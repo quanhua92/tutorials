@@ -13,6 +13,9 @@ This repository contains AI-generated tutorials created using Claude AI models t
 ### Frontend Development
 - [**TanStack Router & Start**](./frontend/tanstack-router/README.md) - Comprehensive tutorials covering TanStack Router and TanStack Start from first principles
 
+### Rust Development
+- [**Fred.rs Redis Client**](./rust/fred.rs/README.md) - Comprehensive tutorials for the Fred Redis client library, from basic connections to production-ready implementations
+
 *More tutorial series coming soon...*
 
 ## Philosophy

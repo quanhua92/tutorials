@@ -18,6 +18,9 @@ This repository contains AI-generated tutorials created using Claude AI models t
 - [**Fred.rs Redis Client**](./rust/fred.rs/README.md) - Comprehensive tutorials for the Fred Redis client library, from basic connections to production-ready implementations
 - [**SQLx Database Toolkit**](./rust/sqlx/README.md) - Comprehensive tutorials for SQLx, covering MySQL, PostgreSQL, and SQLite with practical examples from basic queries to advanced features
 
+### Vector Databases
+- [**Qdrant**](./vector-db/qdrant/README.md) - Comprehensive tutorials covering Qdrant vector database from fundamentals to advanced applications including RAG, multimodal search, and optimization techniques
+
 *More tutorial series coming soon...*
 
 ## Philosophy

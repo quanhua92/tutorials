@@ -14,6 +14,7 @@ This repository contains AI-generated tutorials created using Claude AI models t
 - [**TanStack Router & Start**](./frontend/tanstack-router/README.md) - Comprehensive tutorials covering TanStack Router and TanStack Start from first principles
 
 ### Rust Development
+- [**Axum Web Framework**](./rust/axum/README.md) - Comprehensive tutorials for building robust web applications with Axum, from first principles to advanced patterns
 - [**Fred.rs Redis Client**](./rust/fred.rs/README.md) - Comprehensive tutorials for the Fred Redis client library, from basic connections to production-ready implementations
 - [**SQLx Database Toolkit**](./rust/sqlx/README.md) - Comprehensive tutorials for SQLx, covering MySQL, PostgreSQL, and SQLite with practical examples from basic queries to advanced features
 

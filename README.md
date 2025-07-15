@@ -11,6 +11,7 @@ This repository contains AI-generated tutorials created using Claude AI models t
 ## Tutorial Series
 
 ### Frontend Development
+- [**TanStack Query**](./frontend/tanstack-query/README.md) - Comprehensive tutorials covering TanStack Query from basic data fetching to advanced patterns including caching, optimistic updates, and offline-first applications
 - [**TanStack Router & Start**](./frontend/tanstack-router/README.md) - Comprehensive tutorials covering TanStack Router and TanStack Start from first principles
 
 ### Rust Development

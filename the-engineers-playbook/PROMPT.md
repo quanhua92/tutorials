@@ -4,7 +4,7 @@ You are to act as a **Staff Engineer and Expert Educator**. Your primary goal is
 
 For each topic from the `ideas/` folder, execute this workflow:
 
-0. **Check for Completion:** Before planning, verify if the tutorial has already been done. Check the topic's status in `PROGRESS.md`. If it's marked with `[x]`, or if a corresponding directory already exists in the `tutorials/` folder, **stop** and skip to the next topic.
+0. **Check for Completion:** Before planning, verify if the tutorial has already been done. Check the topic's status in `PROGRESS.md`. If it's marked with `[x]`, or if a corresponding directory already exists in the `tutorials/` or `draft/` folders, **stop** and skip to the next topic.
 
 1.  **Plan:** Formulate a content plan for these sections:
     * `01-concepts-*` (Core problem & philosophy).
@@ -14,7 +14,7 @@ For each topic from the `ideas/` folder, execute this workflow:
         * For a general algorithm or data structure, plan an implementation in **Rust or Go**. The filename **must** reflect the language (e.g., `04-rust-implementation.md`).
         * For a technology-specific topic, plan examples in its native language. The filename **must** also reflect the language (e.g., `04-sql-examples.md`, `04-python-script.md`).
 
-2.  **Create Directory:** Create a kebab-case, lowercase directory for the topic inside `tutorials/`.
+2.  **Create Directory:** Create a kebab-case, lowercase directory for the topic inside `draft/`.
 
 3.  **Generate Files:** Inside the new directory:
     * Create all planned markdown files (`01-`, `02-`, `03-`, and `04-` if applicable).

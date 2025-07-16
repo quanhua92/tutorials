@@ -1,0 +1,44 @@
+# Tutorial Progress
+
+## Data Structures & Algorithms
+
+- [x] adaptive-data-structures-the-self-optimizer-chameleon
+- [x] append-only-logs-the-immutable-ledger
+- [x] b-trees-the-disks-best-friend
+- [x] batching-the-power-of-bulk-processing
+- [x] bloom-filters-the-space-efficient-gatekeeper
+- [x] caching-remembering-for-speed
+- [x] columnar-storage-querying-at-ludicrous-speed
+- [x] compression-making-data-smaller
+- [x] consistent-hashing-stable-distribution-in-a-changing-world
+- [x] copy-on-write-cow-the-efficient-illusionist
+- [x] crdts-agreeing-without-asking
+- [x] data-structures-algorithms-101
+- [x] delta-compression-storing-only-what-changed
+- [x] event-sourcing-the-unforgettable-history
+- [ ] fenwick-trees-the-efficient-summation-machine
+- [x] hashing-the-universal-filing-system
+- [ ] heap-data-structures-the-priority-expert
+- [ ] in-memory-storage-the-need-for-speed
+- [ ] indexing-the-ultimate-table-of-contents
+- [ ] inverted-indexes-the-heart-of-search-engines
+- [ ] lockless-data-structures-concurrency-without-waiting
+- [ ] lsm-trees-making-writes-fast-again
+- [ ] materialized-views-the-pre-calculated-answer
+- [ ] merkle-trees-the-fingerprint-of-data
+- [ ] partitioning-the-art-of-slicing-data
+- [ ] probabilistic-data-structures-good-enough-is-perfect
+- [ ] radix-trees-the-compressed-prefix-tree
+- [ ] replication-dont-put-all-your-eggs-in-one-basket
+- [ ] ring-buffers-the-circular-conveyor-belt
+- [ ] rope-data-structures-the-string-splicer
+- [ ] segment-trees-the-range-query-specialist
+- [ ] sharding-slicing-the-monolith
+- [ ] skip-lists-the-probabilistic-search-tree
+- [ ] sorting-creating-order-from-chaos
+- [ ] spatial-indexing-finding-your-place-in-the-world
+- [ ] suffix-arrays-the-string-search-specialist
+- [ ] time-series-databases-the-pulse-of-data
+- [ ] trie-structures-the-autocomplete-expert
+- [ ] union-find-the-social-network-analyzer
+- [ ] write-ahead-logging-wal-durability-without-delay

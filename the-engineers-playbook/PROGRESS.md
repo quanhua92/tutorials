@@ -16,29 +16,29 @@
 - [x] data-structures-algorithms-101
 - [x] delta-compression-storing-only-what-changed
 - [x] event-sourcing-the-unforgettable-history
-- [ ] fenwick-trees-the-efficient-summation-machine
+- [x] fenwick-trees-the-efficient-summation-machine
 - [x] hashing-the-universal-filing-system
-- [ ] heap-data-structures-the-priority-expert
-- [ ] in-memory-storage-the-need-for-speed
-- [ ] indexing-the-ultimate-table-of-contents
-- [ ] inverted-indexes-the-heart-of-search-engines
-- [ ] lockless-data-structures-concurrency-without-waiting
-- [ ] lsm-trees-making-writes-fast-again
-- [ ] materialized-views-the-pre-calculated-answer
-- [ ] merkle-trees-the-fingerprint-of-data
-- [ ] partitioning-the-art-of-slicing-data
-- [ ] probabilistic-data-structures-good-enough-is-perfect
-- [ ] radix-trees-the-compressed-prefix-tree
-- [ ] replication-dont-put-all-your-eggs-in-one-basket
-- [ ] ring-buffers-the-circular-conveyor-belt
-- [ ] rope-data-structures-the-string-splicer
-- [ ] segment-trees-the-range-query-specialist
-- [ ] sharding-slicing-the-monolith
-- [ ] skip-lists-the-probabilistic-search-tree
-- [ ] sorting-creating-order-from-chaos
-- [ ] spatial-indexing-finding-your-place-in-the-world
-- [ ] suffix-arrays-the-string-search-specialist
-- [ ] time-series-databases-the-pulse-of-data
-- [ ] trie-structures-the-autocomplete-expert
-- [ ] union-find-the-social-network-analyzer
-- [ ] write-ahead-logging-wal-durability-without-delay
+- [x] heap-data-structures-the-priority-expert
+- [x] in-memory-storage-the-need-for-speed
+- [x] indexing-the-ultimate-table-of-contents
+- [x] inverted-indexes-the-heart-of-search-engines
+- [x] lockless-data-structures-concurrency-without-waiting
+- [x] lsm-trees-making-writes-fast-again
+- [x] materialized-views-the-pre-calculated-answer
+- [x] merkle-trees-the-fingerprint-of-data
+- [x] partitioning-the-art-of-slicing-data
+- [x] probabilistic-data-structures-good-enough-is-perfect
+- [x] radix-trees-the-compressed-prefix-tree
+- [x] replication-dont-put-all-your-eggs-in-one-basket
+- [x] ring-buffers-the-circular-conveyor-belt
+- [x] rope-data-structures-the-string-splicer
+- [x] segment-trees-the-range-query-specialist
+- [x] sharding-slicing-the-monolith
+- [x] skip-lists-the-probabilistic-search-tree
+- [x] sorting-creating-order-from-chaos
+- [x] spatial-indexing-finding-your-place-in-the-world
+- [x] suffix-arrays-the-string-search-specialist
+- [x] time-series-databases-the-pulse-of-data
+- [x] trie-structures-the-autocomplete-expert
+- [x] union-find-the-social-network-analyzer
+- [x] write-ahead-logging-wal-durability-without-delay

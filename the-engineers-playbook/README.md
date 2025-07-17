@@ -39,6 +39,8 @@ This collection provides deep, intuitive understanding of the core data structur
 3. [CRDTs](tutorials/crdts-agreeing-without-asking/) - Coordination-free data types
 4. [Append-Only Logs](tutorials/append-only-logs/) - Event storage patterns
 5. [Copy-on-Write](tutorials/copy-on-write/) - Process forking and container efficiency
+6. [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) - High availability patterns
+7. [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) - Data integrity verification
 
 **📊 Working with Analytics?** Explore:
 1. [Hashing](tutorials/hashing-the-universal-filing-system/) - Fast data retrieval foundations
@@ -54,6 +56,40 @@ This collection provides deep, intuitive understanding of the core data structur
 4. [Batching](tutorials/batching/) - Throughput via bulk operations
 5. [Compression](tutorials/compression/) - Space and bandwidth optimization
 
+**🔤 Building Search & Text Systems?** Focus on:
+1. [Trie Structures](tutorials/trie-structures-the-autocomplete-expert/) - Prefix matching and autocomplete
+2. [Inverted Indexes](tutorials/inverted-indexes-the-heart-of-search-engines/) - Full-text search foundations
+3. [Suffix Arrays](tutorials/suffix-arrays-the-string-search-specialist/) - Advanced pattern matching
+4. [Rope Data Structures](tutorials/rope-data-structures-the-string-splicer/) - Efficient text editing
+5. [Radix Trees](tutorials/radix-trees-the-compressed-prefix-tree/) - Compressed prefix matching
+
+**🗄️ Mastering Database Internals?** Explore:
+1. [B-Trees](tutorials/b-trees/) - Disk-based storage fundamentals
+2. [LSM Trees](tutorials/lsm-trees-making-writes-fast-again/) - Write-optimized storage
+3. [Indexing](tutorials/indexing-the-ultimate-table-of-contents/) - Query optimization
+4. [Write-Ahead Logging](tutorials/write-ahead-logging-wal-durability-without-delay/) - Durability guarantees
+5. [Time Series Databases](tutorials/time-series-databases-the-pulse-of-data/) - Temporal data patterns
+6. [Materialized Views](tutorials/materialized-views-the-pre-calculated-answer/) - Pre-computed query results
+7. [Partitioning](tutorials/partitioning-the-art-of-slicing-data/) - Data distribution strategies
+8. [Sharding](tutorials/sharding-slicing-the-monolith/) - Horizontal scaling patterns
+9. [In-Memory Storage](tutorials/in-memory-storage-the-need-for-speed/) - High-speed data access
+
+**🌳 Advanced Trees & Algorithms?** Master:
+1. [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) - Range query optimization
+2. [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) - Prefix sum operations
+3. [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) - Probabilistic data structures
+4. [Union-Find](tutorials/union-find-the-social-network-analyzer/) - Graph connectivity
+5. [Adaptive Data Structures](tutorials/adaptive-data-structures/) - Self-optimizing structures
+6. [Sorting](tutorials/sorting-creating-order-from-chaos/) - Fundamental ordering algorithms
+7. [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) - Approximation algorithms
+
+**⚙️ Concurrency & Real-Time Systems?** Dive into:
+1. [Lockless Data Structures](tutorials/lockless-data-structures-concurrency-without-waiting/) - Lock-free programming
+2. [Ring Buffers](tutorials/ring-buffers-the-circular-conveyor-belt/) - Real-time data processing
+3. [Event Sourcing](tutorials/event-sourcing/) - Event-driven architectures
+4. [Heap Data Structures](tutorials/heap-data-structures-the-priority-expert/) - Priority scheduling
+5. [Spatial Indexing](tutorials/spatial-indexing-finding-your-place-in-the-world/) - Geographic data systems
+
 ### Tutorial Structure
 
 Each tutorial follows a consistent 4-section structure:
@@ -65,232 +101,345 @@ Each tutorial follows a consistent 4-section structure:
 
 ## Complete Tutorial Collection
 
-*35 comprehensive tutorials covering fundamental data structures, system optimization patterns, and distributed systems principles.*
+*43 comprehensive tutorials covering fundamental data structures, system optimization patterns, and distributed systems principles.*
 
-### Core Data Structures
+### Quick Navigation Table
 
-#### [Hashing: The Universal Filing System](tutorials/hashing-the-universal-filing-system/)
-**Why it matters**: The fundamental pattern behind dictionaries, databases, and distributed systems.
-- **Learn**: How hash tables achieve O(1) lookup through mathematical calculation
-- **Key insight**: Calculate location instead of searching for it
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Core concept with straightforward implementation)
+| Tutorial | Category | Difficulty | Implementation |
+|----------|----------|------------|----------------|
+| [Adaptive Data Structures](tutorials/adaptive-data-structures/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
+| [Append-Only Logs](tutorials/append-only-logs/) | Distributed Systems | ⭐⭐⭐ | Rust |
+| [B-Trees](tutorials/b-trees/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Batching](tutorials/batching/) | System Optimization | ⭐⭐ | Rust |
+| [Bloom Filters](tutorials/bloom-filters/) | Core Data Structures | ⭐⭐ | Rust |
+| [Caching](tutorials/caching/) | System Optimization | ⭐⭐ | Rust |
+| [Columnar Storage](tutorials/columnar-storage/) | System Optimization | ⭐⭐⭐ | Rust |
+| [Compression](tutorials/compression/) | System Optimization | ⭐⭐⭐ | Rust |
+| [Consistent Hashing](tutorials/consistent-hashing/) | Distributed Systems | ⭐⭐⭐ | Rust |
+| [Copy-on-Write](tutorials/copy-on-write/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [CRDTs](tutorials/crdts-agreeing-without-asking/) | Distributed Systems | ⭐⭐⭐⭐ | Python/Rust |
+| [Data Structures & Algorithms 101](tutorials/data-structures-algorithms-101/) | Fundamentals | ⭐⭐ | Python/Rust/Go/C++ |
+| [Delta Compression](tutorials/delta-compression/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Event Sourcing](tutorials/event-sourcing/) | Distributed Systems | ⭐⭐⭐⭐ | Rust |
+| [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
+| [Hashing](tutorials/hashing-the-universal-filing-system/) | Core Data Structures | ⭐⭐ | Rust |
+| [Heap Data Structures](tutorials/heap-data-structures-the-priority-expert/) | Core Data Structures | ⭐⭐ | Rust |
+| [Indexing](tutorials/indexing-the-ultimate-table-of-contents/) | System Optimization | ⭐⭐ | SQL |
+| [In-Memory Storage](tutorials/in-memory-storage-the-need-for-speed/) | Distributed Systems | ⭐⭐ | Rust |
+| [Inverted Indexes](tutorials/inverted-indexes-the-heart-of-search-engines/) | System Optimization | ⭐⭐⭐ | Rust |
+| [Lockless Data Structures](tutorials/lockless-data-structures-concurrency-without-waiting/) | Core Data Structures | ⭐⭐⭐⭐⭐ | Rust |
+| [LSM Trees](tutorials/lsm-trees-making-writes-fast-again/) | System Optimization | ⭐⭐⭐⭐ | Rust |
+| [Materialized Views](tutorials/materialized-views-the-pre-calculated-answer/) | Distributed Systems | ⭐⭐⭐ | SQL |
+| [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Partitioning](tutorials/partitioning-the-art-of-slicing-data/) | System Optimization | ⭐⭐⭐ | SQL |
+| [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) | Distributed Systems | ⭐⭐⭐ | Rust |
+| [Radix Trees](tutorials/radix-trees-the-compressed-prefix-tree/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) | Distributed Systems | ⭐⭐⭐⭐ | Rust |
+| [Ring Buffers](tutorials/ring-buffers-the-circular-conveyor-belt/) | System Optimization | ⭐⭐ | Rust |
+| [Rope Data Structures](tutorials/rope-data-structures-the-string-splicer/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
+| [Sharding](tutorials/sharding-slicing-the-monolith/) | System Optimization | ⭐⭐⭐⭐ | Rust |
+| [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Sorting](tutorials/sorting-creating-order-from-chaos/) | Core Data Structures | ⭐⭐ | Rust |
+| [Spatial Indexing](tutorials/spatial-indexing-finding-your-place-in-the-world/) | System Optimization | ⭐⭐⭐⭐ | Rust |
+| [Suffix Arrays](tutorials/suffix-arrays-the-string-search-specialist/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
+| [System Design 101](tutorials/system-design-101/) | Fundamentals | ⭐⭐⭐ | Python |
+| [Time Series Databases](tutorials/time-series-databases-the-pulse-of-data/) | System Optimization | ⭐⭐⭐ | Rust |
+| [Trie Structures](tutorials/trie-structures-the-autocomplete-expert/) | Core Data Structures | ⭐⭐ | Rust |
+| [Union-Find](tutorials/union-find-the-social-network-analyzer/) | Core Data Structures | ⭐⭐⭐ | Rust |
+| [Write-Ahead Logging](tutorials/write-ahead-logging-wal-durability-without-delay/) | Distributed Systems | ⭐⭐⭐⭐ | Python/Rust |
 
-#### [B-Trees: The Disk's Best Friend](tutorials/b-trees/)
-**Why it matters**: Foundation of database storage systems, file systems, and indexing.
-- **Learn**: How databases efficiently store and retrieve data from disk
-- **Key insight**: Block-oriented storage optimization
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐ (Complex tree operations and balancing)
+### Detailed Tutorial Descriptions
 
-#### [Bloom Filters: The Space-Efficient Gatekeeper](tutorials/bloom-filters/)
-**Why it matters**: Probabilistic data structure for fast membership testing with minimal memory.
-- **Learn**: How to build web crawlers, caches, and distributed systems
-- **Key insight**: Trading accuracy for massive space savings
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Simple concept with probability math)
+#### Fundamentals
 
-#### [Adaptive Data Structures: The Self-Optimizer](tutorials/adaptive-data-structures/)
+##### [Data Structures & Algorithms 101](tutorials/data-structures-algorithms-101/)
+**Why it matters**: Your complete foundation - Everything you need to understand how data structures and algorithms work from first principles.
+- **Learn**: Big O notation, common patterns, problem-solving approaches
+- **Key insight**: How to think about efficiency and trade-offs
+- **Implementation**: Python, Rust, Go, C++
+- **Difficulty**: ⭐⭐ (Beginner-friendly foundation)
+
+##### [System Design 101](tutorials/system-design-101/)
+**Why it matters**: Architecture fundamentals - How to design scalable, reliable systems from the ground up.
+- **Learn**: Scalability patterns, trade-offs, and system thinking
+- **Key insight**: How individual components combine into robust systems
+- **Implementation**: Python
+- **Difficulty**: ⭐⭐⭐ (Intermediate architectural thinking)
+
+#### Core Data Structures
+
+##### [Adaptive Data Structures: The Self-Optimizer](tutorials/adaptive-data-structures/)
 **Why it matters**: Data structures that optimize themselves based on usage patterns.
 - **Learn**: How splay trees and other adaptive structures work
 - **Key insight**: Amortized analysis and self-optimization
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Advanced tree rotations and amortized analysis)
 
-#### [Skip Lists: The Probabilistic Search Tree](tutorials/skip-lists-the-probabilistic-search-tree/)
-**Why it matters**: Randomized data structure that achieves O(log n) operations without complex balancing.
-- **Learn**: How probabilistic algorithms can replace complex deterministic ones
-- **Key insight**: Trading guaranteed performance for implementation simplicity
+##### [B-Trees: The Disk's Best Friend](tutorials/b-trees/)
+**Why it matters**: Foundation of database storage systems, file systems, and indexing.
+- **Learn**: How databases efficiently store and retrieve data from disk
+- **Key insight**: Block-oriented storage optimization
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐ (Probabilistic reasoning and multi-level pointers)
+- **Difficulty**: ⭐⭐⭐ (Complex tree operations and balancing)
 
-#### [Trie Structures: The Autocomplete Expert](tutorials/trie-structures-the-autocomplete-expert/)
-**Why it matters**: Specialized tree structure for string operations and prefix matching.
-- **Learn**: How search engines, autocomplete systems, and spell checkers work
-- **Key insight**: Sharing common prefixes for space and time efficiency
+##### [Bloom Filters: The Space-Efficient Gatekeeper](tutorials/bloom-filters/)
+**Why it matters**: Probabilistic data structure for fast membership testing with minimal memory.
+- **Learn**: How to build web crawlers, caches, and distributed systems
+- **Key insight**: Trading accuracy for massive space savings
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Tree structure with string focus)
+- **Difficulty**: ⭐⭐ (Simple concept with probability math)
 
-#### [Union-Find: The Social Network Analyzer](tutorials/union-find-the-social-network-analyzer/)
-**Why it matters**: Efficient data structure for tracking connected components in dynamic graphs.
-- **Learn**: How social networks, image processing, and network analysis algorithms work
-- **Key insight**: Path compression and union by rank for near-constant time operations
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐ (Graph theory and optimization techniques)
-
-#### [Suffix Arrays: The String Search Specialist](tutorials/suffix-arrays-the-string-search-specialist/)
-**Why it matters**: Space-efficient alternative to suffix trees for string pattern matching.
-- **Learn**: How search engines and bioinformatics tools find patterns in large texts
-- **Key insight**: Sorting suffixes to enable binary search on substrings
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐⭐ (Advanced string algorithms and suffix construction)
-
-#### [Copy-on-Write: The Efficient Illusionist](tutorials/copy-on-write/)
+##### [Copy-on-Write: The Efficient Illusionist](tutorials/copy-on-write/)
 **Why it matters**: Lazy optimization technique that defers expensive copying until absolutely necessary.
 - **Learn**: How operating systems, databases, and containers optimize memory usage
 - **Key insight**: Share until modified - turning O(n) copies into O(1) references
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Memory management and lazy evaluation)
 
-#### [Delta Compression: Storing Only What Changed](tutorials/delta-compression/)
+##### [Delta Compression: Storing Only What Changed](tutorials/delta-compression/)
 **Why it matters**: Space-efficient versioning that stores only differences between data versions.
 - **Learn**: How Git, databases, and backup systems achieve massive storage savings
 - **Key insight**: Transform O(n) storage growth into O(1) + changes through differential storage
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Difference algorithms and compression techniques)
 
-#### [Heap Data Structures: The Priority Expert](tutorials/heap-data-structures-the-priority-expert/)
-**Why it matters**: Fundamental data structure for implementing priority queues and efficient sorting algorithms.
-- **Learn**: How operating system schedulers, graph algorithms, and task processing systems work
-- **Key insight**: Complete binary tree structure enables O(log n) insertion and extraction
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Binary tree with heap property)
-
-#### [Fenwick Trees: The Efficient Summation Machine](tutorials/fenwick-trees-the-efficient-summation-machine/)
+##### [Fenwick Trees: The Efficient Summation Machine](tutorials/fenwick-trees-the-efficient-summation-machine/)
 **Why it matters**: Space and time efficient data structure for prefix sum queries and range updates.
 - **Learn**: How real-time analytics and competitive programming solutions achieve logarithmic performance
 - **Key insight**: Binary representation magic enables both queries and updates in O(log n)
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Binary indexing and bit manipulation magic)
 
-#### [Sorting: Creating Order from Chaos](tutorials/sorting-creating-order-from-chaos/)
-**Why it matters**: Fundamental algorithmic problem that appears in virtually every software system.
-- **Learn**: How different sorting algorithms work and when to use each one
-- **Key insight**: Understanding the trade-offs between time, space, and stability in sorting
+##### [Hashing: The Universal Filing System](tutorials/hashing-the-universal-filing-system/)
+**Why it matters**: The fundamental pattern behind dictionaries, databases, and distributed systems.
+- **Learn**: How hash tables achieve O(1) lookup through mathematical calculation
+- **Key insight**: Calculate location instead of searching for it
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Fundamental algorithms with clear patterns)
+- **Difficulty**: ⭐⭐ (Core concept with straightforward implementation)
 
-#### [Lockless Data Structures: Concurrency Without Waiting](tutorials/lockless-data-structures-concurrency-without-waiting/)
+##### [Heap Data Structures: The Priority Expert](tutorials/heap-data-structures-the-priority-expert/)
+**Why it matters**: Fundamental data structure for implementing priority queues and efficient sorting algorithms.
+- **Learn**: How operating system schedulers, graph algorithms, and task processing systems work
+- **Key insight**: Complete binary tree structure enables O(log n) insertion and extraction
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Binary tree with heap property)
+
+##### [Lockless Data Structures: Concurrency Without Waiting](tutorials/lockless-data-structures-concurrency-without-waiting/)
 **Why it matters**: High-performance concurrent programming without the overhead and complexity of locks.
 - **Learn**: How lock-free algorithms enable scalable multi-threaded systems
 - **Key insight**: Compare-and-swap operations and memory ordering for thread-safe programming
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐⭐ (Advanced concurrency and memory ordering)
 
-### System Optimization Patterns
-
-#### [Caching: Remembering for Speed](tutorials/caching/)
-**Why it matters**: Fundamental performance optimization technique used everywhere.
-- **Learn**: Cache strategies, invalidation, and distributed caching
-- **Key insight**: Trading memory for speed
+##### [Merkle Trees: The Fingerprint of Data](tutorials/merkle-trees-the-fingerprint-of-data/)
+**Why it matters**: Cryptographic hash tree that enables efficient and secure verification of large data structures.
+- **Learn**: How Git, Bitcoin, and distributed systems verify data integrity without transferring entire datasets
+- **Key insight**: Hierarchical hashing enables O(log n) verification of any data change
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Clear concept with practical implementation)
+- **Difficulty**: ⭐⭐⭐ (Hash functions and binary tree concepts)
 
-#### [Compression: Making Data Smaller](tutorials/compression/)
-**Why it matters**: Reduces storage costs and transfer times across all systems.
-- **Learn**: Lossless compression algorithms and trade-offs
-- **Key insight**: Exploiting redundancy for efficiency
+##### [Radix Trees: The Compressed Prefix Tree](tutorials/radix-trees-the-compressed-prefix-tree/)
+**Why it matters**: Space-efficient tree structure that compresses common prefixes for faster string operations.
+- **Learn**: How IP routing tables, autocomplete systems, and string databases optimize prefix matching
+- **Key insight**: Path compression eliminates redundant single-child nodes for space and time efficiency
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐ (Encoding algorithms and mathematical optimization)
+- **Difficulty**: ⭐⭐⭐ (Tree compression and prefix matching algorithms)
 
-#### [Batching: The Power of Bulk Processing](tutorials/batching/)
+##### [Rope Data Structures: The String Splicer](tutorials/rope-data-structures-the-string-splicer/)
+**Why it matters**: Tree-based string representation that enables efficient editing operations on large texts.
+- **Learn**: How text editors, IDEs, and document processors handle massive files without performance degradation
+- **Key insight**: Tree structure transforms O(n) string operations into O(log n) through strategic splitting
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Tree balancing and string manipulation)
+
+##### [Segment Trees: The Range Query Specialist](tutorials/segment-trees-the-range-query-specialist/)
+**Why it matters**: Tree data structure that enables efficient range queries and updates on arrays.
+- **Learn**: How real-time analytics, competitive programming, and database systems perform range operations
+- **Key insight**: Divide-and-conquer approach enables O(log n) range queries and updates
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Tree construction and lazy propagation)
+
+##### [Skip Lists: The Probabilistic Search Tree](tutorials/skip-lists-the-probabilistic-search-tree/)
+**Why it matters**: Randomized data structure that achieves O(log n) operations without complex balancing.
+- **Learn**: How probabilistic algorithms can replace complex deterministic ones
+- **Key insight**: Trading guaranteed performance for implementation simplicity
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Probabilistic reasoning and multi-level pointers)
+
+##### [Sorting: Creating Order from Chaos](tutorials/sorting-creating-order-from-chaos/)
+**Why it matters**: Fundamental algorithmic problem that appears in virtually every software system.
+- **Learn**: How different sorting algorithms work and when to use each one
+- **Key insight**: Understanding the trade-offs between time, space, and stability in sorting
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Fundamental algorithms with clear patterns)
+
+##### [Suffix Arrays: The String Search Specialist](tutorials/suffix-arrays-the-string-search-specialist/)
+**Why it matters**: Space-efficient alternative to suffix trees for string pattern matching.
+- **Learn**: How search engines and bioinformatics tools find patterns in large texts
+- **Key insight**: Sorting suffixes to enable binary search on substrings
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Advanced string algorithms and suffix construction)
+
+##### [Trie Structures: The Autocomplete Expert](tutorials/trie-structures-the-autocomplete-expert/)
+**Why it matters**: Specialized tree structure for string operations and prefix matching.
+- **Learn**: How search engines, autocomplete systems, and spell checkers work
+- **Key insight**: Sharing common prefixes for space and time efficiency
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Tree structure with string focus)
+
+##### [Union-Find: The Social Network Analyzer](tutorials/union-find-the-social-network-analyzer/)
+**Why it matters**: Efficient data structure for tracking connected components in dynamic graphs.
+- **Learn**: How social networks, image processing, and network analysis algorithms work
+- **Key insight**: Path compression and union by rank for near-constant time operations
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Graph theory and optimization techniques)
+
+#### System Optimization Patterns
+
+##### [Batching: The Power of Bulk Processing](tutorials/batching/)
 **Why it matters**: Optimizes throughput by processing data in groups.
 - **Learn**: Database inserts, network requests, and processing optimization
 - **Key insight**: Amortizing fixed costs across multiple operations
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐ (Straightforward optimization pattern)
 
-#### [Columnar Storage: Querying at Ludicrous Speed](tutorials/columnar-storage/)
+##### [Caching: Remembering for Speed](tutorials/caching/)
+**Why it matters**: Fundamental performance optimization technique used everywhere.
+- **Learn**: Cache strategies, invalidation, and distributed caching
+- **Key insight**: Trading memory for speed
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Clear concept with practical implementation)
+
+##### [Columnar Storage: Querying at Ludicrous Speed](tutorials/columnar-storage/)
 **Why it matters**: Foundation of modern analytics databases and data warehouses.
 - **Learn**: Why column-oriented storage revolutionized analytics
 - **Key insight**: Data layout optimization for analytical workloads
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Data layout design and cache optimization)
 
-#### [Ring Buffers: The Circular Conveyor Belt](tutorials/ring-buffers-the-circular-conveyor-belt/)
-**Why it matters**: Fixed-size buffer that enables efficient producer-consumer patterns.
-- **Learn**: How logging systems, audio processing, and real-time systems manage continuous data
-- **Key insight**: Circular data flow eliminates expensive memory allocation
+##### [Compression: Making Data Smaller](tutorials/compression/)
+**Why it matters**: Reduces storage costs and transfer times across all systems.
+- **Learn**: Lossless compression algorithms and trade-offs
+- **Key insight**: Exploiting redundancy for efficiency
 - **Implementation**: Rust
-- **Difficulty**: ⭐⭐ (Circular indexing with clear benefits)
+- **Difficulty**: ⭐⭐⭐ (Encoding algorithms and mathematical optimization)
 
-#### [Indexing: The Ultimate Table of Contents](tutorials/indexing-the-ultimate-table-of-contents/)
+##### [Indexing: The Ultimate Table of Contents](tutorials/indexing-the-ultimate-table-of-contents/)
 **Why it matters**: Foundation of database performance - transforms linear scans into logarithmic lookups.
 - **Learn**: How databases achieve millisecond queries on millions of records through smart data organization
 - **Key insight**: Trade space for time by building sorted shortcuts to your data
 - **Implementation**: SQL
 - **Difficulty**: ⭐⭐ (Database fundamentals with practical SQL)
 
-#### [Inverted Indexes: The Heart of Search Engines](tutorials/inverted-indexes-the-heart-of-search-engines/)
+##### [Inverted Indexes: The Heart of Search Engines](tutorials/inverted-indexes-the-heart-of-search-engines/)
 **Why it matters**: Data structure that powers search engines, databases, and text processing systems.
 - **Learn**: How Google, Elasticsearch, and database full-text search find needles in massive haystacks
 - **Key insight**: Preprocessing documents into word-to-document mappings for instant text search
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Text processing and ranking algorithms)
 
-#### [Spatial Indexing: Finding Your Place in the World](tutorials/spatial-indexing-finding-your-place-in-the-world/)
-**Why it matters**: Efficient querying of geographic and spatial data for location-based services.
-- **Learn**: How GPS navigation, ride-sharing apps, and GIS systems find nearby locations
-- **Key insight**: Partitioning space into hierarchical regions for fast proximity queries
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐⭐ (Geometric algorithms and spatial partitioning)
-
-#### [LSM Trees: Making Writes Fast Again](tutorials/lsm-trees-making-writes-fast-again/)
+##### [LSM Trees: Making Writes Fast Again](tutorials/lsm-trees-making-writes-fast-again/)
 **Why it matters**: Write-optimized data structure that powers modern NoSQL databases and storage engines.
 - **Learn**: How databases like Cassandra, RocksDB, and LevelDB achieve high write throughput
 - **Key insight**: Sequential writes and periodic compaction for write-heavy workloads
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Complex compaction strategies and write optimization)
 
-#### [Partitioning: The Art of Slicing Data](tutorials/partitioning-the-art-of-slicing-data/)
+##### [Partitioning: The Art of Slicing Data](tutorials/partitioning-the-art-of-slicing-data/)
 **Why it matters**: Fundamental technique for scaling databases beyond single machine limits.
 - **Learn**: How to distribute data across multiple machines while maintaining query performance
 - **Key insight**: Divide data strategically to parallelize operations and improve scalability
 - **Implementation**: SQL
 - **Difficulty**: ⭐⭐⭐ (Distribution strategies and consistency challenges)
 
-#### [Sharding: Slicing the Monolith](tutorials/sharding-slicing-the-monolith/)
+##### [Ring Buffers: The Circular Conveyor Belt](tutorials/ring-buffers-the-circular-conveyor-belt/)
+**Why it matters**: Fixed-size buffer that enables efficient producer-consumer patterns.
+- **Learn**: How logging systems, audio processing, and real-time systems manage continuous data
+- **Key insight**: Circular data flow eliminates expensive memory allocation
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Circular indexing with clear benefits)
+
+##### [Sharding: Slicing the Monolith](tutorials/sharding-slicing-the-monolith/)
 **Why it matters**: The ultimate scaling technique for breaking through single-server limits in massive applications.
 - **Learn**: How to horizontally partition databases across multiple servers while maintaining performance
 - **Key insight**: Divide and conquer - route queries to the right shard to achieve linear scaling
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Complex distributed systems with routing and consistency challenges)
 
-#### [Time Series Databases: The Pulse of Data](tutorials/time-series-databases-the-pulse-of-data/)
+##### [Spatial Indexing: Finding Your Place in the World](tutorials/spatial-indexing-finding-your-place-in-the-world/)
+**Why it matters**: Efficient querying of geographic and spatial data for location-based services.
+- **Learn**: How GPS navigation, ride-sharing apps, and GIS systems find nearby locations
+- **Key insight**: Partitioning space into hierarchical regions for fast proximity queries
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Geometric algorithms and spatial partitioning)
+
+##### [Time Series Databases: The Pulse of Data](tutorials/time-series-databases-the-pulse-of-data/)
 **Why it matters**: Specialized storage and query patterns for time-stamped data like metrics and sensor readings.
 - **Learn**: How monitoring systems, IoT platforms, and financial applications handle temporal data
 - **Key insight**: Time-ordered storage and compression for efficient temporal queries and analytics
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Temporal data patterns and compression techniques)
 
-### Distributed Systems Fundamentals
+#### Distributed Systems Fundamentals
 
-#### [Consistent Hashing: Stable Distribution in a Changing World](tutorials/consistent-hashing/)
-**Why it matters**: Enables scalable distributed systems without massive data movement.
-- **Learn**: How distributed caches, databases, and CDNs scale
-- **Key insight**: Minimizing reshuffling when nodes join/leave
-- **Implementation**: Rust
-- **Difficulty**: ⭐⭐⭐ (Hash rings and distributed system concepts)
-
-#### [CRDTs: Agreeing Without Asking](tutorials/crdts-agreeing-without-asking/)
-**Why it matters**: Enables offline-first applications and partition-tolerant systems.
-- **Learn**: How Google Docs, distributed databases, and mobile apps sync data
-- **Key insight**: Mathematical properties that guarantee convergence
-- **Implementation**: Python and Rust
-- **Difficulty**: ⭐⭐⭐⭐ (Advanced mathematical properties and conflict resolution)
-
-#### [Append-Only Logs: The Immutable Ledger](tutorials/append-only-logs/)
+##### [Append-Only Logs: The Immutable Ledger](tutorials/append-only-logs/)
 **Why it matters**: Foundation of event sourcing, stream processing, and distributed systems.
 - **Learn**: How Kafka, blockchain, and event-driven architectures work
 - **Key insight**: Immutability as a design principle
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Event ordering and distributed consistency)
 
-#### [Event Sourcing: The Unforgettable History](tutorials/event-sourcing/)
+##### [Consistent Hashing: Stable Distribution in a Changing World](tutorials/consistent-hashing/)
+**Why it matters**: Enables scalable distributed systems without massive data movement.
+- **Learn**: How distributed caches, databases, and CDNs scale
+- **Key insight**: Minimizing reshuffling when nodes join/leave
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Hash rings and distributed system concepts)
+
+##### [CRDTs: Agreeing Without Asking](tutorials/crdts-agreeing-without-asking/)
+**Why it matters**: Enables offline-first applications and partition-tolerant systems.
+- **Learn**: How Google Docs, distributed databases, and mobile apps sync data
+- **Key insight**: Mathematical properties that guarantee convergence
+- **Implementation**: Python and Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Advanced mathematical properties and conflict resolution)
+
+##### [Event Sourcing: The Unforgettable History](tutorials/event-sourcing/)
 **Why it matters**: Architectural pattern that stores application state as a sequence of events.
 - **Learn**: How to build auditable, time-travel capable systems
 - **Key insight**: State as a function of events, not current snapshots
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Event modeling and state reconstruction)
 
-#### [Replication: Don't Put All Your Eggs in One Basket](tutorials/replication-dont-put-all-your-eggs-in-one-basket/)
+##### [In-Memory Storage: The Need for Speed](tutorials/in-memory-storage-the-need-for-speed/)
+**Why it matters**: Ultra-fast data access by eliminating disk I/O entirely, trading durability for performance.
+- **Learn**: How Redis, Memcached, and in-memory databases achieve microsecond response times
+- **Key insight**: RAM access is 100,000x faster than disk - optimize for memory when speed matters most
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Memory management with clear performance benefits)
+
+##### [Materialized Views: The Pre-Calculated Answer](tutorials/materialized-views-the-pre-calculated-answer/)
+**Why it matters**: Pre-computed query results that transform expensive operations into instant lookups.
+- **Learn**: How analytics dashboards and reporting systems deliver real-time insights from complex data
+- **Key insight**: Trade storage space and update complexity for query speed through smart pre-computation
+- **Implementation**: SQL
+- **Difficulty**: ⭐⭐⭐ (Query optimization and incremental updates)
+
+##### [Probabilistic Data Structures: Good Enough is Perfect](tutorials/probabilistic-data-structures-good-enough-is-perfect/)
+**Why it matters**: Space-efficient data structures that trade perfect accuracy for massive memory savings.
+- **Learn**: How large-scale systems use approximation algorithms to handle billion-element datasets
+- **Key insight**: Probabilistic guarantees often provide better practical performance than exact solutions
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Probability theory and hash functions)
+
+##### [Replication: Don't Put All Your Eggs in One Basket](tutorials/replication-dont-put-all-your-eggs-in-one-basket/)
 **Why it matters**: Foundation of high availability and disaster recovery in distributed systems.
 - **Learn**: How databases eliminate single points of failure through intelligent data copying
 - **Key insight**: Redundancy through automatic synchronization and transparent failover
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Consistency models and failure handling)
 
-#### [Write-Ahead Logging (WAL): Durability without Delay](tutorials/write-ahead-logging-wal-durability-without-delay/)
+##### [Write-Ahead Logging (WAL): Durability without Delay](tutorials/write-ahead-logging-wal-durability-without-delay/)
 **Why it matters**: Fundamental technique that enables databases to provide durability guarantees while maintaining performance.
 - **Learn**: How WAL separates commitment from completion through sequential logging and crash recovery
 - **Key insight**: Write intentions before actions - achieving both speed and safety

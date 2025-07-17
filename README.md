@@ -2,15 +2,13 @@
 
 This repository offers a unique collection of AI-generated tutorials and playbooks, crafted with Claude AI models, to demystify complex software engineering concepts. Our mission is to transform intricate codebases and advanced documentation into clear, actionable, and engaging learning resources that empower you to build, understand, and innovate.
 
-## The Engineer's Playbook: A New Approach to Fundamentals
+## The Engineer's Playbook: Fundamental Data Structures and Algorithms
 
 Unlike the tutorial series which are derived from existing codebases, The Engineer's Playbook is a *ground-up, first-principles* exploration of fundamental data structures, algorithms, and system design patterns. Each entry is meticulously crafted to build deep, intuitive understanding from the ground up, focusing on the 'why' and 'how' of core engineering concepts. This series is designed to be a standalone, comprehensive resource for mastering the bedrock of software engineering.
 
 ## Playbook Series
 
-Ready to master the foundational concepts that power all modern software? Dive into **The Engineer's Playbook** – your guide to deep, intuitive understanding of core data structures and algorithms. Unlock the 'why' behind system design and elevate your engineering skills.
-
-- [**The Engineer's Playbook**](./the-engineers-playbook/README.md) - Deep, intuitive understanding of core data structures and algorithms that power modern software systems
+- [**The Engineer's Playbook**](./the-engineers-playbook/README.md) - 43 comprehensive tutorials covering fundamental data structures, algorithms, and system design patterns from first principles
 
 ## Tutorial Series
 

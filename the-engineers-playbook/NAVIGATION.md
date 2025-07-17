@@ -2,7 +2,7 @@
 
 ## Progress Checklist
 
-### Learning Path Organization (Total: 56 tutorials)
+### Six Paths Sage Mode Organization (Total: 56 tutorials)
 - [ ] **Foundations Path** - Basic concepts and data structures (8 tutorials)
 - [ ] **Systems Path** - Distributed systems and architecture (10 tutorials)
 - [ ] **Algorithms Path** - Advanced algorithms and problem-solving (8 tutorials)
@@ -83,7 +83,7 @@
 - [ ] `zero-downtime-deployments-the-seamless-update` - Deployment techniques
 - [ ] `distributed-tracing-the-request-detective` - Observability
 
-## Learning Path Definitions
+## Six Paths Sage Mode - Learning Path Definitions
 
 ### 1. Foundations Path (Start Here)
 **Goal**: Build fundamental understanding of data structures and algorithms
@@ -104,6 +104,23 @@
 **Goal**: Learn optimization techniques and high-performance systems
 **Duration**: 4-6 weeks
 **Prerequisites**: Foundations + Systems Path completion
+
+### 5. Specialized Topics Path
+**Goal**: Deep dive into cutting-edge data structures and algorithms
+**Duration**: 6-8 weeks
+**Prerequisites**: Advanced understanding of data structures
+
+### 6. Distributed Systems & Architecture Path
+**Goal**: Master the patterns that power modern distributed systems
+**Duration**: 6-8 weeks
+**Prerequisites**: Systems Path completion
+
+### 7. Operations & Reliability Path
+**Goal**: Build production-ready systems with operational excellence
+**Duration**: 3-4 weeks
+**Prerequisites**: Systems Path completion
+
+*True mastery comes from understanding all six paths and their interconnections.*
 
 ## Navigation Implementation Notes
 

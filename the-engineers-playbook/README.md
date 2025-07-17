@@ -35,12 +35,18 @@ This collection provides deep, intuitive understanding of the core data structur
 
 **🚀 Building Distributed Systems?** Start with fundamentals, then focus on:
 1. [System Design 101](tutorials/system-design-101/) - **Start here**
-2. [Consistent Hashing](tutorials/consistent-hashing/) - Stable data distribution
-3. [CRDTs](tutorials/crdts-agreeing-without-asking/) - Coordination-free data types
-4. [Append-Only Logs](tutorials/append-only-logs/) - Event storage patterns
-5. [Copy-on-Write](tutorials/copy-on-write/) - Process forking and container efficiency
-6. [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) - High availability patterns
-7. [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) - Data integrity verification
+2. [Consensus Algorithms](tutorials/consensus-algorithms-the-agreement-protocol/) - Distributed agreement protocols
+3. [Consistent Hashing](tutorials/consistent-hashing/) - Stable data distribution
+4. [CRDTs](tutorials/crdts-agreeing-without-asking/) - Coordination-free data types
+5. [Append-Only Logs](tutorials/append-only-logs/) - Event storage patterns
+6. [Copy-on-Write](tutorials/copy-on-write/) - Process forking and container efficiency
+7. [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) - High availability patterns
+8. [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) - Data integrity verification
+9. [Message Queues](tutorials/message-queues-the-asynchronous-mailbox/) - Asynchronous communication patterns
+10. [Distributed Tracing](tutorials/distributed-tracing-the-request-detective/) - Request tracking across services
+11. [Service Discovery](tutorials/service-discovery-the-dynamic-directory/) - Dynamic service location
+12. [Saga Pattern](tutorials/saga-pattern-the-distributed-transaction-alternative/) - Distributed transaction alternatives
+13. [Two-Phase Commit](tutorials/two-phase-commit-the-distributed-transaction/) - Distributed transaction coordination
 
 **📊 Working with Analytics?** Explore:
 1. [Hashing](tutorials/hashing-the-universal-filing-system/) - Fast data retrieval foundations
@@ -55,6 +61,10 @@ This collection provides deep, intuitive understanding of the core data structur
 3. [Copy-on-Write](tutorials/copy-on-write/) - Memory optimization through lazy copying
 4. [Batching](tutorials/batching/) - Throughput via bulk operations
 5. [Compression](tutorials/compression/) - Space and bandwidth optimization
+6. [Rate Limiting](tutorials/rate-limiting-the-traffic-controller/) - Traffic control and system protection
+7. [Circuit Breakers](tutorials/circuit-breakers-the-fault-isolator/) - Fault isolation and recovery
+8. [Feature Flags](tutorials/feature-flags-the-progressive-rollout/) - Progressive deployment patterns
+9. [Zero-Downtime Deployments](tutorials/zero-downtime-deployments-the-seamless-update/) - Seamless service updates
 
 **🔤 Building Search & Text Systems?** Focus on:
 1. [Trie Structures](tutorials/trie-structures-the-autocomplete-expert/) - Prefix matching and autocomplete
@@ -62,6 +72,8 @@ This collection provides deep, intuitive understanding of the core data structur
 3. [Suffix Arrays](tutorials/suffix-arrays-the-string-search-specialist/) - Advanced pattern matching
 4. [Rope Data Structures](tutorials/rope-data-structures-the-string-splicer/) - Efficient text editing
 5. [Radix Trees](tutorials/radix-trees-the-compressed-prefix-tree/) - Compressed prefix matching
+6. [String Matching](tutorials/string-matching-the-pattern-detective/) - Pattern detection algorithms
+7. [Vector Databases](tutorials/vector-databases-the-similarity-search-engine/) - Similarity search systems
 
 **🗄️ Mastering Database Internals?** Explore:
 1. [B-Trees](tutorials/b-trees/) - Disk-based storage fundamentals
@@ -75,13 +87,17 @@ This collection provides deep, intuitive understanding of the core data structur
 9. [In-Memory Storage](tutorials/in-memory-storage-the-need-for-speed/) - High-speed data access
 
 **🌳 Advanced Trees & Algorithms?** Master:
-1. [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) - Range query optimization
-2. [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) - Prefix sum operations
-3. [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) - Probabilistic data structures
-4. [Union-Find](tutorials/union-find-the-social-network-analyzer/) - Graph connectivity
-5. [Adaptive Data Structures](tutorials/adaptive-data-structures/) - Self-optimizing structures
-6. [Sorting](tutorials/sorting-creating-order-from-chaos/) - Fundamental ordering algorithms
-7. [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) - Approximation algorithms
+1. [Dijkstra's Algorithm](tutorials/dijkstras-algorithm-the-shortest-path-expert/) - Shortest path optimization
+2. [Dynamic Programming](tutorials/dynamic-programming-the-memoization-master/) - Memoization and optimization
+3. [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) - Range query optimization
+4. [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) - Prefix sum operations
+5. [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) - Probabilistic data structures
+6. [Union-Find](tutorials/union-find-the-social-network-analyzer/) - Graph connectivity
+7. [Adaptive Data Structures](tutorials/adaptive-data-structures/) - Self-optimizing structures
+8. [Sorting](tutorials/sorting-creating-order-from-chaos/) - Fundamental ordering algorithms
+9. [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) - Approximation algorithms
+10. [Graph Traversal](tutorials/graph-traversal-navigating-the-network/) - Network navigation fundamentals
+11. [String Matching](tutorials/string-matching-the-pattern-detective/) - Pattern detection algorithms
 
 **⚙️ Concurrency & Real-Time Systems?** Dive into:
 1. [Lockless Data Structures](tutorials/lockless-data-structures-concurrency-without-waiting/) - Lock-free programming
@@ -101,53 +117,68 @@ Each tutorial follows a consistent 4-section structure:
 
 ## Complete Tutorial Collection
 
-*43 comprehensive tutorials covering fundamental data structures, system optimization patterns, and distributed systems principles.*
+*56 comprehensive tutorials covering fundamental data structures, system optimization patterns, and distributed systems principles.*
 
 ### Quick Navigation Table
 
 | Tutorial | Category | Difficulty | Implementation |
 |----------|----------|------------|----------------|
-| [Adaptive Data Structures](tutorials/adaptive-data-structures/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
-| [Append-Only Logs](tutorials/append-only-logs/) | Distributed Systems | ⭐⭐⭐ | Rust |
-| [B-Trees](tutorials/b-trees/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Batching](tutorials/batching/) | System Optimization | ⭐⭐ | Rust |
-| [Bloom Filters](tutorials/bloom-filters/) | Core Data Structures | ⭐⭐ | Rust |
-| [Caching](tutorials/caching/) | System Optimization | ⭐⭐ | Rust |
-| [Columnar Storage](tutorials/columnar-storage/) | System Optimization | ⭐⭐⭐ | Rust |
-| [Compression](tutorials/compression/) | System Optimization | ⭐⭐⭐ | Rust |
-| [Consistent Hashing](tutorials/consistent-hashing/) | Distributed Systems | ⭐⭐⭐ | Rust |
-| [Copy-on-Write](tutorials/copy-on-write/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [CRDTs](tutorials/crdts-agreeing-without-asking/) | Distributed Systems | ⭐⭐⭐⭐ | Python/Rust |
-| [Data Structures & Algorithms 101](tutorials/data-structures-algorithms-101/) | Fundamentals | ⭐⭐ | Python/Rust/Go/C++ |
-| [Delta Compression](tutorials/delta-compression/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Event Sourcing](tutorials/event-sourcing/) | Distributed Systems | ⭐⭐⭐⭐ | Rust |
-| [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
-| [Hashing](tutorials/hashing-the-universal-filing-system/) | Core Data Structures | ⭐⭐ | Rust |
-| [Heap Data Structures](tutorials/heap-data-structures-the-priority-expert/) | Core Data Structures | ⭐⭐ | Rust |
-| [Indexing](tutorials/indexing-the-ultimate-table-of-contents/) | System Optimization | ⭐⭐ | SQL |
-| [In-Memory Storage](tutorials/in-memory-storage-the-need-for-speed/) | Distributed Systems | ⭐⭐ | Rust |
-| [Inverted Indexes](tutorials/inverted-indexes-the-heart-of-search-engines/) | System Optimization | ⭐⭐⭐ | Rust |
-| [Lockless Data Structures](tutorials/lockless-data-structures-concurrency-without-waiting/) | Core Data Structures | ⭐⭐⭐⭐⭐ | Rust |
-| [LSM Trees](tutorials/lsm-trees-making-writes-fast-again/) | System Optimization | ⭐⭐⭐⭐ | Rust |
-| [Materialized Views](tutorials/materialized-views-the-pre-calculated-answer/) | Distributed Systems | ⭐⭐⭐ | SQL |
-| [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Partitioning](tutorials/partitioning-the-art-of-slicing-data/) | System Optimization | ⭐⭐⭐ | SQL |
-| [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) | Distributed Systems | ⭐⭐⭐ | Rust |
-| [Radix Trees](tutorials/radix-trees-the-compressed-prefix-tree/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) | Distributed Systems | ⭐⭐⭐⭐ | Rust |
-| [Ring Buffers](tutorials/ring-buffers-the-circular-conveyor-belt/) | System Optimization | ⭐⭐ | Rust |
-| [Rope Data Structures](tutorials/rope-data-structures-the-string-splicer/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
-| [Sharding](tutorials/sharding-slicing-the-monolith/) | System Optimization | ⭐⭐⭐⭐ | Rust |
-| [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Sorting](tutorials/sorting-creating-order-from-chaos/) | Core Data Structures | ⭐⭐ | Rust |
-| [Spatial Indexing](tutorials/spatial-indexing-finding-your-place-in-the-world/) | System Optimization | ⭐⭐⭐⭐ | Rust |
-| [Suffix Arrays](tutorials/suffix-arrays-the-string-search-specialist/) | Core Data Structures | ⭐⭐⭐⭐ | Rust |
-| [System Design 101](tutorials/system-design-101/) | Fundamentals | ⭐⭐⭐ | Python |
-| [Time Series Databases](tutorials/time-series-databases-the-pulse-of-data/) | System Optimization | ⭐⭐⭐ | Rust |
-| [Trie Structures](tutorials/trie-structures-the-autocomplete-expert/) | Core Data Structures | ⭐⭐ | Rust |
-| [Union-Find](tutorials/union-find-the-social-network-analyzer/) | Core Data Structures | ⭐⭐⭐ | Rust |
-| [Write-Ahead Logging](tutorials/write-ahead-logging-wal-durability-without-delay/) | Distributed Systems | ⭐⭐⭐⭐ | Python/Rust |
+| [Circuit Breakers](tutorials/circuit-breakers-the-fault-isolator/) | [API & Service Patterns](#api--service-patterns) | ⭐⭐⭐ | Rust |
+| [Feature Flags](tutorials/feature-flags-the-progressive-rollout/) | [API & Service Patterns](#api--service-patterns) | ⭐⭐ | TypeScript |
+| [Rate Limiting](tutorials/rate-limiting-the-traffic-controller/) | [API & Service Patterns](#api--service-patterns) | ⭐⭐⭐ | Rust |
+| [Zero-Downtime Deployments](tutorials/zero-downtime-deployments-the-seamless-update/) | [API & Service Patterns](#api--service-patterns) | ⭐⭐⭐ | Implementation Guide |
+| [Dijkstra's Algorithm](tutorials/dijkstras-algorithm-the-shortest-path-expert/) | [Core Algorithms](#core-algorithms) | ⭐⭐⭐ | Rust |
+| [Dynamic Programming](tutorials/dynamic-programming-the-memoization-master/) | [Core Algorithms](#core-algorithms) | ⭐⭐⭐ | Rust |
+| [Graph Traversal](tutorials/graph-traversal-navigating-the-network/) | [Core Algorithms](#core-algorithms) | ⭐⭐ | Rust |
+| [String Matching](tutorials/string-matching-the-pattern-detective/) | [Core Algorithms](#core-algorithms) | ⭐⭐⭐ | Rust |
+| [Adaptive Data Structures](tutorials/adaptive-data-structures/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐⭐ | Rust |
+| [B-Trees](tutorials/b-trees/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Bloom Filters](tutorials/bloom-filters/) | [Core Data Structures](#core-data-structures) | ⭐⭐ | Rust |
+| [Copy-on-Write](tutorials/copy-on-write/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Delta Compression](tutorials/delta-compression/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Fenwick Trees](tutorials/fenwick-trees-the-efficient-summation-machine/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐⭐ | Rust |
+| [Hashing](tutorials/hashing-the-universal-filing-system/) | [Core Data Structures](#core-data-structures) | ⭐⭐ | Rust |
+| [Heap Data Structures](tutorials/heap-data-structures-the-priority-expert/) | [Core Data Structures](#core-data-structures) | ⭐⭐ | Rust |
+| [Lockless Data Structures](tutorials/lockless-data-structures-concurrency-without-waiting/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐⭐⭐ | Rust |
+| [Merkle Trees](tutorials/merkle-trees-the-fingerprint-of-data/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Radix Trees](tutorials/radix-trees-the-compressed-prefix-tree/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Rope Data Structures](tutorials/rope-data-structures-the-string-splicer/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Segment Trees](tutorials/segment-trees-the-range-query-specialist/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐⭐ | Rust |
+| [Skip Lists](tutorials/skip-lists-the-probabilistic-search-tree/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Sorting](tutorials/sorting-creating-order-from-chaos/) | [Core Data Structures](#core-data-structures) | ⭐⭐ | Rust |
+| [Suffix Arrays](tutorials/suffix-arrays-the-string-search-specialist/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐⭐ | Rust |
+| [Trie Structures](tutorials/trie-structures-the-autocomplete-expert/) | [Core Data Structures](#core-data-structures) | ⭐⭐ | Rust |
+| [Union-Find](tutorials/union-find-the-social-network-analyzer/) | [Core Data Structures](#core-data-structures) | ⭐⭐⭐ | Rust |
+| [Append-Only Logs](tutorials/append-only-logs/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Rust |
+| [Consensus Algorithms](tutorials/consensus-algorithms-the-agreement-protocol/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Go/Rust |
+| [Consistent Hashing](tutorials/consistent-hashing/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Rust |
+| [CRDTs](tutorials/crdts-agreeing-without-asking/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Python/Rust |
+| [Distributed Tracing](tutorials/distributed-tracing-the-request-detective/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Go/Rust |
+| [Event Sourcing](tutorials/event-sourcing/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Rust |
+| [In-Memory Storage](tutorials/in-memory-storage-the-need-for-speed/) | [Distributed Systems](#distributed-systems) | ⭐⭐ | Rust |
+| [Materialized Views](tutorials/materialized-views-the-pre-calculated-answer/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | SQL |
+| [Message Queues](tutorials/message-queues-the-asynchronous-mailbox/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Go |
+| [Probabilistic Data Structures](tutorials/probabilistic-data-structures-good-enough-is-perfect/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Rust |
+| [Replication](tutorials/replication-dont-put-all-your-eggs-in-one-basket/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Rust |
+| [Saga Pattern](tutorials/saga-pattern-the-distributed-transaction-alternative/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Rust |
+| [Service Discovery](tutorials/service-discovery-the-dynamic-directory/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐ | Go |
+| [Two-Phase Commit](tutorials/two-phase-commit-the-distributed-transaction/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Rust |
+| [Write-Ahead Logging](tutorials/write-ahead-logging-wal-durability-without-delay/) | [Distributed Systems](#distributed-systems) | ⭐⭐⭐⭐ | Python/Rust |
+| [Data Structures & Algorithms 101](tutorials/data-structures-algorithms-101/) | [Fundamentals](#fundamentals) | ⭐⭐ | Python/Rust/Go/C++ |
+| [System Design 101](tutorials/system-design-101/) | [Fundamentals](#fundamentals) | ⭐⭐⭐ | Python |
+| [Vector Databases](tutorials/vector-databases-the-similarity-search-engine/) | [Modern Data Infrastructure](#modern-data-infrastructure) | ⭐⭐⭐⭐ | Rust |
+| [Batching](tutorials/batching/) | [System Optimization](#system-optimization) | ⭐⭐ | Rust |
+| [Caching](tutorials/caching/) | [System Optimization](#system-optimization) | ⭐⭐ | Rust |
+| [Columnar Storage](tutorials/columnar-storage/) | [System Optimization](#system-optimization) | ⭐⭐⭐ | Rust |
+| [Compression](tutorials/compression/) | [System Optimization](#system-optimization) | ⭐⭐⭐ | Rust |
+| [Indexing](tutorials/indexing-the-ultimate-table-of-contents/) | [System Optimization](#system-optimization) | ⭐⭐ | SQL |
+| [Inverted Indexes](tutorials/inverted-indexes-the-heart-of-search-engines/) | [System Optimization](#system-optimization) | ⭐⭐⭐ | Rust |
+| [LSM Trees](tutorials/lsm-trees-making-writes-fast-again/) | [System Optimization](#system-optimization) | ⭐⭐⭐⭐ | Rust |
+| [Partitioning](tutorials/partitioning-the-art-of-slicing-data/) | [System Optimization](#system-optimization) | ⭐⭐⭐ | SQL |
+| [Ring Buffers](tutorials/ring-buffers-the-circular-conveyor-belt/) | [System Optimization](#system-optimization) | ⭐⭐ | Rust |
+| [Sharding](tutorials/sharding-slicing-the-monolith/) | [System Optimization](#system-optimization) | ⭐⭐⭐⭐ | Rust |
+| [Spatial Indexing](tutorials/spatial-indexing-finding-your-place-in-the-world/) | [System Optimization](#system-optimization) | ⭐⭐⭐⭐ | Rust |
+| [Time Series Databases](tutorials/time-series-databases-the-pulse-of-data/) | [System Optimization](#system-optimization) | ⭐⭐⭐ | Rust |
 
 ### Detailed Tutorial Descriptions
 
@@ -166,6 +197,36 @@ Each tutorial follows a consistent 4-section structure:
 - **Key insight**: How individual components combine into robust systems
 - **Implementation**: Python
 - **Difficulty**: ⭐⭐⭐ (Intermediate architectural thinking)
+
+#### Core Algorithms
+
+##### [Dijkstra's Algorithm: The Shortest Path Expert](tutorials/dijkstras-algorithm-the-shortest-path-expert/)
+**Why it matters**: Essential graph algorithm for finding shortest paths in weighted graphs with non-negative edges.
+- **Learn**: How GPS navigation, network routing, and pathfinding algorithms work
+- **Key insight**: Greedy approach with priority queue achieves optimal results in O((V + E) log V) time
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Graph algorithms and priority queue optimization)
+
+##### [Dynamic Programming: The Memoization Master](tutorials/dynamic-programming-the-memoization-master/)
+**Why it matters**: Powerful optimization technique that transforms exponential algorithms into polynomial ones.
+- **Learn**: How to recognize and solve optimization problems through intelligent caching
+- **Key insight**: Trading space for time by remembering subproblem solutions
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Problem decomposition and state design)
+
+##### [Graph Traversal: Navigating the Network](tutorials/graph-traversal-navigating-the-network/)
+**Why it matters**: Fundamental algorithms for exploring connected data structures and networks.
+- **Learn**: How social networks, web crawlers, and dependency analyzers navigate complex relationships
+- **Key insight**: Systematic exploration strategies for discovering connections and paths
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐ (Basic graph algorithms with clear patterns)
+
+##### [String Matching: The Pattern Detective](tutorials/string-matching-the-pattern-detective/)
+**Why it matters**: Efficient algorithms for finding patterns in text, essential for search and text processing.
+- **Learn**: How text editors, search engines, and bioinformatics tools find patterns in large texts
+- **Key insight**: Preprocessing patterns to enable fast matching through smart skipping
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Pattern preprocessing and matching optimization)
 
 #### Core Data Structures
 
@@ -295,7 +356,7 @@ Each tutorial follows a consistent 4-section structure:
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Graph theory and optimization techniques)
 
-#### System Optimization Patterns
+#### System Optimization
 
 ##### [Batching: The Power of Bulk Processing](tutorials/batching/)
 **Why it matters**: Optimizes throughput by processing data in groups.
@@ -381,7 +442,14 @@ Each tutorial follows a consistent 4-section structure:
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐ (Temporal data patterns and compression techniques)
 
-#### Distributed Systems Fundamentals
+#### Distributed Systems
+
+##### [Consensus Algorithms: The Agreement Protocol](tutorials/consensus-algorithms-the-agreement-protocol/)
+**Why it matters**: Foundation of distributed coordination - how multiple nodes agree on shared state despite failures.
+- **Learn**: Raft, Paxos, and Byzantine fault tolerance algorithms that power distributed databases and blockchain
+- **Key insight**: Democratic voting systems with epochs solve the fundamental problem of distributed agreement
+- **Implementation**: Go and Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Complex distributed systems theory with safety vs. liveness trade-offs)
 
 ##### [Append-Only Logs: The Immutable Ledger](tutorials/append-only-logs/)
 **Why it matters**: Foundation of event sourcing, stream processing, and distributed systems.
@@ -439,12 +507,87 @@ Each tutorial follows a consistent 4-section structure:
 - **Implementation**: Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Consistency models and failure handling)
 
+##### [Distributed Tracing: The Request Detective](tutorials/distributed-tracing-the-request-detective/)
+**Why it matters**: Tracks requests across multiple services to diagnose performance issues and failures.
+- **Learn**: How microservices monitor request flows and identify bottlenecks in distributed systems
+- **Key insight**: Correlate distributed operations through trace propagation and span relationships
+- **Implementation**: Go and Rust
+- **Difficulty**: ⭐⭐⭐ (Distributed context propagation and performance monitoring)
+
+##### [Message Queues: The Asynchronous Mailbox](tutorials/message-queues-the-asynchronous-mailbox/)
+**Why it matters**: Enables asynchronous communication and decoupling between services through reliable message passing.
+- **Learn**: How distributed systems handle async processing and service communication through message brokers
+- **Key insight**: Decouple producers from consumers through persistent message storage and delivery
+- **Implementation**: Go
+- **Difficulty**: ⭐⭐⭐ (Message durability and delivery guarantees)
+
+##### [Saga Pattern: The Distributed Transaction Alternative](tutorials/saga-pattern-the-distributed-transaction-alternative/)
+**Why it matters**: Manages distributed transactions through choreographed compensation actions instead of locks.
+- **Learn**: How to maintain consistency across services without distributed locks or two-phase commit
+- **Key insight**: Achieve eventual consistency through compensating actions and forward progress
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Distributed transaction management and compensation logic)
+
+##### [Service Discovery: The Dynamic Directory](tutorials/service-discovery-the-dynamic-directory/)
+**Why it matters**: Enables services to find and communicate with each other in dynamic distributed environments.
+- **Learn**: How microservices locate dependencies and handle service topology changes
+- **Key insight**: Centralized service registry with health checking for dynamic service mesh
+- **Implementation**: Go
+- **Difficulty**: ⭐⭐⭐ (Service registration and health monitoring)
+
+##### [Two-Phase Commit: The Distributed Transaction](tutorials/two-phase-commit-the-distributed-transaction/)
+**Why it matters**: Ensures atomic transactions across multiple databases or services through coordinated commitment.
+- **Learn**: How distributed systems achieve ACID properties across multiple participants
+- **Key insight**: Coordinate commitment decisions through prepare and commit phases
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (Distributed coordination and failure handling)
+
 ##### [Write-Ahead Logging (WAL): Durability without Delay](tutorials/write-ahead-logging-wal-durability-without-delay/)
 **Why it matters**: Fundamental technique that enables databases to provide durability guarantees while maintaining performance.
 - **Learn**: How WAL separates commitment from completion through sequential logging and crash recovery
 - **Key insight**: Write intentions before actions - achieving both speed and safety
 - **Implementation**: Python and Rust
 - **Difficulty**: ⭐⭐⭐⭐ (Transaction guarantees and crash recovery)
+
+#### API & Service Patterns
+
+##### [Circuit Breakers: The Fault Isolator](tutorials/circuit-breakers-the-fault-isolator/)
+**Why it matters**: Prevents cascading failures by automatically cutting off failing services and providing fallback behavior.
+- **Learn**: How microservices protect themselves from dependency failures through automatic circuit breaking
+- **Key insight**: Fail fast and recover gracefully - isolate failures before they spread
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (State management and failure detection)
+
+##### [Feature Flags: The Progressive Rollout](tutorials/feature-flags-the-progressive-rollout/)
+**Why it matters**: Enables safe, gradual deployment of new features without code changes or downtime.
+- **Learn**: How to decouple deployment from release through feature toggles and controlled rollouts
+- **Key insight**: Separate feature activation from code deployment for risk-free releases
+- **Implementation**: TypeScript
+- **Difficulty**: ⭐⭐ (Configuration management and user targeting)
+
+##### [Rate Limiting: The Traffic Controller](tutorials/rate-limiting-the-traffic-controller/)
+**Why it matters**: Protects services from overload by controlling request rates and preventing resource exhaustion.
+- **Learn**: How APIs and services handle traffic spikes through intelligent request throttling
+- **Key insight**: Control demand to match capacity - preventing system collapse under load
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐ (Algorithm implementation and distributed rate limiting)
+
+##### [Zero-Downtime Deployments: The Seamless Update](tutorials/zero-downtime-deployments-the-seamless-update/)
+**Why it matters**: Enables continuous service updates without interrupting users or losing availability.
+- **Learn**: How to update production systems safely through blue-green deployments and rolling updates
+- **Key insight**: Maintain service continuity during updates through careful orchestration
+- **Implementation**: Implementation Guide
+- **Difficulty**: ⭐⭐⭐ (Deployment orchestration and traffic management)
+
+#### Modern Data Infrastructure
+
+##### [Vector Databases: The Similarity Search Engine](tutorials/vector-databases-the-similarity-search-engine/)
+**Why it matters**: Enables AI applications to find similar items through high-dimensional vector search.
+- **Learn**: How recommendation systems, image search, and AI applications find semantically similar content
+- **Key insight**: Transform similarity into geometric proximity for efficient nearest neighbor search
+- **Implementation**: Rust
+- **Difficulty**: ⭐⭐⭐⭐ (High-dimensional indexing and similarity algorithms)
+
 
 ## Learning Philosophy
 

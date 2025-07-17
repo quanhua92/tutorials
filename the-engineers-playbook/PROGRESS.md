@@ -8,6 +8,7 @@
 - [x] batching-the-power-of-bulk-processing
 - [x] bloom-filters-the-space-efficient-gatekeeper
 - [x] caching-remembering-for-speed
+- [x] circuit-breakers-the-fault-isolator
 - [x] columnar-storage-querying-at-ludicrous-speed
 - [x] compression-making-data-smaller
 - [x] consistent-hashing-stable-distribution-in-a-changing-world
@@ -42,3 +43,19 @@
 - [x] trie-structures-the-autocomplete-expert
 - [x] union-find-the-social-network-analyzer
 - [x] write-ahead-logging-wal-durability-without-delay
+
+## Distributed Systems & Consensus
+- [x] consensus-algorithms-the-agreement-protocol
+- [x] dijkstras-algorithm-the-shortest-path-expert
+- [x] distributed-tracing-the-request-detective
+- [x] dynamic-programming-the-memoization-master
+- [x] feature-flags-the-progressive-rollout
+- [x] graph-traversal-navigating-the-network
+- [x] message-queues-the-asynchronous-mailbox
+- [x] rate-limiting-the-traffic-controller
+- [x] saga-pattern-the-distributed-transaction-alternative
+- [x] service-discovery-the-dynamic-directory
+- [x] string-matching-the-pattern-detective
+- [x] two-phase-commit-the-distributed-transaction
+- [x] vector-databases-the-similarity-search-engine
+- [x] zero-downtime-deployments-the-seamless-update

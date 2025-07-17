@@ -8,7 +8,7 @@ Unlike the tutorial series which are derived from existing codebases, The Engine
 
 ## Playbook Series
 
-- [**The Engineer's Playbook**](./the-engineers-playbook/README.md) - 43 comprehensive tutorials covering fundamental data structures, algorithms, and system design patterns from first principles
+- [**The Engineer's Playbook**](./the-engineers-playbook/README.md) - 56 comprehensive tutorials covering fundamental data structures, algorithms, and system design patterns from first principles
 
 ## Tutorial Series
 

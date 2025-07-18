@@ -30,7 +30,8 @@ App
 │   ├── Social Features
 │   ├── Achievement System
 │   ├── Export/Import
-│   └── Help System
+│   ├── Help System
+│   └── Six Paths Sage (AI Assistant)
 └── UI Components
     ├── Base Components (ShadCN)
     ├── Custom Components
@@ -563,6 +564,78 @@ export function PathProgressCard({
   );
 }
 ```
+
+### Six Paths Sage (AI Assistant) Components
+
+```typescript
+// components/features/SixPathsSage.tsx
+interface SixPathsSageProps {
+  tutorialContext?: Tutorial;
+  pathContext?: Path;
+  className?: string;
+  mode?: 'sidebar' | 'dialog' | 'floating';
+}
+
+export function SixPathsSage({ tutorialContext, pathContext, className, mode = 'sidebar' }: SixPathsSageProps) {
+  // Main Six Paths Sage component with context-aware AI assistance
+  // Supports multiple display modes and integrates with Vercel AI SDK
+  // Provides secure API key management and OpenAI-compatible endpoints
+}
+
+// components/features/SageChatInterface.tsx
+interface SageChatInterfaceProps {
+  messages: Message[];
+  input: string;
+  handleInputChange: (e: ChangeEvent<HTMLInputElement>) => void;
+  handleSubmit: (e: FormEvent<HTMLFormElement>) => void;
+  isLoading: boolean;
+  onClose?: () => void;
+  tutorialContext?: Tutorial;
+  onQuickQuestion: (question: string) => void;
+  showHeader?: boolean;
+}
+
+export function SageChatInterface(props: SageChatInterfaceProps) {
+  // Chat interface with markdown support, quick questions, and auto-scroll
+  // Contextual help based on current tutorial/path
+  // Responsive design for different container sizes
+}
+
+// components/features/SageSetupPrompt.tsx
+export function SageSetupPrompt() {
+  // Initial setup flow for API key configuration
+  // Secure storage with base64 encoding
+  // User-friendly onboarding experience
+}
+
+// hooks/useAPISettings.ts
+export function useAPISettings() {
+  const [apiKey, setApiKey] = useState<string>('');
+  const [baseUrl, setBaseUrl] = useState<string>('');
+  const [isConfigured, setIsConfigured] = useState<boolean>(false);
+
+  // Secure API key management with localStorage
+  // Base64 encoding for basic obfuscation
+  // Configuration validation and error handling
+  
+  return {
+    apiKey,
+    baseUrl,
+    isConfigured,
+    saveSettings: (key: string, url: string) => void,
+    clearSettings: () => void
+  };
+}
+```
+
+**Six Paths Sage Features:**
+- **Context-Aware Assistance**: Understands current tutorial and learning path
+- **Multiple Display Modes**: Sidebar, floating dialog, or embedded
+- **Secure Credentials**: Base64-encoded localStorage with clear privacy messaging
+- **OpenAI Compatible**: Works with OpenAI, Anthropic, local models, and custom endpoints
+- **Quick Questions**: Pre-defined contextual questions for faster learning
+- **Markdown Support**: Rich text responses with code highlighting
+- **Responsive Design**: Adapts to different screen sizes and container layouts
 
 ### Social Components
 

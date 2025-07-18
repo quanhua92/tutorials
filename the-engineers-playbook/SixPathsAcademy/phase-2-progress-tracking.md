@@ -370,37 +370,63 @@ function TutorialDetailPage() {
         </Card>
       </div>
 
-      {/* Tutorial Content Link */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Start Learning</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-muted-foreground mb-2">
-                Ready to dive into this tutorial? Click below to access the full content.
-              </p>
-              <Button asChild>
-                <a 
-                  href={tutorial.githubUrl} 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="flex items-center space-x-2"
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  <span>Open Tutorial</span>
-                </a>
-              </Button>
-            </div>
-            <div className="text-right">
-              <p className="text-sm text-muted-foreground">
-                Mark as complete when finished
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {/* Tutorial Content Link with Sage Assistant */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Start Learning</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-muted-foreground mb-2">
+                    Ready to dive into this tutorial? Click below to access the full content.
+                  </p>
+                  <Button asChild>
+                    <a 
+                      href={tutorial.githubUrl} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="flex items-center space-x-2"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      <span>Open Tutorial</span>
+                    </a>
+                  </Button>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm text-muted-foreground">
+                    Mark as complete when finished
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+        
+        <div className="lg:col-span-1">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center space-x-2">
+                <div className="text-2xl">🥋</div>
+                <span>Ask Sensei Roku</span>
+              </CardTitle>
+              <CardDescription>
+                Get personalized help with this tutorial
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <SenseiRoku 
+                tutorialContext={tutorial}
+                pathContext={path}
+                mode="dialog"
+                className="h-96"
+              />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
 
       {/* Next Steps */}
       <NextStepsSection 
@@ -523,7 +549,450 @@ export function AchievementNotification({ achievement }: { achievement: Achievem
 }
 ```
 
-#### Task 2.5: Progress Analytics
+#### Task 2.5: Sensei Roku AI Learning Assistant
+**Estimated Time: 12 hours**
+
+```typescript
+// components/features/SenseiRoku.tsx
+interface SenseiRokuProps {
+  tutorialContext?: Tutorial;
+  pathContext?: Path;
+  className?: string;
+  mode?: 'sidebar' | 'dialog' | 'floating';
+}
+
+export function SenseiRoku({ tutorialContext, pathContext, className, mode = 'sidebar' }: SenseiRokuProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const { apiKey, baseUrl } = useAPISettings();
+  const { profile } = useProfile();
+  
+  const systemPrompt = `You are Sensei Roku, a wise and encouraging mentor for SixPathsAcademy learners. You help students understand software engineering concepts through the Six Paths methodology:
+
+1. 📚 Foundations Path - Core CS concepts and data structures
+2. 🏗️ Systems Path - Distributed systems and architecture  
+3. 🧠 Algorithms Path - Advanced algorithms and problem-solving
+4. ⚡ Performance Path - Optimization and efficiency
+5. 🔬 Specialized Topics - Advanced data structures
+6. 🌐 Distributed Systems & Architecture - Advanced distributed patterns
+
+Current context:
+- Student: ${profile?.user.name || 'Learner'}
+- Current Level: ${profile?.user.currentLevel || 'Code Ninja'}
+- Total XP: ${profile?.user.totalXP || 0}
+${tutorialContext ? `- Current Tutorial: ${tutorialContext.title}` : ''}
+${pathContext ? `- Current Path: ${pathContext.name}` : ''}
+
+Be encouraging, provide clear explanations, and relate concepts to the Six Paths methodology. Keep responses concise but helpful.`;
+
+  const { messages: chatMessages, input, handleInputChange, handleSubmit, isLoading: aiLoading } = useChat({
+    api: baseUrl ? `${baseUrl}/v1/chat/completions` : '/api/chat',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    initialMessages: [
+      {
+        id: 'system',
+        role: 'system',
+        content: systemPrompt,
+      },
+      {
+        id: 'welcome',
+        role: 'assistant', 
+        content: `🥋 Greetings, ${profile?.user.name || 'fellow learner'}! I'm Sensei Roku, your guide on the path to software engineering mastery. ${tutorialContext ? `I see you're working on "${tutorialContext.title}" - how can I help you understand this better?` : 'What would you like to explore today?'}`
+      }
+    ],
+  });
+
+  const handleQuickQuestion = (question: string) => {
+    const contextualQuestion = tutorialContext 
+      ? `Regarding the tutorial "${tutorialContext.title}": ${question}`
+      : question;
+    
+    handleSubmit(new Event('submit') as any, { data: { message: contextualQuestion } });
+  };
+
+  if (!apiKey) {
+    return <SenseiSetupPrompt />;
+  }
+
+  if (mode === 'floating') {
+    return (
+      <div className={cn("fixed bottom-4 right-4 z-50", className)}>
+        <AnimatePresence>
+          {!isOpen && (
+            <motion.button
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0 }}
+              onClick={() => setIsOpen(true)}
+              className="w-14 h-14 bg-gradient-to-r from-purple-500 to-blue-500 rounded-full shadow-lg hover:shadow-xl transition-shadow flex items-center justify-center text-white text-2xl"
+            >
+              🥋
+            </motion.button>
+          )}
+        </AnimatePresence>
+        
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              initial={{ opacity: 0, y: 20, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 20, scale: 0.9 }}
+              className="absolute bottom-0 right-0 w-96 h-[500px] bg-background border rounded-lg shadow-xl"
+            >
+              <SageChatInterface 
+                messages={chatMessages}
+                input={input}
+                handleInputChange={handleInputChange}
+                handleSubmit={handleSubmit}
+                isLoading={aiLoading}
+                onClose={() => setIsOpen(false)}
+                tutorialContext={tutorialContext}
+                onQuickQuestion={handleQuickQuestion}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  }
+
+  if (mode === 'sidebar') {
+    return (
+      <div className={cn("w-80 h-full border-l bg-background/50", className)}>
+        <SageChatInterface 
+          messages={chatMessages}
+          input={input}
+          handleInputChange={handleInputChange}
+          handleSubmit={handleSubmit}
+          isLoading={aiLoading}
+          tutorialContext={tutorialContext}
+          onQuickQuestion={handleQuickQuestion}
+          showHeader={true}
+        />
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// components/features/SageChatInterface.tsx
+interface SageChatInterfaceProps {
+  messages: Message[];
+  input: string;
+  handleInputChange: (e: ChangeEvent<HTMLInputElement>) => void;
+  handleSubmit: (e: FormEvent<HTMLFormElement>) => void;
+  isLoading: boolean;
+  onClose?: () => void;
+  tutorialContext?: Tutorial;
+  onQuickQuestion: (question: string) => void;
+  showHeader?: boolean;
+}
+
+export function SageChatInterface({ 
+  messages, 
+  input, 
+  handleInputChange, 
+  handleSubmit, 
+  isLoading,
+  onClose,
+  tutorialContext,
+  onQuickQuestion,
+  showHeader = false
+}: SageChatInterfaceProps) {
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const quickQuestions = tutorialContext ? [
+    "Can you explain the key concepts?",
+    "What are common gotchas to avoid?", 
+    "How does this relate to other Six Paths?",
+    "Can you give me a practical example?"
+  ] : [
+    "How do I choose which path to focus on?",
+    "What's my recommended next tutorial?",
+    "How can I improve my learning efficiency?",
+    "Explain the Six Paths methodology"
+  ];
+
+  return (
+    <div className="flex flex-col h-full">
+      {showHeader && (
+        <div className="flex items-center justify-between p-4 border-b">
+          <div className="flex items-center space-x-2">
+            <div className="text-2xl">🎯</div>
+            <div>
+              <h3 className="font-semibold">Six Paths Sage</h3>
+              <p className="text-xs text-muted-foreground">Your Learning Mentor</p>
+            </div>
+          </div>
+          {onClose && (
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.filter(m => m.role !== 'system').map((message) => (
+          <div
+            key={message.id}
+            className={cn(
+              "flex space-x-2",
+              message.role === 'user' ? 'justify-end' : 'justify-start'
+            )}
+          >
+            {message.role === 'assistant' && (
+              <div className="w-8 h-8 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 flex items-center justify-center text-white text-sm shrink-0">
+                🥋
+              </div>
+            )}
+            <div
+              className={cn(
+                "max-w-[80%] rounded-lg px-3 py-2 text-sm",
+                message.role === 'user'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted'
+              )}
+            >
+              <ReactMarkdown 
+                className="prose prose-sm dark:prose-invert max-w-none"
+                components={{
+                  code: ({ node, ...props }) => (
+                    <code className="bg-muted px-1 py-0.5 rounded text-xs" {...props} />
+                  ),
+                  pre: ({ node, ...props }) => (
+                    <pre className="bg-muted p-2 rounded mt-2 overflow-x-auto text-xs" {...props} />
+                  )
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
+            </div>
+            {message.role === 'user' && (
+              <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-sm shrink-0">
+                👤
+              </div>
+            )}
+          </div>
+        ))}
+        {isLoading && (
+          <div className="flex items-center space-x-2">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-r from-purple-500 to-blue-500 flex items-center justify-center text-white text-sm">
+              🥋
+            </div>
+            <div className="bg-muted rounded-lg px-3 py-2">
+              <div className="flex space-x-1">
+                <div className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" />
+                <div className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce [animation-delay:0.1s]" />
+                <div className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce [animation-delay:0.2s]" />
+              </div>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Quick Questions */}
+      <div className="p-2 border-t">
+        <div className="grid grid-cols-1 gap-1 mb-2">
+          {quickQuestions.map((question, index) => (
+            <Button
+              key={index}
+              variant="ghost"
+              size="sm"
+              className="justify-start h-auto p-2 text-xs"
+              onClick={() => onQuickQuestion(question)}
+              disabled={isLoading}
+            >
+              {question}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      {/* Input */}
+      <div className="p-4 border-t">
+        <form onSubmit={handleSubmit} className="flex space-x-2">
+          <Input
+            value={input}
+            onChange={handleInputChange}
+            placeholder="Ask Sensei Roku anything..."
+            disabled={isLoading}
+            className="flex-1"
+          />
+          <Button type="submit" disabled={isLoading || !input.trim()}>
+            <Send className="h-4 w-4" />
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// hooks/useAPISettings.ts
+export function useAPISettings() {
+  const [apiKey, setApiKey] = useState<string>('');
+  const [baseUrl, setBaseUrl] = useState<string>('');
+  const [isConfigured, setIsConfigured] = useState<boolean>(false);
+
+  useEffect(() => {
+    // Load from localStorage
+    const storedKey = localStorage.getItem('sixpaths-api-key');
+    const storedUrl = localStorage.getItem('sixpaths-base-url');
+    
+    if (storedKey) {
+      try {
+        // Decode from base64 for basic security
+        const decodedKey = atob(storedKey);
+        setApiKey(decodedKey);
+        setIsConfigured(true);
+      } catch (error) {
+        console.error('Failed to decode API key');
+      }
+    }
+    
+    if (storedUrl) {
+      setBaseUrl(storedUrl);
+    }
+  }, []);
+
+  const saveSettings = (newApiKey: string, newBaseUrl: string) => {
+    try {
+      // Encode to base64 for basic security (not encryption, just obfuscation)
+      const encodedKey = btoa(newApiKey);
+      localStorage.setItem('sixpaths-api-key', encodedKey);
+      localStorage.setItem('sixpaths-base-url', newBaseUrl);
+      
+      setApiKey(newApiKey);
+      setBaseUrl(newBaseUrl);
+      setIsConfigured(true);
+    } catch (error) {
+      console.error('Failed to save API settings');
+    }
+  };
+
+  const clearSettings = () => {
+    localStorage.removeItem('sixpaths-api-key');
+    localStorage.removeItem('sixpaths-base-url');
+    setApiKey('');
+    setBaseUrl('');
+    setIsConfigured(false);
+  };
+
+  return {
+    apiKey,
+    baseUrl,
+    isConfigured,
+    saveSettings,
+    clearSettings
+  };
+}
+
+// components/features/SenseiSetupPrompt.tsx
+export function SenseiSetupPrompt() {
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('https://api.openai.com');
+  const { saveSettings } = useAPISettings();
+  const [isOpen, setIsOpen] = useState(false);
+
+  const handleSave = () => {
+    if (apiKey.trim()) {
+      saveSettings(apiKey.trim(), baseUrl.trim());
+      setIsOpen(false);
+    }
+  };
+
+  return (
+    <div className="p-4 text-center space-y-4">
+      <div className="text-6xl mb-4">🥋</div>
+      <h3 className="font-semibold">Meet Sensei Roku</h3>
+      <p className="text-sm text-muted-foreground">
+        Configure your AI learning mentor to get personalized guidance on your journey.
+      </p>
+      
+      <Dialog open={isOpen} onOpenChange={setIsOpen}>
+        <DialogTrigger asChild>
+          <Button>Configure Sensei</Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Configure Sensei Roku</DialogTitle>
+            <DialogDescription>
+              Enter your OpenAI-compatible API credentials to enable your personal learning mentor.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="apiKey">API Key</Label>
+              <Input
+                id="apiKey"
+                type="password"
+                placeholder="sk-..."
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Your API key is stored locally and never sent to our servers.
+              </p>
+            </div>
+            
+            <div>
+              <Label htmlFor="baseUrl">Base URL</Label>
+              <Input
+                id="baseUrl"
+                placeholder="https://api.openai.com"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Use https://api.openai.com for OpenAI or your provider's endpoint.
+              </p>
+            </div>
+            
+            <div className="bg-blue-50 dark:bg-blue-950 p-3 rounded-lg">
+              <div className="flex items-start space-x-2">
+                <Shield className="h-4 w-4 text-blue-600 mt-0.5" />
+                <div className="text-sm">
+                  <p className="font-medium text-blue-800 dark:text-blue-200">Secure & Private</p>
+                  <p className="text-blue-600 dark:text-blue-300">
+                    Your credentials are stored locally using base64 encoding and never leave your device.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={!apiKey.trim()}>
+              Save Configuration
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+```
+
+#### Task 2.6: Progress Analytics
 **Estimated Time: 6 hours**
 
 ```typescript
@@ -626,7 +1095,10 @@ src/
 │   │   ├── TutorialDetail.tsx
 │   │   ├── AchievementNotification.tsx
 │   │   ├── ProgressAnalytics.tsx
-│   │   └── CompletionToggle.tsx
+│   │   ├── CompletionToggle.tsx
+│   │   ├── SixPathsSage.tsx
+│   │   ├── SageChatInterface.tsx
+│   │   └── SageSetupPrompt.tsx
 │   └── ui/
 │       ├── ProgressChart.tsx
 │       ├── SkillsRadar.tsx
@@ -637,7 +1109,16 @@ src/
 │   └── progress.ts
 └── hooks/
     ├── useProfile.ts (enhanced)
-    └── useAchievements.ts
+    ├── useAchievements.ts
+    └── useAPISettings.ts
+```
+
+## 📦 Additional Dependencies Required
+
+```bash
+# Six Paths Sage AI Assistant
+npm install ai @ai-sdk/openai @ai-sdk/anthropic
+npm install react-markdown framer-motion
 ```
 
 ## ✅ Definition of Done
@@ -648,6 +1129,11 @@ src/
 - [ ] Tutorial detail pages with completion tracking
 - [ ] Achievement system with notifications working
 - [ ] Progress analytics and charts functional
+- [ ] **Six Paths Sage AI assistant integrated**
+- [ ] **Secure API key storage with base64 encoding**
+- [ ] **Chat interface working in sidebar and floating modes**
+- [ ] **Context-aware responses for tutorials and paths**
+- [ ] **Setup flow for API configuration completed**
 - [ ] Local storage persistence working reliably
 - [ ] All progress-related tests passing
 

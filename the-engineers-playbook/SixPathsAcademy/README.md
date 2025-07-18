@@ -32,8 +32,8 @@ SixPathsAcademy.com is a gamified learning platform that transforms The Engineer
 Core application setup with routing, data models, and basic UI components.
 - [📋 Phase 1 Tasks](./phase-1-foundation.md)
 
-### **Phase 2: Progress Tracking** (Weeks 3-4)
-User profile system with progress visualization and local storage.
+### **Phase 2: Progress Tracking & AI Assistant** (Weeks 3-4)
+User profile system with progress visualization, local storage, and the Sensei Roku AI assistant.
 - [📋 Phase 2 Tasks](./phase-2-progress-tracking.md)
 
 ### **Phase 3: Social Features** (Weeks 5-6)
@@ -69,6 +69,7 @@ Git-based ranking system with GitHub Actions aggregation.
 
 ### **Feature Components**
 - Progress visualization, peer comparison, achievement system
+- **🥋 Sensei Roku** - AI-powered learning assistant with contextual guidance
 
 ### **UI Components**
 - ShadCN UI-based design system with custom gamification elements
@@ -120,6 +121,8 @@ Git-based ranking system with GitHub Actions aggregation.
 - **Tailwind CSS** - Utility-first styling
 - **ShadCN UI** - Component library
 - **TypeScript** - Type safety
+- **Vercel AI SDK** - Client-side AI chat integration
+- **React Markdown** - Rich text rendering for AI responses
 
 ### **Data Layer**
 - **GitHub API** - Repository crawling and data fetching
@@ -153,10 +156,33 @@ Git-based ranking system with GitHub Actions aggregation.
 - Social feature usage
 - Content contributions
 
+## 🥋 Sensei Roku - AI Learning Mentor
+
+**Sensei Roku** is SixPathsAcademy's intelligent AI assistant that acts as your personal software engineering mentor. Named after the Japanese word for "six" (representing the Six Paths methodology), this context-aware companion provides personalized guidance throughout your learning journey.
+
+### **Key Features:**
+- **🧠 Context-Aware**: Understands your current tutorial, progress level, and learning path
+- **🔒 Privacy-First**: Uses your own API key, stored locally with base64 encoding
+- **🎨 Flexible Modes**: Sidebar, floating chat, or embedded assistance
+- **⚡ Quick Help**: Pre-built contextual questions for faster learning
+- **🌐 Provider Agnostic**: Works with OpenAI, Claude, local models, or any OpenAI-compatible API
+
+### **How It Works:**
+1. Configure your OpenAI-compatible API credentials in Settings
+2. Sensei Roku appears throughout the platform ready to help
+3. Get instant explanations, examples, and guidance tailored to your current study topic
+4. Ask questions in plain English - no technical jargon required
+
+**Perfect for**: Students who want an intelligent study companion that understands both their current lesson and overall progress, providing personalized mentorship without compromising privacy or data control.
+
+*Your path to software engineering mastery, guided by AI wisdom.* 🥋
+
+---
+
 ## 🔄 Future Enhancements
 
 ### **Phase 7+: Advanced Features**
-- **AI-Powered Recommendations** - Personalized learning paths
+- **Enhanced AI Features** - Advanced prompt templates and learning analytics
 - **Video Integration** - Tutorial walkthroughs and explanations
 - **Practice Challenges** - Coding exercises and assessments
 - **Mentorship System** - Connect learners with experienced developers

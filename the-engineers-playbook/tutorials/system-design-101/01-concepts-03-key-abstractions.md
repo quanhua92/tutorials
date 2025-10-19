@@ -208,8 +208,7 @@ graph TD
     E --> C
     E --> D
     
-    F[Query for User "Mike"] --> E
-    E --> C
+    F["Query for User 'Mike'"] --> E
     
     style E fill:#FFE4B5
     style C fill:#90EE90
@@ -245,7 +244,7 @@ graph TD
     A --> C[Server B<br/>Position 200]
     A --> D[Server C<br/>Position 300]
     
-    E[Key "user123"<br/>Hash: 150] --> F[Assigned to Server B<br/>Next clockwise]
+    E[Key 'user123'<br/>Hash: 150] --> F[Assigned to Server B<br/>Next clockwise]
     
     G[Add Server D<br/>Position 250] --> H[Only keys 200-250<br/>move from B to D]
     

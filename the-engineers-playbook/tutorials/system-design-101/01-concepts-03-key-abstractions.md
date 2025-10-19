@@ -244,7 +244,7 @@ graph TD
     A --> C[Server B<br/>Position 200]
     A --> D[Server C<br/>Position 300]
     
-    E[Key "user123"<br/>Hash: 150] --> F[Assigned to Server B<br/>Next clockwise]
+    E[Key 'user123'<br/>Hash: 150] --> F[Assigned to Server B<br/>Next clockwise]
     
     G[Add Server D<br/>Position 250] --> H[Only keys 200-250<br/>move from B to D]
     

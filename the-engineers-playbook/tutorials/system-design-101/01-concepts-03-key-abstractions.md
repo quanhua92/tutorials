@@ -209,7 +209,6 @@ graph TD
     E --> D
     
     F["Query for User 'Mike'"] --> E
-    E --> C
     
     style E fill:#FFE4B5
     style C fill:#90EE90

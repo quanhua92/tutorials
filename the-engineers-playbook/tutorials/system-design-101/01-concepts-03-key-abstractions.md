@@ -55,7 +55,7 @@ Hash tables power everything from in-memory caches to distributed databases. The
 
 ```mermaid
 graph LR
-    A[user:john] --> B[hashed 'user:john']
+    A[user:john] --> B["hash('user:john')"]
     B --> C[bucket 47]
     C --> D[name: John, email: john@example.com]
     

@@ -57,7 +57,7 @@ Hash tables power everything from in-memory caches to distributed databases. The
 graph LR
     A[user:john] --> B["hash('user:john')"]
     B --> C[bucket 47]
-    C --> D[name: John, email: john@example.com]
+    C --> D["{ name: 'John', email: 'john@example.com' }"]
     
     style B fill:#FFE4B5
     style C fill:#98FB98

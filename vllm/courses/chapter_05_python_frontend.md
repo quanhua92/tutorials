@@ -2,34 +2,34 @@
 
 ```mermaid
 flowchart TB
-    Client(["Client HTTP/SSE"]) -- "POST /v1/completions" --> FastAPI
+    Client["Client HTTP/SSE"] -- "POST /v1/completions" --> FastAPI
     
     subgraph Frontend ["Python Frontend Orchestration"]
         direction TB
         subgraph API ["API & Validation Layer"]
             FastAPI["FastAPI Interface"] --> Pydantic["Pydantic v2 Validation"]
             Pydantic --> Jinja["Jinja2 ChatTemplate Rendering"]
-            note1[[Jinja2 Overhead]] -.-> Jinja
+            note1["Jinja2 Overhead"] -.-> Jinja
         end
 
         subgraph Tracker ["Request Tracking & Mapping"]
-            Jinja --> EngineEntry[AsyncLLMEngine.generate]
-            EngineEntry --> RT[RequestTracker]
-            RT --> Lock[asyncio.Lock]
+            Jinja --> EngineEntry["AsyncLLMEngine.generate"]
+            EngineEntry --> RT["RequestTracker"]
+            RT --> Lock["asyncio.Lock"]
             Lock --> Map["RequestID -> asyncio.Future/Queue Mapping"]
-            note2[[Lock Contention]] -.-> Lock
+            note2["Lock Contention"] -.-> Lock
         end
 
         subgraph Framing ["Response Processing"]
             RT --> SSE["SSE Framing & JSON Serializer"]
-            note3[[Framing Overhead]] -.-> SSE
+            note3["Framing Overhead"] -.-> SSE
         end
     end
 
     subgraph Backend ["Engine Core - Background Loop"]
-        Map -- "add_request" --> Scheduler[vLLM Scheduler]
+        Map -- "add_request" --> Scheduler["vLLM Scheduler"]
         Scheduler --> Model["Model Executor C++/CUDA"]
-        Model --> Process[Output Processor]
+        Model --> Process["Output Processor"]
         Process -- "put_output" --> RT
     end
 
@@ -40,9 +40,6 @@ flowchart TB
     Abort --> RT
     RT -- "abort_request" --> Scheduler
     Scheduler -- "Reclaim KV Cache" --> Model
-
-    classDef bottleneck fill:#f96,stroke:#333,stroke-width:2px;
-    class note1,note2,note3 bottleneck;
 ```
 
 The Python frontend in vLLM is the "brain" that coordinates the high-performance "muscles" (C++/CUDA). While it provides a user-friendly OpenAI-compatible API, it is a complex asynchronous system where performance bottlenecks—ranging from lock contention to event loop starvation—must be rigorously managed to maintain high throughput.

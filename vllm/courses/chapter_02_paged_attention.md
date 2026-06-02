@@ -1,35 +1,35 @@
 # Chapter 2: PagedAttention – Deep Dive into KV Cache Management
 
 ```mermaid
-graph TD
+flowchart TB
     subgraph Logical_Space ["Logical Context Space"]
         L_Blocks["Logical Blocks 0...N"]
     end
 
     subgraph Mapping_Logic ["vLLM Scheduler"]
-        BT["Block Table <br/> Maps Logical to Physical"]
+        BT["Block Table: Logical to Physical Mapping"]
     end
 
     subgraph Physical_Layout ["Physical KV Cache Layout"]
-        direction LR
+        direction TB
         subgraph K_Cache ["Key Cache (LDS.128 Aligned)"]
-            K_Desc["[num_blocks, heads, head_size/x, block_size, x]<br/><i>x=8 for FP16 (16B loads)</i>"]
+            K_Desc["Key Tensor: [num_blocks, heads, head_size/x, block_size, x]"]
         end
         subgraph V_Cache ["Value Cache"]
-            V_Desc["[num_blocks, heads, head_size, block_size]"]
+            V_Desc["Value Tensor: [num_blocks, heads, head_size, block_size]"]
         end
     end
 
-    subgraph V2_Architecture ["PagedAttention V2 3D Grid Mapping"]
-        Grid3D["Grid: (num_heads, num_seqs, max_num_partitions)"]
+    subgraph V2_Architecture ["PagedAttention V2 3D Grid"]
+        Grid3D["Grid: (num_heads, num_seqs, max_partitions)"]
         subgraph Parallel_Compute ["Parallel Partition Processing"]
-            P_Exec["Thread Group LDS.128 Load<br/>(128-bit Vectorized Access)"]
+            P_Exec["LDS.128 Vectorized Access"]
             P_Result["Partial Result: [max_logit, exp_sum, weighted_v]"]
         end
     end
 
     subgraph Reduction_Stage ["Parallel Reduction Phase"]
-        RK["Reduce Kernel <br/> Aggregates Multi-Partition Results"]
+        RK["Reduce Kernel: Parallel Aggregation"]
         Output["Final Attention Output"]
     end
 

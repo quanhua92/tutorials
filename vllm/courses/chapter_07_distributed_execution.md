@@ -2,7 +2,7 @@
 
 ```mermaid
 flowchart TD
-    subgraph Initialization ["Orchestration &amp; Coordination"]
+    subgraph Initialization ["Orchestration & Coordination"]
         direction TB
         TCP["TCPStore Server @ Rank 0"]
         NCCL_ID{NCCL UniqueID Exchange}
@@ -15,17 +15,17 @@ flowchart TD
     subgraph TP ["Tensor Parallelism (TP) - Intra-Layer Sharding"]
         direction LR
         subgraph Intra_Node ["Intra-Node: CUDA IPC"]
-            CAR[[Custom All-Reduce Kernel]]
+            CAR["Custom All-Reduce Kernel"]
             CAR --- |Zero-Copy| SHM[Shared Memory IPC]
         end
         subgraph Inter_Node ["Inter-Node: NCCL Collectives"]
-            NAR[[NCCL All-Reduce]]
+            NAR["NCCL All-Reduce"]
         end
         
-        Rank_i["Rank i: ColumnLinear"] <--> CAR
-        CAR <--> Rank_j["Rank j: RowLinear"]
-        Rank_i <--> NAR
-        NAR <--> Rank_j
+        Rank_i["Rank i: ColumnLinear"] --> CAR
+        CAR --> Rank_j["Rank j: RowLinear"]
+        Rank_i --> NAR
+        NAR --> Rank_j
     end
 
     subgraph PP ["Pipeline Parallelism (PP) - Inter-Layer Sharding"]
@@ -42,8 +42,8 @@ flowchart TD
         Act -- "NCCL P2P (recv)" --> Stage_N1["PP Stage N+1"]
     end
 
-    Initialization ==> TP
-    Initialization ==> PP
+    Initialization --> TP
+    Initialization --> PP
 ```
 
 When model parameters exceed the memory capacity of a single accelerator, or when inference latency must be reduced beyond the limits of a single device, vLLM employs distributed execution. This chapter details the architectural components that enable multi-GPU orchestration, specifically focusing on Tensor Parallelism (TP), Pipeline Parallelism (PP), and the Static Executor Model.

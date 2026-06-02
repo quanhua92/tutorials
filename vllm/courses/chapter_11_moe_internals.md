@@ -3,30 +3,35 @@
 Mixture of Experts (MoE) is a pivotal architecture for scaling Large Language Models (LLMs) to trillions of parameters while maintaining manageable computational costs during inference. This chapter dives into vLLM's high-performance implementation of MoE, focusing on fused Triton kernels, expert sharding, and kernel tuning.
 
 ```mermaid
-graph TD
-    A[Input Hidden States] --> B[MoE Router / Gating]
-    B --> C{Top-k Selection}
-    C --> D[Token-Expert Mapping]
-    D --> E[Fused MoE Kernel Execution]
-    subgraph "Fused Triton Kernel"
-        E1[Sorted Token IDs]
-        E2[Expert ID Mapping]
-        E3[Fused gate_up_proj]
-        E4[Activation - e.g., SiLU]
-        E5[Fused down_proj]
+flowchart TD
+    A["Input Hidden States"] --> B["MoE Router / Gating"]
+    B --> C{"Top-k Selection"}
+    C --> D["Token-Expert Mapping"]
+    D --> E["Fused MoE Kernel Execution"]
+
+    subgraph FTK ["Fused Triton Kernel"]
+        direction TB
+        E1["Sorted Token IDs"]
+        E2["Expert ID Mapping"]
+        E3["Fused gate_up_proj"]
+        E4["Activation - e.g., SiLU"]
+        E5["Fused down_proj"]
         E1 --> E3
         E2 --> E3
         E3 --> E4
         E4 --> E5
     end
-    E5 --> F[Top-k Weighted Sum]
-    F --> G[Output Hidden States]
+
+    E5 --> F["Top-k Weighted Sum"]
+    F --> G["Output Hidden States"]
     
-    subgraph "TP-Aware MoE"
-        H[Expert Sharding]
-        I[Inter-GPU Communication]
+    subgraph TP ["TP-Aware MoE"]
+        direction TB
+        H["Expert Sharding"]
+        I["Inter-GPU Communication"]
         H <--> I
     end
+
     E1 -.-> H
 ```
 

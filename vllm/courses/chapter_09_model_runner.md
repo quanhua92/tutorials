@@ -1,45 +1,45 @@
 # Chapter 9: Model Execution and Hardware Abstraction
 
 ```mermaid
-flowchart TD
-    subgraph MR [ModelRunner Execution & Hardware Abstraction]
+flowchart TB
+    subgraph MR ["ModelRunner Execution & Hardware Abstraction"]
         direction TB
-        Start([execute_model]) --> Input[BatchExecutionDescriptor]
+        Start(["execute_model"]) --> Input["BatchExecutionDescriptor"]
         Input --> Meta["Metadata Management: SamplingMetadata, AttentionMetadata"]
         
-        subgraph MM [Multi-Modal Insertion]
-            direction LR
-            Encoder[Vision Encoder] --> Proj[Projector]
+        subgraph MM ["Multi-Modal Insertion"]
+            direction TB
+            Encoder["Vision Encoder"] --> Proj["Projector"]
             Proj --> Interleave["Interleave Features &#64; Placeholder Tokens"]
         end
         
-        Meta --> MM_Check{Is MM?}
+        Meta --> MM_Check{"Is MM?"}
         MM_Check -->|Yes| Encoder
-        MM_Check -->|No| Embed[Embedding Lookup]
+        MM_Check -->|No| Embed["Embedding Lookup"]
         
         subgraph CUDAGraph ["CUDA Graph: FULL vs PIECEWISE"]
             direction TB
-            Path{Capture Mode}
-            Path -->|FULL| Full[Full Graph Capture]
-            Path -->|PIECEWISE| Piece[Graph Splitting / PiecewiseBackend]
-            Full & Piece --> Static[Static Buffer I/O Synchronization]
+            Path{"Capture Mode"}
+            Path -->|FULL| Full["Full Graph Capture"]
+            Path -->|PIECEWISE| Piece["Graph Splitting / PiecewiseBackend"]
+            Full & Piece --> Static["Static Buffer I/O Synchronization"]
         end
         
         Interleave --> Path
         Embed --> Path
         Static --> Backend["AttentionBackend: Dispatch to FlashAttn/XFormers/FlashInfer"]
-        Backend --> Sampler[Logit Warping & Sampling]
+        Backend --> Sampler["Logit Warping & Sampling"]
     end
 
-    subgraph SD [Speculative Decoding Workflow]
+    subgraph SD ["Speculative Decoding Workflow"]
         direction TB
         Proposer["Proposer: K-step Draft Loop"] --> Verify["Target: Single Verification Pass"]
-        Verify --> Rejection[Rejection Sampling]
+        Verify --> Rejection["Rejection Sampling"]
         
-        subgraph SDSync [Multi-Step State Sync]
-            direction LR
-            KVSync[KV Cache Rollback]
-            HiddenSync[Hidden State Feedback]
+        subgraph SDSync ["Multi-Step State Sync"]
+            direction TB
+            KVSync["KV Cache Rollback"]
+            HiddenSync["Hidden State Feedback"]
         end
         
         Rejection --> KVSync & HiddenSync

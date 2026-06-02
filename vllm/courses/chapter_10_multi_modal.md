@@ -10,12 +10,13 @@ A VLM typically consists of three components:
 3.  **Language Model (LLM):** The causal backbone that processes the concatenated text and vision embeddings.
 
 ```mermaid
-graph TD
+flowchart TB
     UserPrompt["User Prompt + Images"] --> MMProcessor["MultiModal Processor"]
     MMProcessor --> TextTokens["Text Tokens & Placeholders"]
     MMProcessor --> PixelValues["Pixel Values (Tensors)"]
     
-    subgraph "Model Executor"
+    subgraph ME ["Model Executor"]
+        direction TB
         PixelValues --> VisionTower["Vision Tower (CLIP/SigLIP)"]
         VisionTower --> Projector["MM Projector (MLP)"]
         Projector --> VisionEmbeds["Vision Embeddings"]

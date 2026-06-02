@@ -1,17 +1,20 @@
 # Chapter 3: Continuous Batching and Iteration-Level Scheduling
 
 ```mermaid
-graph TB
+flowchart TB
     subgraph Scheduling_Iteration ["Iteration-Level Scheduling (O(N) Scheduler)"]
-        S(["Iteration Start"]) --> PQ["Poll Queues"]
+        direction TB
+        S["Iteration Start"] --> PQ["Poll Queues"]
         
         subgraph KV_Management ["Radix Cache & Block Management"]
+            direction TB
             PQ --> Radix{"Radix Search"}
             Radix -- "Prefix Match" --> Reuse["Reuse KV Blocks"]
             Radix -- "Cache Miss" --> Alloc["Allocate New Blocks"]
         end
 
         subgraph Preemption_Logic ["Preemption Strategy"]
+            direction TB
             Reuse --> Mem{"Memory Pressure?"}
             Alloc --> Mem
             Mem -- "Swap (PCIe)" --> SwapOut["Move to CPU RAM"]
@@ -20,6 +23,7 @@ graph TB
         end
 
         subgraph Batch_Execution ["Execution Strategy"]
+            direction TB
             Batch --> CP{"Chunked Prefill?"}
             CP -- "Tokens > Max" --> Chunk["Split into Chunks"]
             CP -- "Piggyback" --> Full["Full Prefill/Decode"]
@@ -30,8 +34,9 @@ graph TB
     end
 
     subgraph State_Transitions ["Request Life Cycle"]
-        W[[Waiting]] -- "Schedule" --> R[[Running]]
-        R -- "Preempt: Swap" --> Sw[[Swapped]]
+        direction TB
+        W["Waiting"] -- "Schedule" --> R["Running"]
+        R -- "Preempt: Swap" --> Sw["Swapped"]
         Sw -- "Swap-In" --> R
         R -- "Preempt: Recompute" --> W
     end

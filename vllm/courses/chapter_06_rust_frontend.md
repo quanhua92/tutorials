@@ -1,39 +1,39 @@
 # Chapter 6: The Rust Frontend - Architectural Deep Dive
 
 ```mermaid
-graph TD
-    subgraph "External World"
+flowchart TD
+    subgraph EXTERNAL ["External World"]
         Client[HTTP Clients]
     end
 
-    subgraph "Rust Frontend (Axum Server)"
+    subgraph RUST_FE ["Rust Frontend (Axum Server)"]
         direction TB
         Axum[Axum Web Framework]
         
-        subgraph "Tower Middleware Stack"
+        subgraph TOWER ["Tower Middleware Stack"]
             Trace["Tracing / Span Mgmt"]
             Metrics["Prometheus Metrics"]
             Backpressure["Load Tracking & Backpressure"]
         end
         
-        subgraph "Internal Systems"
+        subgraph INTERNAL ["Internal Systems"]
             State["Arc-Managed State"]
             SIMD["SIMD Detokenizer"]
             Malloc["mimalloc / jemalloc"]
         end
         
-        subgraph "ZMQ Transport (Binding)"
+        subgraph ZMQ ["ZMQ Transport (Binding)"]
             Router["ZMQ ROUTER - Input Plane"]
             Pull["ZMQ PULL - Output Plane"]
         end
     end
 
-    subgraph "Inter-Process Communication (IPC)"
+    subgraph IPC ["Inter-Process Communication (IPC)"]
         direction LR
         MsgPack["MessagePack Serialization"]
     end
 
-    subgraph "Python EngineCore (Connecting Clients)"
+    subgraph PYTHON_CORE ["Python EngineCore (Connecting Clients)"]
         Dealer["ZMQ DEALER"]
         Push["ZMQ PUSH"]
         Engine["Inference Logic"]
@@ -42,10 +42,7 @@ graph TD
 
     %% Flow
     Client <--> Axum
-    Axum --> Trace
-    Trace --> Metrics
-    Metrics --> Backpressure
-    Backpressure --> State
+    Axum --> Trace --> Metrics --> Backpressure --> State
     State --> Router
     Pull --> State
     State --> SIMD
@@ -64,15 +61,6 @@ graph TD
     %% Health & Process Management
     Health -.->|"Heartbeat"| Router
     State -.->|"OS Polling / waitpid"| Health
-
-    %% Formatting
-    classDef rust fill:#2e3440,stroke:#81a1c1,stroke-width:2px,color:#eceff4;
-    classDef python fill:#3b4252,stroke:#bf616a,stroke-width:2px,color:#eceff4;
-    classDef ipc fill:#434c5e,stroke:#ebcb8b,stroke-width:2px,color:#eceff4;
-    
-    class Axum,Trace,Metrics,Backpressure,State,SIMD,Malloc,Router,Pull rust;
-    class Dealer,Push,Engine,Health python;
-    class MsgPack ipc;
 ```
 
 In high-throughput LLM serving, the "front-of-house" is often the bottleneck. While Python is excellent for model orchestration and deep learning research, its Global Interpreter Lock (GIL) and garbage collection (GC) pauses can introduce significant tail latency (P99) when handling thousands of concurrent requests.

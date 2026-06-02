@@ -1,8 +1,9 @@
 # Chapter 12: Contributing to vLLM – Systems Engineering Edition
 
 ```mermaid
-flowchart TD
-    subgraph Env_Config ["Environment &amp; Flags"]
+flowchart TB
+    subgraph Env_Config ["Environment & Flags"]
+        direction TB
         VLLM_TARGET["VLLM_TARGET_DEVICE"]
         MAX_JOBS["MAX_JOBS"]
         PUNT_TORCH["VLLM_INSTALL_PUNT_PYTORCH"]
@@ -13,20 +14,22 @@ flowchart TD
     PUNT_TORCH --> SETUP
 
     subgraph Build_Orchestration ["Build Orchestration (setup.py / pyproject.toml)"]
-        PYPROJ["pyproject.toml<br/>(build-system.requires)"]
+        direction TB
+        PYPROJ["pyproject.toml (build-system.requires)"]
         REQ_CUDA["requirements/build/cuda.txt"]
-        SETUP["setup.py<br/>(Main Orchestrator)"]
+        SETUP["setup.py (Main Orchestrator)"]
         
-        PYPROJ ---|"Sync Check"| REQ_CUDA
+        PYPROJ -- "Sync Check" --- REQ_CUDA
         PYPROJ --> SETUP
         REQ_CUDA --> SETUP
     end
 
     subgraph CXX_CUDA_Stack ["C++/CUDA Stack"]
+        direction TB
         CMAKE["CMake (v3.26+)"]
-        CSRC["csrc/<br/>(Kernels &amp; Ops)"]
-        PYBIND["Pybind11<br/>(Python FFI)"]
-        ABI["&quot;_GLIBCXX_USE_CXX11_ABI=1&quot;"]
+        CSRC["csrc/ (Kernels & Ops)"]
+        PYBIND["Pybind11 (Python FFI)"]
+        ABI["_GLIBCXX_USE_CXX11_ABI=1"]
         
         SETUP --> CMAKE
         CMAKE --> CSRC
@@ -35,9 +38,10 @@ flowchart TD
     end
 
     subgraph Rust_Stack ["Rust Stack"]
+        direction TB
         CARGO["Cargo"]
-        RUST_SRC["rust/<br/>(Frontend/Orchestration)"]
-        PYO3["PyO3<br/>(Python FFI)"]
+        RUST_SRC["rust/ (Frontend/Orchestration)"]
+        PYO3["PyO3 (Python FFI)"]
         STRUST["setuptools-rust"]
         
         SETUP --> STRUST
@@ -46,10 +50,11 @@ flowchart TD
         RUST_SRC --> PYO3
     end
 
-    subgraph Testing_Matrix ["Testing &amp; Validation (pytest)"]
-        PARITY["Numerical Parity<br/>(torch.testing.assert_close)"]
-        MARKERS["pytest Markers:<br/>vllm_v1, core_model, distributed"]
-        CI["CI/CD Pipeline<br/>(.buildkite/)"]
+    subgraph Testing_Matrix ["Testing & Validation (pytest)"]
+        direction TB
+        PARITY["Numerical Parity (torch.testing.assert_close)"]
+        MARKERS["pytest Markers: vllm_v1, core_model, distributed"]
+        CI["CI/CD Pipeline (.buildkite/)"]
         
         PYBIND --> PARITY
         PYO3 --> PARITY

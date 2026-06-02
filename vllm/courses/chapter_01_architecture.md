@@ -1,7 +1,7 @@
 # Chapter 1: vLLM Architecture – Evolution and Distributed Orchestration
 
 ```mermaid
-graph TD
+flowchart TD
     subgraph FE ["Frontend Layer (Client / API)"]
         FE_API["API Entrypoint"]
         FE_TOK["Tokenizer / Detokenizer"]
@@ -57,12 +57,6 @@ graph TD
     RAY_MGR -. "Resource Mgmt" .-> CORE_LOOP
     RAY_MGR -. "Resource Mgmt" .-> WORKER_0
     RAY_MGR -. "Resource Mgmt" .-> WORKER_N
-
-    style CORE_LOOP fill:#f9f,stroke:#333,stroke-width:4px
-    style WORKER_0 fill:#ccf,stroke:#333
-    style WORKER_N fill:#ccf,stroke:#333
-    style ZMQ_DEALER fill:#bfb,stroke:#333
-    style ZMQ_PUSH fill:#bfb,stroke:#333
 ```
 
 This chapter explores the evolution of vLLM's architecture from the monolithic V0 to the decoupled V1, focusing on advanced orchestration, stateless execution, and high-performance control planes.

@@ -1,17 +1,19 @@
 # Chapter 8: Hardware Acceleration - CUDA, Triton, and Specialized Kernels
 
 ```mermaid
-graph TD
-    subgraph Dispatch ["Kernel Dispatch &amp; Programming Model"]
+flowchart TB
+    subgraph Dispatch ["Kernel Dispatch & Programming Model"]
+        direction TB
         Triton["Triton Dispatch<br/>(Block-level DSL)"]
         CuTe["CuTe Layouts<br/>(Algebraic Tiling)"]
         CUDA["CUDA C++<br/>(Warp Primitives)"]
     end
 
     subgraph Memory ["Data Movement Architecture"]
-        Global[("Global Memory")]
-        Shared[["Shared Memory / L1"]]
-        Regs[["Register File"]]
+        direction TB
+        Global["Global Memory"]
+        Shared["Shared Memory / L1"]
+        Regs["Register File"]
         
         CP_Async["cp.async / TMA<br/>(Asynchronous Global &rarr; Shared)"]
         Tiling["Conflict-free Swizzling<br/>(Bank Alignment)"]
@@ -23,9 +25,10 @@ graph TD
     end
 
     subgraph Execution ["Hardware Execution Units"]
+        direction TB
         SIMT["Independent Thread Scheduling<br/>(Volta+ PC per Thread)"]
         MMA["Tensor Cores (MMA)<br/>(Matrix Multiplication Units)"]
-        Warp["Warp-level Sync<br/>(&#95;&#95;shfl&#95;sync, &#95;&#95;barrier)"]
+        Warp["Warp-level Sync<br/>(__shfl_sync, __barrier)"]
         
         Regs --> MMA
         SIMT --> Warp

@@ -39,7 +39,7 @@ vLLM supports various vision encoders, primarily **CLIP** (Contrastive Language-
 One key optimization in vLLM is initializing the vision tower only up to the "feature layer" required by the specific VLM. For example, if a LLaVA model uses features from the 23rd layer of a 24-layer CLIP encoder, vLLM will skip loading and computing the 24th layer.
 
 ```python
-# vllm/model_executor/models/llava.py
+# [vllm/model_executor/models/llava.py](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/models/llava.py)
 def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     feature_layers = hf_config.vision_feature_layer
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
@@ -88,9 +88,9 @@ Think of the VLM as a translator in a courtroom.
 To make sure the judge knows exactly where the witness's testimony fits into the story, we leave a series of empty chairs (Placeholders) in the courtroom. When the witness is ready to speak, their translated testimony is placed into those specific chairs. Even if the witness brings 500 pages of evidence (tokens) or 1000, we simply adjust the number of chairs reserved.
 
 ## Implementation Reference
-*   **Input Processing:** `vllm/multimodal/inputs.py` (Defines `PlaceholderRange` and `MultiModalKwargsItem`).
-*   **Model Integration:** `vllm/model_executor/models/llava.py` (Example of a complete VLM implementation).
-*   **Vision Utilities:** `vllm/model_executor/models/vision.py` (Handling feature selection and DP sharding).
+*   **Input Processing:** [`vllm/multimodal/inputs.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/multimodal/inputs.py) (Defines `PlaceholderRange` and `MultiModalKwargsItem`).
+*   **Model Integration:** [`vllm/model_executor/models/llava.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/models/llava.py) (Example of a complete VLM implementation).
+*   **Vision Utilities:** [`vllm/model_executor/models/vision.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/models/vision.py) (Handling feature selection and DP sharding).
 
 ---
 

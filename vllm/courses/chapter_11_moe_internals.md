@@ -48,7 +48,7 @@ vLLM's MoE implementation is designed for extreme efficiency, particularly in mu
 
 ## 2. Fused MoE Kernels
 
-The core of vLLM's MoE performance is its **Fused Triton Kernels**, located in `vllm/model_executor/layers/fused_moe/`.
+The core of vLLM's MoE performance is its **Fused Triton Kernels**, located in [`vllm/model_executor/layers/fused_moe/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/layers/fused_moe/).
 
 ### Why Fusion?
 Launching separate kernels for each expert (especially with many experts and small $k$) leads to massive overhead due to:
@@ -83,7 +83,7 @@ The performance of the Fused MoE kernel is highly sensitive to the shape of the 
 - **M (Tokens)**: The number of tokens in the current batch. Since M changes every iteration, vLLM must be dynamic.
 
 ### Configuration Files:
-Look at `vllm/model_executor/layers/fused_moe/configs/`. These JSON files contain pre-tuned configurations for specific hardware (e.g., A100, H100) and data types (FP16, BF16, FP8, INT8).
+Look at [`vllm/model_executor/layers/fused_moe/configs/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/layers/fused_moe/configs/). These JSON files contain pre-tuned configurations for specific hardware (e.g., A100, H100) and data types (FP16, BF16, FP8, INT8).
 
 Example config structure:
 ```json
@@ -98,7 +98,7 @@ Example config structure:
 ```
 
 ### Dynamic Selection:
-The `try_get_optimal_moe_config` function in `fused_moe.py` maps the current $(M, N, E)$ triplet to the closest optimized configuration. If no exact match is found, it uses heuristics to interpolate:
+The `try_get_optimal_moe_config` function in [`fused_moe.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/layers/fused_moe/fused_moe.py) maps the current $(M, N, E)$ triplet to the closest optimized configuration. If no exact match is found, it uses heuristics to interpolate:
 - **Small M**: Favors smaller `BLOCK_SIZE_M` to maximize occupancy.
 - **Large M**: Favors larger tiles to maximize compute throughput.
 

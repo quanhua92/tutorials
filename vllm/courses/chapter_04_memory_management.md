@@ -121,10 +121,10 @@ If VRAM is exhausted, vLLM **preempts** requests by freeing their blocks and mov
 
 Explore these files in `vllm/v1/core` for implementation details:
 
-*   **`block_pool.py`**: Implementation of `BlockPool` and `BlockHashToBlockMap`. Handles `null_block` and the multiple-block-per-hash logic.
-*   **`kv_cache_utils.py`**: Contains the hashing logic (including LoRA and `cache_salt` integration) and ghost memory padding calculations.
-*   **`kv_cache_manager.py`**: Orchestrates the admission gates and coordinates with the scheduler.
-*   **`sched/scheduler.py`**: Manages the request queues and triggers preemption based on the admission gate's feedback.
+*   **[`block_pool.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/core/block_pool.py)**: Implementation of `BlockPool` and `BlockHashToBlockMap`. Handles `null_block` and the multiple-block-per-hash logic.
+*   **[`kv_cache_utils.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/core/kv_cache_utils.py)**: Contains the hashing logic (including LoRA and `cache_salt` integration) and ghost memory padding calculations.
+*   **[`kv_cache_manager.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/core/kv_cache_manager.py)**: Orchestrates the admission gates and coordinates with the scheduler.
+*   **[`sched/scheduler.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/core/sched/scheduler.py)**: Manages the request queues and triggers preemption based on the admission gate's feedback.
 
 ---
 

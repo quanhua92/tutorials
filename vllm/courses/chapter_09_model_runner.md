@@ -99,17 +99,17 @@ Speculative Decoding accelerates inference by using a small "proposer" model to 
 
 ## Platform Abstraction Layer
 
-The `vllm/platforms/` directory provides a unified interface (`Platform` and `Device` classes) that abstracts hardware-specific APIs (CUDA, HIP, XLA). This ensures that the core Model Runner logic remains largely consistent across NVIDIA GPUs, AMD GPUs, and TPUs.
+The [`vllm/platforms/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/platforms/) directory provides a unified interface (`Platform` and `Device` classes) that abstracts hardware-specific APIs (CUDA, HIP, XLA). This ensures that the core Model Runner logic remains largely consistent across NVIDIA GPUs, AMD GPUs, and TPUs.
 
 ---
 
 ### Key Source References
--   `vllm/v1/worker/gpu_model_runner.py`: The V1 execution orchestrator.
--   `vllm/v1/attention/backend.py`: The `AttentionBackend` abstract base class.
--   `vllm/v1/attention/backends/`: Implementations for FlashAttention, XFormers, etc.
--   `vllm/multimodal/`: Multi-modal input processing and registry.
--   `vllm/v1/worker/gpu/spec_decode/`: Implementation of speculative decoding strategies.
--   `vllm/v1/worker/gpu/cudagraph_utils.py`: CUDA graph descriptor and mode management.
+-   [`vllm/v1/worker/gpu_model_runner.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/worker/gpu_model_runner.py): The V1 execution orchestrator.
+-   [`vllm/v1/attention/backend.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/attention/backend.py): The `AttentionBackend` abstract base class.
+-   [`vllm/v1/attention/backends/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/attention/backends/): Implementations for FlashAttention, XFormers, etc.
+-   [`vllm/multimodal/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/multimodal/): Multi-modal input processing and registry.
+-   [`vllm/v1/worker/gpu/spec_decode/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/worker/gpu/spec_decode/): Implementation of speculative decoding strategies.
+-   [`vllm/v1/worker/gpu/cudagraph_utils.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/worker/gpu/cudagraph_utils.py): CUDA graph descriptor and mode management.
 
 ---
 

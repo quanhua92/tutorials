@@ -120,10 +120,10 @@ In large-scale distributed deployments, vLLM must account for **Non-Uniform Late
 ---
 
 ### References in Codebase
-- `vllm/v1/engine/core.py`: The Engine Core busy-loop and N+1 scheduling.
-- `vllm/v1/engine/coordinator.py`: The `DPCoordinator` and wave synchronization logic.
-- `vllm/entrypoints/cli/serve.py`: Implementation of the `--headless` flag.
-- `vllm/v1/executor/multiproc_executor.py`: Worker lifecycle and Ray placement management.
+- [`vllm/v1/engine/core.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/engine/core.py): The Engine Core busy-loop and N+1 scheduling.
+- [`vllm/v1/engine/coordinator.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/engine/coordinator.py): The `DPCoordinator` and wave synchronization logic.
+- [`vllm/entrypoints/cli/serve.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/entrypoints/cli/serve.py): Implementation of the `--headless` flag.
+- [`vllm/v1/executor/multiproc_executor.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/v1/executor/multiproc_executor.py): Worker lifecycle and Ray placement management.
 
 ---
 

@@ -48,7 +48,7 @@ In the GPU programming model, threads are executed in groups that share a single
 
 - **NVIDIA (Warp32):** Threads are grouped into **Warps** of 32. All threads in a warp execute the same instruction simultaneously. vLLM uses warp-level primitives like `__shfl_sync` for ultra-fast data exchange without shared memory.
 - **AMD (Wave64/32):** AMD GPUs (ROCm) use **Wavefronts**. Historically, these were always 64 threads (Wave64). Modern architectures like RDNA3 (gfx1100) support both Wave32 and Wave64.
-- **vLLM's Abstraction:** vLLM handles these differences through conditional compilation and abstraction layers. For example, `csrc/rocm/q_gemm_rdna3_wmma.cu` specifically targets AMD's WMMA (Wavefront Matrix Multiply-Accumulate) instructions.
+- **vLLM's Abstraction:** vLLM handles these differences through conditional compilation and abstraction layers. For example, [`csrc/rocm/q_gemm_rdna3_wmma.cu`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/rocm/q_gemm_rdna3_wmma.cu) specifically targets AMD's WMMA (Wavefront Matrix Multiply-Accumulate) instructions.
 
 ## 2. Tensor Cores and MMA (Matrix-Multiply Accumulate)
 
@@ -73,7 +73,7 @@ Writing manual CUDA C++ is time-consuming and error-prone. vLLM increasingly use
 
 - **Why Triton?** It provides a middle ground: easier to write than CUDA but faster than PyTorch. It automatically handles tiling, memory coalescing, and shared memory management.
 - **Execution Model:** Triton operates on **blocks** of data rather than individual threads. This higher-level abstraction allows for rapid prototyping of kernels like FlashAttention or specialized activation functions.
-- **vLLM Integration:** Look at `vllm/triton_utils/` and various Triton-based models in vLLM that use it for dynamic quantization or custom fused ops.
+- **vLLM Integration:** Look at [`vllm/triton_utils/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/triton_utils/) and various Triton-based models in vLLM that use it for dynamic quantization or custom fused ops.
 
 ## 5. Abstractions for Complexity: Cutlass and CuTe
 
@@ -83,7 +83,7 @@ For complex GEMMs (General Matrix Multiplications) and MoE (Mixture of Experts) 
 - **CuTe Layouts:** Instead of manual index arithmetic (e.g., `row * stride + col`), CuTe uses a formal algebraic representation of layouts and tensors. This allows developers to express complex tiling and swizzling patterns in a type-safe way.
 - **Usage in vLLM:** vLLM uses Cutlass/CuTe for:
     - **Marlin/Machete:** High-performance 4-bit quantized GEMMs.
-    - **MoE Kernels:** Expert-specialized MXFP8 blockscaled grouped kernels (`csrc/moe/mxfp8_moe/`).
+    - **MoE Kernels:** Expert-specialized MXFP8 blockscaled grouped kernels ([`csrc/moe/mxfp8_moe/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/moe/mxfp8_moe/)).
     - **FP8 Scaled MM:** High-performance kernels for Hopper and Blackwell architectures.
 
 ## 6. Quantization Context: AWQ and GPTQ Dequantization
@@ -114,11 +114,11 @@ By fusing dequantization directly into the GEMM kernel, vLLM avoids the massive 
 
 ### References in Codebase
 
-- `csrc/quantization/marlin/`: Cutlass-based 4-bit quantized kernels.
-- `csrc/moe/mxfp8_moe/`: Cutlass 3.x/CuTe based MoE implementations.
-- `csrc/libtorch_stable/quantization/w8a8/cutlass/`: Scaled MM kernels using Cutlass.
-- `csrc/rocm/`: AMD-specific kernel implementations.
-- `vllm/model_executor/layers/quantization/`: Python side of quantization logic.
+- [`csrc/quantization/marlin/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/quantization/marlin/): Cutlass-based 4-bit quantized kernels.
+- [`csrc/moe/mxfp8_moe/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/moe/mxfp8_moe/): Cutlass 3.x/CuTe based MoE implementations.
+- [`csrc/libtorch_stable/quantization/w8a8/cutlass/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/libtorch_stable/quantization/w8a8/cutlass/): Scaled MM kernels using Cutlass.
+- [`csrc/rocm/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/rocm/): AMD-specific kernel implementations.
+- [`vllm/model_executor/layers/quantization/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/layers/quantization/): Python side of quantization logic.
 
 ---
 

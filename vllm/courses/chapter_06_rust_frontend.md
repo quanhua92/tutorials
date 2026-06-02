@@ -148,11 +148,11 @@ Only when the `Arc` reference count drops to 1 (meaning no active request handle
 
 ### References in Codebase
 
--   `rust/src/server/src/state.rs`: Graceful shutdown logic.
--   `rust/src/server/src/middleware/`: Implementation of `tower` middleware.
--   `rust/src/engine-core-client/src/transport.rs`: ZMQ transport and socket management.
--   `rust/src/tokenizer/src/byte_level_decode.rs`: SIMD-optimized detokenization logic.
--   `rust/src/cmd/Cargo.toml`: Configuration for `mimalloc`.
+-   [`rust/src/server/src/state.rs`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/src/server/src/state.rs): Graceful shutdown logic.
+-   [`rust/src/server/src/middleware/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/src/server/src/middleware/): Implementation of `tower` middleware.
+-   [`rust/src/engine-core-client/src/transport.rs`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/src/engine-core-client/src/transport.rs): ZMQ transport and socket management.
+-   [`rust/src/tokenizer/src/byte_level_decode.rs`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/src/tokenizer/src/byte_level_decode.rs): SIMD-optimized detokenization logic.
+-   [`rust/src/cmd/Cargo.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/src/cmd/Cargo.toml): Configuration for `mimalloc`.
 
 ---
 

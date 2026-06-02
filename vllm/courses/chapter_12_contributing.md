@@ -13,11 +13,11 @@ flowchart TB
     MAX_JOBS --> SETUP
     PUNT_TORCH --> SETUP
 
-    subgraph Build_Orchestration ["Build Orchestration (setup.py / pyproject.toml)"]
+    subgraph Build_Orchestration ["Build Orchestration ([setup.py](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/setup.py) / [pyproject.toml](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml))"]
         direction TB
-        PYPROJ["pyproject.toml (build-system.requires)"]
-        REQ_CUDA["requirements/build/cuda.txt"]
-        SETUP["setup.py (Main Orchestrator)"]
+        PYPROJ["[pyproject.toml](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml) (build-system.requires)"]
+        REQ_CUDA["[requirements/build/cuda.txt](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/build/cuda.txt)"]
+        SETUP["[setup.py](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/setup.py) (Main Orchestrator)"]
         
         PYPROJ -- "Sync Check" --- REQ_CUDA
         PYPROJ --> SETUP
@@ -27,7 +27,7 @@ flowchart TB
     subgraph CXX_CUDA_Stack ["C++/CUDA Stack"]
         direction TB
         CMAKE["CMake (v3.26+)"]
-        CSRC["csrc/ (Kernels & Ops)"]
+        CSRC["[csrc/](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/) (Kernels & Ops)"]
         PYBIND["Pybind11 (Python FFI)"]
         ABI["_GLIBCXX_USE_CXX11_ABI=1"]
         
@@ -40,7 +40,7 @@ flowchart TB
     subgraph Rust_Stack ["Rust Stack"]
         direction TB
         CARGO["Cargo"]
-        RUST_SRC["rust/ (Frontend/Orchestration)"]
+        RUST_SRC["[rust/](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/) (Frontend/Orchestration)"]
         PYO3["PyO3 (Python FFI)"]
         STRUST["setuptools-rust"]
         
@@ -54,7 +54,7 @@ flowchart TB
         direction TB
         PARITY["Numerical Parity (torch.testing.assert_close)"]
         MARKERS["pytest Markers: vllm_v1, core_model, distributed"]
-        CI["CI/CD Pipeline (.buildkite/)"]
+        CI["CI/CD Pipeline ([.buildkite/](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/.buildkite/))"]
         
         PYBIND --> PARITY
         PYO3 --> PARITY
@@ -69,9 +69,9 @@ Contributing to a high-performance system like vLLM requires a deep understandin
 
 vLLM manages dependencies across multiple files to support various hardware backends and build environments. A critical requirement for contributors is maintaining **Numerical and Dependency Parity**.
 
--   **`pyproject.toml` vs `requirements/`**: The `build-system.requires` section in `pyproject.toml` must be kept in sync with `requirements/build/cuda.txt` (and other backend-specific build requirements).
--   **Runtime Dependencies**: Core dependencies like `torch` are pinned strictly (e.g., `torch == 2.11.0`) to ensure ABI stability. When updating a dependency, you must ensure it is updated across all relevant `requirements/*.txt` files and `pyproject.toml`.
--   **Why Mirroring?**: `pyproject.toml` is the standard for modern Python packaging, while `requirements/*.txt` files provide granular control for CI/CD, Docker image builds, and local development environments. Discrepancies between these can lead to "works on my machine" bugs or CI failures.
+-   **[`pyproject.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml) vs [`requirements/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/)**: The `build-system.requires` section in [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml) must be kept in sync with [`requirements/build/cuda.txt`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/build/cuda.txt) (and other backend-specific build requirements).
+-   **Runtime Dependencies**: Core dependencies like `torch` are pinned strictly (e.g., `torch == 2.11.0`) to ensure ABI stability. When updating a dependency, you must ensure it is updated across all relevant [`requirements/*.txt`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/) files and [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml).
+-   **Why Mirroring?**: [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml) is the standard for modern Python packaging, while [`requirements/*.txt`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/) files provide granular control for CI/CD, Docker image builds, and local development environments. Discrepancies between these can lead to "works on my machine" bugs or CI failures.
 
 ## Numerical Parity Testing
 
@@ -105,9 +105,9 @@ vLLM's high-performance orchestration layer increasingly utilizes Rust. Managing
 
 -   **`setuptools-rust`**: This is used to build Rust extensions as part of the standard `pip install` process. It handles the invocation of `cargo` and ensures the resulting shared objects are correctly packaged.
 -   **Cross-Compilation**: For distributing vLLM across different architectures (e.g., x86_64, aarch64), we rely on `setuptools-rust`'s ability to cross-compile. Contributors working on Rust modules should be aware of:
-    -   Target-specific dependencies in `Cargo.toml`.
+    -   Target-specific dependencies in [`Cargo.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/Cargo.toml).
     -   The need for appropriate cross-compilers (e.g., `musl-tools`) in the build environment.
-    -   Using `build_rust.sh` to wrap complex toolchain configurations.
+    -   Using [`build_rust.sh`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/build_rust.sh) to wrap complex toolchain configurations.
 
 ## The Build System and Environment
 
@@ -121,7 +121,7 @@ The build system utilizes **CMake (v3.26+)** for C++ and **Cargo** for Rust. Use
 
 ## The Testing Matrix
 
-vLLM's CI/CD pipeline (via `.buildkite/`) is exhaustive. Use `pytest` with specific markers:
+vLLM's CI/CD pipeline (via [`.buildkite/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/.buildkite/)) is exhaustive. Use `pytest` with specific markers:
 
 -   **`vllm_v1`**: Tests for the V1 engine architecture.
 -   **`core_model`**: Validation for core model architectures.
@@ -130,12 +130,12 @@ vLLM's CI/CD pipeline (via `.buildkite/`) is exhaustive. Use `pytest` with speci
 ---
 
 ### Key Source References
--   `pyproject.toml`: Modern packaging and build-system definition.
--   `requirements/build/cuda.txt`: Build-time dependencies for CUDA.
--   `setup.py`: The primary build orchestrator.
--   `csrc/`: C++/CUDA kernel implementations.
--   `rust/`: Rust frontend and orchestration layer.
--   `tests/`: The comprehensive test suite.
+-   [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/pyproject.toml): Modern packaging and build-system definition.
+-   [`requirements/build/cuda.txt`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/requirements/build/cuda.txt): Build-time dependencies for CUDA.
+-   [`setup.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/setup.py): The primary build orchestrator.
+-   [`csrc/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/csrc/): C++/CUDA kernel implementations.
+-   [`rust/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/rust/): Rust frontend and orchestration layer.
+-   [`tests/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/tests/): The comprehensive test suite.
 
 ---
 

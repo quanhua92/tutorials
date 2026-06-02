@@ -114,10 +114,10 @@ When memory is exhausted, vLLM must preempt requests:
 ---
 
 ### Implementation Map
-- `vllm/core/scheduler.py`: Handles the O(N) scheduling loop and preemption.
-- `vllm/core/block_manager.py`: Manages the Radix Cache, SWA windowing, and block allocation.
-- `vllm/model_executor/layers/attention/`: Implements the CUDA kernels that consume the prepared metadata.
-- `vllm/spec_decode/`: Manages the $K+1$ reservation logic for speculative execution.
+- [`vllm/core/scheduler.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/core/scheduler.py): Handles the O(N) scheduling loop and preemption.
+- [`vllm/core/block_manager.py`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/core/block_manager.py): Manages the Radix Cache, SWA windowing, and block allocation.
+- [`vllm/model_executor/layers/attention/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/model_executor/layers/attention/): Implements the CUDA kernels that consume the prepared metadata.
+- [`vllm/spec_decode/`](https://github.com/vllm-project/vllm/blob/f69ede495b3fe97a4b8f6c74d29627f735d46f33/vllm/spec_decode/): Manages the $K+1$ reservation logic for speculative execution.
 
 ---
 

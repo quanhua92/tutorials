@@ -2,14 +2,14 @@
 
 ```mermaid
 flowchart TB
-    subgraph "Frontend" ["Frontend - Rust/Axum/Tokio"]
+    subgraph FE ["Frontend (Rust / Axum / Tokio)"]
         direction TB
         A["Ingress: API Request"] --> B["Multi-modal Tower Orchestration"]
         B --> C["ZeroMQ / IPC Serialization"]
         Q["Egress: Final Response"]
     end
 
-    subgraph "Core" ["Engine Core - Python Scheduler"]
+    subgraph CORE ["Engine Core (Python Scheduler)"]
         direction TB
         C --> D["Request Prioritization Queue"]
         D --> E{"Continuous Batcher"}
@@ -22,7 +22,7 @@ flowchart TB
         P["Response Streamer"]
     end
 
-    subgraph "Execution" ["Workers - GPU ModelRunner"]
+    subgraph EXEC ["Execution (Workers / GPU ModelRunner)"]
         direction TB
         I --> J["Distributed Context Sync - TP/PP/SP"]
         J --> K["Quantized Weights - FP8/Marlin/AWQ"]
@@ -35,10 +35,6 @@ flowchart TB
     O -- "Next Tokens" --> E
     O -- "Completion" --> P
     P -- "Streaming" --> Q
-
-    style Frontend fill:#f9f,stroke:#333,stroke-width:2px
-    style Core fill:#bbf,stroke:#333,stroke-width:2px
-    style Execution fill:#bfb,stroke:#333,stroke-width:2px
 ```
 
 This course provides a high-level technical exploration of vLLM's internal architecture, memory management, and execution engine. It is designed for engineers and researchers who wish to master the bleeding-edge mechanisms that enable production-grade LLM serving at extreme scale.

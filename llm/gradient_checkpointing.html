@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gradient Checkpointing — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#9b59b6;
+    --store:#27ae60; --full:#c0392b; --sel:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:220px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .store{color:var(--store)}
+  .readout .full{color:var(--full)}
+  .readout .sel{color:var(--gold)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  #grid{display:block;width:100%;max-width:1100px;height:120px}
+  #mem{display:block;width:100%;max-width:1100px;height:300px}
+  #comp{display:block;width:100%;max-width:1100px;height:240px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>Gradient Checkpointing (Activation Recomputation) &mdash; interactive
+    <a class="badge" href="./GRADIENT_CHECKPOINTING.md">GRADIENT_CHECKPOINTING.md</a>
+    <a class="badge" href="./gradient_checkpointing.py">gradient_checkpointing.py</a></h1>
+  <div class="sub"><b>The suitcase idea:</b> backprop is a round trip &mdash; drop a snack (activation) at every layer on the way out, eat each on the way back.
+    <b style="color:var(--store)">store-all</b> carries all <b>L</b> snacks (<code>O(L)</code> memory); <b style="color:var(--full)">full-recompute</b> carries none but walks back to the start each time (<code>O(L&sup2;)</code> compute);
+    <b style="color:var(--sel)">selective &radic;L</b> stashes a snack every &radic;L-th layer &mdash; <code>O(&radic;L)</code> memory for one extra forward (<b>+33%</b> compute). Drag <b style="color:var(--green)">L</b> and watch the grid + bars redraw.
+    Every number is recomputed live in JS from the <i>identical</i> formula in <code>gradient_checkpointing.py</code> (a faithful activation-memory simulation; the memory &amp; compute arithmetic is exact).
+    &nbsp;|&nbsp; <a href="./ddp.html">DDP</a> &middot; <a href="./zero.html">ZeRO</a> (shard the model+optimizer 20N &mdash; the <i>other</i> memory axis) &middot;
+    <a href="./pipeline_parallel.html">Pipeline Parallel</a> (1F1B cuts in-flight micro-batch activations) &middot;
+    <a href="./mlp_activation.html">MLP block</a> (the per-layer internals checkpointing discards)</div>
+
+  <!-- ===== GLOBAL CONTROL ===== -->
+  <h2>&#9312; The checkpoint grid &mdash; which layers are STORED (&#9632;) vs RECOMPUTED (&#9633;)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>What to do:</b> drag <b>L</b> (depth). Green <b>&#9632;</b> cells are the <b style="color:var(--store)">checkpoints</b> whose input activation is KEPT (their index set matches
+      <code>gradient_checkpointing.py</code> Section D). Faint cells are thrown away and <b>recomputed</b> in backward. The default count is <code>ceil(&radic;L)</code> (Chen 2016's optimum); drag the <b>checkpoints</b> slider to override it and watch only the <i>memory</i> move &mdash; compute stays at one extra forward.</div>
+    <div class="controls">
+      <label>L (layers) <input type="range" id="L" min="4" max="128" value="32" step="1">
+        <span class="val" id="Lval">32</span></label>
+      <label>checkpoints <input type="range" id="C" min="1" max="32" value="6" step="1">
+        <span class="val" id="Cval">6</span></label>
+      <button id="btnSqrt" class="active">use ceil(&radic;L)</button>
+      <span class="micro" id="gridHint"></span>
+    </div>
+    <canvas id="grid" width="1100" height="120"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--store)"></i>STORED checkpoint (keep its input activation)</span>
+      <span><i class="sw" style="background:#2d3340;border:1px solid #3d4452"></i>recomputed in backward (discarded, redone)</span>
+    </div>
+    <div class="readout" id="gridReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: MEMORY BARS ===== -->
+  <h2>&#9313; Activation memory across the 3 strategies (log scale)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> each bar is the <b>memory multiplier</b> (&times; one layer's activation <code>A</code>). <b style="color:var(--store)">store-all</b> = <code>L</code> (linear in depth);
+      <b style="color:var(--full)">full-recompute</b> = <code>1</code> (only the input); <b style="color:var(--sel)">selective</b> = <code>#checkpoints</code> &asymp; <code>&radic;L</code>.
+      Log scale so the small bars stay visible. Drag <b>L</b> &mdash; store-all races away while selective crawls as <code>&radic;L</code>.</div>
+    <canvas id="mem" width="1100" height="300"></canvas>
+    <div class="readout" id="memReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: COMPUTE OVERHEAD ===== -->
+  <h2>&#9314; Compute cost &mdash; selective is +33%, full-recompute is O(L&sup2;)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> compute in <b>layer-forward units</b> (backward &asymp; 2&times; forward). <b style="color:var(--store)">store-all</b> = <code>3L</code> (1 fwd + 1 bwd). <b style="color:var(--sel)">selective</b> = <code>4L</code> &mdash; one <i>extra</i> forward &rarr; <b>+33%</b> (the dashed line).
+      <b style="color:var(--full)">full-recompute</b> = <code>L + L(L+1)/2 + 2L</code> = <code>O(L&sup2;)</code> &mdash; it explodes with depth. This is why nobody trains full-recompute: the &radic;L trick is the Pareto pick.</div>
+    <canvas id="comp" width="1100" height="240"></canvas>
+    <div class="readout" id="compReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check &mdash;</b> the badge means the live JS recomputes the exact L=32 row printed by <code>gradient_checkpointing.py</code> Section G:
+    <span class="badge" id="check">check: &hellip;</span>
+    <br><br>
+    Verified: memory multipliers {32, 1, 6}, selective recompute = L = 32, selective overhead = +33.33%, and the L=32 checkpoint indices [0,6,12,19,25,31].
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formulas, copied verbatim from gradient_checkpointing.py ===== */
+function strategyStoreAll(L){         /* keep all L activations */
+  return {stored:L, recompute:0};
+}
+function strategyFullRecompute(L){    /* keep only the network input */
+  return {stored:1, recompute:L*(L+1)/2};
+}
+function strategySelectiveSqrt(L){    /* keep ceil(sqrt(L)) checkpoints */
+  if(L<=1) return {stored:1, recompute:0};
+  const m=Math.ceil(Math.sqrt(L));
+  const cps=Array.from(new Set(Array.from({length:m},(_,i)=>Math.round(i*(L-1)/(m-1))))).sort((a,b)=>a-b);
+  return {stored:cps.length, recompute:L, checkpoints:cps};
+}
+function selectiveWith(L, nCkpt){      /* override #checkpoints, evenly spaced */
+  const k=Math.max(1,Math.min(L,nCkpt));
+  let cps;
+  if(k===1){ cps=[0]; }
+  else { cps=Array.from(new Set(Array.from({length:k},(_,i)=>Math.round(i*(L-1)/(k-1))))).sort((a,b)=>a-b); }
+  return {stored:cps.length, recompute:L, checkpoints:cps};
+}
+function computeUnits(L, recompute){  /* fwd + recompute + bwd(=2*fwd) */
+  return L + recompute + 2*L;
+}
+
+/* ===== canvas helper (DPR-aware, same as siblings) ===== */
+function setup(cv){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||1100, h=cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: checkpoint grid ===== */
+let USE_SQRT=true;
+const gridCv=document.getElementById('grid');
+function drawGrid(){
+  const ctx=setup(gridCv); const w=gridCv.clientWidth, h=gridCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const L=+document.getElementById('L').value;
+  const cSlider=+document.getElementById('C').value;
+  const sel = USE_SQRT ? strategySelectiveSqrt(L) : selectiveWith(L, cSlider);
+  const cps=new Set(sel.checkpoints);
+  const padT=28, padB=18;
+  const cellW=Math.min(40,(w-20)/L);
+  const totalW=L*cellW;
+  const x0=(w-totalW)/2;
+  const cellH=h-padT-padB;
+  for(let i=0;i<L;i++){
+    const x=x0+i*cellW, y=padT;
+    if(cps.has(i)){
+      ctx.fillStyle='#1c3a25'; ctx.fillRect(x+0.5,y+0.5,cellW-1,cellH-1);
+      ctx.strokeStyle='#27ae60'; ctx.lineWidth=1.5; ctx.strokeRect(x+0.5,y+0.5,cellW-1,cellH-1);
+      if(cellW>14){ ctx.fillStyle='#9fe3b5'; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+        ctx.fillText(i, x+cellW/2, y+cellH/2+3); }
+    } else {
+      ctx.fillStyle='#1a1f27'; ctx.fillRect(x+0.5,y+0.5,cellW-1,cellH-1);
+      ctx.strokeStyle='#2d3340'; ctx.lineWidth=1; ctx.strokeRect(x+0.5,y+0.5,cellW-1,cellH-1);
+    }
+  }
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillText('L0', x0, padT-8);
+  ctx.textAlign='right'; ctx.fillText('L'+(L-1), x0+totalW, padT-8);
+  ctx.textAlign='center';
+  /* readout */
+  const el=document.getElementById('gridReadout');
+  el.innerHTML =
+    'L = '+L+' layers   |   <span class="sel">selective</span> keeps <b>'+sel.stored+'</b> checkpoints '+
+    '(indices ['+sel.checkpoints.join(',')+'])   |   recompute = <b>'+sel.recompute+'</b> layer-forwards (= L = one extra fwd)\n'+
+    '   memory multiplier: <span class="sel">selective = '+sel.stored+'x</span>   vs   <span class="store">store-all = '+L+'x</span>   vs   <span class="full">full-recompute = 1x</span>';
+  /* hint under buttons */
+  document.getElementById('gridHint').textContent =
+    USE_SQRT ? ('ceil(sqrt('+L+')) = '+Math.ceil(Math.sqrt(L))+' (Chen 2016 optimum)')
+             : ('manual: '+cSlider+' checkpoints');
+}
+
+/* ===== PANEL 2: memory bars (log scale) ===== */
+const memCv=document.getElementById('mem');
+function drawMem(){
+  const ctx=setup(memCv); const w=memCv.clientWidth, h=memCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const L=+document.getElementById('L').value;
+  const cSlider=+document.getElementById('C').value;
+  const sel = USE_SQRT ? strategySelectiveSqrt(L) : selectiveWith(L, cSlider);
+  const rows=[
+    {name:'store-all', mult:L,        color:'var(--store)', note:'= L (linear)'},
+    {name:'full-recompute', mult:1,   color:'var(--full)',  note:'= 1 (only input)'},
+    {name:'selective \u221aL', mult:sel.stored, color:'var(--sel)', note:'= \u221aL ('+sel.stored+' checkpoints)'},
+  ];
+  const max=L*1.15;
+  const padL=44,padR=24,padT=38,padB=54;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const Xlog=v=>padL+(Math.log10(Math.max(v,1))/Math.log10(max))*pw;
+  /* gridlines (powers of 10) */
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1; ctx.fillStyle='#8b949e';
+  ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+  const base=Math.pow(10,Math.floor(Math.log10(max)));
+  for(let g=base; g<=max; g*=10){ const x=Xlog(g); ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+ph); ctx.stroke(); ctx.fillText(g, x, padT+ph+14); }
+  const bw=Math.min(160, pw/rows.length-30);
+  const totalW=rows.length*bw+(rows.length-1)*30;
+  let x=padL+(pw-totalW)/2;
+  rows.forEach(r=>{
+    const barW=Math.max(2, Xlog(r.mult)-padL);
+    ctx.fillStyle=r.color; ctx.fillRect(x,padT+10,barW,ph-10);
+    ctx.fillStyle='#fff'; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText(r.name, x+barW/2, padT+30);
+    ctx.fillStyle='#e6edf3'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(r.mult+'x', x+barW/2, padT+48);
+    ctx.fillStyle='#8b949e'; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(r.note, x+barW/2, padT+62);
+    ctx.fillText('('+(L/r.mult).toFixed(1)+'x less than store-all)', x+barW/2, padT+74);
+    x+=bw+30;
+  });
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='right';
+  ctx.fillText('L='+L+'   (log scale)', w-padR, padT-12);
+  /* readout */
+  const el=document.getElementById('memReadout');
+  const A=1; /* in units of one layer activation */
+  el.innerHTML='memory multiplier (&times; one layer activation A),  L='+L+'\n'+
+    rows.map(r=>'  '+r.name.padEnd(16)+' = '+r.mult+'x A'+(r.mult===L?'  (= L)':r.mult===1?'  (= O(1))':'  (= \u221aL)')).join('\n')+
+    '\n  <b>store-all / selective = '+(L/sel.stored).toFixed(1)+'x</b> memory saved for +33% compute';
+}
+
+/* ===== PANEL 3: compute bars ===== */
+const compCv=document.getElementById('comp');
+function drawComp(){
+  const ctx=setup(compCv); const w=compCv.clientWidth, h=compCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const L=+document.getElementById('L').value;
+  const cAll=computeUnits(L, 0);                              /* store-all = 3L */
+  const cSel=computeUnits(L, L);                              /* selective = 4L */
+  const cFull=computeUnits(L, L*(L+1)/2);                     /* full = O(L^2) */
+  /* clamp full for display on log scale but keep its true number in readout */
+  const rows=[
+    {name:'store-all', units:cAll,  color:'var(--store)', note:'3L = fwd+bwd'},
+    {name:'selective', units:cSel,  color:'var(--sel)',   note:'4L = +1 fwd (+33%)'},
+    {name:'full-recompute', units:cFull, color:'var(--full)', note:'O(L\u00b2) = prohibitive'},
+  ];
+  const max=Math.max(cAll,cSel,cFull)*1.15;
+  const padL=44,padR=24,padT=38,padB=54;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const Xlog=v=>padL+(Math.log10(Math.max(v,1))/Math.log10(max))*pw;
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1; ctx.fillStyle='#8b949e';
+  ctx.font='9px ui-monospace,monospace'; ctx.textAlign='center';
+  const base=Math.pow(10,Math.floor(Math.log10(max)));
+  for(let g=base; g<=max; g*=10){ const x=Xlog(g); ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+ph); ctx.stroke(); ctx.fillText(g, x, padT+ph+14); }
+  const bw=Math.min(160, pw/rows.length-30);
+  const totalW=rows.length*bw+(rows.length-1)*30;
+  let x=padL+(pw-totalW)/2;
+  rows.forEach(r=>{
+    const barW=Math.max(2, Xlog(r.units)-padL);
+    ctx.fillStyle=r.color; ctx.fillRect(x,padT+10,barW,ph-10);
+    ctx.fillStyle='#fff'; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText(r.name, x+barW/2, padT+30);
+    ctx.fillStyle='#e6edf3'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(r.units+' units', x+barW/2, padT+48);
+    ctx.fillStyle='#8b949e'; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(r.note, x+barW/2, padT+62);
+    ctx.fillText('('+(r.units/cAll).toFixed(2)+'x store-all)', x+barW/2, padT+74);
+    x+=bw+30;
+  });
+  /* +33% reference line at selective = 4L */
+  ctx.strokeStyle='#f1c40f'; ctx.lineWidth=1; ctx.setLineDash([5,4]);
+  const refX=Xlog(cSel); ctx.beginPath(); ctx.moveTo(refX,padT); ctx.lineTo(refX,padT+ph); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#f1c40f'; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillText('selective = 4L = +33%', refX+4, padT-4);
+  /* readout */
+  const el=document.getElementById('compReadout');
+  const ovh=(cSel-cAll)/cAll;
+  el.innerHTML='compute (layer-forward units; backward = 2\u00d7 forward),  L='+L+'\n'+
+    '  store-all       = '+L+' + 0 + '+(2*L)+' = '+cAll+' units\n'+
+    '  selective       = '+L+' + '+L+' + '+(2*L)+' = '+cSel+' units   (recompute = L = one extra fwd)\n'+
+    '  full-recompute  = '+L+' + '+(L*(L+1)/2)+' + '+(2*L)+' = '+cFull+' units   (recompute = L(L+1)/2 = O(L\u00b2))\n'+
+    '  <b>selective overhead = ('+cSel+'-'+cAll+')/'+cAll+' = +'+(ovh*100).toFixed(1)+'%</b>   (the famous ~33%)';
+}
+
+/* ===== master render ===== */
+function render(){
+  const L=+document.getElementById('L').value;
+  document.getElementById('Lval').textContent=L;
+  /* keep the checkpoints slider in sync with the sqrt default */
+  if(USE_SQRT){
+    const def=Math.ceil(Math.sqrt(L));
+    document.getElementById('C').value=Math.min(32,def);
+    document.getElementById('Cval').textContent=def;
+  } else {
+    document.getElementById('Cval').textContent=document.getElementById('C').value;
+  }
+  drawGrid(); drawMem(); drawComp();
+  goldCheck();
+}
+
+/* ===== events ===== */
+document.getElementById('L').addEventListener('input',render);
+document.getElementById('C').addEventListener('input',()=>{
+  /* dragging checkpoints auto-switches to manual mode */
+  if(USE_SQRT){ USE_SQRT=false; document.getElementById('btnSqrt').classList.remove('active'); }
+  render();
+});
+document.getElementById('btnSqrt').addEventListener('click',()=>{
+  USE_SQRT=true; document.getElementById('btnSqrt').classList.add('active'); render();
+});
+window.addEventListener('resize',render);
+
+/* ===== GOLD-CHECK vs gradient_checkpointing.py Section D + G =====
+   L=32: store-all mult=32, full mult=1, selective mult=ceil(sqrt(32))=6,
+         selective recompute=32, overhead=(4L-3L)/3L=1/3=+33.33%,
+         checkpoint indices = [0,6,12,19,25,31].
+*/
+function goldCheck(){
+  const GOLD={multStore:32, multFull:1, multSel:6, recompute:32, cps:[0,6,12,19,25,31]};
+  const s=strategySelectiveSqrt(32);
+  const cAll=computeUnits(32,0), cSel=computeUnits(32,32);
+  const ovh=(cSel-cAll)/cAll;
+  const ok =
+    32===GOLD.multStore &&
+    1===GOLD.multFull &&
+    s.stored===GOLD.multSel &&
+    s.recompute===GOLD.recompute &&
+    Math.abs(ovh-1/3)<1e-9 &&
+    JSON.stringify(s.checkpoints)===JSON.stringify(GOLD.cps);
+  const ck=document.getElementById('check');
+  ck.textContent = ok
+    ? 'check: OK \u2014 JS L=32: store-all=32x, full=1x, selective=ceil(\u221a32)='+s.stored+'x, recompute='+s.recompute+', overhead=+33.33%, cps=['+s.checkpoints.join(',')+']'
+    : 'check: FAIL \u2014 mismatch!';
+  ck.style.borderColor = ok?'#27ae60':'#c0392b';
+  ck.style.color       = ok?'#27ae60':'#c0392b';
+  ck.style.background  = ok?'#1c3a25':'#3a1414';
+}
+
+render();
+</script>
+</body>
+</html>

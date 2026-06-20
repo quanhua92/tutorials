@@ -1,18 +1,15 @@
 # NEXT.md — the build queue
 
-> The roadmap for every bundle still to build, in priority order. **The next
-> swarm = the first 10 (Wave 1).** Read this to know what's next; read
+> The build history for every bundle, in priority order. The build is now
+> **FINISHED** — read this for the lineage; read
 > [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) / [`SUBAGENTS_RESEARCH_GUIDE.md`](./SUBAGENTS_RESEARCH_GUIDE.md)
-> for *how* to build them.
+> for *how* bundles were built.
 >
-> Companion to [`README.md`](./README.md) (the 11 bundles already shipped).
+> Companion to [`README.md`](./README.md) (the 29 bundles now shipped).
 
-> **✅ WAVE 1 SHIPPED** — all 10 bundles built + independently verified GREEN
-> (Batch 1: 3/3, Batch 2: 3/3, Batch 3: 4/4) through generator → verifier →
-> editor. `research/` now holds **21 bundles** (Phases 1–4). W2/W3 below are NEXT.
->
-> **✅ WAVE 2 SHIPPED — 4 more bundles built + verified GREEN (4/4).** `research/`
-> now holds **25 bundles** (Phases 1–4 nearly complete + Phase 5 started). W3 below is NEXT.
+> **✅ CURRICULUM COMPLETE** — all 29 bundles (Phases 0–5) built + independently
+> verified GREEN across 3 waves (W1: 10, W2: 4, W3: 4) through generator →
+> verifier → editor. `research/` holds **29 bundles**.
 
 ---
 
@@ -51,12 +48,11 @@ graph LR
 
 ## TL;DR
 
-- **25 done & green** (Phases 1–4; Wave 1 shipped — 10 bundles, 3 batches;
-  Wave 2 shipped — 4 bundles). **~4 to go** (W3, gradient checkpointing + Phase 5 trio).
-- **Next = Wave 3:** `gradient_checkpointing` + Phase 5 trio
-  (`disaggregated_serving`, `ktransformers_offload`, `jax_xla_tpu`).
+- **29 done & green — curriculum complete (Phases 0–5)** (Wave 1 shipped —
+  10 bundles, 3 batches; Wave 2 shipped — 4 bundles; Wave 3 shipped — 4 bundles).
+  The entire build is **FINISHED** — nothing is next.
 - Executed in batches: Stage 1 generators → Stage 2 verifier → Stage 3 editor
-  (see MANDATORY above), then promote.
+  (see MANDATORY above), then promote. All waves shipped.
 - **Env:** `research/.venv` was fixed once by Stage 0 (torch 2.12.1, py 3.13.5) —
   **do NOT rebuild it** (see §5).
 
@@ -68,20 +64,20 @@ graph LR
 graph LR
     P1["Phase 1 — Math pipe<br/>(8 bundles) ✅"] --> P2["Phase 2 — Acceleration<br/>(3 bundles) ✅"]
     P2 --> P3["Phase 3 — Serving<br/>(7 bundles) ✅ Wave 1"]
-    P3 --> P4["Phase 4 — Distributed<br/>(5/6 done) 🔜 W3"]
-    P4 --> P5["Phase 5 — Next-gen<br/>(2/5) 🔜 W3"]
+    P3 --> P4["Phase 4 — Distributed<br/>(6/6) ✅"]
+    P4 --> P5["Phase 5 — Next-gen<br/>(5/5) ✅"]
     style P1 fill:#eafaf1,stroke:#27ae60
     style P2 fill:#eafaf1,stroke:#27ae60
     style P3 fill:#eafaf1,stroke:#27ae60
-    style P4 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
-    style P5 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
+    style P4 fill:#eafaf1,stroke:#27ae60
+    style P5 fill:#eafaf1,stroke:#27ae60
 ```
 
 ---
 
 ## 2. The full build queue
 
-`✅ DONE (Wave 1/2)` = shipped & green · `NEXT (W3)` = Wave 3.
+`✅ DONE (Wave 1/2/3)` = shipped & green · all 18 rows now DONE.
 Source = `learning_guide/` section + primary reference repo.
 
 ### Phase 3 — Scale & Serving (`03_Scale_Serving.md` · ref: `nano-vllm/`)
@@ -105,7 +101,7 @@ Source = `learning_guide/` section + primary reference repo.
 | 10 | `tensor_parallel` | Matrices too big for 1 GPU → **Megatron** column/row parallel (AllReduce cancels across MLP/attn) | §4 · `nano-vllm/layers/linear.py` | column/row shard, the "AllReduce cancels" trick | ✅ DONE (Wave 1) |
 | 11 | `pipeline_parallel` | TP not enough → **GPipe** micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | §5 | pipeline timeline, bubble shrinking with M microbatches | ✅ DONE (Wave 2) |
 | 12 | `zero` | DDP redundancy (20N bytes) → **ZeRO 1/2/3** partition opt-state/grad/params | §6 | per-stage memory bars, 20N → 16/K bytes | ✅ DONE (Wave 2) |
-| 13 | `gradient_checkpointing` | O(L) activation memory → **selective recompute** (√L trick) | §8 | checkpoint grid, recompute spans | NEXT (W3) |
+| 13 | `gradient_checkpointing` | O(L) activation memory → **selective recompute** (√L trick) | §8 | checkpoint grid, recompute spans | ✅ DONE (Wave 3) |
 
 ### Phase 5 — Next-Gen (`05_Next_Gen_Architecture.md` · ref: `tiny-llm/moe.py`)
 
@@ -113,9 +109,9 @@ Source = `learning_guide/` section + primary reference repo.
 |---|---|---|---|---|---|
 | 14 | `moe_routing` | Dense FFN (all params active) → **top-k sparse MoE** + load-balance/z-loss + DeepSeek aux-free | §2 · `tiny-llm/moe.py` | router gate, top-k selection, expert routing | ✅ DONE (Wave 2) |
 | 15 | `speculative_decoding` | 1 token/step (memory-bound) → **draft+verify** parallel (rejection sampling, exact dist) | §3 | draft chain, parallel verify, accept/reject | ✅ DONE (Wave 2) |
-| 16 | `disaggregated_serving` | Co-located prefill+decode contention → **DistServe/Mooncake** split + KV RDMA transfer | §4 | prefill vs decode clusters, KV transfer latency budget | NEXT (W3) |
-| 17 | `ktransformers_offload` | GPU-only (671B won't fit) → **CPU DRAM expert offload** + AMX/AVX (activation-only transfer) | §5 | GPU attn + CPU experts, 14 KB activation vs 350 GB weight | NEXT (W3) |
-| 18 | `jax_xla_tpu` | PyTorch/CUDA eager → **JAX trace → XLA → Pallas** TPU kernels (Splash Attention) | §6 | jaxpr trace, systolic MXU, VMEM tiling | NEXT (W3) |
+| 16 | `disaggregated_serving` | Co-located prefill+decode contention → **DistServe/Mooncake** split + KV RDMA transfer | §4 | prefill vs decode clusters, KV transfer latency budget | ✅ DONE (Wave 3) |
+| 17 | `ktransformers_offload` | GPU-only (671B won't fit) → **CPU DRAM expert offload** + AMX/AVX (activation-only transfer) | §5 | GPU attn + CPU experts, 14 KB activation vs 350 GB weight | ✅ DONE (Wave 3) |
+| 18 | `jax_xla_tpu` | PyTorch/CUDA eager → **JAX trace → XLA → Pallas** TPU kernels (Splash Attention) | §6 | jaxpr trace, systolic MXU, VMEM tiling | ✅ DONE (Wave 3) |
 
 ---
 
@@ -179,8 +175,28 @@ weakest "tiny `.py`" fits — defer until the engine story is solid).
 and `speculative_decoding` open Phase 5 (both cite the shipped `KV_CACHE` and
 `mlp_activation`/`sampling` siblings).
 
-**Remaining NEXT = Wave 3:** `gradient_checkpointing` (Phase 4 close-out) +
-the Phase 5 trio `disaggregated_serving`, `ktransformers_offload`, `jax_xla_tpu`.
+---
+
+## 3c. WAVE 3 — SHIPPED ✅ (curriculum complete)
+
+> **All 4 GREEN** — every bundle passed the full 29-bundle independent verifier
+> re-run (`uv run python`, `node --check`, gold value vs `.py`). Wave 3 closes
+> out Phase 4 and finishes Phase 5. **The build is now FINISHED** — all 29
+> bundles across Phases 0–5 are built and green; there is no next wave.
+
+| # | Bundle | Covers (1-line) |
+|---|---|---|
+| 13 | `gradient_checkpointing` | O(L) activation memory → selective recompute via the √L trick (recompute only √L layers, keep the rest) |
+| 16 | `disaggregated_serving` | Co-located prefill/decode contention → DistServe/Mooncake prefill/decode split + KV transfer via RDMA |
+| 17 | `ktransformers_offload` | 671B won't fit on GPU → CPU DRAM expert offload via AMX/AVX (transfer activations, not weights) |
+| 18 | `jax_xla_tpu` | PyTorch/CUDA eager → JAX trace → XLA → Pallas TPU kernels (Splash Attention = FlashAttention for TPUs) |
+
+**Build order rationale:** `gradient_checkpointing` is the final Phase 4 bundle
+(cites `ddp`/`zero` activation-memory lineage); the Phase 5 trio completes the
+curriculum — `disaggregated_serving` cites the Wave-1 `scheduler` it splits,
+`ktransformers_offload` cites Wave-2 `moe_routing`'s experts + `quantization`'s
+4-bit weights, and `jax_xla_tpu` cites `flash_attention`'s online-softmax math
+(re-implemented as Splash on the TPU systolic array).
 
 ---
 

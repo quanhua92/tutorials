@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KTransformers (Heterogeneous CPU/GPU Expert Offload) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --yellow:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:6ch;text-align:right;font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap;line-height:1.45}
+  .readout b{color:var(--green)}
+  .readout .rd{color:var(--red)}
+  .readout .or{color:var(--orange)}
+  .readout .bl{color:var(--blue)}
+  .readout .mu{color:var(--muted)}
+  .micro{color:var(--muted);font-size:.74rem}
+  canvas{display:block;width:100%;max-width:1100px;height:auto;background:#0d1117;border-radius:6px}
+  #split{height:360px}
+  #contrast{height:300px}
+  .warn{background:#3a2f12;color:#ffd966;border:1px solid #f1c40f;border-radius:6px;
+        padding:.6rem .8rem;font-size:.8rem;margin:.6rem 0}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>KTransformers &mdash; Heterogeneous CPU/GPU Expert Offload &mdash; interactive
+    <a class="badge" href="./KTRANSFORMERS_OFFLOAD.md">KTRANSFORMERS_OFFLOAD.md</a>
+    <a class="badge" href="./ktransformers_offload.py">ktransformers_offload.py</a></h1>
+  <div class="sub"><b>The weight-stays, activation-flies idea:</b> a 671B MoE model is ~335 GB even at 4-bit (🔗 <a href="./quantization.html">QUANTIZATION</a>) &mdash; way beyond a 24 GB GPU.
+    <b style="color:var(--red)">Layer offload</b> streams all 350 GB of weights across PCIe every token (~0.18 tok/s &mdash; unusable).
+    <b style="color:var(--green)">KTransformers</b> parks the MoE <b>expert weights</b> in CPU DRAM and runs only the <b>k active experts</b> via Intel <b>AMX</b> (🔗 <a href="./moe_routing.html">MOE_ROUTING</a>),
+    so per token only the tiny <b style="color:var(--green)">~14 KB activations</b> cross PCIe &mdash; not the weights. Every number is recomputed in JS from the <i>identical</i> formulas in
+    <code>ktransformers_offload.py</code>. <b>Bandwidths are real; the GPU/CPU split + AMX are a faithful simulation</b> (no real AMX on this Mac). &nbsp;|&nbsp;
+    <a href="./lmcache.html">&rarr; LMCACHE (hierarchy)</a> &nbsp;
+    <a href="./paged_attention.html">&rarr; PAGED_ATTENTION</a></div>
+
+  <div class="warn"><b>Simulation:</b> this page uses REAL published bandwidths (PCIe Gen4 ~64 GB/s, Gen5 ~128 GB/s) but no real Intel AMX, GPU, or 382 GB DRAM.
+    The transfer times below are <code>bytes / real_bandwidth</code>; the "AMX GEMM" is conceptual. See <a href="./KTRANSFORMERS_OFFLOAD.md">KTRANSFORMERS_OFFLOAD.md &sect; Sources</a>.</div>
+
+  <!-- ===== PANEL 1: GPU + CPU SPLIT ===== -->
+  <h2>&#9312; The GPU + CPU split &mdash; where each part of a MoE layer lives</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> a MoE layer (🔗 <a href="./moe_routing.html">MOE_ROUTING</a>) is physically split. The <b style="color:var(--blue)">small, hot</b> parts (attention, router, shared expert, KV cache &mdash; 🔗 PAGED_ATTENTION) stay on the <b>GPU</b>;
+      the <b style="color:var(--green)">huge, cold</b> routed expert weights are parked once in <b>CPU DRAM</b>. Per token, only the tiny hidden state flies across PCIe &mdash; the weights never move.</div>
+    <canvas id="split" width="1100" height="360"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--blue)"></i>GPU VRAM (small, hot, every token)</span>
+      <span><i class="sw" style="background:var(--green)"></i>CPU DRAM (huge, cold, parked once)</span>
+      <span><i class="sw" style="background:var(--orange)"></i>activation flies across PCIe (~14 KB/call)</span>
+      <span><i class="sw" style="background:var(--yellow)"></i>AMX GEMM on the k active experts</span>
+    </div>
+    <div class="readout" id="splitReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: 350 GB vs 14 KB CONTRAST (log scale) ===== -->
+  <h2>&#9313; The gold centerpiece &mdash; 350 GB weights vs ~14 KB activations (log scale)</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>model size (GB) <input type="range" id="modelGB" min="20" max="1400" value="350" step="10">
+        <span class="val" id="modelGBVal">350</span></label>
+      <label>hidden dim <input type="range" id="hidden" min="1024" max="12288" value="7168" step="512">
+        <span class="val" id="hiddenVal">7168</span></label>
+      <label>PCIe gen
+        <select id="pcie">
+          <option value="64e9" selected>Gen4 x16 &mdash; 64 GB/s</option>
+          <option value="128e9">Gen5 x16 &mdash; 128 GB/s</option>
+        </select></label>
+      <label>k (experts/token) <input type="range" id="k" min="1" max="16" value="8" step="1">
+        <span class="val" id="kVal">8</span></label>
+      <label>layers <input type="range" id="layers" min="1" max="120" value="61" step="1">
+        <span class="val" id="layersVal">61</span></label>
+    </div>
+    <canvas id="contrast" width="1100" height="300"></canvas>
+    <div class="readout" id="contrastReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag <b>model size</b>, <b>hidden</b>, <b>PCIe gen</b>. The <b style="color:var(--red)">red bar</b> (layer offload: all weights/token) is always
+      <b>thousands to millions of times</b> taller than the <b style="color:var(--green)">green bar</b> (expert offload: only activations). At DeepSeek-V3 defaults (350 GB, hidden 7168, Gen4): layer offload
+      = <b>5.47 s/tok (0.18 tok/s)</b>; expert offload full = <b>219 &micro;s/tok</b> &mdash; a <b>~25,000&times;</b> transfer reduction. See <a href="./KTRANSFORMERS_OFFLOAD.md#7-the-gold-centerpiece--350-gb-weights-vs-kb-activations--section-g-output">KTRANSFORMERS_OFFLOAD.md &sect;7</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 3: EXECUTION FLOW ===== -->
+  <h2>&#9314; Execution flow &mdash; GPU does attn+router, CPU does the k active experts via AMX</h2>
+  <div class="panel">
+    <div class="controls">
+      <button id="btnStep">&#9654; step through one token</button>
+      <button id="btnReset">reset</button>
+      <span class="micro">tiny demo: D=8, E=4 routed + 1 shared, k=2 (matches ktransformers_offload.py Section D)</span>
+    </div>
+    <canvas id="flow" width="1100" height="320"></canvas>
+    <div class="readout" id="flowReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> click <b>step</b>. The GPU runs the router (🔗 MOE_ROUTING) + shared expert; the hidden state flies to the CPU (~14 KB);
+      AMX runs the k active routed experts; outputs fly back; the GPU gathers into the residual. The <b>weights never move</b>. See <a href="./KTRANSFORMERS_OFFLOAD.md#4-the-gpucpu-execution-flow--section-d-output-tiny-demo">KTRANSFORMERS_OFFLOAD.md &sect;4</a>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check &mdash;</b> three green badges mean the live JS math reproduces the exact numbers printed by <code>ktransformers_offload.py</code> (Section G, Gen4 defaults):
+    <span class="badge" id="check1">check 1: &hellip;</span>
+    <span class="badge" id="check2">check 2: &hellip;</span>
+    <span class="badge" id="check3">check 3: &hellip;</span>
+    <br><br>
+    Verified: layer-offload time/token (5.4688 s), expert-call transfer (0.224 &micro;s), and the layer/expert byte ratio (~25,014&times; full per-token).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth constants, copied verbatim from ktransformers_offload.py ===== */
+const BYTES_FP16 = 2;
+const DEFAULT_MODEL_GB = 350;          /* DS_V3_MODEL_BYTES / 1e9 */
+const DEFAULT_HIDDEN = 7168;           /* DS_V3_HIDDEN */
+const DEFAULT_K = 8;                   /* DS_V3_K */
+const DEFAULT_LAYERS = 61;             /* DS_V3_LAYERS */
+
+/* ===== transfer formulas (identical to ktransformers_offload.py) ===== */
+function layerOffloadBytes(modelGB){ return modelGB * 1e9; }
+function expertCallBytes(hidden){ return 1 * hidden * BYTES_FP16; }            /* one direction, one expert */
+function expertFullBytes(hidden, k, layers){
+  /* worst case: k calls/layer, both directions */
+  return k * layers * hidden * BYTES_FP16 * 2;
+}
+function transferTime(bytes, bw){ return bytes / bw; }
+
+/* ===== canvas helper ===== */
+function setup(cv, h){
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 1100;
+  if(cv._h !== h){ cv.style.height = h + 'px'; cv._h = h; }
+  const bh = Math.round(h*dpr), bw = Math.round(w*dpr);
+  if(cv.width !== bw || cv.height !== bh){ cv.width = bw; cv.height = bh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {ctx, w, h};
+}
+function fmtBytes(b){
+  if(b >= 1e9) return (b/1e9).toFixed(2)+' GB';
+  if(b >= 1e6) return (b/1e6).toFixed(3)+' MB';
+  if(b >= 1e3) return (b/1e3).toFixed(3)+' KB';
+  return b.toFixed(1)+' B';
+}
+function fmtTime(s){
+  if(s >= 1)   return s.toFixed(4)+' s';
+  if(s >= 1e-3)return (s*1e3).toFixed(3)+' ms';
+  if(s >= 1e-6)return (s*1e6).toFixed(3)+' &micro;s';
+  return (s*1e9).toFixed(3)+' ns';
+}
+
+/* ===== PANEL 1: GPU + CPU split diagram ===== */
+const splitCv = document.getElementById('split');
+function drawSplit(){
+  const {ctx, w, h} = setup(splitCv, 360);
+  ctx.clearRect(0,0,w,h);
+  const padL=20, padR=20, padT=40, padB=20;
+  const gpuW = w*0.42, cpuW = w*0.42, gap = w*0.16;
+  const gpuX = padL, cpuX = padL + gpuW + gap;
+  const boxY = padT, boxH = h - padT - padB;
+  /* GPU box */
+  ctx.fillStyle = 'rgba(41,128,185,0.12)'; ctx.strokeStyle = '#2980b9'; ctx.lineWidth = 2;
+  ctx.fillRect(gpuX, boxY, gpuW, boxH); ctx.strokeRect(gpuX, boxY, gpuW, boxH);
+  ctx.fillStyle = '#2980b9'; ctx.font = 'bold 13px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText('GPU VRAM  (24 GB)', gpuX + gpuW/2, boxY - 14);
+  ctx.font = '11px ui-monospace,monospace'; ctx.fillStyle = '#e6edf3';
+  const gpuParts = [
+    'embeddings',
+    'RMSNorm',
+    'attention  (KV cache)',
+    'router  W_g  [E, D]',
+    'SHARED expert  (always on)',
+    'residual stream'
+  ];
+  gpuParts.forEach((p,i)=>{
+    const y = boxY + 30 + i*36;
+    ctx.fillStyle = 'rgba(41,128,185,0.25)'; ctx.fillRect(gpuX+12, y-14, gpuW-24, 28);
+    ctx.strokeStyle = '#2980b9'; ctx.lineWidth = 1; ctx.strokeRect(gpuX+12, y-14, gpuW-24, 28);
+    ctx.fillStyle = '#e6edf3'; ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText(p, gpuX + gpuW/2, y+4);
+  });
+  /* CPU box */
+  ctx.fillStyle = 'rgba(39,174,96,0.12)'; ctx.strokeStyle = '#27ae60'; ctx.lineWidth = 2;
+  ctx.fillRect(cpuX, boxY, cpuW, boxH); ctx.strokeRect(cpuX, boxY, cpuW, boxH);
+  ctx.fillStyle = '#27ae60'; ctx.font = 'bold 13px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText('CPU DRAM  (~330 GB) + AMX', cpuX + cpuW/2, boxY - 14);
+  const cpuParts = [
+    'routed expert 0  (parked)',
+    'routed expert 1  (parked)',
+    '   ...   ',
+    'routed expert 254',
+    'routed expert 255',
+    'AMX: 8 tiles x 1 KB + TMUL'
+  ];
+  cpuParts.forEach((p,i)=>{
+    const y = boxY + 30 + i*36;
+    const dormant = (i !== cpuParts.length-1 && p.indexOf('...') < 0);
+    ctx.fillStyle = dormant ? 'rgba(33,38,45,0.6)' : 'rgba(241,196,15,0.18)';
+    ctx.fillRect(cpuX+12, y-14, cpuW-24, 28);
+    ctx.strokeStyle = dormant ? '#30363d' : '#f1c40f'; ctx.lineWidth = 1; ctx.strokeRect(cpuX+12, y-14, cpuW-24, 28);
+    ctx.fillStyle = dormant ? '#8b949e' : '#f1c40f'; ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText(p, cpuX + cpuW/2, y+4);
+  });
+  /* arrows: activation flies GPU -> CPU and back */
+  const arrowY1 = boxY + 30 + 1*36;        /* near router */
+  const arrowY2 = boxY + 30 + 4*36;        /* near experts */
+  function arrow(x1,y1,x2,y2,color,label){
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    const a = Math.atan2(y2-y1, x2-x1), s = 8;
+    ctx.fillStyle = color; ctx.beginPath();
+    ctx.moveTo(x2,y2);
+    ctx.lineTo(x2 - s*Math.cos(a-0.4), y2 - s*Math.sin(a-0.4));
+    ctx.lineTo(x2 - s*Math.cos(a+0.4), y2 - s*Math.sin(a+0.4));
+    ctx.closePath(); ctx.fill();
+    if(label){
+      ctx.fillStyle = color; ctx.font = '10px ui-monospace,monospace'; ctx.textAlign = 'center';
+      ctx.fillText(label, (x1+x2)/2, (y1+y2)/2 - 6);
+    }
+  }
+  arrow(gpuX + gpuW, arrowY1, cpuX, arrowY1, '#e67e22', 'send x  (~14 KB)');
+  arrow(cpuX, arrowY2, gpuX + gpuW, arrowY2, '#e67e22', 'gather out  (~14 KB)');
+  /* PCIe label */
+  ctx.fillStyle = '#e67e22'; ctx.font = 'bold 11px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText('PCIe  (Gen4 ~64 GB/s)', gpuX + gpuW + gap/2, boxY + boxH/2);
+  ctx.fillStyle = '#8b949e'; ctx.font = '9px ui-monospace,monospace';
+  ctx.fillText('only activations cross this', gpuX + gpuW + gap/2, boxY + boxH/2 + 14);
+  ctx.fillText('weights NEVER do', gpuX + gpuW + gap/2, boxY + boxH/2 + 26);
+}
+function renderSplitReadout(){
+  const hidden = +document.getElementById('hidden').value;
+  const oneCall = expertCallBytes(hidden);
+  document.getElementById('splitReadout').innerHTML =
+    `<span class="mu">// per expert call, the activation that crosses PCIe (one direction):</span>\n` +
+    `activation = batch x hidden x bytes = 1 x ${hidden} x ${BYTES_FP16} = <b>${oneCall} B = ${fmtBytes(oneCall)}</b>\n` +
+    `<span class="mu">// the routed expert WEIGHTS (~330 GB) stay in CPU DRAM; they never move per token.</span>`;
+}
+
+/* ===== PANEL 2: 350 GB vs 14 KB contrast (log-scale bars) ===== */
+const contrastCv = document.getElementById('contrast');
+function drawContrast(){
+  const {ctx, w, h} = setup(contrastCv, 300);
+  ctx.clearRect(0,0,w,h);
+  const modelGB = +document.getElementById('modelGB').value;
+  const hidden = +document.getElementById('hidden').value;
+  const pcie = +document.getElementById('pcie').value;
+  const k = +document.getElementById('k').value;
+  const layers = +document.getElementById('layers').value;
+  const lb = layerOffloadBytes(modelGB);                 /* red */
+  const ebOne = expertCallBytes(hidden);                  /* green light */
+  const ebFull = expertFullBytes(hidden, k, layers);      /* green dark */
+  /* log10 of bytes; clamp to >= 1 B */
+  const logB = b => Math.log10(Math.max(1, b));
+  const maxLog = logB(lb);
+  const minLog = Math.log10(1);   /* 1 B floor */
+  const span = maxLog - minLog;
+  const padL=180, padR=30, padT=24, padB=30;
+  const pw = w - padL - padR, ph = h - padT - padB;
+  function barY(logv){ return padT + ph*(1 - (logv - minLog)/span); }
+  /* axis */
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT+ph); ctx.stroke();
+  /* gridlines + labels per decade */
+  const dec = Math.ceil(minLog);
+  for(let d = dec; d <= Math.floor(maxLog); d++){
+    const y = barY(d);
+    ctx.strokeStyle = '#21262d'; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w-padR, y); ctx.stroke();
+    ctx.fillStyle = '#8b949e'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'right';
+    let lbl;
+    if(d>=9) lbl = (Math.pow(10,d)/1e9)+' GB';
+    else if(d>=6) lbl = (Math.pow(10,d)/1e6)+' MB';
+    else if(d>=3) lbl = (Math.pow(10,d)/1e3)+' KB';
+    else lbl = Math.pow(10,d)+' B';
+    ctx.fillText(lbl, padL - 6, y+3);
+  }
+  ctx.fillStyle = '#8b949e'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.save(); ctx.translate(12, padT+ph/2); ctx.rotate(-Math.PI/2);
+  ctx.fillText('bytes / token  (log scale)', 0, 0); ctx.restore();
+  /* bars */
+  function drawBar(x, bw, logv, color, labelTop, labelBot){
+    const y = barY(logv);
+    const yBase = barY(minLog);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, bw, yBase - y);
+    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 11px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText(labelTop, x + bw/2, y - 6);
+    ctx.fillStyle = '#8b949e'; ctx.font = '9px ui-monospace,monospace';
+    ctx.fillText(labelBot, x + bw/2, yBase + 16);
+  }
+  const colW = pw/3;
+  drawBar(padL + colW*0.15, colW*0.7, logB(lb), '#c0392b', 'LAYER OFFLOAD', fmtBytes(lb));
+  drawBar(padL + colW*1.15, colW*0.7, logB(ebFull), '#27ae60', 'EXPERT (full/token)', fmtBytes(ebFull));
+  drawBar(padL + colW*2.15, colW*0.7, logB(ebOne), '#196f3d', 'EXPERT (1 call)', fmtBytes(ebOne));
+  /* ratio annotation */
+  const ratio = lb / ebFull;
+  ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 12px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText(`ratio (layer / expert-full) = ${ratio.toLocaleString(undefined,{maximumFractionDigits:0})}x`,
+               w/2, padT + 12);
+}
+function renderContrastReadout(){
+  const modelGB = +document.getElementById('modelGB').value;
+  const hidden = +document.getElementById('hidden').value;
+  const pcie = +document.getElementById('pcie').value;
+  const k = +document.getElementById('k').value;
+  const layers = +document.getElementById('layers').value;
+  const lb = layerOffloadBytes(modelGB);
+  const ebOne = expertCallBytes(hidden);
+  const ebFull = expertFullBytes(hidden, k, layers);
+  const tLayer = transferTime(lb, pcie);
+  const tOne = transferTime(ebOne, pcie);
+  const tFull = transferTime(ebFull, pcie);
+  const tpsLayer = 1/tLayer;
+  const ratioFull = lb / ebFull;
+  const ratioOne = lb / ebOne;
+  const bwLabel = pcie === 64e9 ? 'Gen4 64 GB/s' : 'Gen5 128 GB/s';
+  document.getElementById('contrastReadout').innerHTML =
+    `<span class="mu">// @ model=${modelGB} GB, hidden=${hidden}, k=${k}, layers=${layers}, ${bwLabel}</span>\n` +
+    `<span class="rd">LAYER OFFLOAD</span>:  bytes/token = ${fmtBytes(lb)}   ->  time = ${fmtTime(tLayer)}  ->  <b>${tpsLayer.toFixed(4)} tok/s</b>\n` +
+    `<span class="bl">EXPERT (1 call)</span>: bytes/call  = ${fmtBytes(ebOne)}  ->  time = ${fmtTime(tOne)}\n` +
+    `<span class="or">EXPERT (full/tok)</span>: bytes/token = ${fmtBytes(ebFull)} ->  time = ${fmtTime(tFull)}\n` +
+    `ratio (layer / 1 call)  = ${ratioOne.toLocaleString(undefined,{maximumFractionDigits:0})}x\n` +
+    `<b>ratio (layer / full)   = ${ratioFull.toLocaleString(undefined,{maximumFractionDigits:0})}x</b>`;
+}
+
+/* ===== PANEL 3: execution flow (tiny demo D=8, E=4, k=2) ===== */
+/* deterministic tiny demo: matches ktransformers_offload.py build_tiny_layer()
+   weights via the same seeds. We re-derive the routing decision for token m=0
+   (experts [1,0], gates [0.5625, 0.4375]) — the same gold as MOE_ROUTING. */
+const flowCv = document.getElementById('flow');
+let flowStep = 0;
+const FLOW_STEPS = [
+  {label: '0. idle', desc: 'GPU VRAM holds attention + router + shared expert. CPU DRAM holds the routed expert weights.'},
+  {label: '1. GPU: router', desc: 'GPU computes router logits H = x·W_gᵀ, then G = softmax(KeepTopK(H, k=2)). Token m=0 routes to experts [1, 0] (gates 0.5625, 0.4375).'},
+  {label: '2. GPU: shared expert', desc: 'Shared expert (always on) runs on the GPU. No PCIe traffic.'},
+  {label: '3. GPU -> CPU: send x', desc: 'Hidden state x (~14 KB at full scale; 64 B on the tiny D=8 demo) flies across PCIe to the CPU.'},
+  {label: '4. CPU: AMX GEMM', desc: 'CPU runs the k=2 active routed experts via AMX (SwiGLU: down(silu(gate)·up)). The other 2 experts are dormant.'},
+  {label: '5. CPU -> GPU: gather', desc: 'Expert outputs fly back across PCIe (~14 KB). GPU weights them by G and sums into the residual.'}
+];
+function drawFlow(){
+  const {ctx, w, h} = setup(flowCv, 320);
+  ctx.clearRect(0,0,w,h);
+  const padL=20, padR=20, padT=34, padB=20;
+  const cw = (w - padL - padR)/3;
+  const colGpu = padL + cw*0.5, colPcie = padL + cw*1.5, colCpu = padL + cw*2.5;
+  /* column headers */
+  ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 12px ui-monospace,monospace'; ctx.textAlign = 'center';
+  ctx.fillText('GPU VRAM', colGpu, padT - 12);
+  ctx.fillText('PCIe', colPcie, padT - 12);
+  ctx.fillText('CPU DRAM + AMX', colCpu, padT - 12);
+  /* GPU box */
+  const boxH = 220, boxY = padT + 6;
+  ctx.fillStyle = 'rgba(41,128,185,0.10)'; ctx.strokeStyle = '#2980b9'; ctx.lineWidth = 1;
+  ctx.fillRect(colGpu - cw*0.4, boxY, cw*0.8, boxH); ctx.strokeRect(colGpu - cw*0.4, boxY, cw*0.8, boxH);
+  /* CPU box */
+  ctx.fillStyle = 'rgba(39,174,96,0.10)'; ctx.strokeStyle = '#27ae60'; ctx.lineWidth = 1;
+  ctx.fillRect(colCpu - cw*0.4, boxY, cw*0.8, boxH); ctx.strokeRect(colCpu - cw*0.4, boxY, cw*0.8, boxH);
+  /* GPU stages */
+  ctx.textAlign = 'center'; ctx.font = '10px ui-monospace,monospace';
+  const gpuItems = ['attention', 'router', 'shared expert', 'residual'];
+  gpuItems.forEach((it,i)=>{
+    const on = (flowStep===1 && i<=1) || (flowStep===2 && i===2) || (flowStep===5 && i===3);
+    ctx.fillStyle = on ? '#2980b9' : '#3d4452';
+    ctx.fillRect(colGpu - cw*0.35, boxY + 10 + i*46, cw*0.7, 38);
+    ctx.fillStyle = on ? '#fff' : '#8b949e';
+    ctx.fillText(it, colGpu, boxY + 33 + i*46);
+  });
+  /* CPU experts */
+  const cpuItems = ['expert 0', 'expert 1', 'expert 2', 'expert 3'];
+  const active = new Set([1, 0]);   /* token m=0 routes to [1,0] */
+  cpuItems.forEach((it,i)=>{
+    const on = flowStep===4 && active.has(i);
+    const dormant = flowStep>=4 && !active.has(i);
+    ctx.fillStyle = on ? '#27ae60' : (dormant ? '#21262d' : '#3d4452');
+    ctx.fillRect(colCpu - cw*0.35, boxY + 10 + i*46, cw*0.7, 38);
+    ctx.fillStyle = on ? '#fff' : (dormant ? '#8b949e' : '#8b949e');
+    const tag = on ? it+' (ACTIVE)' : (dormant ? it+' (dormant)' : it);
+    ctx.fillText(tag, colCpu, boxY + 33 + i*46);
+  });
+  /* PCIe animation: activation flying */
+  function flyingArrow(y, dir, color, label){
+    const x1 = dir > 0 ? colGpu + cw*0.4 : colCpu - cw*0.4;
+    const x2 = dir > 0 ? colCpu - cw*0.4 : colGpu + cw*0.4;
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+    const a = Math.atan2(0, dir), s = 9;
+    ctx.fillStyle = color; ctx.beginPath();
+    ctx.moveTo(x2, y); ctx.lineTo(x2 - s*Math.cos(a-0.4), y - s*Math.sin(a-0.4));
+    ctx.lineTo(x2 - s*Math.cos(a+0.4), y - s*Math.sin(a+0.4)); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = color; ctx.font = '9px ui-monospace,monospace';
+    ctx.fillText(label, (x1+x2)/2, y - 7);
+  }
+  if(flowStep===3) flyingArrow(boxY + boxH*0.4, +1, '#e67e22', 'send x (~14 KB)');
+  if(flowStep===5) flyingArrow(boxY + boxH*0.6, -1, '#e67e22', 'gather out (~14 KB)');
+  /* AMX glow on step 4 */
+  if(flowStep===4){
+    ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 10px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText('AMX GEMM  (8 tiles x 1 KB)', colCpu, boxY + boxH + 14);
+  }
+  /* step label */
+  ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 12px ui-monospace,monospace'; ctx.textAlign = 'left';
+  ctx.fillText('step ' + FLOW_STEPS[flowStep].label, padL, h - 6);
+}
+function renderFlowReadout(){
+  document.getElementById('flowReadout').innerHTML =
+    `<b>${FLOW_STEPS[flowStep].label}</b>\n${FLOW_STEPS[flowStep].desc}`;
+}
+
+/* ===== master render ===== */
+function render(){
+  document.getElementById('modelGBVal').textContent = document.getElementById('modelGB').value;
+  document.getElementById('hiddenVal').textContent = document.getElementById('hidden').value;
+  document.getElementById('kVal').textContent = document.getElementById('k').value;
+  document.getElementById('layersVal').textContent = document.getElementById('layers').value;
+  drawSplit(); renderSplitReadout();
+  drawContrast(); renderContrastReadout();
+  drawFlow(); renderFlowReadout();
+}
+
+/* ===== events ===== */
+['modelGB','hidden','k','layers'].forEach(id => document.getElementById(id).addEventListener('input', render));
+document.getElementById('pcie').addEventListener('change', render);
+document.getElementById('btnStep').addEventListener('click', ()=>{
+  flowStep = (flowStep + 1) % FLOW_STEPS.length;
+  render();
+});
+document.getElementById('btnReset').addEventListener('click', ()=>{ flowStep = 0; render(); });
+window.addEventListener('resize', render);
+
+/* ===== GOLD-CHECK vs ktransformers_offload.py Section G (Gen4 defaults) ===== */
+// defaults: model=350 GB, hidden=7168, k=8, layers=61, PCIe Gen4 = 64 GB/s
+const g_pcie = 64e9;
+const g_lb = layerOffloadBytes(350);                  // 3.5e11
+const g_ebOne = expertCallBytes(7168);                // 14336
+const g_ebFull = expertFullBytes(7168, 8, 61);        // 13991936
+const g_tLayer = transferTime(g_lb, g_pcie);          // 5.46875 s
+const g_tOne = transferTime(g_ebOne, g_pcie);         // 2.24e-7 s
+const g_tFull = transferTime(g_ebFull, g_pcie);       // 2.186e-4 s
+const g_ratioFull = g_lb / g_ebFull;                  // 25014.x
+
+// check 1: layer offload time/token == 5.4688 s
+const ok1 = Math.abs(g_tLayer - 5.4688) < 1e-3;
+const c1 = document.getElementById('check1');
+c1.textContent = ok1 ? `check 1: OK \u2014 layer offload = ${g_tLayer.toFixed(4)} s/tok (0.18 tok/s)`
+                     : `check 1: FAIL \u2014 layer offload = ${g_tLayer.toFixed(4)} s/tok`;
+c1.style.borderColor = ok1 ? '#27ae60' : '#c0392b';
+c1.style.color = ok1 ? '#27ae60' : '#c0392b';
+c1.style.background = ok1 ? '#1c3a25' : '#3a1414';
+
+// check 2: expert-call transfer == 0.224 us
+const ok2 = Math.abs(g_tOne*1e6 - 0.224) < 1e-3;
+const c2 = document.getElementById('check2');
+c2.textContent = ok2 ? `check 2: OK \u2014 expert call = ${(g_tOne*1e6).toFixed(3)} \u00b5s`
+                     : `check 2: FAIL \u2014 expert call = ${(g_tOne*1e6).toFixed(3)} \u00b5s`;
+c2.style.borderColor = ok2 ? '#27ae60' : '#c0392b';
+c2.style.color = ok2 ? '#27ae60' : '#c0392b';
+c2.style.background = ok2 ? '#1c3a25' : '#3a1414';
+
+// check 3: layer/expert byte ratio == 25,014x
+const ok3 = Math.abs(g_ratioFull - 25014) < 2;
+const c3 = document.getElementById('check3');
+c3.textContent = ok3 ? `check 3: OK \u2014 ratio (layer/full) = ${g_ratioFull.toLocaleString(undefined,{maximumFractionDigits:0})}x`
+                     : `check 3: FAIL \u2014 ratio = ${g_ratioFull.toLocaleString(undefined,{maximumFractionDigits:0})}x`;
+c3.style.borderColor = ok3 ? '#27ae60' : '#c0392b';
+c3.style.color = ok3 ? '#27ae60' : '#c0392b';
+c3.style.background = ok3 ? '#1c3a25' : '#3a1414';
+
+render();
+</script>
+</body>
+</html>

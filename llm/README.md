@@ -48,11 +48,15 @@ graph LR
         TP[TENSOR_PARALLEL]
         PP[PIPELINE_PARALLEL]
         Z[ZERO]
+        GC[GRADIENT_CHECKPOINTING]
     end
-    subgraph p5["Phase 5 — Next-gen (sparse MoE, speculative decode)"]
+    subgraph p5["Phase 5 — Next-gen (sparse MoE, speculative decode, disaggregated serving)"]
         direction LR
         MOE[MOE_ROUTING]
         SPEC[SPECULATIVE_DECODING]
+        DS[DISAGGREGATED_SERVING]
+        KT[KTRANSFORMERS_OFFLOAD]
+        JXP[JAX_XLA_TPU]
     end
     p1 --> p2
     p2 --> p3
@@ -63,7 +67,7 @@ graph LR
     style p2 fill:#fdecea,stroke:#c0392b
     style p3 fill:#eafaf1,stroke:#27ae60
     style p4 fill:#eafaf1,stroke:#27ae60
-    style p5 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
+    style p5 fill:#eafaf1,stroke:#27ae60
     style F fill:#f5b7b1,stroke:#c0392b
 ```
 
@@ -80,10 +84,14 @@ graph LR
 - MOE_ROUTING's sparse expert FFN ⟷ MLP_ACTIVATION's dense SwiGLU (same FFN, top-k routed instead of always-on)
 - SPECULATIVE_DECODING's rejection sampling ⟷ SAMPLING (same distribution) and its draft-chain KV rewind ⟷ KV_CACHE
 - PEFT_LORA's grouped GEMM + LMCACHE's hierarchy extend the serving engine beyond dense inference
+- GRADIENT_CHECKPOINTING's √L recompute ⟷ DDP/ZERO's memory (trading compute to cut activation memory)
+- DISAGGREGATED_SERVING splits what SCHEDULER co-locates (prefill/decode on separate clusters + KV RDMA transfer)
+- KTRANSFORMERS_OFFLOAD offloads MOE_ROUTING's experts via QUANTIZATION's 4-bit (CPU DRAM holds weights, GPU runs attn)
+- JAX_XLA_TPU's Splash == FLASH_ATTENTION's online-softmax math (re-tiled for the TPU systolic array)
 
 ---
 
-## 📚 All 25 bundles at a glance
+## 📚 All 29 bundles at a glance
 
 Every row is the 4-file bundle: `.py` (ground truth) · `.md` (guide) · `.html` (interactive).
 Also commit `*_output.txt` (captured stdout — see each `.md`'s `> From X.py Section Y:` callouts).
@@ -115,6 +123,10 @@ Also commit `*_output.txt` (captured stdout — see each `.md`'s `> From X.py Se
 | 23 | **ZeRO** — DDP redundancy (20N bytes) → ZeRO 1/2/3 partition opt-state/grad/params | 4 | [`zero.py`](./zero.py) | [`ZERO.md`](./ZERO.md) | [`zero.html`](./zero.html) |
 | 24 | **MoE routing** — dense FFN (all params active) → top-k sparse MoE + load-balance/z-loss + DeepSeek aux-free | 5 | [`moe_routing.py`](./moe_routing.py) | [`MOE_ROUTING.md`](./MOE_ROUTING.md) | [`moe_routing.html`](./moe_routing.html) |
 | 25 | **Speculative decoding** — 1 token/step (memory-bound) → draft+verify parallel (rejection sampling, exact dist) | 5 | [`speculative_decoding.py`](./speculative_decoding.py) | [`SPECULATIVE_DECODING.md`](./SPECULATIVE_DECODING.md) | [`speculative_decoding.html`](./speculative_decoding.html) |
+| 26 | **Gradient checkpointing** — O(L) activation memory → selective recompute (√L trick) | 4 | [`gradient_checkpointing.py`](./gradient_checkpointing.py) | [`GRADIENT_CHECKPOINTING.md`](./GRADIENT_CHECKPOINTING.md) | [`gradient_checkpointing.html`](./gradient_checkpointing.html) |
+| 27 | **Disaggregated serving** — co-located prefill+decode contention → DistServe/Mooncake split + KV RDMA transfer | 5 | [`disaggregated_serving.py`](./disaggregated_serving.py) | [`DISAGGREGATED_SERVING.md`](./DISAGGREGATED_SERVING.md) | [`disaggregated_serving.html`](./disaggregated_serving.html) |
+| 28 | **KTransformers offload** — GPU-only (671B won't fit) → CPU DRAM expert offload + AMX/AVX (activation-only transfer) | 5 | [`ktransformers_offload.py`](./ktransformers_offload.py) | [`KTRANSFORMERS_OFFLOAD.md`](./KTRANSFORMERS_OFFLOAD.md) | [`ktransformers_offload.html`](./ktransformers_offload.html) |
+| 29 | **JAX / XLA / TPU** — PyTorch/CUDA eager → JAX trace → XLA → Pallas TPU kernels (Splash Attention) | 5 | [`jax_xla_tpu.py`](./jax_xla_tpu.py) | [`JAX_XLA_TPU.md`](./JAX_XLA_TPU.md) | [`jax_xla_tpu.html`](./jax_xla_tpu.html) |
 
 > The 11 files map to the **10 key problems** in the curriculum — position
 > encoding is one problem split across two sibling bundles (`ROPE` ↔ `ABSOLUTE_PE`).
@@ -151,6 +163,10 @@ graph TD
     U --> V["22. ZERO<br/>partition what DDP replicates"]
     V --> W["23. MOE_ROUTING<br/>sparse expert FFN"]
     W --> X["24. SPECULATIVE_DECODING<br/>draft + verify"]
+    X --> GC["25. GRADIENT_CHECKPOINTING<br/>√L selective recompute"]
+    GC --> DS["26. DISAGGREGATED_SERVING<br/>prefill/decode split"]
+    DS --> KT["27. KTRANSFORMERS_OFFLOAD<br/>CPU expert offload"]
+    KT --> JXP["28. JAX_XLA_TPU<br/>trace → XLA → Pallas"]
     style D fill:#eafaf1,stroke:#27ae60
     style I fill:#f5b7b1,stroke:#c0392b
     style K fill:#eafaf1,stroke:#27ae60
@@ -183,7 +199,9 @@ for n in normalization mlp_activation gqa causal_mask tokenization sampling \
          flash_attention quantization kv_cache rope absolute_pe \
          paged_attention block_manager scheduler prefix_cache cuda_graphs peft_lora lmcache \
          nccl_collectives ddp tensor_parallel \
-         pipeline_parallel zero moe_routing speculative_decoding; do
+         pipeline_parallel zero gradient_checkpointing \
+         moe_routing speculative_decoding \
+         disaggregated_serving ktransformers_offload jax_xla_tpu; do
   uv run python $n.py >/dev/null 2>&1 && echo "  $n.py: OK" || echo "  $n.py: FAILED"
   python3 -c "import re;open('/tmp/_j.js','w').write(re.search(r'<script>(.*)</script>',open('$n.html').read(),re.S).group(1))" 2>/dev/null
   node --check /tmp/_j.js 2>/dev/null && echo "  $n.html JS: OK" || echo "  $n.html JS: FAIL"
@@ -211,5 +229,5 @@ diff them against `{name}_output.txt` to audit any value.
 > recomputed in JS with the identical formula and gold-checked against it. Every
 > formula is fact-checked against the original paper. Nothing is hand-waved.**
 
-That single discipline is what lets these guides scale to 25+ topics without
-drifting into "trust me" math.
+That single discipline is what lets these guides scale to 29+ topics
+(Phases 0–5 complete) without drifting into "trust me" math.

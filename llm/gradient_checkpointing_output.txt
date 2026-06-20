@@ -1,0 +1,204 @@
+gradient_checkpointing.py - reference impl (faithful activation-memory
+simulation + a real torch.utils.checkpoint correctness demo).
+Numbers below feed GRADIENT_CHECKPOINTING.md.  torch = 2.12.1
+
+SIMULATION: L transformer layer activations modelled as [B,S,D] tensors;
+we track which are STORED vs RECOMPUTED across 3 strategies. The
+memory-bytes (from tensor .element_size()*.numel()) and compute-units
+arithmetic is EXACT and asserted. Section E also runs a REAL small
+torch.utils.checkpoint network to prove gradients are bit-identical.
+
+========================================================================
+  SECTION A: why activation memory blows up -- L x B x S x D x ~2 bytes
+========================================================================
+Backprop needs every layer's forward activation to compute its
+gradient. For one transformer layer the activation is [B, S, D], so:
+
+    per-layer activation bytes  A = B * S * D * dtype_bytes
+    total activation memory     = L * A   (all L layers stored)
+
+With dtype = fp16/bf16 (2 bytes/elem):
+
+| B  | S    | D    | A = B*S*D*2 (bytes) | * L=32 layers |
+|----|------|------|----------------------|---------------|
+| 1  | 4096 | 4096 |              33.55 MB |        1.07 GB |
+| 1  | 8192 | 4096 |              67.11 MB |        2.15 GB |
+| 8  | 4096 | 4096 |             268.44 MB |        8.59 GB |
+| 32 | 4096 | 4096 |            1073.74 MB |       34.36 GB |
+| 32 | 8192 | 4096 |            2147.48 MB |       68.72 GB |
+
+READ: at B=32, S=4096, D=4096 (LLaMA-3 8B shape) ONE layer's
+activation is 33.5 MB; all 32 layers = 1.07 GB per... wait, x B=32:
+that is 34.36 GB of activations for one training step -- ~2x the
+16 GB of fp16 model weights. Activations are the memory bottleneck.
+
+[tensor check] one [1,4096,4096] fp16 layer = 33.55 MB ; 32 layers = 1.07 GB
+[check] measured bytes == B*S*D*2 and == 32*A? True
+
+Context (LLaMA-3 8B, N=8,000,000,000 params):
+  model+optimizer (DDP 20N/param)  =  160.0 GB / GPU  (DDP/ZERO)
+  activations, B=32, S=4096         =   34.4 GB
+  --> activations can rival the weights+optimizer. Cutting them is
+      what gradient checkpointing does.  (DDP/ZERO shard the 20N;
+       checkpointing cuts the L*A activation term -- a THIRD axis.)
+
+========================================================================
+  SECTION B: vanilla backprop -- store ALL layers  (O(L) mem, O(L) compute)
+========================================================================
+L = 32 layers. The backward needs every layer's forward activation,
+so we keep ALL of them for the whole backward pass.
+
+  stored layer activations : 32  (= L = 32)
+  recompute (layer-forwards): 0
+  compute (fwd + recompute + bwd=2x): 32 + 0 + 64 = 96 layer-fwd units
+  memory multiplier : 32x  (= L ; linear in depth)
+
+  [check] stored==L=32, recompute==0, compute==3L=96? True
+
+  ==> This is the default. Simple and fastest, but memory grows
+      linearly with depth -> the first thing to OOM as L or B grows.
+
+========================================================================
+  SECTION C: full recompute -- store NONE  (O(1) mem, O(L^2) compute)
+========================================================================
+L = 32 layers. Keep only the network input; recompute each layer's
+forward from scratch when its backward needs it.
+
+  stored layer activations : 1  (just the network input)
+  recompute (layer-forwards): 1+2+...+32 = 528  (= L(L+1)/2)
+  compute (fwd + recompute + bwd=2x): 32 + 528 + 64 = 624 layer-fwd units
+  memory multiplier : 1x  (= 1 ; O(1))
+
+  WHY O(L^2): to backprop layer i we must re-run forwards 1..i from
+  the input. Summed over all L layers that is 1+2+...+L = L(L+1)/2.
+
+  [check] stored==1, recompute==L(L+1)/2=528? True
+
+  ==> Tiny memory, but the O(L^2) compute is brutal: at L=32 the
+      backward alone redoes 528 layer-forwards -> 624 total
+      units vs vanilla's 96. That is 6.5x the compute.
+      No one trains this way -- it is the baseline the sqrt trick beats.
+
+========================================================================
+  SECTION D: selective sqrt(L) checkpointing -- the gold centerpiece
+========================================================================
+L = 32 layers. Keep activations only at every sqrt(L)-th layer ->
+ceil(sqrt(32)) = ceil(5.6569) = 6 checkpoints. Throw the
+rest away; recompute each segment in backward.
+
+  checkpoint layer indices (stored inputs): [0, 6, 12, 19, 25, 31]
+  stored layer activations : 6  (= ceil(sqrt(L)) = 6)
+  recompute (layer-forwards): 32  (one per non-checkpoint layer)
+  compute (fwd + recompute + bwd=2x): 32 + 32 + 64 = 128 layer-fwd units
+  memory multiplier : 6x  (O(sqrt L))
+
+  WHY O(L) compute: split L layers into ~sqrt(L) segments of ~sqrt(L)
+  layers. Backward of each segment recomputes its <= sqrt(L) layers from
+  its checkpoint input, once. Total recompute = sqrt(L) segments x
+  sqrt(L) layers = L layer-forwards = ONE extra network forward.
+
+  [check] stored==ceil(sqrt(32))==6, recompute==L=32, compute==4L=128? True
+
+  ==> THE SWEET SPOT. Memory drops 32/6 = 5.3x (from 32x to 6x)
+      for ONE extra forward. At L=32: 32x -> 6x memory, 128/96 = 1.33x the compute (~33% overhead).
+      (Chen 2016: '1000-layer net, 48G -> 7G with ~30% extra runtime'.)
+
+========================================================================
+  SECTION E: torch.utils.checkpoint API -- a real tiny correctness demo
+========================================================================
+torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False) wraps a
+sub-network: during the FORWARD it runs fn but DISCARDS fn's intermediate
+activations (saving memory); during BACKWARD it RE-RUNS fn to regenerate
+them on demand. The recomputed activations feed an identical backward, so
+the GRADIENTS are bit-identical -- checkpointing is exact, not approximate.
+
+tiny net: 4 layers, D_in=8, D_hidden=16, x (2, 8)
+checkpointed segment: blocks 1-2 (use_reentrant=False)
+
+  forward output match?      max|h_ref - h_ckp| = 0.00e+00
+  loss match?                |loss_ref - loss_ckp| = 0.00e+00
+  input-grad match?          max|dx_ref - dx_ckp| = 0.00e+00
+
+  [check] forward bit-identical? True
+  [check] GRADIENT bit-identical? True  <- the whole point:
+          checkpointing trades MEMORY for COMPUTE, NOT accuracy.
+
+  use_reentrant flag (the #1 pitfall, learning_guide 04 §11 #10):
+    use_reentrant=False -> MODERN impl. Supports DDP/FSDP, double-
+                           backward, dropped-inputs. RECOMMENDED.
+    use_reentrant=True  -> LEGACY reentrant impl. Needed only for
+                           very old patterns; breaks under DDP/FSDP.
+  In torch >= 2.1 you get a UserWarning if you omit the flag; in a
+  future release use_reentrant=True will be removed. Always pass
+  use_reentrant=False explicitly.
+
+========================================================================
+  SECTION F: the ~33% compute-overhead tradeoff (where the number comes from)
+========================================================================
+Measure compute in LAYER-FORWARD units, with backward ~= 2x forward:
+
+    vanilla step   = fwd(32) + bwd(64)           = 96 units
+    selective step = fwd(32) + recompute(32) + bwd(64) = 128 units
+    overhead       = (128 - 96) / 96 = +33.3%
+
+That +33% is the famous '~33%'. It is ONE extra forward
+(the recompute) on top of a step that already costs ~3 forwards
+(1 fwd + 1 bwd, bwd ~= 2 fwd). So 1 / 3 = 33%.
+
+Counted other ways (same fact, different denominator):
+    vs forward only : +100%   (the forward runs twice)
+    vs wall-clock    : ~30% in practice (Chen 2016: '30% extra runtime')
+    learning_guide  : '30-40% more computation' (04 §8)
+
+  [check] overhead == 1/3 == +33.33%? True
+
+  ==> Selective checkpointing: ~sqrt(L)x less memory for ~33% more
+      compute. Almost always worth it when activations are the bottleneck.
+
+========================================================================
+  SECTION G: the GOLD table -- memory + compute across 3 strategies (L=32)
+========================================================================
+L = 32 layers. Memory in units of A (one layer's activation bytes).
+
+| strategy           | stored | memory mult | recompute | compute (units) | vs vanilla |
+|--------------------|--------|-------------|-----------|-----------------|------------|
+| store-all (vanilla) |     32 |          32x |         0 |              96 |      1.00x |
+| full-recompute       |      1 |           1x |       528 |             624 |      6.50x |
+| selective sqrt(L)    |      6 |           6x |        32 |             128 |      1.33x |
+
+Concrete (LLaMA-3 8B per-seq activation A = 1*4096*4096*2 = 33.55 MB, B=1):
+
+| strategy           | memory mult | activation memory | compute (vs vanilla) |
+|--------------------|-------------|-------------------|----------------------|
+| store-all (vanilla) |          32x |          1073.7 MB |                1.00x |
+| full-recompute       |           1x |            33.6 MB |                6.50x |
+| selective sqrt(L)    |           6x |           201.3 MB |                1.33x |
+
+GOLD PINS (gradient_checkpointing.html recomputes these, L=32):
+  store-all  memory mult = 32
+  full-rec.  memory mult = 1
+  selective  memory mult = ceil(sqrt(32)) = 6    (checkpoints)
+  selective  recompute   = 32        (= L ; one extra forward)
+  selective  overhead    = +1/3 = +33.33%
+
+  [check] mults {32, 1, 6}, recompute==32, overhead==+33.33%? True
+
+sweep L -- selective memory multiplier ceil(sqrt(L)) vs O(L) store-all:
+| L   | store-all (L) | selective ceil(sqrt L) | full-recompute (1) |
+|-----|---------------|------------------------|--------------------|
+| 4   |             4 |                      2 |                  1 |
+| 8   |             8 |                      3 |                  1 |
+| 16  |            16 |                      4 |                  1 |
+| 32  |            32 |                      6 |                  1 |
+| 64  |            64 |                      8 |                  1 |
+| 128 |           128 |                     12 |                  1 |
+| 1000 |          1000 |                     32 |                  1 |
+
+READ: store-all grows LINEARLY with L; selective grows as sqrt(L)
+(flattens fast); full-recompute is always 1x. At L=1000: store-all =
+1000x, selective = ceil(sqrt(1000)) = 32x. That is
+the Chen 2016 result (1000-layer net, 48G -> 7G at ~30% extra runtime).
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

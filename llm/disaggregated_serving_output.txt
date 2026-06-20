@@ -1,0 +1,268 @@
+disaggregated_serving.py - reference impl (FAITHFUL SIMULATION).
+All numbers below feed DISAGGREGATED_SERVING.md. torch = 2.12.1
+NOTE: no real cluster/RDMA/two-pool split here; the pools are two Node
+objects and the 'KV transfer' is a tensor clone. Bandwidth/latency
+numbers are REAL published hardware figures; prefill/decode latencies
+(80ms / 20ms) are representative empirical.
+
+
+========================================================================
+  SECTION A: prefill vs decode characteristics
+========================================================================
+An LLM request has two phases with OPPOSITE computational profiles:
+
+| characteristic      | PREFILL                          | DECODE                          |
+|---------------------|----------------------------------|----------------------------------|
+| input size          | full prompt (S tokens)           | exactly 1 token                     |
+| compute type        | COMPUTE-bound (big S-token       | MEMORY-bound (1 token, reads all   |
+|                     |  matmul, high arithmetic int.)   |  weights per step)                 |
+| GPU utilization     | near 100% if S large             | low (weight-bandwidth limited)     |
+| key metric          | TTFT (Time-To-First-Token)       | ITL / TPOT (per-token latency)      |
+| batching strategy   | large chunks to saturate compute | continuous batching, many streams   |
+| happens             | ONCE per request                 | max_tokens times                   |
+| optimal parallelism | tensor parallel (low TTFT)       | data/pipeline parallel (high throughput)|
+
+Arithmetic intensity (AI = FLOPs / bytes_moved) vs A100 crossover:
+  A100 crossover = peak_TFLOPS / HBM_BW = 3e+14 / 2e+12 = 156 FLOP/B
+
+  PREFILL (S=512): AI = 2*N*512 / 2*N*2 = 512/2 = 256 FLOP/B
+    256 > 156 crossover -> COMPUTE-bound (saturates GPU math units)
+
+  DECODE (S=1):     AI = 2*N*1 / 2*N*2 = 1/2 = 0 FLOP/B
+    0 < 156 crossover -> MEMORY-bound (starved for weight bandwidth)
+
+[check] prefill is COMPUTE-bound (AI 256 >= crossover 156) : True -> OK
+[check] decode is MEMORY-bound  (AI 0 < crossover 156)  : True -> OK
+
+Because the two phases stress DIFFERENT GPU resources (math units
+vs memory bandwidth), co-locating them on one GPU means each blocks
+the other — the seed of the interference problem (Section B).
+
+========================================================================
+  SECTION B: co-location interference (🔗 SCHEDULER baseline)
+========================================================================
+FAITHFUL SIMULATION: representative latencies for a ~8B model on A100.
+  decode_step = 20 ms (batch of ~32 concurrent decode streams)
+  prefill_512 = 80 ms (batch=1 prefill of 512 tokens)
+
+🔗 SCHEDULER co-locates prefill + decode on ONE GPU with prefill
+priority: when a prefill arrives, it runs first and the decode batch
+WAITS for the full prefill duration. The decode ITL for that step =
+prefill_ms + decode_ms (serialized).
+
+Timeline (decode batch running; 512-token prefill arrives at steps 6, 11):
+
+| step | CO-LOCATED (1 GPU)                    | DISAGGREGATED (2 pools)            |
+|      | GPU runs        | decode ITL  | note  | prefill pool | decode pool | decode ITL |
+|------|-----------------|-------------|-------|--------------|-------------|------------|
+| 1    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 2    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 3    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 4    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 5    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 6    | PREFILL(80ms)   |       100 ms | ITL SPIKE | prefill(80ms) | decode(20ms) |      20 ms |
+| 7    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 8    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 9    | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 10   | decode(20ms)    |        20 ms |       | idle         | decode(20ms) |      20 ms |
+| 11   | PREFILL(80ms)   |       100 ms | ITL SPIKE | prefill(80ms) | decode(20ms) |      20 ms |
+
+CO-LOCATED ITL:   avg=35 ms, max=100 ms (spike = 80+20 = 100 ms)
+DISAGGREGATED ITL: avg=20 ms, max=20 ms (flat; prefill runs in parallel)
+
+ITL spike factor: co-located max / decode baseline = 5.0x
+ITL stability:    disaggregated max / baseline = 1.0x
+
+[check] co-located max ITL == prefill+decode (100 ms) : True -> OK
+[check] disaggregated max ITL == decode (20 ms, no spike) : True -> OK
+
+This is the WHY of disaggregation: a 5x ITL spike breaks latency SLAs.
+Splitting onto separate pools eliminates the interference entirely.
+
+========================================================================
+  SECTION C: disaggregated architecture (prefill pool -> RDMA -> decode pool)
+========================================================================
+DistServe (OSDI'24) and Mooncake (FAST'25) split the two phases onto
+SEPARATE GPU POOLS, connected by a high-speed RDMA/RoCEv2 link:
+
+  +-------------------+         +-------------------+
+  |  PREFILL POOL     |  KV     |  DECODE POOL      |
+  |  (compute-tuned)  |---->----|  (memory-tuned)   |
+  |  tensor parallel  |  RDMA   |  many concurrent  |
+  |  for low TTFT     |  RoCEv2 |  streams, low ITL |
+  +-------------------+         +-------------------+
+           ^                              |
+           |       Request Router          |
+           +-------- (routes reqs) <-------+
+                    (tokens out)
+
+| decision        | prefill pool                | decode pool
+|-----------------|------------------------------|---------------------
+| GPU type        | compute-optimized            | memory-bandwidth-optimized
+| parallelism     | tensor parallel (low TTFT)   | data/pipeline parallel
+| batch shape     | large S-token chunks         | many 1-token streams
+| resource stress | math units (FLOPs)           | HBM bandwidth
+| metric          | TTFT                         | ITL / TPOT
+| KV cache role   | PRODUCES KV (writes it)      | CONSUMES KV (reads it)
+
+A request flows: router -> prefill pool (compute KV, emit first token)
+-> KV transferred over RDMA -> decode pool (receives KV, decodes
+autoregressively). The two pools are tuned INDEPENDENTLY — making TTFT
+better never hurts ITL and vice versa. That decoupling is the win.
+
+DistServe co-optimizes: given the app's TTFT and TPOT SLOs, pick the
+ratio of prefill to decode GPUs (e.g. 2P:1D) and the parallelism per
+pool to maximize goodput. Result: up to 7.4x more requests within SLOs.
+
+[check] prefill pool has 2 nodes, decode pool has 2 nodes (disaggregated) : True -> OK
+
+========================================================================
+  SECTION D: KV transfer prefill pool -> decode pool (🔗 LMCACHE)
+========================================================================
+FAITHFUL SIMULATION: the KV 'transfer' is a deterministic tensor copy.
+Real latency = Size_KV / bandwidth (Section F). The byte-equality
+proof shows the decode pool receives EXACTLY the KV the prefill pool
+produced — attention cannot tell transferred from locally-computed.
+
+Prompt = [100, 101, 102, 103, 104, 105] (tiny demo: D=8, 1 layer, 1 KV head; REALISTIC
+dims in Section F: layers=32, n_kv_heads=8, head_dim=128, S=512)
+
+Step 1: PREFILL pool node0 computes KV for req42
+  KV shape = (6, 8)  (S=6, D=8)
+  KV stored in prefill node0 VRAM
+
+Step 2: TRANSFER KV over RDMA -> decode pool node0
+  decode node0 block table: logical 0 -> page 0
+  bytes moved (tiny demo) = 192 B
+
+Step 3: DECODE pool gathers KV via block table (🔗 PAGED_ATTENTION)
+  gathered shape = (6, 8)
+  [check] received KV == original KV (byte-equal) : True -> OK
+
+The decode pool now holds the exact KV the prefill pool produced. The
+paged attention kernel (🔗 PAGED_ATTENTION) reads it like any local KV
+— the transfer is transparent. The real cost is Size_KV / bandwidth
+(Section F), which is far smaller than re-prefilling on the decode node.
+
+========================================================================
+  SECTION E: Mooncake KV-centric prefix-aware routing (🔗 LMCACHE)
+========================================================================
+Mooncake (Kimi/Moonshot AI, FAST'25) treats all CPU+GPU+SSD memory as
+a unified KV hierarchy and ROUTES each request to the prefill node
+that already holds the longest prefix of its KV (prefix hit). Only the
+MISSING suffix is computed + transferred, not the whole prompt.
+
+Setup: 3 prefill nodes with cached prefixes:
+  system_prompt = [100, 101, 102, 103, 104, 105, 106, 107] (8 tokens)
+  node0 cached: system_prompt + query_a [200, 201, 202] (11 tokens)
+  node1 cached: system_prompt only (8 tokens)
+  node2 cached: system_prompt + query_b [203, 204, 205] (11 tokens)
+
+New request arrives: system_prompt + query_a + new_question
+  full prompt = [100, 101, 102, 103, 104, 105, 106, 107, 200, 201, 202, 300, 301] (13 tokens)
+
+Router checks each prefill node for the longest cached prefix:
+
+| node | longest cached prefix match                | hit tokens | compute |
+|------|---------------------------------------------|------------|---------|
+| 0    | first 11 tokens                             | 11         | 2       |
+| 1    | first 8 tokens                              | 8          | 5       |
+| 2    | first 8 tokens                              | 8          | 5       |
+
+Router picks node0 (longest prefix hit = 11 tokens).
+  only 2 NEW tokens need prefill (vs 13 from scratch).
+  KV transfer = 2 tokens' worth (not the full prompt).
+  prefix savings: 11/13 tokens = 85% of prefill SKIPPED.
+
+[check] router picks node0 (longest prefix = 11 tokens) : True -> OK
+[check] prefix hit = 11 tokens (system+query_a, not just system) : True -> OK
+
+This is Mooncake's KV-centric routing: the global KV index (🔗 LMCACHE)
+lets the router find prefill nodes with cached prefixes, so each
+request recomputes only what is NOT already cached. The same idea
+also drives 🔗 PREFIX_CACHE / RadixAttention within one node; Mooncake
+extends it across the whole prefill pool.
+
+========================================================================
+  SECTION F: the latency budget (transfer vs prefill) — the GOLD numbers
+========================================================================
+Reference model (Llama-3-8B-class GQA transformer):
+  layers=32, n_q_heads=32, n_kv_heads=8 (GQA 4:1),
+  head_dim=128, hidden=4096, inter=14336 (SwiGLU), bytes=2
+  body params = 6,979,321,856 (~6.98 B, excl. embeddings)
+  prompt S = 512 tokens
+  reference GPU: A100 80GB SXM (HBM 2.0 TB/s, 312 TFLOPS bf16 peak)
+
+Size_KV = 2(K+V) * layers * n_kv_heads * head_dim * S * bytes
+        = 2 * 32 * 8 * 128 * 512 * 2
+        = 67,108,864 bytes = 64.0 MiB
+
+Latency_transfer = Size_KV / bandwidth, per network (REAL bandwidths):
+
+| path                              | bandwidth    | Latency_transfer | vs prefill floor |
+|-----------------------------------|--------------|------------------|------------------|
+| Intra-node NVLink (GPU<->GPU)     | 600.0 GB/s   |       0.1118 ms |    204.8x faster    |
+| RoCEv2 / IB 400 Gbps (cross-node) | 50.0 GB/s    |       1.3422 ms |     17.1x faster    |
+| RoCEv2 / IB 200 Gbps (cross-node) | 25.0 GB/s    |       2.6844 ms |      8.5x faster    |
+| RoCEv2 / 100 GbE (cross-node)     | 12.5 GB/s    |       5.3687 ms |      4.3x faster    |
+
+Recompute (prefill) roofline FLOOR at batch=1:
+  mem-bound (read all weights once) = 13.959 ms
+  compute-bound (2*N*S FLOPs / peak) = 22.906 ms
+  arithmetic intensity = 256 FLOP/B ; crossover = 156 FLOP/B
+  -> COMPUTE-bound; floor = 22.906 ms (IDEAL; real prefill ~80 ms)
+
+BUDGET VERDICT (primary: 400G RoCEv2 transfer):
+  Latency_transfer = 67,108,864 / 5e+10 = 1342.18 us (1.3422 ms)
+  Latency_prefill  (roofline floor) = 22.906 ms
+  Latency_prefill  (empirical ~80 ms)
+  transfer < prefill ? True  (floor/transfer = 17.1x; empirical/transfer = 59.6x)
+
+The KV transfer (1.34 ms) is a TINY fraction of the prefill (80 ms),
+so disaggregation's KV-transfer overhead barely raises TTFT while
+completely eliminating ITL spikes (Section B). This is why DistServe
+and Mooncake split the pools: the transfer cost is negligible compared
+to the prefill, and the interference elimination is huge.
+
+[check] Latency_transfer < Latency_prefill_floor : True -> OK
+
+GOLD for .html: Size_KV(S=512) = 67108864 bytes (64.0 MiB);
+  Latency_transfer(S=512, BW=5e+10) = 1342.18 us (1.3422 ms);
+  Latency_prefill (floor) = 22.906 ms;
+  verdict transfer<prefill = True.
+
+========================================================================
+  SECTION G: co-located vs disaggregated — TTFT / ITL / goodput contrast
+========================================================================
+End-to-end comparison for a single request (512-token prompt):
+
+| metric              | CO-LOCATED (1 GPU)         | DISAGGREGATED (2 pools)         |
+|---------------------|----------------------------|-------------------------------|
+| TTFT (no contention)| 80 ms (prefill)            | 80 + 1.3 = 81.3 ms (prefill+transfer)|
+| TTFT (under load)   | 80+ ms (waits for decode)  | ~81 ms (prefill pool free)   |
+| ITL baseline        | 20 ms                     | 20 ms                        |
+| ITL under prefill   | 100 ms (SPIKE!)       | 20 ms (no spike)             |
+| parallelism tuning  | coupled (one GPU)          | independent per pool        |
+| goodput (SLO-bound) | limited by interference    | up to 7.4x higher           |
+
+TTFT overhead of disaggregation: +1.34 ms transfer = +1.68% of the 80 ms prefill.
+  -> negligible TTFT cost (1.68%) for a huge ITL gain
+     (no 100ms spikes).
+
+THE TRADEOFF AND WHY IT'S WORTH IT:
+  Cost:  TTFT rises by 1.34 ms (1.68%) — the KV transfer.
+  Gain:  ITL spikes vanish (max 100ms -> 20ms).
+  Gain:  prefill and decode pools tuned INDEPENDENTLY (tensor parallel
+         for TTFT, data parallel for ITL).
+  Gain:  goodput up to 7.4x (DistServe) / up to 525% throughput (Mooncake).
+
+[check] TTFT overhead < 5% of prefill (1.68%) : True -> OK
+[check] disaggregated ITL has no prefill-induced spike : True -> OK
+
+This is the one-line summary: disaggregation trades a ~2% TTFT increase
+for the elimination of ITL spikes AND independent per-phase optimization.
+That trade is why DistServe, Mooncake, Splitwise, and DejaVu all adopt it.
+
+========================================================================
+  DONE - all sections printed; disaggregated serving gold = OK
+========================================================================

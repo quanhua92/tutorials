@@ -5,7 +5,7 @@
 > re-paste. Nothing here is hand-computed.
 >
 > **Sibling guides:** [`ROPE.md`](./ROPE.md) (rotation on the `L` axis,
-> `offset=slice(m, m+1)` for decode) and a planned `KV_CACHE.md` (the `offset`
+> `offset=slice(m, m+1)` for decode) and [`KV_CACHE.md`](./KV_CACHE.md) (the `offset`
 > and `k=(S−L)` are the same idea wearing different hats). Cross-references are
 > marked 🔗 throughout.
 >
@@ -301,7 +301,7 @@ garbage. **Section 4** shows this bug in real numbers.
 > 🔗 The `k=(S−L)` offset here is the *attention-side twin* of RoPE's
 > `offset=slice(m, m+1)` ([`ROPE.md`](./ROPE.md) §10). Both encode "during
 > decode, the new token sits at position `current_len`, not zero". The KV cache
-> (planned `KV_CACHE.md`) is what makes `S > L` possible: it stores the past
+> ([`KV_CACHE.md`](./KV_CACHE.md)) is what makes `S > L` possible: it stores the past
 > keys/values so each decode step only processes the one new token.
 
 ---
@@ -581,8 +581,8 @@ graph LR
 
 > 🔗 The `k=(S−L)` offset and RoPE's `offset=slice(m,m+1)` are the same idea on
 > two different axes (attention-keys vs cos/sin-table rows). Read
-> [`ROPE.md`](./ROPE.md) §10 for the rotation-side version, and watch for
-> `KV_CACHE.md` (planned) which will animate prefill → decode → rewind using
+> [`ROPE.md`](./ROPE.md) §10 for the rotation-side version, and see
+> [`KV_CACHE.md`](./KV_CACHE.md) which animates prefill → decode → rewind using
 > both offsets together.
 
 ---

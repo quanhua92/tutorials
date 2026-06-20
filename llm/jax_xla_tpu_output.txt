@@ -1,0 +1,279 @@
+jax_xla_tpu.py - JAX/XLA/TPU pipeline + Splash Attention (faithful sim).
+torch = 2.12.1
+PLATFORM: NO TPU / NO real JAX on this Mac. Tracing, fusion, systolic,
+and Pallas Grid/BlockSpec are SIMULATED [SIM]; the Splash=Flash online-
+softmax MATH and the HBM-write COUNTS are EXACT. See JAX_XLA_TPU.md.
+
+
+========================================================================
+  SECTION A: the eager HBM-write problem (why trace at all?)
+========================================================================
+PyTorch on a GPU is EAGER: each op runs the moment Python sees it and
+writes its result to slow HBM. For a chain like
+
+    h = x @ W1        # dot_general  -> writes [..,d1] to HBM
+    h = h + b1        # add          -> writes [..,d1] to HBM
+    h = silu(h)       # silu         -> writes [..,d1] to HBM
+    y = h @ W2        # dot_general  -> writes [..,d2] to HBM
+
+that is FOUR intermediate buffers shuttled through HBM. Each write is
+bandwidth the GPU pays for nothing — the next op reads it straight back.
+LLM steps are MEMORY-BANDWIDTH bound, so those round-trips dominate.
+
+JAX's answer: do NOT run the function eagerly. TRACE it once with abstract
+inputs into a jaxpr (Section B), let XLA FUSE the element-wise chain into
+one kernel (Section C), so intermediates live only in fast on-chip memory.
+
+| regime | op chain silu(x@W1+b1)@W2 | HBM intermediate writes |
+|---|---|---|
+| EAGER (PyTorch) | each op writes its output to HBM | 4 |
+| TRACED + FUSED (JAX/XLA) | element-wise chain fused; only final writes | 1 |
+
+=> 4x fewer HBM round-trips for the SAME math. The rest of this file
+   shows the mechanism (tracing, fusion, systolic, Pallas) and proves the
+   math is unchanged (Splash == Flash == naive, Section F).
+
+========================================================================
+  SECTION B: jaxpr tracing  (@jax.jit + Tracer)  [SIM]
+========================================================================
+Real JAX: @jax.jit wraps fn in a PjitFunction. On the FIRST call it hashes
+the input signature; on a cache MISS it traces the fn with abstract Tracer
+inputs (shapes only, no data), recording each primitive op into a jaxpr.
+Source: Frostig, Johnson, Leary, 'Compiling machine learning programs via
+high-level tracing', SysML 2018 — 'to compile we first monitor its
+execution once in Python'. (NOTE: this is the formal JAX paper; there is
+NO arXiv id for it — see Sources.)
+
+The traced jaxpr for  f(x) = silu(x @ W1 + b1) @ W2:
+
+jaxpr (traced equations):
+  dot1 = dot_general(x, W1)    : (1, 8)
+  a2 = add(dot1, b1)    : (1, 8)
+  s3 = silu(a2)    : (1, 8)
+  dot4 = dot_general(s3, W2)    : (1, 4)
+
+[check] traced eqns = 4  (anchors=2, element-wise=2)
+[check] jaxpr has 4 eqns (dot, add, silu, dot):  OK
+
+Key: the Tracer ran NO real math — it only RECORDED the op sequence.
+That recording is the input to the XLA fusion pass (Section C). In real
+JAX this is cached keyed by (shapes, dtypes); a re-call with the same
+signature skips tracing and runs the already-compiled binary.
+
+========================================================================
+  SECTION C: XLA fusion  (eager 4 HBM writes -> fused 1)  [SIM]  GOLD
+========================================================================
+XLA takes the jaxpr and FUSES producer-consumer chains so intermediates
+flow register-to-register instead of round-tripping to HBM. The rule this
+simulation applies (the bandwidth-optimal bound fusion drives toward):
+
+  EAGER : every op materializes its output to HBM  (1 write per equation).
+  FUSED : a variable is written to HBM ONLY IF it is the function output
+          (0 consumers) or a fan-out (>=2 consumers). A straight-line
+          single-user chain stays on-chip end to end.
+
+The 4 traced equations and where each result lands:
+
+| # | equation                   | kind        | consumers | writes HBM eager? | writes HBM fused? |
+|---|----------------------------|-------------|-----------|------------------|-------------------|
+| 0 | dot1 = dot_general(x, W1)       | anchor      | 1         | YES              | no (on-chip)      |
+| 1 | a2 = add(dot1, b1)              | element-wise | 1         | YES              | no (on-chip)      |
+| 2 | s3 = silu(a2)                 | element-wise | 1         | YES              | no (on-chip)      |
+| 3 | dot4 = dot_general(s3, W2)      | anchor      | 0 (output) | YES              | YES (final output) |
+
+eager HBM writes  = 4   (one per equation)
+fused HBM writes  = 1   (only final output materialized)
+
+[GOLD PIN] eager = 4 HBM writes  ->  XLA-fused = 1 HBM write   (4 -> 1)
+[check] eager_writes == 4 AND fused_writes == 1:  OK
+
+Read it like a story: dot1's result is consumed only by add -> stays
+on-chip; add's result is consumed only by silu -> stays on-chip; silu's
+result is consumed only by dot2 -> stays on-chip; dot2 is the final output
+-> the ONLY thing written to HBM. Four eager round-trips collapse to one.
+
+[SIM note] real XLA keeps large GEMM anchors as separate kernels, so the
+literal floor for TWO matmuls is 2. The model above pins the concept —
+collapse N intermediate writes toward 1 — which is what the lecture's
+'all ops fused into the GEMM' diagrams depict. The HBM-write COUNTS under
+this model are exact.
+
+========================================================================
+  SECTION D: TPU hardware  (MXU systolic, VMEM, ICI)
+========================================================================
+A TPU runs the compiled code on hardware that is nothing like a GPU:
+
+| unit | what it is | GPU analogue |
+|---|---|---|
+| MXU | Matrix multiply Unit: a SYSTOLIC array of MAC PEs (256x256 on real
+|     |  TPU). Weights sit STILL; activations flow through and partial sums
+|     |  accumulate across the grid WITHOUT writing back to memory. | tensor
+|     |  |  cores (but data-flow, not SIMT) |
+| VPU | Vector Processing Unit: 8x128 grid doing element-wise ops (exp, add,
+|     |  max, sum) on VREGs. | the SIMT cores doing element-wise work |
+| VMEM| Vector Memory: fast on-chip scratchpad (~tens of MiB) where tiles
+|     |  live. | GPU SRAM / shared memory |
+| SMEM| Scalar Memory: small, holds scalars + control flow. | scalar regs |
+| ICI | Inter-Chip Interconnect: direct low-latency links between TPU cores
+|     |  (pod-scale AllReduce/AllGather, no host/PCIe round-trip). | NVLink |
+
+Source: llmsys-12 lecture (TPU Ironwood: 256x256 MXU, ~0.1 GiB VMEM/core,
+1200 GB/s ICI) + Jouppi et al. TPU v1 (weight-stationary systolic).
+
+MXU weight-stationary systolic on a 3x3 grid (the teaching model):
+
+W (stationary weights, 3x3):
+tensor([[-0.1000,  0.8000,  0.9000],
+        [-1.1000,  1.7000, -0.9000],
+        [-0.4000,  1.2000,  0.1000]])
+X (streaming activations, 3x3):
+tensor([[-1.7000,  0.3000,  0.1000],
+        [ 0.1000,  0.2000,  1.4000],
+        [ 1.3000,  2.4000,  0.2000]])
+
+Weight-stationary flow: W[:,k] held fixed; X[k,:] streams in at step k;
+partial sum C += W[:,k] (outer) X[k,:] accumulates in the PEs (no HBM writeback):
+
+  step k=0: C += W[:,0] (x) X[0,:]  ->  C =
+tensor([[ 0.1700, -0.0300, -0.0100],
+        [ 1.8700, -0.3300, -0.1100],
+        [ 0.6800, -0.1200, -0.0400]])
+  step k=1: C += W[:,1] (x) X[1,:]  ->  C =
+tensor([[0.2500, 0.1300, 1.1100],
+        [2.0400, 0.0100, 2.2700],
+        [0.8000, 0.1200, 1.6400]])
+  step k=2: C += W[:,2] (x) X[2,:]  ->  C =
+tensor([[ 1.4200,  2.2900,  1.2900],
+        [ 0.8700, -2.1500,  2.0900],
+        [ 0.9300,  0.3600,  1.6600]])
+
+torch.matmul(W, X) reference:
+tensor([[ 1.4200,  2.2900,  1.2900],
+        [ 0.8700, -2.1500,  2.0900],
+        [ 0.9300,  0.3600,  1.6600]])
+
+[check] max|systolic - matmul| = 2.38e-07
+[check] weight-stationary systolic == torch.matmul (atol=1e-5):  OK
+
+For an N x N grid the wall-clock is the fill+drain latency = 3N-1 cycles
+(N cycles to fill the diagonal pipeline + N-1 to drain the last partial
+sums out). For N=256 that is 767 cycles per dense matmul — but each PE
+reuses its stationary weight 256 times, which is the whole efficiency win.
+
+========================================================================
+  SECTION E: Pallas Grid + BlockSpec  (HBM <-> VMEM tiling)  [SIM]
+========================================================================
+Pallas is the TPU kernel language. Three pieces:
+
+  Grid      : the parallel index space. prod(grid) kernel launches. The first
+              axes are PARALLEL (spread across TPU cores); the LAST axis is
+              the SERIAL reduction axis (each core accumulates along it).
+  BlockSpec : (block_shape, index_map) — for each grid coord, which HBM tile
+              gets copied into VMEM. Pallas pipelines the next HBM->VMEM copy
+              while the current tile computes (overlap I/O with compute).
+  kernel    : runs on VMEM refs only; writes the output ref. The output
+              accumulator lives in VMEM for the whole K-loop and is written
+              back to HBM exactly ONCE (single write-back).
+
+Why Pallas? XLA's auto-fusion can leave the MXU idle during softmax's exp/sum
+(the VPU bottlenecks). Pallas gives explicit control over HBM<->VMEM so the
+whole Scale->Softmax->V chain stays on-chip (=> Splash Attention, Section F).
+
+Block matmul  X(4,4) @ Y(4,4)  with tiles bm=bk=bn=2:
+  grid = (m//bm, n//bn, k//bk) = (2,2,2)  = 8 kernel launches
+
+Pallas block result Z:
+tensor([[ 0.0600, -2.2600,  1.7500,  1.3700],
+        [-0.7800,  1.9900, -1.0500, -1.2200],
+        [-2.3000,  2.6900,  2.7200,  1.0500],
+        [ 0.7000,  0.8600, -2.5600, -2.5800]])
+torch.matmul(X, Y) reference:
+tensor([[ 0.0600, -2.2600,  1.7500,  1.3700],
+        [-0.7800,  1.9900, -1.0500, -1.2200],
+        [-2.3000,  2.6900,  2.7200,  1.0500],
+        [ 0.7000,  0.8600, -2.5600, -2.5800]])
+
+[check] max|pallas_block - matmul| = 2.38e-07
+[check] Pallas block matmul == torch.matmul (atol=1e-5):  OK
+
+The BlockSpec index_map is the HBM->VMEM mapping; the kernel's output ref
+is the VMEM accumulator; only ONE write-back to HBM happens per output tile.
+
+========================================================================
+  SECTION F: Splash Attention == FlashAttention == naive  (GOLD centerpiece)
+========================================================================
+Splash Attention is the tiled online-softmax attention kernel written in
+Pallas for the TPU. Its recurrence is MATHEMATICALLY IDENTICAL to
+FlashAttention (the GPU version): tile Q in row-tiles, stream K,V in
+col-tiles through VMEM, carry running (m, l, o) per query row, and rescale
+with exp(m_old - m_new) when the running max rises. The [N,N] score matrix
+is NEVER written to HBM. (🔗 FLASH_ATTENTION.md — same math, GPU vs TPU.)
+
+Inputs: N=8, d=8, scale=1/sqrt(d)=0.3536, Br=Bc=4 (=> Tr=2 Q-tiles, Tc=2 K/V-tiles)
+
+Anchor recurrence (web-verified — identical to flash_attention.py):
+  m_new = max(m_old, rowmax(s))
+  p     = exp(s - m_new)
+  l_new = exp(m_old - m_new) * l_old + rowsum(p)
+  o_new = exp(m_old - m_new) * o_old + p @ v_tile
+  final: out_row = o / l
+
+Tiled (Splash) output, row q=0:
+  [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+Naive output,          row q=0:
+  [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+
+[check] max|splash - naive| over all 64 entries = 2.98e-08
+[check] Splash Attention == naive attention (atol=1e-5):  OK  (EXACT)
+
+[check] Splash q=0 == flash_attention.py GOLD PIN:  OK
+       (same seed=0 inputs => identical numbers => the math is
+        hardware-agnostic: GPU (Flash), TPU (Splash), CPU (here) agree.)
+
+========================================================================
+  SECTION G: eager vs fused HBM-write scaling  (the 4 -> 1 win generalizes)
+========================================================================
+The fusion win scales with the LENGTH of the element-wise chain fused.
+For a chain of E element-wise ops hanging off one matmul anchor, eager
+writes (E+1) intermediate buffers; XLA fuses them so only the final
+result writes HBM. The win ratio is (E+1) : 1.
+
+| element-wise ops fused (E) | eager HBM writes | fused HBM writes | win |
+|---|---|---|---|
+| 0 | 1 | 1 | 1x |
+| 1 | 2 | 1 | 2x |
+| 2 | 3 | 1 | 3x |
+| 3 | 4 | 1 | 4x |
+| 5 | 6 | 1 | 6x |
+| 9 | 10 | 1 | 10x |
+
+Our gold f(x)=silu(x@W1+b1)@W2 has E=2 element-wise ops (add, silu) ->
+eager 4 writes, fused 1 write, a 4x win.
+
+Caveat: fusion only helps the MEMORY-BANDWIDTH-bound part. A pure matmul
+is compute-bound and fuses little. The big real-world win is exactly the
+attention/MLP epilogues (bias, activation, residual, layernorm) that XLA
+stitches onto their matmuls — and the extreme case, where the WHOLE softmax
+stays on-chip, is Splash Attention (Section F), which XLA auto-fusion cannot
+quite reach (it leaves the MXU idle during exp/sum) — hence Pallas.
+
+Put the three regimes side by side:
+| regime | who runs the op chain | HBM writes for silu(x@W1+b1)@W2 |
+|---|---|---|
+| EAGER PyTorch/CUDA | each op launched separately from Python | 4 |
+| JAX + XLA fusion | element-wise chain fused into the matmul kernel | 1 |
+| JAX + Pallas (Splash) | whole softmax stays in VMEM, one write-back | 1 |
+
+=> 🔗 CUDA_GRAPHS.md solves the LAUNCH-overhead problem (many kernels -> 1).
+   JAX/XLA fusion solves the MEMORY-bandwidth problem (many HBM writes -> 1).
+   Both collapse 'many small things' into 'one big thing' — different axes.
+
+========================================================================
+  GOLD PIN (for JAX_XLA_TPU.md + jax_xla_tpu.html)
+========================================================================
+Gold 1 (XLA fusion):  eager HBM writes = 4  ->  fused = 1   (4 -> 1)
+Gold 2 (Splash == Flash == naive):  q=0 out[0] = -0.0673  (== flash_attention.py GOLD PIN -0.0673)
+
+========================================================================
+  DONE - all sections printed, all [check] OK
+========================================================================

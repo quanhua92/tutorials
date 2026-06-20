@@ -1,0 +1,207 @@
+ktransformers_offload.py - reference impl (FAITHFUL SIMULATION).
+All numbers below feed KTRANSFORMERS_OFFLOAD.md. torch = 2.12.1
+NOTE: no real AMX/GPU split here; 'GPU'/'CPU' are tags on in-process
+tensors. Bandwidth/transfer numbers are REAL published figures.
+
+
+========================================================================
+  SECTION A: why a 671B MoE does NOT fit on one consumer GPU
+========================================================================
+DeepSeek-V3/R1: 671B total params, 37B active/token (🔗 MOE_ROUTING Section A).
+
+| precision      | bytes/param | model footprint    | fits 24 GB GPU? |
+|----------------|-------------|--------------------|-----------------|
+| FP16 / BF16    | 2           | 1342.00 GB         | NO (14.6x over)  |
+| W4A16 (4-bit)  | 0.5           | 335.50 GB          | NO (14x over)    |
+| W4A16 + ovh    | ~0.52       | 350.00 GB          | NO               |
+
+A 24 GB GPU holds 24.00 GB; the 4-bit model needs 350.00 GB -- ~15x too big.
+GPU-only serving is impossible on consumer hardware. We MUST offload
+most of the weights to the much larger (and cheaper per GB) CPU DRAM.
+
+[check] 4-bit model (350.00 GB) > 24 GB GPU : True -> OK
+
+========================================================================
+  SECTION B: naive LAYER OFFLOAD -- stream all weights every token
+========================================================================
+llama.cpp-style layer offload: for each token, pull every layer's
+weights across PCIe just-in-time, compute, discard.
+
+Transfer/token = model_size (the whole thing moves every token):
+
+  bytes/token = 350.00 GB = 3.500e+11 B
+
+  PCIe Gen4 x16 @ 64 GB/s: time/token = 3.50e+11 / 6.40e+10 = 5.4688 s -> 0.1829 tok/s (10.97 tok/min)
+  PCIe Gen5 x16 @ 128 GB/s: time/token = 3.50e+11 / 1.28e+11 = 2.7344 s -> 0.3657 tok/s (21.94 tok/min)
+
+At PCIe Gen4 the ceiling is 0.183 tok/s. For a 1000-token
+answer that is ~1.5 HOURS. The PCIe bus is saturated by the WEIGHTS.
+
+KEY: the weights are STATIC (stored once, identical every token) yet
+layer offload re-streams them every token. That is the waste.
+
+[check] layer-offload tok/s < 1.0 (unusable) : True -> OK
+
+GOLD (layer offload @ Gen4): 5.4688 s/tok, 0.1829 tok/s.
+
+========================================================================
+  SECTION C: KTransformers EXPERT OFFLOAD -- weights stay, activations fly
+========================================================================
+Split the layer:
+
+  [GPU VRAM]  embeddings + attention + router + shared expert
+              (the SMALL, HOT, frequently-touched parts)
+  [CPU DRAM]  the 256 routed EXPERT WEIGHTS (~330 GB, parked once)
+              the CPU runs the k=8 ACTIVE experts per token via AMX
+
+Per expert call, what crosses PCIe? Only the hidden state:
+
+  activation/expert-call = batch x hidden x bytes
+                         = 1 x 7168 x 2
+                         = 14336 B = 14.336 KB
+
+  PCIe Gen4 x16 @ 64 GB/s: time/call = 14336 / 6.40e+10 = 0.224 us  (microseconds, not seconds)
+
+  PCIe Gen5 x16 @ 128 GB/s: time/call = 14336 / 1.28e+11 = 0.112 us  (microseconds, not seconds)
+
+The weights NEVER cross PCIe per token -- they live in CPU DRAM.
+PCIe bandwidth stops being the bottleneck. The new bottleneck is
+CPU AMX throughput on the k active experts (Section E + F).
+
+[check] expert-call transfer < 1 ms : True -> OK
+
+GOLD (expert offload @ Gen4): 14336 B/call, 0.224 us/call.
+
+========================================================================
+  SECTION D: the GPU+CPU execution flow (tiny demo, D=8, E=4, k=2)
+========================================================================
+Forward one tiny layer. Attention is sketched as a no-op on the GPU
+(the focus here is the MoE split; 🔗 GQA / 🔗 ROPE cover attention).
+
+Input x: shape (1, 4, 8) = [B=1, L=4, D=8]
+
+Per-token router decisions (🔗 MOE_ROUTING Section B math):
+| m | routed experts | gate weights (nonzero)        | shared expert |
+|---|----------------|-------------------------------|---------------|
+| 0 | [1, 0]         | G1=0.5625, G0=0.4375          | always-on (GPU) |
+| 1 | [2, 1]         | G2=0.536, G1=0.464            | always-on (GPU) |
+| 2 | [3, 0]         | G3=0.5526, G0=0.4474          | always-on (GPU) |
+| 3 | [3, 0]         | G3=0.5004, G0=0.4996          | always-on (GPU) |
+
+MoE output y[0,0] (first 4 of 8): [+0.0091, +0.0094, -0.0033, -0.0009]
+
+Transfer bookkeeping for this forward (tiny demo):
+  active routed-expert calls (over all 4 tokens) = 8
+  bytes per direction per call (B*L*D*2) = 64
+  total bytes 'across PCIe' (both dirs) = 512 B = 512.0 B
+
+  (contrast: the tiny layer's routed+shared weight footprint at 4-bit
+   would be 960 B = 960.0 B; layer
+   offload would re-stream that EVERY token; KTransformers streams
+   only the 512.0 B of activations above.)
+
+[check] activation transfer (512 B) < weight footprint (960 B) : True -> OK
+
+========================================================================
+  SECTION E: CPU vectorization -- Intel AMX (and AVX-512 fallback)
+========================================================================
+The CPU must run the k active experts (SwiGLU GEMMs, 🔗 MLP_ACTIVATION)
+fast enough to not become the new bottleneck. Two x86 engines:
+
+| engine   | width              | data types   | role in KTransformers         |
+|----------|--------------------|--------------|-------------------------------|
+| AVX-512  | 512-bit SIMD (VNNI)| INT8         | fallback when no AMX (older)  |
+| AMX      | 8 tiles x 1024 B   | INT8, BF16    | primary: tiled matrix-multiply |
+
+AMX anatomy (VERIFIED, Intel): 8 two-dimensional TILE registers,
+each 1024 B (= 16 rows x 64 bytes), plus a TMUL (Tile Matrix
+Multiply) unit that does one tiled GEMM per instruction. Introduced with
+Sapphire Rapids (4th Gen Xeon, Jan 2023); on every Xeon core.
+
+Why it matters: a dual-socket Xeon with AMX sustains multi-TFLOP/s of
+INT8/BF16 GEMM -- enough that the k=8 active experts per token (each a
+small SwiGLU) compute in milliseconds, not the 5+ seconds layer offload
+spends just WAITING on PCIe. The expert weights are stored quantized
+(INT4/INT8, 🔗 QUANTIZATION) and dequantized into AMX tiles on the fly.
+
+AVX-512 (VNNI) is the older 512-bit SIMD path for INT8 dot-products;
+KTransformers uses it as a fallback on CPUs without AMX. AMX is strictly
+faster for the dense GEMM kernels because it operates on whole tiles
+(8 x 1024 B) per instruction, vs one 512-bit vector.
+
+NOTE (simulation): this Mac has no AMX. The expert GEMMs in this file
+are plain torch matmuls; the AMX throughput claim above is a published
+hardware fact, not a measured number from this run.
+
+[check] AMX tile storage = 8 x 1024 = 8 KB (matches Intel spec) : True -> OK
+
+========================================================================
+  SECTION F: why MoE SPARSITY is what makes expert offload feasible
+========================================================================
+Expert offload works because of MoE sparsity: per token, only k=8 of
+E=256 routed experts run (🔗 MOE_ROUTING Section 0). The other 248 are
+dormant -- their weights sit in CPU DRAM doing nothing this token.
+
+| design                     | experts running/token | CPU GEMMs/token |
+|----------------------------|-----------------------|-----------------|
+| DeepSeek-V3 MoE (sparse)   | k=8 of E=256        | 8 x SwiGLU      |
+| dense equivalent (all run) | all 256            | 256 x SwiGLU      |
+
+MoE sparsity cuts CPU expert compute by 256/8 = 32x vs a dense FFN of the same total capacity.
+Without sparsity, the CPU would have to run all 256 experts every
+token -- the CPU AMX throughput, not PCIe, would become the wall, and
+the model would be too slow to be useful on a single box.
+
+This is also why KTransformers targets MoE models specifically: the
+paper's title is '... Hybrid Inference for MoE Models' -- a dense LLM
+(e.g. Llama-70B) gets far less benefit because its FFN is dense and
+ALL of it must run every token regardless of where it lives.
+
+[check] E/k = 32 > 10 (sparsity pays off) : True -> OK
+
+========================================================================
+  SECTION G: the GOLD CENTERPIECE -- 350 GB weights vs KB activations
+========================================================================
+Side-by-side transfer budget per token. Bandwidths are REAL; the
+transport is a faithful simulation (no real KTransformers/AMX here).
+
+Single expert-call activation (the headline):
+  = batch x hidden x bytes = 1 x 7168 x 2 = 14336 B = 14.336 KB
+
+Full per-token activation accounting (worst case: k calls/layer, both dirs):
+  = k x layers x hidden x bytes x 2(dirs)
+  = 8 x 61 x 7168 x 2 x 2
+  = 13991936 B = 13.992 MB
+
+(Batched: 1 round-trip/layer = 1.749 MB; the truth is
+ between these and still microscopic vs the weights.)
+
+Layer offload re-streams EVERY token: 350.00 GB = 3.500e+11 B
+
+| scheme          | bytes/token   | time/token @ Gen4 64 GB/s | tok/s        |
+|-----------------|---------------|--------------------|--------------|
+| layer offload   | 350.00 GB     | 5.4688 s           | 0.1829       |
+| expert (1 call) | 14.336 KB     | 0.224 us          | 4464286 (uncapped) |
+| expert (full)   | 13.992 MB     | 218.624 us          | 4574 (uncapped)|
+
+Ratio (layer offload bytes / expert-offload bytes per token):
+  vs single expert call : 3.50e+11 / 1.43e+04 = 24,414,062x  (~24.4 million x)
+  vs full per-token      : 3.50e+11 / 1.40e+07 = 25,014x  (~25 thousand x)
+
+VERDICT: PCIe bandwidth is the WHOLE bottleneck for layer offload and
+NEGLIGIBLE for expert offload. KTransformers shifts the bottleneck from
+'streaming 350 GB of static weights' to 'running k=8 small AMX GEMMs on
+the CPU' -- a problem modern Xeons are built to solve. THAT is why a
+671B MoE model can run on one cheap GPU+CPU box at usable speed.
+
+[check] layer/expert byte ratio > 10,000x : True -> OK
+
+GOLD (the .html recomputes these):
+  layer_offload_time_gen4   = 5.4688 s/tok  (0.1829 tok/s)
+  expert_call_time_gen4     = 0.224 us/call
+  expert_full_time_gen4     = 218.624 us/tok
+  ratio (vs full per-token) = 25,014x
+
+========================================================================
+  DONE - all sections printed; KTransformers sim gold = OK
+========================================================================

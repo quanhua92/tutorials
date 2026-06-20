@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disaggregated Serving (DistServe / Mooncake) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --waste:#3d4452;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .rd{color:var(--red)}
+  .readout .or{color:var(--orange)}
+  .readout .mu{color:var(--muted)}
+  .readout .bl{color:#7ab8e0}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  /* ---- ITL timeline ---- */
+  .tltable{width:100%;border-collapse:collapse;font-size:.76rem;margin-top:.5rem;font-variant-numeric:tabular-nums}
+  .tltable th{color:var(--muted);font-weight:600;text-align:left;padding:3px 6px;border-bottom:1px solid var(--grid)}
+  .tltable td{padding:2px 6px;border-bottom:1px solid #0a0e14}
+  .tltable .spike{color:var(--red);font-weight:700}
+  .tltable .flat{color:var(--green);font-weight:700}
+  /* ---- latency bars ---- */
+  .latrow{display:flex;align-items:center;gap:.6rem;margin:.4rem 0;font-size:.84rem}
+  .latrow .lbl{width:130px;color:var(--muted);text-align:right;font-size:.78rem}
+  .barTrack{flex:1;height:22px;background:#0a0e14;border:1px solid #30363d;border-radius:5px;overflow:hidden;position:relative;min-width:120px}
+  .barFill{height:100%;transition:width .35s;display:flex;align-items:center;padding-left:7px;color:#012;font-weight:700;font-size:.7rem;font-variant-numeric:tabular-nums}
+  /* ---- pools ---- */
+  .pools{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.5rem}
+  .poolcard{flex:1;min-width:200px;background:#0a0e14;border:1px solid #30363d;border-radius:8px;padding:.6rem .7rem}
+  .poolcard.pf{border-color:var(--red)}
+  .poolcard.dp{border-color:var(--blue)}
+  .poolcard h4{margin:0 0 .35rem;font-size:.82rem}
+  .poolcard.pf h4{color:var(--red)}
+  .poolcard.dp h4{color:#7ab8e0}
+</style>
+</head>
+<body>
+  <h1>Disaggregated Serving &mdash; DistServe / Mooncake &mdash; interactive
+    <a class="badge" href="./DISAGGREGATED_SERVING.md">DISAGGREGATED_SERVING.md</a>
+    <a class="badge" href="./disaggregated_serving.py">disaggregated_serving.py</a></h1>
+  <div class="sub"><b>The two-kitchens idea:</b> co-locating prefill (<b style="color:var(--red)">compute-bound</b>, TTFT) and decode
+    (<b style="color:#7ab8e0">memory-bound</b>, ITL) on one GPU (🔗 <a href="./scheduler.html">SCHEDULER</a>) makes a long prefill block every decode &rarr;
+    <b style="color:var(--red)">ITL spikes</b> 20ms&rarr;100ms. DistServe/Mooncake split them onto <b style="color:var(--green)">separate pools</b> and
+    transfer the KV over RDMA. Every number is recomputed in JS from the <i>identical</i> formulas in
+    <code>disaggregated_serving.py</code> &mdash; <b>bandwidths are real; the transport is a faithful simulation.</b>
+    &nbsp;|&nbsp; <a href="./lmcache.html">LMCACHE</a> (KV transfer) &middot; <a href="./paged_attention.html">PAGED_ATTENTION</a> &middot; <a href="./kv_cache.html">KV_CACHE</a> (the paged bytes that move)</div>
+
+  <!-- ===== PANEL 1: PREFILL vs DECODE ===== -->
+  <h2>&#9312; Prefill vs decode &mdash; opposite computational profiles</h2>
+  <div class="panel">
+    <div class="readout" id="charReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Reading:</b> arithmetic intensity AI = S/bytes.
+      Prefill (S=512): AI=256 &ge; crossover 156 &rarr; <b style="color:var(--red)">COMPUTE-bound</b> (saturates math units).
+      Decode (S=1): AI=0 &lt; 156 &rarr; <b style="color:#7ab8e0">MEMORY-bound</b> (starved for weight BW).
+      They stress DIFFERENT resources &rarr; co-location = interference.
+      See <a href="./DISAGGREGATED_SERVING.md#1-prefill-vs-decode--opposite-computational-profiles--section-a-output">DISAGGREGATED_SERVING.md &sect;1</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 2: CO-LOCATION INTERFERENCE TIMELINE ===== -->
+  <h2>&#9313; Co-location interference &mdash; the ITL spike (🔗 SCHEDULER baseline)</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>decode step (ms) <input type="range" id="decodeMs" min="5" max="40" value="20" step="1">
+        <span class="val" id="decodeMsVal">20</span></label>
+      <label>prefill 512 tok (ms) <input type="range" id="prefillMs" min="20" max="200" value="80" step="5">
+        <span class="val" id="prefillMsVal">80</span></label>
+      <label>prefill every N steps <input type="range" id="pfEvery" min="3" max="10" value="5" step="1">
+        <span class="val" id="pfEveryVal">5</span></label>
+    </div>
+    <table class="tltable" id="timeline"></table>
+    <div class="readout" id="itlSummary"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag the sliders. <b style="color:var(--red)">Co-located</b>: when a prefill arrives, the decode batch waits &rarr; ITL = prefill + decode (spike!).
+      <b style="color:var(--green)">Disaggregated</b>: prefill runs on a separate pool &rarr; decode ITL stays flat.
+      See <a href="./DISAGGREGATED_SERVING.md#2-the-co-location-interference--section-b-output--scheduler-baseline">DISAGGREGATED_SERVING.md &sect;2</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 3: THE TWO POOLS ===== -->
+  <h2>&#9314; The disaggregated architecture &mdash; prefill pool &rarr; RDMA &rarr; decode pool</h2>
+  <div class="panel">
+    <div class="pools">
+      <div class="poolcard pf">
+        <h4>PREFILL POOL (compute-tuned)</h4>
+        <div style="font-size:.78rem;color:var(--ink)">
+          &bull; tensor parallel (low TTFT)<br>
+          &bull; large S-token chunks<br>
+          &bull; saturates math units<br>
+          &bull; <b>PRODUCES</b> KV
+        </div>
+      </div>
+      <div class="poolcard dp">
+        <h4>DECODE POOL (memory-tuned)</h4>
+        <div style="font-size:.78rem;color:var(--ink)">
+          &bull; data/pipeline parallel<br>
+          &bull; many 1-token streams<br>
+          &bull; saturates HBM bandwidth<br>
+          &bull; <b>CONSUMES</b> KV
+        </div>
+      </div>
+    </div>
+    <div class="readout" id="archNote" style="margin-top:.6rem"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Reading:</b> after prefill, the KV is transferred over RDMA to the decode pool's block table (🔗 <a href="./lmcache.html">LMCACHE</a> / <a href="./paged_attention.html">PAGED_ATTENTION</a>).
+      The two pools are tuned <b>independently</b> &mdash; making TTFT better never hurts ITL.
+      See <a href="./DISAGGREGATED_SERVING.md#3-the-disaggregated-architecture--section-c-output">DISAGGREGATED_SERVING.md &sect;3</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 4: LATENCY BUDGET (GOLD) ===== -->
+  <h2>&#9315; The budget: is KV transfer cheaper than re-prefilling? <span style="color:var(--green);font-size:.8rem">(GOLD)</span></h2>
+  <div class="panel">
+    <div class="controls">
+      <label>prompt length S <input type="range" id="s" min="64" max="4096" value="512" step="64">
+        <span class="val" id="sVal">512</span></label>
+      <label>transfer network
+        <select id="bw">
+          <option value="600e9">Intra-node NVLink &mdash; 600 GB/s</option>
+          <option value="50e9" selected>RoCEv2 400G (cross-node) &mdash; 50 GB/s</option>
+          <option value="25e9">RoCEv2 200G (cross-node) &mdash; 25 GB/s</option>
+          <option value="12.5e9">RoCE 100G (cross-node) &mdash; 12.5 GB/s</option>
+        </select></label>
+    </div>
+    <div class="readout" id="budget"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag <b>S</b> and pick a <b>network</b>.
+      <b>Size_KV</b> grows with S; <b>Latency_transfer = Size_KV / BW</b>.
+      The <span style="color:var(--red)">red bar</span> is the prefill roofline FLOOR (real ~80ms is higher).
+      When the green bar stays under the red bar, <b>transfer wins</b> &mdash; disaggregate, don't re-prefill.
+      At S=512, RoCE 400G: transfer <b>1.34 ms</b> vs prefill floor <b>22.9 ms</b> (~17&times;).
+      See <a href="./DISAGGREGATED_SERVING.md#6-the-latency-budget-transfer--prefill--section-f-output--the-gold">DISAGGREGATED_SERVING.md &sect;6</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 5: CONTRAST ===== -->
+  <h2>&#9316; Co-located vs disaggregated &mdash; the end-to-end contrast</h2>
+  <div class="panel">
+    <div class="readout" id="contrast"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Reading:</b> disaggregation trades a <b>~2% TTFT increase</b> (the KV transfer) for the elimination of ITL spikes AND independent per-pool optimization.
+      That trade is why DistServe, Mooncake, Splitwise, and D&eacute;j&agrave;Vu all adopt it.
+      See <a href="./DISAGGREGATED_SERVING.md#7-co-located-vs-disaggregated--the-end-to-end-contrast--section-g-output">DISAGGREGATED_SERVING.md &sect;7</a>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS recompute matches <code>disaggregated_serving.py</code> Section F: Size_KV(S=512)=67108864 B; Latency_transfer(S=512, BW=50 GB/s)=1342.18 us; verdict transfer&lt;prefill = True.
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+   GROUND-TRUTH formulas, copied verbatim from disaggregated_serving.py.
+   Bandwidths are REAL published numbers; the transport is simulated.
+============================================================================ */
+const LAYERS=32, N_Q_HEADS=32, N_KV_HEADS=8, HEAD_DIM=128, HIDDEN=4096, INTER=14336, BYTES=2;
+const A100_HBM_BW=2.0e12, A100_TFLOPS=312e12;
+const PREFILL_512_MS=80.0, DECODE_STEP_MS=20.0;
+
+function kvBytes(s){ return 2*LAYERS*N_KV_HEADS*HEAD_DIM*s*BYTES; }
+function modelParams(layers,nq,nkv,hd,hidden,inter){
+  const qo=hidden*(nq*hd), kv=hidden*(nkv*hd);
+  const attn=2*qo+2*kv, mlp=3*hidden*inter;
+  return layers*(attn+mlp);
+}
+const N_PARAMS=modelParams(LAYERS,N_Q_HEADS,N_KV_HEADS,HEAD_DIM,HIDDEN,INTER); // 6,979,321,856
+function prefillFloor(s){
+  const weightBytes=2*N_PARAMS*BYTES;
+  const flops=2*N_PARAMS*s;
+  const mem=weightBytes/A100_HBM_BW, comp=flops/A100_TFLOPS;
+  const floor=Math.max(mem,comp);
+  const ai=flops/weightBytes, crossover=A100_TFLOPS/A100_HBM_BW;
+  return {mem,comp,floor,ai,crossover,bound: ai>=crossover?'COMPUTE-bound':'MEMORY-bound'};
+}
+function transferLat(size,bw){ return size/bw; }
+function fmtBytes(b){
+  if(b>=1024*1024) return (b/1024/1024).toFixed(1)+' MiB';
+  if(b>=1024) return (b/1024).toFixed(1)+' KiB';
+  return b+' B';
+}
+function fmtLat(s){
+  if(s>=1e-2) return (s*1e3).toFixed(2)+' ms';
+  if(s>=1e-3) return (s*1e3).toFixed(3)+' ms';
+  return (s*1e6).toFixed(2)+' us';
+}
+
+/* ============================================================================
+   PANEL 1: prefill vs decode characteristics
+============================================================================ */
+function renderChar(){
+  const crossover=A100_TFLOPS/A100_HBM_BW;
+  const pfAI=512/BYTES, dcAI=1/BYTES;
+  const el=document.getElementById('charReadout');
+  el.innerHTML=
+    'A100 crossover = peak_TFLOPS / HBM_BW = '+(A100_TFLOPS/1e12).toFixed(0)+' / '+(A100_HBM_BW/1e12).toFixed(1)+' = <b>'+crossover.toFixed(0)+' FLOP/B</b>\n\n'+
+    '<span class="rd">PREFILL</span> (S=512): AI = S/bytes = 512/'+BYTES+' = <b>'+pfAI.toFixed(0)+' FLOP/B</b>  >= '+crossover.toFixed(0)+' -> <span class="rd">COMPUTE-bound</span> (saturates math units)\n'+
+    '<span class="bl">DECODE</span> (S=1):     AI = 1/bytes = 1/'+BYTES+'   = <b>'+dcAI.toFixed(1)+' FLOP/B</b>  <  '+crossover.toFixed(0)+' -> <span class="bl">MEMORY-bound</span>  (starved for weight BW)\n\n'+
+    'Co-locating them = each blocks the resource the other needs -> interference (Panel 2).';
+}
+
+/* ============================================================================
+   PANEL 2: co-location interference timeline
+============================================================================ */
+function renderTimeline(){
+  const decode=+document.getElementById('decodeMs').value;
+  const prefill=+document.getElementById('prefillMs').value;
+  const every=+document.getElementById('pfEvery').value;
+  document.getElementById('decodeMsVal').textContent=decode;
+  document.getElementById('prefillMsVal').textContent=prefill;
+  document.getElementById('pfEveryVal').textContent=every;
+
+  const spike=prefill+decode;
+  const nSteps=every*2+1;
+  const pfSteps=new Set();
+  for(let s=every; s<=nSteps; s+=every) pfSteps.add(s);
+
+  let html='<thead><tr><th>step</th><th>CO-LOCATED GPU runs</th><th>co-located ITL</th>'
+    +'<th>DISAGG prefill pool</th><th>decode pool</th><th>disagg ITL</th></tr></thead><tbody>';
+  const coITLs=[], daITLs=[];
+  for(let step=1; step<=nSteps; step++){
+    const isPF=pfSteps.has(step);
+    const coITL=isPF?spike:decode;
+    const daITL=decode;
+    coITLs.push(coITL); daITLs.push(daITL);
+    const coGPU=isPF?'<span class="rd">PREFILL('+prefill+'ms)</span>':'decode('+decode+'ms)';
+    const coCls=isPF?'spike':'';
+    const pfPool=isPF?'prefill('+prefill+'ms)':'idle';
+    const dPool='decode('+decode+'ms)';
+    const daCls='flat';
+    html+='<tr><td>'+step+'</td><td>'+coGPU+'</td>'
+      +'<td class="'+coCls+'">'+coITL+' ms'+(isPF?' (SPIKE)':'')+'</td>'
+      +'<td>'+pfPool+'</td><td>'+dPool+'</td>'
+      +'<td class="'+daCls+'">'+daITL+' ms</td></tr>';
+  }
+  html+='</tbody>';
+  document.getElementById('timeline').innerHTML=html;
+
+  const coMax=Math.max(...coITLs), coAvg=coITLs.reduce((a,b)=>a+b,0)/coITLs.length;
+  const daMax=Math.max(...daITLs), daAvg=daITLs.reduce((a,b)=>a+b,0)/daITLs.length;
+  const spikeFactor=coMax/decode;
+  document.getElementById('itlSummary').innerHTML=
+    '<span class="rd">CO-LOCATED</span> ITL:   avg='+coAvg.toFixed(0)+' ms, max=<span class="rd">'+coMax+' ms</span> (spike = '+prefill+'+'+decode+' = '+spike+')\n'+
+    '<span class="flat">DISAGGREGATED</span> ITL: avg='+daAvg.toFixed(0)+' ms, max=<span class="flat">'+daMax+' ms</span> (flat; prefill parallel)\n'+
+    'ITL spike factor: <b>'+spikeFactor.toFixed(1)+'x</b>  (co-located max / decode baseline)';
+}
+
+/* ============================================================================
+   PANEL 3: architecture note (static, with live KV size for context)
+============================================================================ */
+function renderArch(){
+  const size=kvBytes(512);
+  document.getElementById('archNote').innerHTML=
+    'After prefill, the prompt\'s KV (<b>'+fmtBytes(size)+'</b> for S=512) is transferred over RDMA from the prefill pool\'s VRAM\n'+
+    'to the decode pool\'s block table (a deterministic copy here; real latency = Size_KV / BW, see Panel 4).\n'+
+    'The decode pool\'s paged attention reads it like any local KV \u2014 <b>byte-equal</b>, transparent.\n'+
+    'DistServe co-optimizes the P:D pool ratio and per-pool parallelism to maximize goodput (up to 7.4x).';
+}
+
+/* ============================================================================
+   PANEL 4: latency budget (live sliders) — GOLD
+============================================================================ */
+function renderBudget(){
+  const s=+document.getElementById('s').value;
+  const bw=parseFloat(document.getElementById('bw').value);
+  document.getElementById('sVal').textContent=s;
+  const size=kvBytes(s);
+  const pf=prefillFloor(s);
+  const t=transferLat(size,bw);
+  const verdict=t<pf.floor;
+  const ratio=pf.floor/t;
+  const bws=bw>=1e12?(bw/1e12).toFixed(0)+' GB/s':(bw/1e9).toFixed(1)+' GB/s';
+  const maxLat=Math.max(pf.floor, t, PREFILL_512_MS*1e-3)*1.15;
+  const tpct=(t/maxLat)*100, fpct=(pf.floor/maxLat)*100, epct=(PREFILL_512_MS*1e-3/maxLat)*100;
+  const el=document.getElementById('budget');
+  el.innerHTML=
+    'Size_KV = 2*'+LAYERS+'*'+N_KV_HEADS+'*'+HEAD_DIM+'*'+s+'*'+BYTES+' = <b>'+size.toLocaleString()+' B ('+fmtBytes(size)+')</b>\n'+
+    'Latency_transfer = '+size.toLocaleString()+' / '+bws+' = <b>'+fmtLat(t)+'</b>   <span class="mu">(the disaggregation cost)</span>\n'+
+    'Latency_prefill (roofline floor) = <span class="rd">'+fmtLat(pf.floor)+'</span>   <span class="mu">['+pf.bound+': mem '+fmtLat(pf.mem)+', compute '+fmtLat(pf.comp)+'; AI '+pf.ai.toFixed(0)+' vs crossover '+pf.crossover.toFixed(0)+']</span>\n'+
+    'Latency_prefill (empirical ~'+PREFILL_512_MS+' ms)   <span class="mu">(real batch=1 prefill is higher than the floor)</span>\n'+
+    '<div class="latrow"><span class="lbl">transfer</span><div class="barTrack"><div class="barFill" style="width:'+tpct+'%;background:var(--green)">'+fmtLat(t)+'</div></div></div>'+
+    '<div class="latrow"><span class="lbl">prefill floor</span><div class="barTrack"><div class="barFill" style="width:'+fpct+'%;background:var(--red)">'+fmtLat(pf.floor)+'</div></div></div>'+
+    '<div class="latrow"><span class="lbl">prefill ~empirical</span><div class="barTrack"><div class="barFill" style="width:'+epct+'%;background:var(--orange)">'+PREFILL_512_MS+' ms</div></div></div>'+
+    '\nverdict: '+(verdict?'<b>transfer WINS</b> &mdash; disaggregate, skip re-prefill':'<span class="or">prefill cheaper</span>')+
+    '  (floor/transfer = '+ratio.toFixed(1)+'x; empirical/transfer = '+(PREFILL_512_MS*1e-3/t).toFixed(1)+'x)';
+}
+
+/* ============================================================================
+   PANEL 5: contrast (co-located vs disaggregated)
+============================================================================ */
+function renderContrast(){
+  const size=kvBytes(512);
+  const t=transferLat(size,50e9);
+  const ttftCo=PREFILL_512_MS;
+  const ttftDa=PREFILL_512_MS+t*1e3;
+  const overhead=(t*1e3/PREFILL_512_MS)*100;
+  const spike=PREFILL_512_MS+DECODE_STEP_MS;
+  document.getElementById('contrast').innerHTML=
+    '| metric               | CO-LOCATED (1 GPU)          | DISAGGREGATED (2 pools)     |\n'+
+    '|----------------------|-----------------------------|------------------------------|\n'+
+    '| TTFT (no contention) | '+ttftCo.toFixed(0)+' ms (prefill)             | '+ttftCo.toFixed(0)+' + '+(t*1e3).toFixed(1)+' = <b>'+ttftDa.toFixed(1)+' ms</b> (prefill+transfer) |\n'+
+    '| ITL baseline         | '+DECODE_STEP_MS+' ms                        | '+DECODE_STEP_MS+' ms                        |\n'+
+    '| ITL under prefill    | <span class="rd">'+spike.toFixed(0)+' ms (SPIKE!)</span>            | <span class="flat">'+DECODE_STEP_MS+' ms (no spike)</span>             |\n'+
+    '| parallelism tuning   | coupled (one GPU)           | <b>independent</b> per pool          |\n'+
+    '| goodput (SLO-bound)  | limited by interference     | up to <b>7.4x</b> higher             |\n\n'+
+    'TTFT overhead of disaggregation: +'+(t*1e3).toFixed(2)+' ms = <b>+'+overhead.toFixed(2)+'%</b> of the '+PREFILL_512_MS+' ms prefill.\n'+
+    'Cost: +'+overhead.toFixed(1)+'% TTFT.  Gain: ITL spikes vanish ('+spike.toFixed(0)+'->'+DECODE_STEP_MS+' ms) + independent per-pool optimization.';
+}
+
+/* ============================================================================
+   GOLD CHECK vs disaggregated_serving.py Section F
+============================================================================ */
+const goldSize=kvBytes(512);                            // 67108864
+const goldT=transferLat(goldSize,50e9);                 // 1.3422e-3 s = 1342.18 us
+const goldPF=prefillFloor(512).floor;                   // 2.2906e-2 s
+const goldVerdict=goldT<goldPF;
+const sizeOK=goldSize===67108864;
+const tOK=Math.abs(goldT*1e6-1342.18)<0.5;              // 1342.18 us
+const pfOK=Math.abs(goldPF*1e3-22.906)<0.5;             // 22.906 ms
+const vOK=goldVerdict===true;
+const ok=sizeOK&&tOK&&pfOK&&vOK;
+const chk=document.getElementById('check');
+chk.textContent=ok
+  ? 'check: OK \u2014 JS Size_KV(512)='+goldSize+' B, Latency_transfer='+(goldT*1e6).toFixed(2)+' us, prefill_floor='+(goldPF*1e3).toFixed(3)+' ms matches disaggregated_serving.py \u00a7F'
+  : 'check: FAIL \u2014 size='+goldSize+', t='+(goldT*1e6).toFixed(2)+'us, pf='+(goldPF*1e3).toFixed(3)+'ms';
+chk.style.borderColor=ok?'#27ae60':'#c0392b';
+chk.style.color=ok?'#27ae60':'#c0392b';
+chk.style.background=ok?'#1c3a25':'#3a1414';
+
+/* ===== wire up events ===== */
+['decodeMs','prefillMs','pfEvery'].forEach(id=>document.getElementById(id).addEventListener('input',renderTimeline));
+document.getElementById('s').addEventListener('input',renderBudget);
+document.getElementById('bw').addEventListener('change',renderBudget);
+
+/* ===== initial render ===== */
+renderChar();
+renderTimeline();
+renderArch();
+renderBudget();
+renderContrast();
+</script>
+</body>
+</html>

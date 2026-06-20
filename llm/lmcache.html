@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LMCache (Hierarchical, Global KV-Cache Pooling) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --waste:#3d4452;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .rd{color:var(--red)}
+  .readout .or{color:var(--orange)}
+  .readout .mu{color:var(--muted)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  /* ---- tier ladder ---- */
+  .ladder{display:flex;flex-direction:column;gap:.5rem;margin-top:.5rem}
+  .rung{display:flex;align-items:center;gap:.7rem;font-size:.82rem}
+  .rung .nm{width:140px;font-weight:600}
+  .rung .cap{width:96px;color:var(--muted);font-size:.74rem}
+  .barTrack{flex:1;height:20px;background:#0a0e14;border:1px solid #30363d;border-radius:5px;overflow:hidden;position:relative;min-width:120px}
+  .barFill{height:100%;transition:width .35s;display:flex;align-items:center;padding-left:7px;color:#012;font-weight:700;font-size:.7rem;font-variant-numeric:tabular-nums}
+  /* ---- nodes / transfer ---- */
+  .nodes{display:flex;gap:1.4rem;flex-wrap:wrap;margin-top:.5rem}
+  .nodecard{flex:1;min-width:200px;background:#0a0e14;border:1px solid #30363d;border-radius:8px;padding:.6rem .7rem}
+  .nodecard h4{margin:0 0 .35rem;font-size:.82rem;color:var(--ink)}
+  .tierline{font-family:ui-monospace,monospace;font-size:.72rem;margin:.18rem 0;padding:2px 6px;border-radius:4px}
+  .tierline.hot{background:#0f2418;color:#7ee2a8}
+  .tierline.cold{color:var(--muted)}
+  .btline{font-family:ui-monospace,monospace;font-size:.72rem;margin:.18rem 0;color:#7ab8e0}
+  .step{color:var(--orange);font-weight:700}
+  /* ---- latency bars ---- */
+  .latrow{display:flex;align-items:center;gap:.6rem;margin:.4rem 0;font-size:.84rem}
+  .latrow .lbl{width:130px;color:var(--muted);text-align:right;font-size:.78rem}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>LMCache &mdash; Hierarchical, Global KV-Cache Pooling &mdash; interactive
+    <a class="badge" href="./LMCACHE.md">LMCACHE.md</a>
+    <a class="badge" href="./lmcache.py">lmcache.py</a></h1>
+  <div class="sub"><b>The global-library idea:</b> &lambda; single-node prefix cache (🔗 <a href="./prefix_cache.html">PREFIX_CACHE</a>) shares KV on ONE node. In a cluster a request may land on a
+    <b style="color:var(--red)">cold node</b> &rarr; full prefill recompute. LMCache turns the datacenter's memory into ONE <b style="color:var(--green)">global, hierarchical pool</b>
+    (VRAM &rarr; DRAM &rarr; NVMe &rarr; S3); on a local miss a chunk-hash <b>global lookup</b> finds the KV on a sibling node and an <b style="color:var(--green)">RDMA pull</b>
+    streams it into the local block table (🔗 <a href="./paged_attention.html">PAGED_ATTENTION</a>), skipping prefill. Every number is recomputed in JS from the <i>identical</i> formulas in
+    <code>lmcache.py</code> &mdash; <b>bandwidths are real; the transport is a faithful simulation.</b></div>
+
+  <!-- ===== PANEL 1: TIER LADDER ===== -->
+  <h2>&#9312; The memory hierarchy &mdash; capacity grows down, bandwidth shrinks down</h2>
+  <div class="panel">
+    <div class="ladder" id="ladder"></div>
+    <div class="micro" style="margin-top:.6rem"><b>Reading:</b> each rung holds <b>more</b> KV but pulls <b>slower</b>. Effective cross-node pull BW = min(network, dst PCIe).
+      At 400 Gbps RoCE (~50 GB/s) vs PCIe Gen5 (~64 GB/s) the network is the bottleneck. See <a href="./LMCACHE.md#3-the-hierarchical-memory-tiers-real-bandwidthcapacity--section-c-output">LMCACHE.md &sect;3</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 2: CROSS-NODE TRANSFER ===== -->
+  <h2>&#9313; Cross-node pull &mdash; local miss &rarr; global lookup &rarr; RDMA &rarr; block table</h2>
+  <div class="panel">
+    <div class="controls">
+      <button id="btnRun">&#9654; run cross-node pull (3 chunks)</button>
+      <button id="btnReset">reset</button>
+      <span class="micro">prompt [100,101,102,103,104,105] &middot; chunk_size=2 &middot; node1 DRAM has it, node0 is cold</span>
+    </div>
+    <div class="nodes" id="nodes"></div>
+    <div class="readout" id="xferLog"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> click <b>run</b>. node0 looks up each chunk locally (<span style="color:var(--red)">MISS</span>), asks the
+      <b>global index</b> (HIT on node1 DRAM), and pulls the KV page into its block table. The gathered KV is <b>byte-equal</b> to the original &mdash; prefill skipped.
+      See <a href="./LMCACHE.md#5-the-rdma-pull-into-the-local-block-table--section-e-output">LMCACHE.md &sect;5</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 3: LATENCY BUDGET ===== -->
+  <h2>&#9314; The budget: is it cheaper to MOVE the KV or RECOMPUTE it?</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>prompt length S <input type="range" id="s" min="64" max="4096" value="512" step="64">
+        <span class="val" id="sVal">512</span></label>
+      <label>pull tier/bandwidth
+        <select id="bw">
+          <option value="64e9">PCIe Gen5 (local DRAM&rarr;VRAM) &mdash; 64 GB/s</option>
+          <option value="7e9">Local NVMe &mdash; 7 GB/s</option>
+          <option value="12.5e9">RoCE 100G (remote DRAM) &mdash; 12.5 GB/s</option>
+          <option value="50e9" selected>RoCE 400G (remote DRAM) &mdash; 50 GB/s</option>
+        </select></label>
+    </div>
+    <div class="readout" id="budget"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag <b>S</b> and pick a <b>tier</b>. <b>Size_KV</b> grows with S; <b>Latency_transfer = Size_KV / BW</b>.
+      The <span style="color:var(--red)">red line</span> is the prefill roofline FLOOR (real prefill is higher). When the green bar stays under the red bar, <b>transfer wins</b> &mdash; pull, don't recompute.
+      At S=512, RoCE 400G: transfer <b>0.252 ms</b> vs prefill floor <b>3.407 ms</b> (~13.5&times;). See <a href="./LMCACHE.md#6-the-latency-budget-transfer--recompute--section-f-output">LMCACHE.md &sect;6</a>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS recompute matches <code>lmcache.py</code> Section F: Size_KV(S=512)=12582912 B; Latency_transfer(S=512, BW=50 GB/s)=251.66 us; verdict transfer&lt;prefill = True.
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+   GROUND-TRUTH formulas, copied verbatim from lmcache.py (Section F + tiers).
+   Bandwidths are REAL published numbers; the transport is simulated.
+============================================================================ */
+const LAYERS=24, N_Q_HEADS=16, N_KV_HEADS=2, HEAD_DIM=128, HIDDEN=2048, INTER=5504, BYTES=2;
+const A100_HBM_BW=2.0e12, A100_TFLOPS=312e12;
+
+function kvBytes(s){ return 2*LAYERS*N_KV_HEADS*HEAD_DIM*s*BYTES; }
+function modelParams(layers,nq,nkv,hd,hidden,inter){
+  const qo=hidden*(nq*hd), kv=hidden*(nkv*hd);
+  const attn=2*qo+2*kv, mlp=3*hidden*inter;
+  return layers*(attn+mlp);
+}
+const N_PARAMS=modelParams(LAYERS,N_Q_HEADS,N_KV_HEADS,HEAD_DIM,HIDDEN,INTER); // 1,038,090,240
+function prefillFloor(s){
+  const weightBytes=2*N_PARAMS*BYTES;
+  const flops=2*N_PARAMS*s;
+  const mem=weightBytes/A100_HBM_BW, comp=flops/A100_TFLOPS;
+  const floor=Math.max(mem,comp);
+  const ai=flops/weightBytes, crossover=A100_TFLOPS/A100_HBM_BW;
+  return {mem,comp,floor,ai,crossover,bound: ai>=crossover?'COMPUTE-bound':'MEMORY-bound'};
+}
+function transferLat(size,bw){ return size/bw; }
+function fmtBytes(b){
+  if(b>=1024*1024) return (b/1024/1024).toFixed(2)+' MiB';
+  if(b>=1024) return (b/1024).toFixed(1)+' KiB';
+  return b+' B';
+}
+function fmtLat(s){
+  if(s>=1e-2) return (s*1e3).toFixed(2)+' ms';
+  if(s>=1e-3) return (s*1e3).toFixed(3)+' ms';
+  return (s*1e6).toFixed(2)+' us';
+}
+
+/* ---- FNV-1a 64-bit (BigInt), identical to lmcache.py / prefix_cache.html ---- */
+const FNV_OFFSET=0xcbf29ce484222325n, FNV_PRIME=0x100000001b3n, MASK64=(1n<<64n)-1n;
+function mix(h,byte){ return ((h^BigInt(byte))*FNV_PRIME)&MASK64; }
+function computeHash(tokenIds){
+  let h=FNV_OFFSET;
+  for(const t of tokenIds){ for(let k=0;k<4;k++){ h=mix(h,(t>>>(8*k))&0xff); } }
+  return h;
+}
+function hex64(h){ return '0x'+((h&MASK64).toString(16)).padStart(16,'0'); }
+
+/* ============================================================================
+   PANEL 1: tier ladder (real numbers as bars, log-scaled widths)
+============================================================================ */
+const TIER_SPECS=[
+  {nm:'GPU VRAM / HBM',   cap:'40-80 GB',   bw:3.35e12, unit:'TB/s', color:'#27ae60', note:'execution cache (KV must land here)'},
+  {nm:'CPU DRAM',         cap:'0.5-2 TB',   bw:64e9,    unit:'GB/s', color:'#2980b9', note:'PCIe Gen5 (offload when VRAM full)'},
+  {nm:'Local NVMe',       cap:'1-8 TB',     bw:7e9,     unit:'GB/s', color:'#e67e22', note:'survive restarts'},
+  {nm:'Remote S3/Redis',  cap:'unbounded',  bw:50e9,    unit:'GB/s', color:'#8e44ad', note:'RoCE 400G; share across cluster'}
+];
+function renderLadder(){
+  const el=document.getElementById('ladder');
+  el.innerHTML='';
+  const max=Math.log(3.35e12), min=Math.log(7e9); // NVMe slowest of the explicit ones
+  TIER_SPECS.forEach(t=>{
+    const bws=t.bw>=1e12?(t.bw/1e12).toFixed(2)+' TB/s':(t.bw/1e9).toFixed(1)+' GB/s';
+    const w=20+70*(Math.log(t.bw)-min)/(max-min); // log scale -> width %
+    const row=document.createElement('div');
+    row.className='rung';
+    row.innerHTML=
+      '<span class="nm">'+t.nm+'</span>'+
+      '<span class="cap">'+t.cap+'</span>'+
+      '<div class="barTrack"><div class="barFill" style="width:'+w+'%;background:'+t.color+'">'+bws+'</div></div>';
+    el.appendChild(row);
+  });
+}
+
+/* ============================================================================
+   PANEL 2: cross-node transfer simulation (mirrors lmcache.py Section E)
+============================================================================ */
+const PROMPT=[100,101,102,103,104,105], CHUNK=2;
+function chunkize(t){ const out=[]; for(let i=0;i<t.length;i+=CHUNK) out.push(t.slice(i,i+CHUNK)); return out; }
+const CHUNKS=chunkize(PROMPT);
+// deterministic tiny KV per chunk (matches make_chunk_kv shape [n,8])
+function makeChunkKV(chunk){
+  const rows=[];
+  for(const t of chunk){ const r=[]; for(let d=0;d<8;d++) r.push(d*0.001+t*0.01); rows.push(r); }
+  return rows; // array of 2 rows x 8
+}
+function kvEqual(a,b){ if(a.length!==b.length) return false; for(let i=0;i<a.length;i++){ for(let j=0;j<a[i].length;j++) if(Math.abs(a[i][j]-b[i][j])>1e-9) return false; } return true; }
+
+let sim=null;
+function freshSim(){
+  // node0 cold; node1 DRAM holds all chunks
+  const node1DRAM={};
+  CHUNKS.forEach(c=>{ node1DRAM[hex64(computeHash(c))]=makeChunkKV(c); });
+  return {
+    nodes:[
+      {id:0, tiers:{VRAM:{},DRAM:{},NVMe:{},S3:{}}, blockTable:{}, pages:{}, npage:0},
+      {id:1, tiers:{VRAM:{},DRAM:node1DRAM,NVMe:{},S3:{}}, blockTable:{}, pages:{}, npage:0}
+    ],
+    globalIndex:{}
+  };
+}
+function renderNodes(highlightSig, phase){
+  const el=document.getElementById('nodes');
+  el.innerHTML='';
+  sim.nodes.forEach(n=>{
+    const card=document.createElement('div');
+    card.className='nodecard';
+    let h='<h4>node'+n.id+'</h4>';
+    ['VRAM','DRAM','NVMe','S3'].forEach(t=>{
+      const keys=Object.keys(n.tiers[t]);
+      const cls=keys.length?'hot':'cold';
+      let txt=t+': '+ (keys.length? keys.map(k=>k.slice(0,10)).join(', ') : 'empty');
+      h+='<div class="tierline '+cls+'">'+txt+'</div>';
+    });
+    const btKeys=Object.keys(n.blockTable);
+    if(btKeys.length){
+      h+='<div class="btline">block table: '+btKeys.map(l=>l+'->p'+n.blockTable[l]).join(', ')+'</div>';
+    } else {
+      h+='<div class="btline" style="color:#3d4452">block table: (empty)</div>';
+    }
+    card.innerHTML=h;
+    el.appendChild(card);
+  });
+}
+function globalLookup(sig){ return sim.globalIndex[sig]||null; }
+function registerGlobal(nodeId,tier,sig){
+  const k=sig; (sim.globalIndex[k]=sim.globalIndex[k]||[]);
+  const loc=nodeId+':'+tier; if(!sim.globalIndex[k].includes(loc)) sim.globalIndex[k].push(loc);
+}
+let xferSteps=[];
+function runPull(){
+  sim=freshSim();
+  // register node1 DRAM chunks in the global index
+  CHUNKS.forEach(c=>{ registerGlobal(1,'DRAM',hex64(computeHash(c))); });
+  xferSteps=[];
+  let totalBytes=0, allEqual=true;
+  const original=CHUNKS.flatMap(makeChunkKV);
+  CHUNKS.forEach((c,i)=>{
+    const sig=hex64(computeHash(c));
+    xferSteps.push('<span class="step">c'+i+' '+sig+'</span> local lookup -> <span class="rd">MISS</span>');
+    const locs=globalLookup(sig);
+    xferSteps.push('  global lookup -> HIT on '+locs[0]);
+    // pull: copy node1 DRAM chunk into node0 VRAM + block table
+    const kv=sim.nodes[1].tiers.DRAM[sig];
+    const page=sim.nodes[0].npage; sim.nodes[0].npage++;
+    const logical=Object.keys(sim.nodes[0].blockTable).length;
+    sim.nodes[0].blockTable[logical]=page;
+    sim.nodes[0].pages[page]=kv.map(r=>r.slice());
+    sim.nodes[0].tiers.VRAM[sig]=kv.map(r=>r.slice());
+    registerGlobal(0,'VRAM',sig);
+    const bytes=kv.length*kv[0].length*4; // float32 = 4 B (sim)
+    totalBytes+=bytes;
+    xferSteps.push('  RDMA pull '+bytes+' B -> node0 VRAM, block table logical '+logical+' -> page '+page);
+  });
+  // gather via block table, byte-equality
+  const gathered=[]; const n=Object.keys(sim.nodes[0].blockTable).length;
+  for(let l=0;l<n;l++){ const pg=sim.nodes[0].blockTable[l]; sim.nodes[0].pages[pg].forEach(r=>gathered.push(r.slice())); }
+  const eq=kvEqual(gathered,original);
+  xferSteps.push('');
+  xferSteps.push('node0 gather_kv() via block table: shape ['+gathered.length+', 8]');
+  xferSteps.push('[check] pulled+gathered KV == original : '+(eq?'<b>OK</b>':'<span class="rd">FAIL</span>'));
+  xferSteps.push('node0 SKIPPED prefill: '+totalBytes+' B of KV moved, 0 model weights touched.');
+  document.getElementById('xferLog').innerHTML=xferSteps.join('\n');
+  renderNodes(null,'done');
+  // light up node0 VRAM + block table (already shown via renderNodes keys)
+}
+document.getElementById('btnRun').onclick=runPull;
+document.getElementById('btnReset').onclick=()=>{
+  sim=freshSim();
+  CHUNKS.forEach(c=>{ registerGlobal(1,'DRAM',hex64(computeHash(c))); });
+  document.getElementById('xferLog').innerHTML='(click run to pull the 3 chunks from node1 DRAM into node0)';
+  renderNodes(null,'init');
+};
+
+/* ============================================================================
+   PANEL 3: latency budget (live sliders)
+============================================================================ */
+function renderBudget(){
+  const s=+document.getElementById('s').value;
+  const bw=parseFloat(document.getElementById('bw').value);
+  document.getElementById('sVal').textContent=s;
+  const size=kvBytes(s);
+  const pf=prefillFloor(s);
+  const t=transferLat(size,bw);
+  const verdict=t<pf.floor;
+  const ratio=pf.floor/t;
+  const bwLabel=TIER_SPECS.find(z=>Math.abs(z.bw-bw)<1) || {nm:''};
+  const bws=bw>=1e12?(bw/1e12).toFixed(2)+' TB/s':(bw/1e9).toFixed(1)+' GB/s';
+  const maxLat=Math.max(pf.floor, t)*1.15;
+  const tpct=(t/maxLat)*100, fpct=(pf.floor/maxLat)*100;
+  const el=document.getElementById('budget');
+  el.innerHTML=
+    'Size_KV = 2*'+LAYERS+'*'+N_KV_HEADS+'*'+HEAD_DIM+'*'+s+'*'+BYTES+' = <b>'+size.toLocaleString()+' B ('+fmtBytes(size)+')</b>\n'+
+    'Latency_transfer = '+size.toLocaleString()+' / '+bws+' = <b>'+fmtLat(t)+'</b>   <span class="mu">(move the KV)</span>\n'+
+    'Latency_prefill (roofline floor) = <span class="rd">'+fmtLat(pf.floor)+'</span>   <span class="mu">['+pf.bound+': mem '+fmtLat(pf.mem)+', compute '+fmtLat(pf.comp)+'; AI '+pf.ai.toFixed(0)+' FLOP/B vs crossover '+pf.crossover.toFixed(0)+']</span>\n'+
+    '<div class="latrow"><span class="lbl">transfer</span><div class="barTrack"><div class="barFill" style="width:'+tpct+'%;background:var(--green)">'+fmtLat(t)+'</div></div></div>'+
+    '<div class="latrow"><span class="lbl">prefill floor</span><div class="barTrack"><div class="barFill" style="width:'+fpct+'%;background:var(--red)">'+fmtLat(pf.floor)+'</div></div></div>'+
+    '\nverdict: '+(verdict?'<b>transfer WINS</b> &mdash; pull, skip prefill':'<span class="or">prefill cheaper</span> &mdash; recompute')+'  (floor/transfer = '+ratio.toFixed(1)+'x)';
+}
+document.getElementById('s').addEventListener('input',renderBudget);
+document.getElementById('bw').addEventListener('change',renderBudget);
+
+/* ============================================================================
+   GOLD CHECK vs lmcache.py Section F
+============================================================================ */
+const goldSize=kvBytes(512);                         // 12582912
+const goldT=transferLatency(goldSize,50e9);          // 2.5166e-4 s = 251.66 us
+const goldPF=prefillFloor(512).floor;                // 3.407e-3 s
+const goldVerdict=goldT<goldPF;
+const sizeOK=goldSize===12582912;
+const tOK=Math.abs(goldT*1e6-251.66)<0.5;            // 251.66 us
+const vOK=goldVerdict===true;
+const ok=sizeOK&&tOK&&vOK;
+const chk=document.getElementById('check');
+chk.textContent=ok
+  ? 'check: OK \u2014 JS Size_KV(512)='+goldSize+' B, Latency_transfer='+ (goldT*1e6).toFixed(2) +' us, transfer<prefill matches lmcache.py \u00a7F'
+  : 'check: FAIL \u2014 size='+goldSize+', t='+(goldT*1e6).toFixed(2)+'us, verdict='+goldVerdict;
+chk.style.borderColor=ok?'#27ae60':'#c0392b';
+chk.style.color=ok?'#27ae60':'#c0392b';
+chk.style.background=ok?'#1c3a25':'#3a1414';
+
+/* ===== initial render ===== */
+renderLadder();
+sim=freshSim();
+CHUNKS.forEach(c=>{ registerGlobal(1,'DRAM',hex64(computeHash(c))); });
+renderNodes(null,'init');
+document.getElementById('xferLog').innerHTML='(click run to pull the 3 chunks from node1 DRAM into node0)';
+renderBudget();
+</script>
+</body>
+</html>

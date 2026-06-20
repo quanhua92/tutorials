@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NCCL Collectives — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --teal:#1abc9c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat td.root{background:#1c3a25;color:var(--green);font-weight:700}
+  table.heat td.shard{background:#3a2f12;color:#ffd966;font-weight:700}
+  table.heat td.dim{color:#5a626e}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .ph1{color:var(--gold)}
+  .readout .ph2{color:var(--teal)}
+  .readout .bad{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  .row{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-start}
+  .row>div{min-width:0}
+  #ring{display:block;width:100%;max-width:640px;height:420px}
+  .scrollx{overflow-x:auto;min-width:0}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>NCCL Collective Operations — interactive
+    <a class="badge" href="./NCCL_COLLECTIVES.md">NCCL_COLLECTIVES.md</a>
+    <a class="badge" href="./nccl_collectives.py">nccl_collectives.py</a></h1>
+  <div class="sub"><b>The bucket brigade:</b> K GPUs in a ring, each talking only to its neighbors, sum everyone's data onto everyone for
+    <b style="color:var(--green)">~2N bytes/GPU regardless of K</b>. Drag <b style="color:var(--green)">K</b> to see the 5 primitives; scrub the
+    <b style="color:var(--green)">ring step</b> slider to watch the sum propagate. Every number is recomputed in JS from the <i>identical</i>
+    algorithm in <code>nccl_collectives.py</code>. &nbsp;|&nbsp; consumed by <a href="./ddp.html">DDP</a> (AllReduce) &middot; <a href="./tensor_parallel.html">Tensor Parallel</a> (AllReduce/layer) &middot; ZeRO (coming).</div>
+
+  <!-- ===== PANEL 1: THE 5 PRIMITIVES ===== -->
+  <h2>① The 5 primitives — before/after grids (drag K; distinct data per rank)</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>K (ranks) <input type="range" id="kp" min="2" max="8" value="4" step="1">
+        <span class="val" id="kpVal">4</span></label>
+      <label>show primitive
+        <select id="prim">
+          <option value="bc">Broadcast (root → all)</option>
+          <option value="rd">Reduce (all → root)</option>
+          <option value="ar">AllReduce (all → all)</option>
+          <option value="rs">ReduceScatter (reduce+scatter shards)</option>
+          <option value="ag">AllGather (gather shards → all)</option>
+        </select></label>
+      <span class="micro">rank r holds [10r+1 … 10r+K]; N = K (chunks of 1). Matches nccl_collectives.py Section B.</span>
+    </div>
+    <div class="scrollx"><table class="heat" id="primTable"></table></div>
+    <div class="readout" id="primReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> flip through the 5 primitives. <b>Broadcast</b> overwrites everyone with rank 0.
+      <b>Reduce</b> lands the sum only on the root (others dimmed = untouched). <b>AllReduce</b> = sum on everyone (DDP's only collective).
+      <b>ReduceScatter</b> leaves each rank holding just its summed shard; <b>AllGather</b> rebuilds the full vector — together they equal AllReduce (panel ③).</div>
+  </div>
+
+  <!-- ===== PANEL 2: RING ALLREDUCE ANIMATION ===== -->
+  <h2>② Ring-AllReduce — the GOLD example (K=4, N=16). Scrub the step slider.</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>ring step <input type="range" id="step" min="0" max="6" value="6" step="1">
+        <span class="val" id="stepVal">6</span> / 6</label>
+      <button id="play">▶ auto-play</button>
+      <span class="micro">K=4 ranks, all hold v=[1..16], chunk=4. After all 6 steps every rank = [4,8,…,64]. Matches nccl_collectives.py Section D.</span>
+    </div>
+    <div class="row">
+      <canvas id="ring" width="640" height="420"></canvas>
+      <div style="flex:1;min-width:260px">
+        <div class="readout" id="ringReadout"></div>
+        <div class="micro" style="margin-top:.4rem"><b>Phases:</b> steps 0–2 = <span style="color:var(--gold)">scatter-reduce</span>
+          (each receiver <b>+=</b>s, accumulates); steps 3–5 = <span style="color:var(--teal)">allgather</span>
+          (each receiver <b>overwrites</b>). At step 2 each rank fully owns one summed chunk; at step 5 every rank has the full sum.</div>
+      </div>
+    </div>
+    <div class="scrollx"><table class="heat" id="chunkTable"></table></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to watch:</b> the chunk each rank sends RIGHT is highlighted; it lands on the next rank and is
+      accumulated (phase 1) or copied (phase 2). The <b>bytes/GPU counter</b> ticks up by N/K=4 every step → 6 steps × 4 = <b>24</b> at the end (the gold).</div>
+  </div>
+
+  <!-- ===== PANEL 3: BYTES SCALING + IDENTITY ===== -->
+  <h2>③ Per-GPU bytes → ~2N (drag K), and the AllReduce = ReduceScatter + AllGather identity</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>K (ranks) <input type="range" id="kb" min="2" max="64" value="4" step="1">
+        <span class="val" id="kbVal">4</span></label>
+      <label>N (els/rank) <input type="range" id="nb" min="4" max="64" value="16" step="4">
+        <span class="val" id="nbVal">16</span></label>
+    </div>
+    <div class="readout" id="scaleReadout"></div>
+    <div class="scrollx"><table class="heat" id="scaleTable"></table></div>
+    <div class="readout" id="identityReadout" style="margin-top:.6rem"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Left table:</b> per-GPU bytes = 2·(K−1)/K·N. As K grows the ratio to 2N → 1.0 — adding GPUs never
+      balloons any GPU's traffic. <b>Right readout:</b> the identity — AllReduce output byte-identical to ReduceScatter→AllGather (NCCL_COLLECTIVES.md §4).</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS ring-AllReduce (K=4, N=16) matches nccl_collectives.py Section D (result[0]=4, bytes/GPU=24).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth algorithm, copied from nccl_collectives.py ===== */
+/* All ops simulate K ranks as an array of K equal-length tensors (lists here). */
+
+function broadcast(ranks, root){ const r0=ranks[root]; return ranks.map(()=>r0.slice()); }
+function reduceSum(ranks, root){
+  const K=ranks.length, N=ranks[0].length;
+  const acc=new Array(N).fill(0);
+  for(let i=0;i<K;i++) for(let j=0;j<N;j++) acc[j]+=ranks[i][j];
+  return ranks.map((r,i)=> i===root ? acc.slice() : r.slice());
+}
+function allReduceSum(ranks){
+  const K=ranks.length, N=ranks[0].length;
+  const acc=new Array(N).fill(0);
+  for(let i=0;i<K;i++) for(let j=0;j<N;j++) acc[j]+=ranks[i][j];
+  return ranks.map(()=>acc.slice());
+}
+function reduceScatterSum(ranks){
+  const K=ranks.length, N=ranks[0].length, chunk=N/K;
+  const out=[];
+  for(let r=0;r<K;r++){
+    const sh=new Array(chunk).fill(0);
+    for(let s=0;s<K;s++) for(let c=0;c<chunk;c++) sh[c]+=ranks[s][r*chunk+c];
+    out.push(sh);
+  }
+  return out;
+}
+function allGather(shards){
+  const full=[].concat(...shards);
+  return shards.map(()=>full.slice());
+}
+
+/* Ring-Allreduce IDENTICAL to ring_allreduce() in the .py. Returns an array of
+   per-step snapshots so the slider can scrub. Each snapshot = {phase, step,
+   buf (K×N), sendIdx (which chunk index each rank sends this step), bytesSoFar}. */
+function ringSteps(ranks){
+  const K=ranks.length, N=ranks[0].length, chunk=N/K;
+  const buf=ranks.map(r=>r.map(x=>x));          // deep copy
+  const left =i=>(i-1+K)%K;
+  const bytes=new Array(K).fill(0);
+  const snaps=[{phase:'init',step:-1,buf:buf.map(r=>r.slice()),sendIdx:null,bytesSoFar:bytes.slice()}];
+  // phase 1: scatter-reduce (K-1 steps)
+  for(let s=0;s<K-1;s++){
+    const send={}; // rank i -> chunk index it sends
+    for(let i=0;i<K;i++){ send[i]=(i-s+K)%K; }
+    // build receives: rank i receives its left neighbor's sent chunk into recv index
+    const recv={};
+    for(let i=0;i<K;i++) recv[i]=(i-s-1+K)%K;
+    // apply: accumulate
+    for(let i=0;i<K;i++){
+      const fromRank=left(i);
+      const ci=send[fromRank];           // chunk index being delivered
+      for(let c=0;c<chunk;c++) buf[i][recv[i]*chunk+c]+=buf[fromRank][ci*chunk+c];
+      bytes[i]+=chunk;
+    }
+    snaps.push({phase:'scatter-reduce',step:s,buf:buf.map(r=>r.slice()),sendIdx:{...send},bytesSoFar:bytes.slice()});
+  }
+  // phase 2: allgather (K-1 steps)
+  for(let s=0;s<K-1;s++){
+    const send={};
+    for(let i=0;i<K;i++){ send[i]=(i+1-s+K)%K; }
+    const recv={};
+    for(let i=0;i<K;i++) recv[i]=(i-s+K)%K;
+    for(let i=0;i<K;i++){
+      const fromRank=left(i);
+      const ci=send[fromRank];
+      for(let c=0;c<chunk;c++) buf[i][recv[i]*chunk+c]=buf[fromRank][ci*chunk+c]; // overwrite
+      bytes[i]+=chunk;
+    }
+    snaps.push({phase:'allgather',step:s,buf:buf.map(r=>r.slice()),sendIdx:{...send},bytesSoFar:bytes.slice()});
+  }
+  return snaps;
+}
+
+/* ===== helpers ===== */
+const el=id=>document.getElementById(id);
+function fmtV(v){ return '['+v.map(x=>{const n=Math.round(x*1000)/1000; return Number.isInteger(n)?n:x}).join(', ')+']'; }
+
+/* ===== PANEL 1: the 5 primitives ===== */
+function makeDistinctRanks(K){ return Array.from({length:K},(_,r)=>Array.from({length:K},(_,j)=>10*r+j+1)); }
+function renderPrim(){
+  const K=+el('kp').value; el('kpVal').textContent=K;
+  const before=makeDistinctRanks(K);
+  const which=el('prim').value;
+  let after, rootCell=(r)=>false, shardCell=(r)=>false, dimRow=(r)=>false, title='';
+  if(which==='bc'){ after=broadcast(before,0); title='Broadcast (root=0): all ranks := rank 0'; rootCell=(r)=>true; }
+  else if(which==='rd'){ after=reduceSum(before,0); title='Reduce (root=0, op=sum): sum lands ONLY on rank 0'; rootCell=(r)=>r===0; dimRow=(r)=>r!==0; }
+  else if(which==='ar'){ after=allReduceSum(before); title='AllReduce (op=sum): every rank := sum of all (DDP)'; rootCell=(r)=>true; }
+  else if(which==='rs'){ after=reduceScatterSum(before); title='ReduceScatter: rank r keeps the summed chunk r (N/K els)'; shardCell=(r)=>true; }
+  else if(which==='ag'){ title='AllGather: rank r contributes a shard; all := concat of shards';
+    const shards=before.map((r,i)=>[r[0]]); after=allGather(shards); shardCell=(r)=>true; }
+  // table
+  let h=`<tr><th>rank</th><th>before</th><th>after</th></tr>`;
+  for(let r=0;r<K;r++){
+    const b=fmtV(before[r]), a=fmtV(after[r]);
+    const aCls= rootCell(r)?'root':(shardCell(r)?'shard':'');
+    const rowDim = dimRow(r)?' class="dim"':'';
+    h+=`<tr><td>${r}</td><td>${b}</td><td class="${aCls}"${rowDim?'':''}>${a}</td></tr>`;
+  }
+  el('primTable').innerHTML=h;
+  // readout
+  const sum=before[0].map((_,j)=>before.reduce((s,rk)=>s+rk[j],0));
+  let extra='';
+  if(which==='bc') extra=`Everyone becomes rank 0 = ${fmtV(before[0])}.`;
+  else if(which==='rd') extra=`Only rank 0 has the sum ${fmtV(sum)}; ranks 1..${K-1} are UNTOUCHED (NCCL writes only the root's recvbuf).`;
+  else if(which==='ar') extra=`All ranks = the sum ${fmtV(sum)}. This is DDP's gradient-sync op.`;
+  else if(which==='rs') extra=`Rank r keeps summed chunk r. Repeating on a full vector: rank0=${sum[0]}, rank1=${sum[1]}… (each keeps N/K=1 el).`;
+  else if(which==='ag') extra=`AllGather of shards → every rank gets the concat ${fmtV(after[0])}.`;
+  el('primReadout').innerHTML=`${title}\n${extra}`;
+}
+
+/* ===== PANEL 2: ring animation ===== */
+const GOLD_K=4, GOLD_N=16;
+const goldRanks=Array.from({length:GOLD_K},()=>Array.from({length:GOLD_N},(_,j)=>j+1)); // all = [1..16]
+const snaps=ringSteps(goldRanks);
+let playing=false, tid=null;
+function renderRing(){
+  const sIdx=+el('step').value; el('stepVal').textContent=sIdx;
+  const snap=snaps[sIdx];
+  const K=GOLD_K, chunk=GOLD_N/GOLD_K;
+  // canvas
+  const cv=el('ring'), ctx=cv.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth, h=cv.clientHeight;
+  cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  const cx=w/2, cy=h/2, R=Math.min(w,h)*0.36;
+  const pos=i=>({x:cx+R*Math.cos(-Math.PI/2+i*2*Math.PI/K), y:cy+R*Math.sin(-Math.PI/2+i*2*Math.PI/K)});
+  // ring arrows
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  for(let i=0;i<K;i++){ const a=pos(i), b=pos((i+1)%K);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+    // arrowhead at b
+    const ang=Math.atan2(b.y-a.y,b.x-a.x);
+    ctx.beginPath(); ctx.moveTo(b.x,b.y);
+    ctx.lineTo(b.x-9*Math.cos(ang-0.4),b.y-9*Math.sin(ang-0.4));
+    ctx.lineTo(b.x-9*Math.cos(ang+0.4),b.y-9*Math.sin(ang+0.4));
+    ctx.closePath(); ctx.fillStyle='#30363d'; ctx.fill();
+  }
+  // nodes
+  for(let i=0;i<K;i++){ const p=pos(i);
+    ctx.beginPath(); ctx.arc(p.x,p.y,26,0,2*Math.PI); ctx.fillStyle='#161b22';
+    ctx.strokeStyle='#30363d'; ctx.lineWidth=2; ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#e6edf3'; ctx.font='bold 14px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('r'+i,p.x,p.y);
+    // label: which chunk it sends this step
+    if(snap.sendIdx){
+      const ci=snap.sendIdx[i];
+      ctx.font='11px ui-monospace,monospace'; ctx.fillStyle='#f1c40f';
+      ctx.fillText('→ c'+ci, p.x, p.y+40);
+    }
+  }
+  // highlight active sends (chunk tokens on edges)
+  if(snap.sendIdx){
+    for(let i=0;i<K;i++){
+      const a=pos(i), b=pos((i+1)%K);
+      const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+      ctx.beginPath(); ctx.arc(mx,my,11,0,2*Math.PI); ctx.fillStyle='#27ae60'; ctx.fill();
+      ctx.fillStyle='#0d1117'; ctx.font='bold 10px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('c'+snap.sendIdx[i],mx,my);
+    }
+  }
+  // readout
+  const phaseName = sIdx===0 ? 'INITIAL state' :
+                    (snap.phase==='scatter-reduce' ? `PHASE 1 · scatter-reduce (accumulate +=) · step ${snap.step+1}/${K-1}`
+                                                   : `PHASE 2 · allgather (overwrite =) · step ${snap.step+1}/${K-1}`);
+  const bytesNow=snap.bytesSoFar[0];
+  const done = sIdx===snaps.length-1;
+  const finalSum = Array.from({length:GOLD_N},(_,j)=>(j+1)*GOLD_K);
+  const allMatch = snap.buf.every(r=>r.every((v,j)=>v===finalSum[j]));
+  el('ringReadout').innerHTML =
+    `${phaseName}\n`+
+    `bytes/GPU so far = 2·(K-1)/K·N counted = ${bytesNow}  (each step +N/K=${chunk})\n`+
+    (done ? `FINAL: every rank = ${fmtV(snap.buf[0])}  ${allMatch?'✓ == 4·v GOLD':''}`
+          : (sIdx===0? `(initial: every rank = v = [1..16])` : `(partial — keep scrubbing to finish)`));
+  // chunk table
+  let ch=`<tr><th>rank</th>${Array.from({length:K},(_,c)=>'<th>chunk '+c+'</th>').join('')}</tr>`;
+  for(let r=0;r<K;r++){
+    let row='<tr><td>r'+r+'</td>';
+    for(let c=0;c<K;c++){
+      const piece=snap.buf[r].slice(c*chunk,(c+1)*chunk);
+      const isOwned = snap.phase==='scatter-reduce' && ((r+1)%K===c) && sIdx>=K-1; // owns after phase1
+      row+=`<td>${fmtV(piece)}</td>`;
+    }
+    ch+=row+'</tr>';
+  }
+  el('chunkTable').innerHTML=ch;
+}
+
+/* ===== PANEL 3: bytes scaling + identity ===== */
+function renderScale(){
+  const K=+el('kb').value; el('kbVal').textContent=K;
+  const N=+el('nb').value; el('nbVal').textContent=N;
+  // table over a range of K
+  let h='<tr><th>K</th><th>2·(K-1)/K·N</th><th>ratio to N</th><th>ratio to 2N</th></tr>';
+  for(const Kk of [2,4,8,16,32,64]){
+    const cost=2*(Kk-1)/Kk*N;
+    const hl = Kk===K?' class="root"':'';
+    h+=`<tr${hl?'':""}><td${hl}>${Kk}</td><td${hl}>${cost.toFixed(2)}</td><td${hl}>${(cost/N).toFixed(3)}</td><td${hl}>${(cost/(2*N)).toFixed(3)}</td></tr>`;
+  }
+  el('scaleTable').innerHTML=h;
+  const cost=2*(K-1)/K*N;
+  const t_nvlink=cost/600e9*1e3, t_ib=cost/50e9*1e3;
+  el('scaleReadout').innerHTML =
+    `K=${K}, N=${N}  →  per-GPU bytes = 2·(${K}-1)/${K}·${N} = ${cost.toFixed(2)}\n`+
+    `time @ NVLink 600 GB/s = ${t_nvlink.toFixed(3)} ms   |   @ InfiniBand 50 GB/s = ${t_ib.toFixed(2)} ms`;
+  // identity readout (recompute on the primitive demo data, K=4 fixed for crispness)
+  const Kc=4, ranks=makeDistinctRanks(Kc);
+  const a=allReduceSum(ranks);
+  const d=allGather(reduceScatterSum(ranks));
+  const maxdiff=Math.max(...a.map((_,r)=>Math.max(...a[r].map((v,j)=>Math.abs(v-d[r][j])))));
+  const ok=maxdiff<1e-9;
+  el('identityReadout').innerHTML =
+    `IDENTITY  AllReduce == ReduceScatter ; AllGather   (on K=4 distinct data):\n`+
+    `  AllReduce           → ${fmtV(a[0])}\n`+
+    `  ReduceScatter→AllGather → ${fmtV(d[0])}\n`+
+    `  max|diff| = ${maxdiff.toExponential(2)}  ${ok?'\u2713 identical (this is why ZeRO splits the DDP AllReduce)':'\u2717 mismatch'}`;
+}
+
+/* ===== gold-value check vs nccl_collectives.py Section D ===== */
+const goldSnaps=ringSteps(goldRanks);
+const finalBuf=goldSnaps[goldSnaps.length-1].buf;
+const goldResult0=4;            // result[0] = 4 (v[0]=1, sum of 4 copies)
+const goldBytes=24;             // 2*(4-1)/4*16
+const jsResult0=finalBuf[0][0];
+const jsBytes=goldSnaps[goldSnaps.length-1].bytesSoFar[0];
+const ok=Math.abs(jsResult0-goldResult0)<1e-9 && jsBytes===goldBytes;
+const chk=el('check');
+chk.textContent = ok ? `check: OK — JS ring (K=4,N=16): result[0]=${jsResult0}, bytes/GPU=${jsBytes} (match .py)` : 'check: FAIL — mismatch!';
+chk.style.borderColor = ok?'#27ae60':'#c0392b';
+chk.style.color = ok?'#27ae60':'#c0392b';
+chk.style.background = ok?'#1c3a25':'#3a1414';
+
+/* ===== events ===== */
+el('kp').addEventListener('input',renderPrim);
+el('prim').addEventListener('change',renderPrim);
+el('step').addEventListener('input',()=>{ if(playing){playing=false; el('play').textContent='▶ auto-play'; clearTimeout(tid);} renderRing(); });
+el('play').addEventListener('click',function(){
+  playing=!playing; this.textContent=playing?'⏸ pause':'▶ auto-play';
+  if(playing){ const step=()=>{ let v=(+el('step').value+1)%(snaps.length); el('step').value=v; renderRing(); if(v===snaps.length-1){playing=false;this.textContent='▶ auto-play';return;} tid=setTimeout(step,700); }; step(); }
+});
+el('kb').addEventListener('input',renderScale);
+el('nb').addEventListener('input',renderScale);
+window.addEventListener('resize',renderRing);
+
+renderPrim();
+renderRing();
+renderScale();
+</script>
+</body>
+</html>

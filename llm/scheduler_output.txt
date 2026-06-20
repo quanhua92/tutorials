@@ -1,0 +1,171 @@
+scheduler.py - reference impl. All numbers below feed SCHEDULER.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: static vs continuous batching timeline
+========================================================================
+Two requests: R0 needs 3 tokens, R1 needs 6 tokens.
+
+STATIC (request-level) batching: run the WHOLE batch to completion.
+| step | R0 (3 tok) | R1 (6 tok) | GPU useful? |
+|------|------------|------------|-------------|
+| 1    | gen        | gen        | yes         |
+| 2    | gen        | gen        | yes         |
+| 3    | gen        | gen        | yes         |
+| 4    | IDLE (pad) | gen        | NO - R0 slot padded |
+| 5    | IDLE (pad) | gen        | NO - R0 slot padded |
+| 6    | IDLE (pad) | gen        | NO - R0 slot padded |
+
+Static: 9/12 token-steps useful (75%); 3 are padded idle.
+
+CONTINUOUS (iteration-level) batching: reclaim a finished slot NEXT step.
+Suppose R2 (2 tokens) arrives right after R0 frees up.
+| step | R0 (3) | R1 (6) | R2 (2) | note              |
+|------|--------|--------|--------|-------------------|
+| 1    | gen    | gen    | -      |                   |
+| 2    | gen    | gen    | -      |                   |
+| 3    | gen    | gen    | -      |                   |
+| 4    | -      | gen    | gen    | R2 slots into R0's freed slot |
+| 5    | -      | gen    | gen    |                   |
+| 6    | -      | gen    | -      |                   |
+
+Continuous: 11/12 token-steps useful (92%). R2 finished 1 step after R0.
+
+Orca (OSDI'22) calls this 'iteration-level scheduling': schedule at
+the granularity of ONE token, not one request.
+
+[check] continuous >= static useful token-steps: True  (11 >= 9) -> OK
+
+========================================================================
+  SECTION B: Sequence 3-state lifecycle + preempt
+========================================================================
+Every request is a Sequence in exactly one of three states:
+
+  WAITING  - prefill not started, or PREEMPTED back here
+  RUNNING  - blocks allocated, actively prefilled / decoding
+  FINISHED - EOS or max_tokens reached
+
+Transitions (who fires them):
+  WAITING  --schedule()+allocate()--> RUNNING
+  RUNNING  --EOS / max_tokens-------> FINISHED   (postprocess)
+  RUNNING  --OOM in decode----------> WAITING    (preempt; re-queue FRONT)
+
+preempt(seq): status=WAITING; is_prefill=True; deallocate blocks;
+              waiting.appendleft(seq).  This is vLLM's RECOMPUTE mode:
+              the seq re-prefills from num_cached_tokens (or from 0 if
+              its old blocks got reused). Eviction picks the NEWEST
+              running seq (running.pop()) ~= LRU under FCFS admission.
+
+Preempt demo: 2 blocks total, both seqs prefilled (each holds 1 block).
+  after prefill: running=[0, 1], free=[]
+  step2 decode: scheduled=[0], is_prefill=False
+  running now=[0], waiting=[1]
+  s1 preempted (RUNNING->WAITING, is_prefill=True)? True
+
+[check] preempt moves newest RUNNING->WAITING at front: True -> OK
+
+========================================================================
+  SECTION C: schedule() PREFILL priority + the token budget
+========================================================================
+Config: max_num_batched_tokens=4, block_size=2, 3 seqs lens [3,5,2].
+PREFILL PRIORITY: any waiting prefill beats a running decode, so a new
+request starts (low TTFT) even if decodes are mid-flight.
+
+First schedule() call (prefill phase only):
+| seq | prompt len | num_scheduled | remaining budget | status |
+|-----|-----------|--------------|------------------|--------|
+| 0   | 3         | 3            | 1                | RUNNING |
+
+Budget used 3/4. seq1 (len 5) does NOT fit fully in the
+remaining 4-token budget -> it gets chunked (Section D). seq0 (len 3)
+fit fully and moved WAITING->RUNNING.
+
+[check] prefill scheduled seq0 fully (cached 0->3): True -> OK
+
+========================================================================
+  SECTION D: chunked prefill - one-at-a-time rule
+========================================================================
+seq1 prompt is 5 tokens but only 4 fit in the budget. The rule:
+  if remaining < num_tokens AND scheduled_seqs already non-empty: break
+Only the FIRST waiting seq may be chunked. seq1 is first -> it is chunked.
+
+step 2: scheduled seq1 for 4 of its 5 remaining prompt tokens.
+        (num_cached_tokens stays 0; after postprocess -> 4)
+
+seq1 num_cached_tokens: 0 -> 4 (chunked: 4 < 5 prompt)
+[check] seq1 chunked (cached 4 < prompt 5, still WAITING): True -> OK
+
+========================================================================
+  SECTION E: decode may_append + preempt-on-OOM (evict newest)
+========================================================================
+Pool: 2 blocks. Both seqs prefilled -> each holds 1 block. free=[] now.
+
+Decode s0: len grows 2->3, crosses a page boundary (3%2==1) -> needs a
+new block. can_append(s0)=False. Loop: evict NEWEST running seq (s1)
+via preempt() until can_append is True.
+
+After schedule(): scheduled=[0], is_prefill=False
+  running=[0]  waiting(front first)=[1]
+  s1.status=WAITING, s1.is_prefill=True (will re-prefill from cached=0)
+
+[check] preempt newest (s1->WAITING front), s0 still decodes: True -> OK
+
+========================================================================
+  SECTION F: postprocess (hash + append + EOS / max_tokens)
+========================================================================
+postprocess(seqs, token_ids, is_prefill) does, per seq:
+  1. block_manager.hash_blocks(seq)  - register newly FILLED pages
+  2. num_cached_tokens += num_scheduled_tokens
+  3. if chunked prefill still incomplete: CONTINUE (no token yet)
+  4. append_token(generated)
+  5. if EOS or num_completion_tokens==max_tokens: FINISHED + deallocate
+
+Scenario: prompt len 2, max_tokens=3 -> prefill then 2 decodes.
+
+  step 1 (prefill, 2 tok): cached 0 -> 2, len=3, completion=1, status=RUNNING, blocks=[0]
+  step 2 (decode, 1 tok): cached 2 -> 3, len=4, completion=2, status=RUNNING, blocks=[0, 1]
+  step 3 (decode, 1 tok): cached 3 -> 4, len=5, completion=3, status=FINISHED, blocks=freed (deallocate)
+
+[check] FINISHED at max_tokens=3, blocks freed: True -> OK
+
+========================================================================
+  SECTION G: FULL multi-step schedule TRACE (the gold centerpiece)
+========================================================================
+Scenario: 3 sequences, prompt lens [3,5,2], max_num_batched_tokens=4,
+block_size=2, greedy decode, max_tokens=2 (ignore_eos). Pool=8 blocks.
+
+| step | scheduled (seq:toks)    | total | is_prefill | note                         |
+|------|------------------------|-------|------------|------------------------------|
+| 1    | seq0:3                 | 3     | True       | prefill                        |
+| 2    | seq1:4                 | 4     | True       | prefill (chunked; seq[1] still waiting) |
+| 3    | seq1:1, seq2:2         | 3     | True       | prefill                        |
+| 4    | seq0:1, seq1:1, seq2:1 | 3     | False      | decode                         |
+
+num_cached_tokens peak per step (chunked prefill visible in seq1):
+| step | seq0 | seq1 | seq2 |
+|------|------|------|------|
+| 1    | 3 | 0 | 0 |
+| 2    | 3 | 4 | 0 |
+| 3    | 3 | 5 | 2 |
+| 4    | 4 | 6 | 3 |
+
+status AFTER each step:
+| step | seq0   | seq1   | seq2   |
+|------|------|------|------|
+| 1    | RUNNING | WAITING | WAITING |
+| 2    | RUNNING | WAITING | WAITING |
+| 3    | RUNNING | RUNNING | RUNNING |
+| 4    | FINISHED | FINISHED | FINISHED |
+
+GOLD (recomputed & badge-checked in scheduler.html):
+  per-step token totals          = [3, 4, 3, 3]   (all <= 4 budget)
+  seq1 num_cached_tokens growth  = [0, 4, 5, 6]
+  total steps to finish all 3    = 4
+
+[check] every step total <= budget 4 : True -> OK
+[check] seq1 growth == [0,4,5,6]      : True -> OK
+[check] all 3 seqs reached FINISHED   : True -> OK
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

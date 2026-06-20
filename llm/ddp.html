@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DDP — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#9b59b6; --gpu0:#2980b9; --gpu1:#e67e22;
+    --sync:#27ae60; --warn:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat tr.hl td{background:#3a2f12;color:#ffd966;font-weight:700}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .g0{color:var(--gpu0)}
+  .readout .g1{color:var(--gpu1)}
+  .readout .avg{color:var(--sync);font-weight:700}
+  .readout .bad{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  #sync{display:block;width:100%;max-width:1100px;height:360px}
+  #accum{display:block;width:100%;max-width:1100px;height:200px}
+  #lr{display:block;width:100%;max-width:1100px;height:260px}
+  #mem{display:block;width:100%;max-width:1100px;height:240px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Distributed Data Parallel (DDP) — interactive
+    <a class="badge" href="./DDP.md">DDP.md</a>
+    <a class="badge" href="./ddp.py">ddp.py</a></h1>
+  <div class="sub"><b>For newcomers:</b> DDP copies the whole model onto every GPU; each GPU eats a <b>different</b>
+    mini-batch, computes a <b>local</b> gradient, then <b style="color:var(--sync)">AllReduces</b> (averages) them so
+    every GPU ends up with the <b>identical</b> gradient → identical optimizer step → replicas <b>never drift</b>.
+    Drag the <b style="color:var(--green)">phase</b> slider below to walk one optimizer step. Every number is
+    recomputed live in JS from the <i>identical</i> formula in <code>ddp.py</code> (a faithful single-process
+    K=2 simulation). &nbsp;|&nbsp;
+    <a href="./nccl_collectives.html">&rarr; NCCL collectives</a> &nbsp;
+    <a href="./tensor_parallel.html">&rarr; Tensor Parallel</a></div>
+
+  <!-- ===== PANEL 1: DDP STEP + GRAD SYNC ===== -->
+  <h2>① One DDP step: 2 replicas → local grads → AllReduce → identical update</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> drag the <b>phase</b> slider through the 4 stages.
+      Phase 0 = identical init (broadcast). Phase 1 = each rank runs fwd+bwd on its <i>own</i> batch → <b>different</b>
+      local grads (note g0 ≠ g1). Phase 2 = AllReduce averages them → <b>both ranks now hold the identical grad</b>.
+      Phase 3 = both take the same SGD step → params stay bit-identical (no drift).</div>
+    <div class="controls">
+      <label>phase <input type="range" id="phase" min="0" max="3" value="2" step="1">
+        <span class="val" id="phaseVal">2</span></label>
+      <span class="micro" id="phaseLabel">AllReduce: both ranks now hold identical averaged grad</span>
+    </div>
+    <canvas id="sync" width="1100" height="360"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--gpu0)"></i>rank 0 (GPU 0, batch X0)</span>
+      <span><i class="sw" style="background:var(--gpu1)"></i>rank 1 (GPU 1, batch X1)</span>
+      <span><i class="sw" style="background:var(--sync)"></i>AllReduce-averaged (identical on both)</span>
+      <span><i class="sw" style="background:var(--muted)"></i>init weights W</span>
+    </div>
+    <div class="readout" id="syncReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to notice:</b> at phase 1 the two gradient bar-groups clearly
+      differ (left=blue, right=orange). At phase 2 they collapse to the <b>same green bars</b> on both sides — that is
+      AllReduce making the replicas agree. At phase 3 the weight bars update identically. This is why DDP replicas
+      can never drift. (DDP.md §A–B)</div>
+  </div>
+
+  <!-- ===== PANEL 2: GRADIENT ACCUMULATION ===== -->
+  <h2>② Gradient accumulation: many micro-batches, ONE AllReduce at the end</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> drag <b>accum steps</b>. The timeline shows
+      micro-batches per rank; <b style="color:var(--red)">red</b> = sync OFF (local accumulate only),
+      <b style="color:var(--sync)">green</b> = the LAST micro-step where <code>require_backward_grad_sync=True</code>
+      and the single AllReduce fires. Effective batch = <code>bs × accum × world_size</code>.</div>
+    <div class="controls">
+      <label>accum steps <input type="range" id="accum" min="1" max="8" value="2" step="1">
+        <span class="val" id="accumVal">2</span></label>
+      <span class="micro">world_size = 2, bs = 2 → effective batch = <b id="effBatch">8</b></span>
+    </div>
+    <canvas id="accum" width="1100" height="200"></canvas>
+    <div class="micro" style="margin-top:.5rem"><b>Why:</b> without this trick you'd AllReduce <code>accum</code> times
+      per optimizer step instead of once. nanoGPT sets <code>model.require_backward_grad_sync = (micro_step == accum-1)</code>
+      to skip AllReduce on all but the last micro-step. (DDP.md §C)</div>
+  </div>
+
+  <!-- ===== PANEL 3: COSINE LR + WARMUP ===== -->
+  <h2>③ Cosine LR + linear warmup (nanoGPT get_lr, Goyal 2017)</h3>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> drag <b>step</b>. The curve warms up linearly
+      0→peak, then cosine-decays peak→min_lr, then holds. Bigger batch ⇒ scale peak LR up (linear scaling rule) and
+      warm up longer to avoid early instability.</div>
+    <div class="controls">
+      <label>step it <input type="range" id="it" min="0" max="60" value="10" step="1">
+        <span class="val" id="itVal">10</span></label>
+      <span class="micro">peak=1.0, min_lr=0.1, warmup=10, decay_iters=50 (readable scale)</span>
+    </div>
+    <canvas id="lr" width="1100" height="260"></canvas>
+    <div class="readout" id="lrReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 4: 20 BYTES/PARAM MEMORY ===== -->
+  <h2>④ The 20-bytes/param memory bill (mixed-precision Adam, per GPU)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> each bar is one component DDP <b>replicates</b>
+      on every GPU. The two fp16 bars (params+grads) are what <a href="./quantization.html">🔗 QUANTIZATION</a> shrinks;
+      the four fp32 bars (master+grad+momentum+variance) are the 16N redundancy ZeRO (coming) will shard away.</div>
+    <canvas id="mem" width="1100" height="240"></canvas>
+    <div class="micro" style="margin-top:.5rem"><b>Total = 20 bytes/param.</b> An 8B model costs ~149 GB per GPU in DDP.
+      ZeRO-3 partitions all of it down to <code>16N/K</code>; QUANTIZATION attacks the weight bytes. Orthogonal axes.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check —</b> the badge means the live JS recomputes the exact gradient + SGD-step numbers printed by
+    <code>ddp.py</code> Section B/G (seeded tensors, MSE-mean loss, AllReduce-average, lr=0.1):
+    <span class="badge" id="check">check: …</span>
+    <br><br>
+    Verified: AllReduce-averaged grad and post-step weight both match the Python output on the canonical 2-rank run.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth seeded tensors, copied verbatim from ddp.py (manual_seed) ===== */
+const W=[[0.15409961342811584,-0.0293428897857666,-0.21787893772125244],
+         [0.05684312805533409,-0.10845223814249039,-0.13985954225063324],
+         [0.040334682911634445,0.08380263298749924,-0.07192575931549072],
+         [-0.04033435508608818,-0.05966353416442871,0.018203649669885635]];
+const X0=[[0.33669036626815796,0.12880940735340118,0.23446236550807953,0.23033303022384644],
+          [-1.1228563785552979,-0.18632829189300537,2.2082014083862305,-0.637997031211853]];
+const T0=[[0.46165722608566284,0.2673508822917938,0.5349046587944031],
+          [0.809357225894928,1.110290288925171,-1.6897989511489868]];
+const X1=[[-0.9889599084854126,0.9579718112945557,1.322135090827942,0.8171897530555725],
+          [-0.765838623046875,-0.7506223320960999,1.3525477647781372,0.6863219141960144]];
+const T1=[[-0.32775864005088806,0.7949687242507935,0.2815195620059967],
+          [0.056163541972637177,0.5227160453796387,-0.23835687339305878]];
+const E_IN=4, E_OUT=3, B=2, LR=0.1;
+
+/* ===== faithful math, copied from ddp.py ===== */
+function matmul(a,b){           // a[m][n] b[n][p] -> [m][p]
+  const m=a.length,n=a[0].length,p=b[0].length;
+  const o=Array.from({length:m},()=>new Array(p).fill(0));
+  for(let i=0;i<m;i++)for(let j=0;j<p;j++){let s=0;for(let k=0;k<n;k++)s+=a[i][k]*b[k][j];o[i][j]=s;}
+  return o;
+}
+function sub(a,b){return a.map((r,i)=>r.map((v,j)=>v-b[i][j]));}
+function mseGradW(x,Wmat,t){   // dL/dW for mean-MSE, shape [E_IN,E_OUT]
+  const y=matmul(x,Wmat);      // [B,E_OUT]
+  const Bn=x.length*E_OUT;
+  const dy=sub(y,t).map(r=>r.map(v=>2*v/Bn));   // [B,E_OUT]
+  // dL/dW = x^T @ dy  -> [E_IN,E_OUT]
+  const xt=transpose(x);
+  return matmul(xt,dy);
+}
+function transpose(a){return a[0].map((_,j)=>a.map(r=>r[j]));}
+function addMat(a,b){return a.map((r,i)=>r.map((v,j)=>v+b[i][j]));}
+function scaleMat(a,s){return a.map(r=>r.map(v=>v*s));}
+function allReduceAvg(g0,g1){                  // average -> identical on both ranks
+  const avg=addMat(scaleMat(g0,0.5),scaleMat(g1,0.5));
+  return [avg,avg.map(r=>r.slice())];
+}
+function sgdStep(Wmat,g,lr){return Wmat.map((r,i)=>r.map((v,j)=>v-lr*g[i][j]));}
+
+const G0=mseGradW(X0,W,T0);
+const G1=mseGradW(X1,W,T1);
+const [GAVG,_]=allReduceAvg(G0,G1);
+const WNEW=sgdStep(W,GAVG,LR);
+
+const fmt=(v,d=4)=>(v>=0?'+':'')+v.toFixed(d);
+const vecM=(m,d=4)=>'['+m.map(r=>'['+r.map(v=>fmt(v,d)).join(', ')+']').join(', ')+']';
+const flat=(m)=>m.flat();
+
+/* ===== canvas helpers ===== */
+function setup(cv){const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||1100,h=cv.clientHeight||260;
+  const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;}
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);return ctx;}
+
+/* ----- PANEL 1: grad sync ----- */
+const syncCv=document.getElementById('sync');
+function drawSync(phase){
+  const ctx=setup(syncCv);const w=syncCv.clientWidth,h=syncCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const labels=['0: IDENTICAL INIT (DDP broadcasts rank-0 weights)',
+                '1: FWD+BWD on each rank → DIFFERENT local grads (g0 ≠ g1)',
+                '2: ALLREDUCE (average) → both ranks hold IDENTICAL grad',
+                '3: SAME SGD step → params stay bit-identical (NO DRIFT)'];
+  document.getElementById('phaseLabel').textContent=labels[phase];
+
+  // draw two GPU columns: left=rank0, right=rank1, center=avg
+  const padT=46,padB=30;
+  const cols=phase===2?3:2;
+  const colW=w/cols;
+  const drawBars=(cx,vec,color,label,sublabel)=>{
+    const n=vec.length,bw=Math.min(26,(colW-40)/n-4);
+    const maxAbs=Math.max(0.3,...G0.flat().map(Math.abs),...G1.flat().map(Math.abs),...GAVG.flat().map(Math.abs));
+    const baseY=h-padB,top=padT+14;
+    const scale=(baseY-top)/maxAbs/1.1;
+    ctx.fillStyle='#e6edf3';ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(label,cx,padT-6);
+    ctx.fillStyle='#8b949e';ctx.font='10px ui-monospace,monospace';
+    if(sublabel)ctx.fillText(sublabel,cx,padT+10);
+    ctx.strokeStyle='#21262d';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(cx-colW/2+20,baseY);ctx.lineTo(cx+colW/2-20,baseY);ctx.stroke();
+    const totalW=n*(bw+3)-3,start=cx-totalW/2;
+    vec.forEach((v,i)=>{
+      const x=start+i*(bw+3),hh=v*scale;
+      ctx.fillStyle=color;
+      ctx.fillRect(x,hh<0?baseY:baseY-hh,bw,Math.abs(hh));
+      ctx.fillStyle='#8b949e';ctx.font='8px ui-monospace,monospace';
+      ctx.fillText(i,x+bw/2,baseY+12);
+    });
+  };
+  if(phase===0){
+    drawBars(colW*0.5,flat(W),'#8b949e','rank 0: W','init weights');
+    drawBars(colW*1.5,flat(W),'#8b949e','rank 1: W','(identical)');
+  }else if(phase===1){
+    drawBars(colW*0.5,flat(G0),'var(--gpu0)','rank 0: g0 = ∇L(X0)','local grad');
+    drawBars(colW*1.5,flat(G1),'var(--gpu1)','rank 1: g1 = ∇L(X1)','local grad');
+  }else if(phase===2){
+    drawBars(colW*0.5,flat(GAVG),'var(--sync)','rank 0: avg','(g0+g1)/2');
+    drawBars(colW*1.5,flat(GAVG),'var(--sync)','rank 1: avg','IDENTICAL');
+    drawBars(colW*2.5,flat(GAVG),'var(--sync)','single-GPU','∇L([X0;X1]) == avg');
+  }else{
+    drawBars(colW*0.5,flat(WNEW),'var(--gpu0)','rank 0: W - lr·avg','after step');
+    drawBars(colW*1.5,flat(WNEW),'var(--gpu1)','rank 1: W - lr·avg','IDENTICAL');
+  }
+}
+function renderSyncReadout(phase){
+  const el=document.getElementById('syncReadout');
+  if(phase===0){
+    el.innerHTML=`<span style="color:var(--muted)">init W (broadcast, identical on both ranks) =</span>\n  ${vecM(W)}`;
+  }else if(phase===1){
+    el.innerHTML=`<span class="g0">g0 = ∇L(X0)</span> = ${vecM(G0)}\n<span class="g1">g1 = ∇L(X1)</span> = ${vecM(G1)}\n  → they DIFFER (different batches) → replicas would drift without sync`;
+  }else if(phase===2){
+    const single=mseGradW(X0.concat?X0:[],W,T0); // not used; show equivalence note
+    el.innerHTML=`<span class="avg">avg = (g0 + g1) / 2</span> = ${vecM(GAVG)}\n  both ranks now hold the IDENTICAL averaged gradient`;
+  }else{
+    el.innerHTML=`W_new = W - ${LR}·avg = ${vecM(WNEW)}\n  rank0 == rank1 == single-GPU-on-[X0;X1]  →  <b>NO DRIFT</b>`;
+  }
+}
+
+/* ----- PANEL 2: accumulation timeline ----- */
+const accumCv=document.getElementById('accum');
+function drawAccum(accum){
+  const ctx=setup(accumCv);const w=accumCv.clientWidth,h=accumCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=30,padR=30,padT=40,padB=34;
+  const pw=w-padL-padR;
+  const total=accum*2; // micro-batches across both ranks
+  const bw=pw/total;
+  for(let r=0;r<2;r++){
+    const y0=padT + r*( (h-padT-padB)/2 );
+    ctx.fillStyle=r===0?'var(--gpu0)':'var(--gpu1)';
+    ctx.font='bold 11px ui-monospace,monospace';ctx.textAlign='left';
+    ctx.fillText('rank '+r+' (GPU '+r+')',padL,y0-6);
+    for(let s=0;s<accum;s++){
+      const idx=r*accum+s;
+      const x=padL+idx*bw;
+      const isLast=(s===accum-1);
+      ctx.fillStyle=isLast?'#1c3a25':'#3a1414';
+      ctx.strokeStyle=isLast?'var(--sync)':'var(--red)';
+      ctx.lineWidth=2;
+      const bwid=bw*0.8, bh=(h-padT-padB)/2-16;
+      ctx.fillRect(x+2,y0,bwid,bh);ctx.strokeRect(x+2,y0,bwid,bh);
+      ctx.fillStyle=isLast?'var(--sync)':'var(--red)';
+      ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+      ctx.fillText('μ'+s, x+2+bwid/2, y0+bh/2);
+      ctx.fillStyle='#8b949e';ctx.font='8px ui-monospace,monospace';
+      ctx.fillText(isLast?'sync ON':'sync OFF', x+2+bwid/2, y0+bh+12);
+    }
+  }
+  document.getElementById('effBatch').textContent=B*accum*2;
+}
+
+/* ----- PANEL 3: cosine LR ----- */
+const lrCv=document.getElementById('lr');
+const PEAK=1.0,MINLR=0.1,WARMUP=10,DECAY=50;
+function getLr(it){
+  if(it<WARMUP) return PEAK*(it+1)/(WARMUP+1);
+  if(it>DECAY) return MINLR;
+  const r=(it-WARMUP)/(DECAY-WARMUP);
+  const coeff=0.5*(1.0+Math.cos(Math.PI*r));
+  return MINLR+coeff*(PEAK-MINLR);
+}
+function drawLr(cur){
+  const ctx=setup(lrCv);const w=lrCv.clientWidth,h=lrCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=44,padR=20,padT=16,padB=28;
+  const pw=w-padL-padR,ph=h-padT-padB;
+  const xmin=0,xmax=60,ymin=0,ymax=1.1;
+  const X=x=>padL+(x-xmin)/(xmax-xmin)*pw;
+  const Y=y=>padT+ph-(y-ymin)/(ymax-ymin)*ph;
+  ctx.strokeStyle='#21262d';ctx.lineWidth=1;ctx.fillStyle='#8b949e';ctx.font='10px ui-monospace,monospace';
+  for(let v=0;v<=1.0;v+=0.2){ctx.beginPath();ctx.moveTo(padL,Y(v));ctx.lineTo(w-padR,Y(v));ctx.stroke();ctx.fillText(v.toFixed(1),padL-16,Y(v)+3);}
+  for(let i=0;i<=60;i+=10){ctx.fillText(i,X(i)-6,padT+ph+14);}
+  // warmup region
+  ctx.fillStyle='rgba(241,196,15,.10)';ctx.fillRect(X(0),padT,X(WARMUP)-X(0),ph);
+  ctx.fillStyle='#f1c40f';ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  ctx.fillText('warmup',X(WARMUP/2),padT+10);
+  // curve
+  ctx.strokeStyle='#27ae60';ctx.lineWidth=2.6;ctx.beginPath();
+  for(let i=0;i<=180;i++){const it=i/3;const lr=getLr(it);i===0?ctx.moveTo(X(it),Y(lr)):ctx.lineTo(X(it),Y(lr));}
+  ctx.stroke();
+  // current point
+  const clr=getLr(cur);
+  ctx.fillStyle='#27ae60';ctx.strokeStyle='#0d1117';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(X(cur),Y(clr),6,0,2*Math.PI);ctx.fill();ctx.stroke();
+  ctx.strokeStyle='rgba(39,174,96,.5)';ctx.lineWidth=1;ctx.setLineDash([4,3]);
+  ctx.beginPath();ctx.moveTo(X(cur),padT);ctx.lineTo(X(cur),Y(clr));ctx.stroke();ctx.setLineDash([]);
+  document.getElementById('lrReadout').innerHTML=
+    `it=${cur}  →  lr = <b>${clr.toFixed(4)}</b>`+
+    (cur<WARMUP?`   (warmup: linear 0→peak)`:cur>DECAY?`   (hold @ min_lr)`:`   (cosine decay)`);
+}
+
+/* ----- PANEL 4: memory ----- */
+const memCv=document.getElementById('mem');
+const MEM=[
+  {name:'fp16 params',b:2,c:'#2980b9'},
+  {name:'fp16 grads',b:2,c:'#5dade2'},
+  {name:'fp32 master',b:4,c:'#9b59b6'},
+  {name:'fp32 grad copy',b:4,c:'#b07cd6'},
+  {name:'fp32 momentum',b:4,c:'#e67e22'},
+  {name:'fp32 variance',b:4,c:'#f39c12'},
+];
+function drawMem(){
+  const ctx=setup(memCv);const w=memCv.clientWidth,h=memCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=30,padR=30,padT=30,padB=40;
+  const total=20;
+  const pw=w-padL-padR;
+  let x=padL;
+  const bh=h-padT-padB-20;
+  MEM.forEach(m=>{
+    const bw=pw*m.b/total;
+    ctx.fillStyle=m.c;ctx.fillRect(x,padT+10,bw,bh);
+    ctx.fillStyle='#fff';ctx.font='bold 11px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(m.b+'B',x+bw/2,padT+10+bh/2);
+    ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';
+    ctx.save();ctx.translate(x+bw/2,padT+10+bh+10);ctx.rotate(-Math.PI/8);
+    ctx.fillText(m.name,0,0);ctx.restore();
+    x+=bw;
+  });
+  ctx.strokeStyle='#27ae60';ctx.lineWidth=2;
+  ctx.strokeRect(padL,padT+10,pw,bh);
+  ctx.fillStyle='#27ae60';ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='right';
+  ctx.fillText('TOTAL = 20 bytes/param',w-padR,padT);
+}
+
+/* ===== master render ===== */
+function render(){
+  const phase=+document.getElementById('phase').value;
+  document.getElementById('phaseVal').textContent=phase;
+  drawSync(phase);renderSyncReadout(phase);
+  const accum=+document.getElementById('accum').value;
+  document.getElementById('accumVal').textContent=accum;
+  drawAccum(accum);
+  const it=+document.getElementById('it').value;
+  document.getElementById('itVal').textContent=it;
+  drawLr(it);
+  drawMem();
+}
+
+/* ===== events ===== */
+document.getElementById('phase').addEventListener('input',render);
+document.getElementById('accum').addEventListener('input',render);
+document.getElementById('it').addEventListener('input',render);
+window.addEventListener('resize',render);
+
+/* ===== gold-value checks vs ddp.py Section B/G ===== */
+// pinned from ddp.py: avg_grad[0,0]=+0.124783, avg_grad[1,2]=-0.167272,
+//   W_after_step[0,0]=+0.141621, W_after_step[1,2]=-0.123132 (lr=0.1)
+const gold={
+  avg00:0.124783, avg12:-0.167272,
+  w00:0.141621, w12:-0.123132
+};
+const ok = Math.abs(GAVG[0][0]-gold.avg00)<5e-4
+        && Math.abs(GAVG[1][2]-gold.avg12)<5e-4
+        && Math.abs(WNEW[0][0]-gold.w00)<5e-4
+        && Math.abs(WNEW[1][2]-gold.w12)<5e-4;
+const ck=document.getElementById('check');
+ck.textContent=ok?'check: OK — JS AllReduce avg + SGD step match ddp.py'
+                  :'check: FAIL — mismatch!';
+ck.style.borderColor=ok?'#27ae60':'#c0392b';
+ck.style.color=ok?'#27ae60':'#c0392b';
+ck.style.background=ok?'#1c3a25':'#3a1414';
+
+render();
+</script>
+</body>
+</html>

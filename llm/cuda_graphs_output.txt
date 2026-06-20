@@ -1,0 +1,237 @@
+cuda_graphs.py - faithful CUDA-Graph simulation + real overhead math.
+torch = 2.12.1
+PLATFORM: this machine has NO CUDA device. The graph capture/replay
+MECHANISM is simulated in pure Python [SIM]; the latency figures are
+the REAL published ones. See CUDA_GRAPHS.md ## Sources.
+
+
+========================================================================
+  SECTION A: the eager launch-overhead problem (real us arithmetic)
+========================================================================
+Model: num_layers=24, kernels_per_layer=3, N_kernels=72
+Published figures: launch=10 us/kernel (PCIe gen3, NVIDIA forums), compute~8 us/kernel (decode bw-bound).
+
+Every eager decode step, the Python interpreter asks the GPU to run
+each of the 72 kernels one at a time. Each 'ask' (a kernel launch)
+costs CPU->GPU driver overhead that produces ZERO FLOPs:
+
+| per eager decode step          | value (us)  |
+|--------------------------------|-------------|
+| N_kernels                      | 72          |
+| x launch latency per kernel    | 10.0        |
+| = EAGER LAUNCH OVERHEAD        | 720         |
+|   (pure CPU bookkeeping, 0 FLOPs) |           |
+| + actual compute (unchanged)   | 576         |
+| = EAGER STEP TOTAL             | 1296        |
+
+=> 55.6% of an eager decode step is wasted on launch overhead
+   (720 us out of 1296 us). That is the tax
+   CUDA Graphs delete.
+
+========================================================================
+  SECTION B: capture flow  (warmup -> record -> store)  [SIM]
+========================================================================
+CUDA Graph capture records the GPU command sequence ONCE into a frozen
+graph. Two mandatory phases (skip either and capture is broken):
+
+  1) WARMUP run (NOT captured): runs model() once to prime the memory
+     allocator, cuDNN/cuBLAS handles, and JIT-compile any PTX. If you
+     skip this, the graph captures un-initialized lazy state.
+  2) CAPTURE run: under `with torch.cuda.graph(graph, pool):` every
+     kernel the model emits is APPENDED to the graph instead of
+     launched. NO allocation may happen inside the graph.
+
+[SIM] Capturing a graph for bs=1:
+  ops before warmup : 0
+  ops after warmup  : 0   (warmup is NOT captured)
+  ops after capture : 72   (== N_kernels = 72)
+
+[check] captured ops == N_kernels:  OK
+
+First 6 captured ops:
+  [ 0] L00 attn_qkv
+  [ 1] L00 attn_score
+  [ 2] L00 mlp_ffn
+  [ 3] L01 attn_qkv
+  [ 4] L01 attn_score
+  [ 5] L01 mlp_ffn
+  ... (66 more)
+
+On real HW, graph.replay() re-issues ALL of these with ONE call. The
+graph now holds a frozen pointer to the SAME input/output tensors; to
+change inputs you copy data INTO them in-place (Section D).
+
+========================================================================
+  SECTION C: one graph per batch size + selection at replay  [SIM]
+========================================================================
+A captured graph is shape-specific: a graph for bs=8 will NOT run a
+bs=3 batch. So we pre-capture a small set of batch sizes and, at run
+time, select the SMALLEST captured graph >= the current batch:
+
+Source: ../nano-vllm/.../model_runner.py capture_cudagraph()
+
+    self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs+1, 16))
+
+Pre-captured graphs (max_bs=32):
+| captured bs | captured ops (= N_kernels) |
+|-------------|----------------------------|
+| 1           | 72                         |
+| 2           | 72                         |
+| 4           | 72                         |
+| 8           | 72                         |
+| 16          | 72                         |
+| 32          | 72                         |
+
+Selection at run time (current batch -> which graph replays):
+| current bs | selected graph_bs | wasted slots |
+|------------|-------------------|--------------|
+| 1          | 1                 | 0            |
+| 2          | 2                 | 0            |
+| 3          | 4                 | 1            |
+| 5          | 8                 | 3            |
+| 8          | 8                 | 0            |
+| 10         | 16                | 6            |
+| 17         | 32                | 15           |
+| 24         | 32                | 8            |
+
+Wasted slots (graph_bs - current_bs) are why Section G's -1 padding
+trick exists: the graph always runs `graph_bs` slots, and the unused
+ones must be marked so the attention kernel ignores them.
+
+========================================================================
+  SECTION D: replay = in-place copy + graph.replay()  [SIM]
+========================================================================
+Replay flow (mirrors run_model()): the graph reuses its PRE-ALLOCATED
+input/output tensors. You OVERWRITE their contents in-place, then call
+graph.replay(). The graph reads/writes the SAME tensor addresses it
+captured -- you must NOT replace the tensor object, only its data.
+
+Replay for current_bs=3 -> selected graph_bs=4
+  graph.input_ids   (captured tensor, shape [4]):
+    data : [0, 1, 2, 0]
+  graph.positions   (shape [4]):
+    data : [0, 1, 2, 0]
+  graph.slot_mapping (shape [4]):
+    data : [0, 1, 2, -1]   (-1 marks the 1 padding slots)
+  graph.replay() -> re-issued 72 kernels in ONE call
+
+[check] padding slots (>= current_bs) are all -1:  OK
+[check] replay_count == 1 after one replay:  OK
+
+vs EAGER: those 72 kernels would have been 72 separate CPU->GPU launches. With the graph it is exactly 1. The per-step
+launch cost drops from N_kernels x launch_us to a single graph launch (Section F).
+
+========================================================================
+  SECTION E: limitations (why graphs are decode-only, fixed-shape)
+========================================================================
+CUDA Graphs are powerful but strict. Break a rule and you get either a
+hard error or silent corruption.
+
+| # | rule                                  | why                       |
+|---|---------------------------------------|---------------------------|
+| 1 | DECODE only, not prefill              | prefill length varies per request -> shape not fixed -> cannot capture |
+| 2 | fixed input shapes                    | the graph bakes in tensor shapes/strides; changing them = illegal mem access |
+| 3 | no allocation inside the graph        | cudaMalloc is a host call; the graph is pure device work |
+| 4 | inputs must be the SAME tensor objects | replay reads captured addresses; you overwrite data in-place, never swap tensors |
+| 5 | warmup before capture is mandatory    | skip it and the graph captures un-initialized lazy/cuDNN state |
+| 6 | bs cap (e.g. >512 falls back to eager) | huge batches are compute-bound anyway; capture cost not worth it |
+
+Net: graphs accelerate the FIXED-SHAPE, REPETITIVE decode loop. The
+scheduler's continuous batching (🔗 SCHEDULER.md) still runs in Python
+on the CPU; only the model forward inside one decode step is graphed.
+
+========================================================================
+  SECTION F: eager vs captured timeline + speedup math  (GOLD centerpiece)
+========================================================================
+N_kernels=72, launch=10 us/kernel, graph_replay=5 us, compute=8 us/kernel
+
+Per-step timeline (us), batch=1 decode:
+
+| phase                  | EAGER        | GRAPHED     |
+|------------------------|--------------|-------------|
+| launch overhead        | 720           | 5           |
+| actual compute (same)  | 576           | 576         |
+| STEP TOTAL             | 1296          | 581         |
+
+Two different speedups (do not conflate them):
+
+| metric                          | value     |
+|---------------------------------|-----------|
+| LAUNCH-overhead speedup         | 144.0     |   (720/5)
+| TOTAL step speedup (compute     | 2.231     |   (1296/581)
+|   unchanged)                    |           |
+
+The launch component is 144x cheaper; the whole step
+is only 2.23x faster here because compute (the same in
+both) is non-trivial. For production models where per-token WEIGHT
+READING dominates (ms-scale, not us-scale), the total speedup shrinks
+into the ~10-20% decode-latency drop vLLM reports -- the launch tax is
+a fixed us cost that matters most at small batch (see table below).
+
+Batch scaling: launch overhead is FIXED per step; compute grows ~linearly
+with batch. So graphs help MOST at small batch, least at large batch.
+
+| batch | compute grows? | launch (fixed) | launch frac (eager) | total speedup |
+|-------|----------------|----------------|---------------------|---------------|
+| 1     | baseline       | 720            | 55.6                | 2.231         |
+| 2     | yes            | 720            | 38.5                | 1.618         |
+| 4     | yes            | 720            | 23.8                | 1.310         |
+| 8     | yes            | 720            | 13.5                | 1.155         |
+| 16    | yes            | 720            | 7.2                 | 1.078         |
+| 32    | yes            | 720            | 3.8                 | 1.039         |
+| 64    | yes            | 720            | 1.9                 | 1.019         |
+
+Read the table: at batch=1 the launch overhead is 55.6% of the step; by batch=64
+it is negligible. This is why serving engines graph the small-batch
+decode path but fall back to eager once batch > the capture cap.
+
+
+========================================================================
+  SECTION G: the slot_mapping.fill_(-1) padding trick  (link KV_CACHE / PAGED_ATTENTION)
+========================================================================
+When current_bs < graph_bs, the graph still runs `graph_bs` slots. The
+unused slots' KV-write addresses must be marked so the paged-attention
+kernel SKIPS them. The convention (from nano-vllm run_model()) is:
+
+    graph_vars['slot_mapping'].fill_(-1)            # mark ALL padding
+    graph_vars['slot_mapping'][:bs].copy_(real)     # then write real
+
+slot_mapping[i] = the physical KV-block slot token i writes into. A
+value of -1 means 'no token here -- do not write'.
+
+[SIM] captured graph_bs=8, replaying current_bs=3:
+
+  real_slots (from block_table)  : [4, 17, 9]
+  graph slot_mapping after fill+copy : [4, 17, 9, -1, -1, -1, -1, -1]
+
+| slot idx | slot_mapping | token? | kernel action           |
+|----------|--------------|--------|------------------------|
+| 0        | 4            | token 0 | write KV to physical slot 4 |
+| 1        | 17           | token 1 | write KV to physical slot 17 |
+| 2        | 9            | token 2 | write KV to physical slot 9 |
+| 3        | -1           | (padding) | SKIP (slot == -1)      |
+| 4        | -1           | (padding) | SKIP (slot == -1)      |
+| 5        | -1           | (padding) | SKIP (slot == -1)      |
+| 6        | -1           | (padding) | SKIP (slot == -1)      |
+| 7        | -1           | (padding) | SKIP (slot == -1)      |
+
+[check] padding region all -1 AND real region == [4,17,9]:  OK
+
+Without this trick, the padding slots would write garbage KV into
+random physical memory -> silent corruption of OTHER sequences' caches.
+Same -1 sentinel is used for context_lens / block_tables padding.
+-> 🔗 PAGED_ATTENTION.md (slot = block_id x block_size + offset)
+-> 🔗 KV_CACHE.md (the block_table that produces these slot ids)
+
+========================================================================
+  GOLD PIN (for CUDA_GRAPHS.md + cuda_graphs.html)
+========================================================================
+Pinned numbers (num_layers=24, kernels/layer=3 -> N_kernels=72):
+  eager_launch_us  = N x launch = 72 x 10 = 720 us
+  graph_launch_us  = single replay   = 5 us
+  launch_speedup   = 720 / 5       = 144.0x   <- gold
+  total_speedup    = 1296 / 581 (incl compute) = 2.231x
+
+========================================================================
+  DONE - all sections printed, all [check] OK
+========================================================================

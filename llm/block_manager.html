@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BlockManager (Paged Allocation + Prefix Cache) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --waste:#3d4452;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .sh{color:#ffba75}
+  .readout .rd{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  /* ---- hash tree ---- */
+  .tree{display:flex;gap:2.2rem;flex-wrap:wrap;margin-top:.4rem}
+  .col{flex:1;min-width:280px}
+  .col h4{margin:0 0 .4rem;font-size:.82rem;color:var(--muted);font-weight:600}
+  .node{border:1px solid #30363d;border-radius:8px;padding:.5rem .7rem;margin:.3rem 0;
+        font-family:ui-monospace,monospace;font-size:.74rem;line-height:1.35;
+        background:#0a0e14;transition:all .18s}
+  .node .tok{color:var(--ink)}
+  .node .hh{color:#ffba75;word-break:break-all}
+  .node.share{border-color:var(--green);background:#0f2418}
+  .node.share .rc{color:var(--green);font-weight:700}
+  .node.amatch{border-color:var(--blue);background:#0f1d2e}
+  .node.bmatch{border-color:var(--purple);background:#1f0f24}
+  .tag{display:inline-block;font-size:.66rem;padding:1px 6px;border-radius:4px;margin-left:.4rem;font-weight:700}
+  .tag.share{background:#1c3a25;color:var(--green)}
+  .tag.diverge{background:#3a1414;color:#ff9c9c}
+  /* ---- pool strip ---- */
+  .strip{display:flex;gap:6px;flex-wrap:wrap;margin:.2rem 0 .1rem}
+  .cell{width:78px;height:64px;border-radius:6px;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;font-size:.66rem;color:#0d1117;
+        font-weight:700;font-family:ui-monospace,monospace;border:1px solid transparent;padding:2px}
+  .cell .bid{font-size:.6rem;opacity:.8}
+  .cell .tk{font-size:.62rem;font-weight:600}
+  .cell .rc{font-size:.66rem}
+  .cell.free{background:var(--waste);color:var(--muted)}
+  .cell.reclaim{background:var(--waste);color:var(--orange);border:1px dashed var(--orange)}
+  .cell.live{background:var(--blue);color:#fff}
+  .cell.shared{background:var(--green);color:#012}
+  table.walk{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem;width:100%}
+  table.walk td,table.walk th{border:1px solid #30363d;padding:4px 8px;text-align:left}
+  table.walk th{color:var(--muted);font-weight:600}
+  table.walk tr.hit td{background:#0f2418;color:#7ee2a8}
+  table.walk tr.miss td{background:#3a1414;color:#ff9c9c}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>BlockManager &mdash; Paged Alloc + Prefix Cache &mdash; interactive
+    <a class="badge" href="./BLOCK_MANAGER.md">BLOCK_MANAGER.md</a>
+    <a class="badge" href="./block_manager.py">block_manager.py</a></h1>
+  <div class="sub"><b>The library-card idea:</b> each page is fingerprinted by a <b style="color:var(--green)">chained hash</b>
+    &mdash; its own tokens folded onto the hash of the page before it. Two requests that share a token prefix get identical
+    fingerprints and <b>share the same physical page</b> (<code>ref_count++</code>), skipping the KV recompute. Every number is
+    recomputed in JS from the <i>identical</i> FNV-1a formula in <code>block_manager.py</code>.
+    &nbsp;|&nbsp; <a href="./kv_cache.html">&larr; KV_CACHE (storage layout)</a>
+    &nbsp;|&nbsp; <a href="./paged_attention.html">paged attention kernel &rarr;</a>
+    &nbsp;|&nbsp; <a href="./scheduler.html">who calls this? the scheduler &rarr;</a>
+    &nbsp;|&nbsp; <a href="./BLOCK_MANAGER.md#glossary-read-once-refer-back">glossary</a></div>
+
+  <!-- ===== PANEL 1: CHAINED-HASH DIVERGENCE TREE ===== -->
+  <h2>&#9312; The chained-hash tree &mdash; drag <b style="color:var(--green)">blocks B shares with A</b></h2>
+  <div class="panel">
+    <div class="controls">
+      <label>blocks B shares with A <input type="range" id="share" min="0" max="3" value="1" step="1">
+        <span class="val" id="shareVal">1</span></label>
+      <span class="micro">block_size = 2. A = [10,11, 12,13, 16,17] (3 blocks). B copies A's first N blocks, then diverges.</span>
+    </div>
+    <div class="tree" id="tree"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>green = shared (identical hash, ref_count 2)</span>
+      <span><i class="sw" style="background:var(--blue)"></i>blue = A's divergent block</span>
+      <span><i class="sw" style="background:var(--purple)"></i>purple = B's divergent block</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag <b>N</b>. At N=1, block0 hashes match exactly (the shared system-prompt page)
+      and block1 diverges. <b>Notice</b> the shared hash is <i>identical</i> even though the block-1 hashes differ &mdash; that is the whole reason
+      prefix sharing works. The hash under each green node is the <b>gold value</b> recomputed from <code>block_manager.py</code>'s FNV-1a.</div>
+  </div>
+
+  <!-- ===== PANEL 2: BLOCK POOL + REF_COUNT LIFECYCLE ===== -->
+  <h2>&#9313; Block pool + ref_count lifecycle (page_size=2, 6 blocks)</h2>
+  <div class="panel">
+    <div class="controls">
+      <button id="btnA">1. Allocate A = [10,11,12,13]</button>
+      <button id="btnB">2. Allocate B = [10,11,14,15]</button>
+      <button id="btnFin">3. Finish A</button>
+      <button id="btnReset">Reset</button>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <div style="flex:1;min-width:340px">
+        <div class="micro">Physical block pool (ids 0..5) &mdash; <span style="color:var(--blue)">blue=live</span>,
+          <span style="color:var(--green)">green=shared (ref&ge;2)</span>, <span style="color:var(--waste)">grey=free</span>,
+          <span style="color:var(--orange)">orange-dash=free but reclaimable</span></div>
+        <div class="strip" id="pool"></div>
+        <div class="micro" style="margin-top:.3rem">Each cell shows: block id, tokens, ref_count. Reclaimable blocks keep their hash &amp; KV.</div>
+      </div>
+      <div style="flex:1;min-width:300px">
+        <div class="micro">Manager state</div>
+        <div class="readout" id="state"></div>
+      </div>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>Caption:</b> <i>Allocate A</i> fills blocks 0,1 and registers their hashes. <i>Allocate B</i> finds block0's
+      hash in the catalog &rarr; <b>reuses block 0 (ref 1&rarr;2, no recompute)</b> and grabs a fresh block 2 for B's divergent tokens.
+      <i>Finish A</i> deallocates: block1 frees (ref 0) but block0 only ticks to ref 1 (B still reads it) &mdash; <b>shared blocks survive preemption</b>.
+      See <a href="./BLOCK_MANAGER.md#7-preemption--ref-counting--shared-blocks-survive-freed-blocks-stay-reclaimable-section-g-output">BLOCK_MANAGER.md &sect;7</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 3: can_allocate WALK ===== -->
+  <h2>&#9314; can_allocate walk for B &mdash; cache hit (block0) then miss (block1)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> when B arrives (after A was allocated+hashed), <code>can_allocate</code> chains B's block hashes and
+      asks the catalog "do I have this fingerprint AND do the tokens match?". Block0 &rarr; HIT (reuse, ref++). Block1 &rarr; MISS (divergent tokens).
+      Returns <b>num_cached_blocks = 1</b> &rarr; B skips prefill for 2 tokens. (Allocate A and B in panel &#9313; first.)</div>
+    <div style="overflow-x:auto;min-width:0"><table class="walk" id="walk"></table></div>
+    <div class="micro" style="margin-top:.5rem"><b>Caption:</b> the green HIT row is the prefix-cache payoff. The red MISS is the divergence &mdash;
+      the walk stops at the first miss. If no catalog match existed, <code>num_cached_blocks=0</code>; if free blocks ran out, it would return <b>-1</b> (OOM &rarr; preempt).</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="checkHash">check: &hellip;</span>
+    <span class="badge" id="checkRC" style="margin-left:.4rem">check: &hellip;</span>
+    JS FNV-1a reproduces <code>block_manager.py</code>: hash([10,11],-1) = <code>0xfece5a30e12404d4</code>;
+    shared block ref_count = 2 after A+B allocate.
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+   GROUND-TRUTH HASH: FNV-1a 64-bit, copied verbatim from block_manager.py.
+   64-bit => use BigInt; compare as hex strings (Number can't hold 2^64).
+   This stands in for vLLM's xxhash.xxh64 (see BLOCK_MANAGER.md Sources).
+============================================================================ */
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME  = 0x100000001b3n;
+const MASK64     = (1n << 64n) - 1n;
+function mix(h, byte){ return ((h ^ BigInt(byte)) * FNV_PRIME) & MASK64; }
+function computeHash(tokenIds, prefix){
+  let h = FNV_OFFSET;
+  if(prefix !== -1){
+    const p = BigInt(prefix);
+    for(let k=0;k<8;k++){ h = mix(h, Number((p >> (8n*BigInt(k))) & 0xffn)); }  // prefix as 8 LE bytes
+  }
+  for(const t of tokenIds){
+    for(let k=0;k<4;k++){ h = mix(h, (t >>> (8*k)) & 0xff); }                   // each token as 4 LE bytes
+  }
+  return h;  // BigInt
+}
+function hex64(h){ return '0x' + ((h & MASK64).toString(16)).padStart(16,'0'); }
+const hexKey = h => (h & MASK64).toString(16).padStart(16,'0');   // dict key (no 0x)
+
+/* ============================================================================
+   A MINIMAL BlockManager IN JS, mirroring block_manager.py (same methods,
+   same ref_count / chaining semantics). Drives panels 2 & 3.
+============================================================================ */
+const BS = 2, NBLK = 6;
+function makeBlock(id){ return {id, ref:0, hash:-1n, tokens:[]}; }
+function makeManager(){
+  const blocks = Array.from({length:NBLK}, (_,i)=>makeBlock(i));
+  return {
+    bs:BS, blocks,
+    hash2id:{},                 // hexKey -> block id  (BigInt keys not allowed)
+    free:Array.from({length:NBLK},(_,i)=>NBLK-1-i),   // pop() -> 0,1,2,... (mirror deque popleft)
+    used:new Set(),
+    // hash
+    computeHash,                 // (tokenIds, prefix)
+    // raw frame allocator
+    _alloc(){
+      const id = this.free.pop();
+      const b = this.blocks[id];
+      if(b.hash !== -1n && this.hash2id[hexKey(b.hash)] === id){ delete this.hash2id[hexKey(b.hash)]; }
+      b.ref = 1; b.hash = -1n; b.tokens = [];
+      this.used.add(id);
+      return id;
+    },
+    _dealloc(id){ this.used.delete(id); this.free.push(id); },
+    // prefill allocation walk
+    canAllocate(seq){
+      let h = -1n, nCached = 0, nNew = seq.numBlocks();
+      for(let i=0;i<seq.numBlocks()-1;i++){
+        const toks = seq.block(i);
+        h = computeHash(toks, h);
+        const id = this.hash2id[hexKey(h)];
+        if(id === undefined || !sameTokens(this.blocks[id].tokens, toks)) break;
+        nCached++;
+        if(this.used.has(id)) nNew--;
+      }
+      return this.free.length < nNew ? -1 : nCached;
+    },
+    allocate(seq, nCached){
+      let h = -1n;
+      for(let i=0;i<nCached;i++){
+        const toks = seq.block(i);
+        h = computeHash(toks, h);
+        const id = this.hash2id[hexKey(h)];
+        const b = this.blocks[id];
+        if(this.used.has(id)){ b.ref++; }
+        else { b.ref = 1; this.free.splice(this.free.indexOf(id),1); this.used.add(id); }
+        seq.table.push(id);
+      }
+      for(let i=nCached;i<seq.numBlocks();i++){ seq.table.push(this._alloc()); }
+      seq.cached = nCached * this.bs;
+    },
+    hashBlocks(seq){
+      const start = Math.floor(seq.cached / this.bs);
+      const end   = Math.floor((seq.cached + seq.sched) / this.bs);
+      if(start === end) return;
+      let h = start>0 ? this.blocks[seq.table[start-1]].hash : -1n;
+      for(let i=start;i<end;i++){
+        const b = this.blocks[seq.table[i]];
+        const toks = seq.block(i);
+        h = computeHash(toks, h);
+        b.hash = h; b.tokens = toks.slice();
+        this.hash2id[hexKey(h)] = b.id;
+      }
+    },
+    deallocate(seq){
+      for(let i=seq.table.length-1;i>=0;i--){
+        const b = this.blocks[seq.table[i]];
+        b.ref--;
+        if(b.ref === 0) this._dealloc(seq.table[i]);
+      }
+      seq.cached = 0; seq.table = [];
+    }
+  };
+}
+function sameTokens(a,b){ return a.length===b.length && a.every((x,i)=>x===b[i]); }
+/* a Sequence: token list + block table */
+function makeSeq(toks){
+  return {
+    toks:toks.slice(), cached:0, sched:0, table:[],
+    numBlocks(){ return Math.ceil(this.toks.length / BS); },
+    block(i){ return this.toks.slice(i*BS, (i+1)*BS); }
+  };
+}
+
+/* ============================================================================
+   PANEL 1: chained-hash divergence tree
+============================================================================ */
+const A_TOKS = [10,11, 12,13, 16,17];        // A's 3 full blocks
+// divergent token generator for B's block i (distinct from A's):
+function bDivToks(i){ return [200+i*2, 201+i*2]; }
+function renderTree(){
+  const share = +document.getElementById('share').value;
+  document.getElementById('shareVal').textContent = share;
+  // A's chain (always full 3 blocks)
+  const aChain = []; let h=-1n;
+  for(let i=0;i<3;i++){ h = computeHash(A_TOKS.slice(i*BS,(i+1)*BS), h); aChain.push({toks:A_TOKS.slice(i*BS,(i+1)*BS), h}); }
+  // B's chain: first `share` blocks == A's, rest divergent
+  const bChain = []; let hb=-1n;
+  for(let i=0;i<3;i++){
+    const toks = i < share ? A_TOKS.slice(i*BS,(i+1)*BS) : bDivToks(i);
+    hb = computeHash(toks, hb);
+    bChain.push({toks, h:hb, shared: i<share});
+  }
+  const el = document.getElementById('tree'); el.innerHTML='';
+  const mkCol = (name, chain, color) => {
+    const c = document.createElement('div'); c.className='col';
+    c.innerHTML = `<h4>request ${name}</h4>`;
+    chain.forEach((nd,i)=>{
+      const share01 = (i<share);   // this block is shared between A and B
+      const cls = share01 ? 'share' : (color==='a'?'amatch':'bmatch');
+      const tag = share01 ? '<span class="tag share">SHARED ref=2</span>'
+                          : (color==='a'?'<span class="tag diverge">A only</span>':'<span class="tag diverge">B only</span>');
+      const prefixLbl = i===0 ? '-1 (root)' : hex64(chain[i-1].h);
+      const node = document.createElement('div');
+      node.className = 'node '+cls;
+      node.innerHTML =
+        `block${i}  tokens=[<span class="tok">${nd.toks.join(', ')}</span>]${tag}<br>`+
+        `&nbsp;&nbsp;prefix = <span class="hh">${prefixLbl}</span><br>`+
+        `&nbsp;&nbsp;<b>hash = <span class="hh">${hex64(nd.h)}</span></b>`;
+      c.appendChild(node);
+    });
+    return c;
+  };
+  el.appendChild(mkCol('A', aChain, 'a'));
+  el.appendChild(mkCol('B', bChain, 'b'));
+}
+document.getElementById('share').addEventListener('input', renderTree);
+
+/* ============================================================================
+   PANELS 2 & 3: shared manager + pool + walk
+============================================================================ */
+let mgr = makeManager();
+let seqA = makeSeq([10,11,12,13]), seqB = makeSeq([10,11,14,15]);
+let step = 0;   // 0=empty, 1=A done, 2=B done, 3=A finished
+function refreshBtns(){
+  document.getElementById('btnA').disabled   = step >= 1;
+  document.getElementById('btnB').disabled   = step !== 1;
+  document.getElementById('btnFin').disabled = step !== 2;
+}
+function renderPool(){
+  const owners = bid => {
+    const o=[];
+    if(step>=1 && seqA.table.includes(bid)) o.push('A');
+    if(step>=2 && seqB.table.includes(bid)) o.push('B');
+    return o;
+  };
+  const strip = document.getElementById('pool'); strip.innerHTML='';
+  for(let id=0; id<NBLK; id++){
+    const b = mgr.blocks[id];
+    const cell = document.createElement('div'); cell.className='cell';
+    const own = owners(id);
+    let cls = 'free';
+    if(b.ref > 0){ cls = b.ref >= 2 ? 'shared' : 'live'; }
+    else if(b.hash !== -1n){ cls = 'reclaim'; }   // free but KV+hash stay
+    cell.className = 'cell '+cls;
+    cell.innerHTML =
+      `<span class="bid">blk${id}</span>`+
+      `<span class="tk">${b.tokens.length?('['+b.tokens.join(',')+']'):'-'}</span>`+
+      `<span class="rc">${b.ref>0?('ref='+b.ref):(b.hash!==-1n?'reclaim':'free')}</span>`;
+    cell.title = own.length ? ('owned by '+own.join(',')) : 'free';
+    strip.appendChild(cell);
+  }
+  // state readout
+  const st = document.getElementById('state');
+  const h2idStr = Object.keys(mgr.hash2id).length
+    ? Object.entries(mgr.hash2id).map(([k,v])=>`0x${k} -> blk${v}`).join('\n    ')
+    : '(empty)';
+  const aTab = step>=1 ? '['+seqA.table.join(', ')+']' : '[]';
+  const bTab = step>=2 ? '['+seqB.table.join(', ')+']' : '[]';
+  const rc0 = mgr.blocks[0].ref;
+  st.innerHTML =
+    `A.block_table = <b>${aTab}</b>${step>=1?`   (tokens ${JSON.stringify(seqA.toks)})`:''}\n`+
+    `B.block_table = <b>${bTab}</b>${step>=2?`   (tokens ${JSON.stringify(seqB.toks)})`:''}\n`+
+    `block0.ref_count = <b>${rc0}</b>${rc0>=2?'  <span class="sh">// SHARED (A+B)</span>':''}\n`+
+    `used = [${[...mgr.used].sort((a,b)=>a-b).join(', ')}]\n`+
+    `free = [${mgr.free.slice().sort((a,b)=>a-b).join(', ')}]\n`+
+    `hash_to_block_id:\n    ${h2idStr}`;
+  renderWalk();
+}
+function renderWalk(){
+  // show B's can_allocate walk against the CURRENT catalog (meaningful once A hashed)
+  const t = document.getElementById('walk');
+  let h = '<tr><th>block</th><th>tokens</th><th>chained hash</th><th>in catalog?</th><th>tokens match?</th><th>verdict</th></tr>';
+  let hb=-1n; let nCached=0;
+  for(let i=0;i<seqB.numBlocks()-1;i++){
+    const toks = seqB.block(i);
+    hb = computeHash(toks, hb);
+    const id = mgr.hash2id[hexKey(hb)];
+    const inCat = id !== undefined;
+    const match = inCat && sameTokens(mgr.blocks[id].tokens, toks);
+    const hit = inCat && match;
+    if(hit) nCached++;
+    h += `<tr class="${hit?'hit':'miss'}"><td>B.blk${i}</td><td>[${toks.join(',')}]</td>`+
+         `<td><span style="color:#ffba75">${hex64(hb)}</span></td>`+
+         `<td>${inCat?('blk'+id):'no'}</td><td>${inCat?match:'-'}</td>`+
+         `<td>${hit?('<b style="color:var(--green)">HIT &mdash; reuse (ref++)</b>'):'<b style="color:var(--red)">MISS &mdash; walk stops</b>'}</td></tr>`;
+    if(!hit) break;
+  }
+  h += `<tr><td colspan="6" style="background:#0a0e14">num_cached_blocks = <b style="color:var(--green)">${nCached}</b>`+
+       ` &rarr; B skips prefill for <b>${nCached*BS}</b> token${nCached*BS!==1?'s':''}`+
+       `${step>=1?'':` <span style="color:var(--muted)">(allocate A in panel &#9313; to populate the catalog)</span>`}</td></tr>`;
+  t.innerHTML = h;
+}
+document.getElementById('btnA').onclick = ()=>{
+  const n = mgr.canAllocate(seqA);
+  mgr.allocate(seqA, n);
+  seqA.sched = seqA.toks.length - seqA.cached;   // execute all of A
+  mgr.hashBlocks(seqA);
+  seqA.cached += seqA.sched; seqA.sched = 0;
+  step = 1; refreshBtns(); renderPool();
+};
+document.getElementById('btnB').onclick = ()=>{
+  const n = mgr.canAllocate(seqB);
+  mgr.allocate(seqB, n);
+  seqB.sched = seqB.toks.length - seqB.cached;
+  mgr.hashBlocks(seqB);
+  seqB.cached += seqB.sched; seqB.sched = 0;
+  step = 2; refreshBtns(); renderPool();
+};
+document.getElementById('btnFin').onclick = ()=>{
+  mgr.deallocate(seqA);
+  step = 3; refreshBtns(); renderPool();
+};
+document.getElementById('btnReset').onclick = ()=>{
+  mgr = makeManager(); seqA = makeSeq([10,11,12,13]); seqB = makeSeq([10,11,14,15]); step = 0;
+  refreshBtns(); renderPool();
+};
+
+/* ============================================================================
+   GOLD CHECK vs block_manager.py
+============================================================================ */
+// (a) chained hash: JS computeHash([10,11], -1) == 0xfece5a30e12404d4
+const goldHash = 'fece5a30e12404d4';
+const jsHash   = hexKey(computeHash([10,11], -1));
+const hashOK   = jsHash === goldHash;
+const chkH = document.getElementById('checkHash');
+chkH.textContent = hashOK ? 'check: OK \u2014 JS hash([10,11],-1) = 0xfece5a30e12404d4 matches block_manager.py \u00a7B'
+                          : 'check: FAIL \u2014 hash mismatch!';
+chkH.style.borderColor = hashOK?'#27ae60':'#c0392b';
+chkH.style.color = hashOK?'#27ae60':'#c0392b';
+chkH.style.background = hashOK?'#1c3a25':'#3a1414';
+
+// (b) ref_count lifecycle: simulate A then B allocate; shared block0 ref == 2
+const gm = makeManager();
+const gA = makeSeq([10,11,12,13]), gB = makeSeq([10,11,14,15]);
+gm.allocate(gA, gm.canAllocate(gA));
+gA.sched = gA.toks.length - gA.cached; gm.hashBlocks(gA); gA.cached += gA.sched; gA.sched = 0;
+gm.allocate(gB, gm.canAllocate(gB));
+const rcOK = gm.blocks[0].ref === 2 && JSON.stringify(gA.table) === '[0,1]' && JSON.stringify(gB.table) === '[0,2]';
+const chkR = document.getElementById('checkRC');
+chkR.textContent = rcOK ? 'check: OK \u2014 shared block0 ref_count = 2, A=[0,1] B=[0,2] matches block_manager.py \u00a7D'
+                        : 'check: FAIL \u2014 ref_count/tables mismatch!';
+chkR.style.borderColor = rcOK?'#27ae60':'#c0392b';
+chkR.style.color = rcOK?'#27ae60':'#c0392b';
+chkR.style.background = rcOK?'#1c3a25':'#3a1414';
+
+/* ===== initial render ===== */
+refreshBtns();
+renderTree();
+renderPool();
+</script>
+</body>
+</html>

@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tensor Parallelism — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --col:#2980b9; --row:#e67e22;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:220px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat tr.sum td{background:#1c3a25;color:#9be8b0;font-weight:700}
+  table.heat tr.full td{background:#3a2f12;color:#ffd966;font-weight:700}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .badge.blue{background:#0d2236;color:#7fb6e8;border-color:#2980b9}
+  .badge.orange{background:#3a2410;color:#f5b980;border-color:#e67e22}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .col{color:var(--blue)}
+  .readout .row{color:var(--orange)}
+  .readout .gold{color:var(--gold)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.25rem 0}
+  .barwrap .lab{width:80px;color:var(--muted);font-size:.78rem}
+  .barwrap .track{flex:1;height:18px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px}
+  .barwrap .num{width:140px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+  #shard{display:block;width:100%;max-width:980px;height:240px}
+  #cancel{display:block;width:100%;max-width:980px;height:280px}
+</style>
+</head>
+<body>
+  <h1>Tensor Parallelism (TP) — interactive
+    <a class="badge" href="./TENSOR_PARALLEL.md">TENSOR_PARALLEL.md</a>
+    <a class="badge" href="./tensor_parallel.py">tensor_parallel.py</a></h1>
+  <div class="sub">Drag <b style="color:var(--green)">TP</b> to slice the matrix into more shards. The Megatron trick:
+    <b style="color:var(--blue)">column-parallel</b> on the first matrix, <b style="color:var(--orange)">row-parallel</b>
+    on the second &rarr; the would-be AllReduce in the middle <b style="color:var(--green)">cancels</b>. Watch the
+    worked example recompute live in JS and match the .py to 1e-6.
+    &nbsp;|&nbsp; <a href="./gqa.html">GQA splits the K,V heads across TP</a> &middot;
+    <a href="./nccl_collectives.html">NCCL collectives</a> (the AllReduce) &middot;
+    <a href="./ddp.html">DDP</a> (data-parallel contrast)</div>
+
+  <!-- ===== PANEL 1: COLUMN vs ROW SHARD ===== -->
+  <h2>&#9312; Column-parallel vs Row-parallel &mdash; which axis you cut decides the comm cost</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b>TP</b> and watch the matrix W[out,in]
+      get sliced. <b style="color:var(--blue)">Column-parallel</b> splits the OUTPUT dim (rows of W) &mdash;
+      each rank holds <code>[out/TP, in]</code> and produces a SHARD of the output (no comm in forward).
+      <b style="color:var(--orange)">Row-parallel</b> splits the INPUT dim (cols) &mdash; each rank holds
+      <code>[out, in/TP]</code> and produces a PARTIAL SUM needing ONE AllReduce.</div>
+    <div class="controls">
+      <label>TP (ranks) <input type="range" id="tp" min="1" max="8" value="2">
+        <span class="val" id="tpVal">2</span></label>
+      <label>out dim <input type="range" id="outD" min="2" max="16" value="8">
+        <span class="val" id="outVal">8</span></label>
+      <label>in dim <input type="range" id="inD" min="2" max="16" value="8">
+        <span class="val" id="inVal">8</span></label>
+      <span class="micro">must divide evenly; else rounded down</span>
+    </div>
+    <canvas id="shard" width="980" height="240"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--col)"></i>column-parallel shard (output split)</span>
+      <span><i class="sw" style="background:var(--row)"></i>row-parallel shard (input split)</span>
+      <span><i class="sw" style="background:var(--green)"></i>AllReduce (sum partials)</span>
+    </div>
+    <div class="readout" id="shardReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: ALLREDUCE CANCELS ===== -->
+  <h2>&#9313; The Megatron trick &mdash; AllReduce <span style="color:var(--green)">CANCELS</span> in the middle
+    (worked example, recomputed live)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> for <code>Y = GeLU(X @ A) @ B</code>, TP=2 with <b>A column-parallel</b>
+      and <b>B row-parallel</b> produces <b>Y_0 + Y_1</b> that bit-matches the full non-TP <b>Y</b>. The AllReduce
+      that would sit between A and B is cancelled because GeLU is element-wise. The green <span class="badge" style="padding:1px 6px">check: OK</span>
+      below confirms the JS recompute matches <code>tensor_parallel.py</code> Section C exactly.</div>
+    <canvas id="cancel" width="980" height="280"></canvas>
+    <div class="readout" id="cancelReadout"></div>
+    <div class="micro" style="margin-top:.4rem">Tiny model: X[1,8], A[FFN=4,E=8] (col-split), B[E=8,FFN=4] (row-split), TP=2.
+      Same seeds as <code>tensor_parallel.py</code> Section C. Y_full[0,0] = -0.178412 is the pinned gold value.</div>
+  </div>
+
+  <!-- ===== PANEL 3: PER-LAYER ALLREDUCE ACCOUNTING ===== -->
+  <h2>&#9314; Per-layer AllReduce count &mdash; exactly 2 per layer (1 attn + 1 MLP)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> a transformer block under Megatron TP pays ONE AllReduce at the end
+      of the attention sub-block (O proj) and ONE at the end of the MLP sub-block (down proj). Everything between
+      the column-parallel projections and the row-parallel projections is LOCAL (no comm). Compare to DDP, which
+      AllReduces once per OPTIMIZER step (amortized).</div>
+    <div id="layerBars"></div>
+    <div class="micro" style="margin-top:.4rem">Each AllReduce moves a tensor of shape [B, L, E]. Bar shows per-rank
+      traffic (<code>2*(TP-1)/TP * B*L*E * bytes</code>) over NVLink vs InfiniBand. &nbsp;
+      &#128279; <a href="./nccl_collectives.html">NCCL_COLLECTIVES</a>: ring-AllReduce = 2N bytes regardless of TP.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS Megatron-MLP recompute matches tensor_parallel.py Section C (Y_full[0,0] = -0.178412).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth inputs, copied verbatim from `uv run python tensor_parallel.py` Section C ===== */
+/* X = make_input(seed=0) = randn(1,8)*0.5 rounded to 4dp */
+const X = [0.7705, -0.1467, -1.0894, 0.2842, -0.5423, -0.6993, 0.2017, 0.4190];
+/* A = make_mlp_weights(seed_A=1)[0] = randn(4,8)*0.3 rounded to 4dp ; stored PyTorch-style [FFN, E] = [4, 8] */
+const A = [
+  [-0.4577, -0.2251, -0.1962, -0.4828, -0.0301, -0.1828, -0.2939, -0.4827],
+  [-0.2136,  0.0911, -0.2332, -0.0754, -0.0667,  0.5061,  0.0685,  0.1403],
+  [-0.2091, -0.3482,  0.2099,  0.0597,  0.2597,  0.0733, -0.1989,  0.2422],
+  [ 0.3305, -0.0528, -0.6737, -0.4339,  0.0183, -0.1853, -0.2394, -0.0395]
+];
+/* B = make_mlp_weights(seed_B=2)[1] = randn(8,4)*0.3 rounded to 4dp ; stored [E, FFN] = [8, 4] */
+const B = [
+  [-0.3122,  0.2750, -0.3913, -0.3329],
+  [-0.3656,  0.3503, -0.3172, -0.0357],
+  [-0.2724,  0.1036, -0.1714, -0.0705],
+  [ 0.3023, -0.2259, -0.0675, -0.1298],
+  [-0.4521, -0.1376, -0.2544,  0.1580],
+  [ 0.0090, -0.0150,  0.3195,  0.2658],
+  [ 0.1392, -0.1496,  0.0387,  0.8289],
+  [ 0.0421,  0.3357,  0.0946,  0.5258]
+];
+const E_DIM = 8, FFN = 4;
+const GOLD_Y00 = -0.178412;   /* from tensor_parallel.py Section C */
+
+/* ===== math (mirrors tensor_parallel.py exactly) ===== */
+function gelu(x){
+  const c = Math.sqrt(2/Math.PI);
+  return 0.5*x*(1+Math.tanh(c*(x+0.044715*x*x*x)));
+}
+/* matmul: a[m][k] @ b[k][n] -> [m][n] ; here vectors are flat */
+function matvec(M, v){           /* M: [rows][cols], v: [cols] -> [rows] */
+  const rows=M.length, cols=v.length;
+  const out=new Array(rows).fill(0);
+  for(let i=0;i<rows;i++){
+    let s=0;
+    for(let j=0;j<cols;j++) s += M[i][j]*v[j];
+    out[i]=s;
+  }
+  return out;
+}
+/* X @ A.T : A is [FFN, E]; A.T is [E, FFN]; X is [E]; result is [FFN] */
+function xAt(W, x){              /* W: [FFN,E], x: [E] -> [FFN]   == x @ W.T */
+  return matvec(W, x);
+}
+/* Z @ B.T : B is [E, FFN]; Z is [FFN]; result is [E]   == Z @ B.T */
+function zBt(W, z){              /* W: [E, FFN], z: [FFN] -> [E]   == z @ W.T */
+  const rows=W.length, cols=W[0].length;
+  const out=new Array(rows).fill(0);
+  for(let i=0;i<rows;i++){
+    let s=0;
+    for(let j=0;j<cols;j++) s += W[i][j]*z[j];
+    out[i]=s;
+  }
+  return out;
+}
+function add(a,b){ return a.map((x,i)=>x+b[i]); }
+function fmt(v,nd){ nd=nd||4; return "["+v.map(x=>(x>=0?"+":"")+x.toFixed(nd)).join(", ")+"]"; }
+
+/* ===== column_shard / row_shard (mirrors tensor_parallel.py) ===== */
+/* A is stored [FFN, E]; column-parallel splits dim 0 (the FFN/output axis) */
+function colShankA(tp, rank){ const sh=FFN/tp; return A.slice(rank*sh, (rank+1)*sh); }
+/* B is stored [E, FFN]; row-parallel splits dim 1 (the FFN/input axis) */
+function rowShardB(tp, rank){
+  const sh = FFN/tp;
+  return B.map(row => row.slice(rank*sh, (rank+1)*sh));   /* each row trimmed to FFN/TP */
+}
+
+/* ===== PANEL 1: shard canvas ===== */
+const sc = document.getElementById('shard');
+function setup(cv){ const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, h=cv.clientHeight||240;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+function drawShard(){
+  const ctx = setup(sc), w=sc.clientWidth, h=sc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const tp = +document.getElementById('tp').value;
+  let outD = +document.getElementById('outD').value;
+  let inD  = +document.getElementById('inD').value;
+  /* round dims down to a multiple of TP so shards are clean */
+  outD = Math.floor(outD/tp)*tp; if(outD<tp) outD=tp;
+  inD  = Math.floor(inD/tp)*tp;  if(inD<tp)  inD=tp;
+  document.getElementById('outVal').textContent=outD;
+  document.getElementById('inVal').textContent=inD;
+
+  /* Draw TWO matrices side by side: column-parallel (left) and row-parallel (right) */
+  const cellW = Math.min(28, (w-160)/(2*Math.max(outD,inD)));
+  const matW_col = inD*cellW,  matH_col = outD*cellW;
+  const matW_row = inD*cellW,  matH_row = outD*cellW;
+  const padX1 = 80, gap = 120;
+  const baseX_col = padX1;
+  const baseX_row = padX1 + matW_col + gap;
+  const baseY = (h - Math.max(matH_col, matH_row))/2;
+
+  /* ---- column-parallel (split OUTPUT dim = rows of W[out,in]) ---- */
+  ctx.font='11px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.fillStyle='var(--muted)';
+  const palette = ['#2980b9','#27ae60','#e67e22','#f1c40f','#9b59b6','#1abc9c','#e74c3c','#34495e'];
+  for(let r=0; r<outD; r++){
+    const rank = Math.floor(r/(outD/tp));
+    ctx.fillStyle = palette[rank % palette.length];
+    for(let c=0; c<inD; c++){
+      ctx.fillRect(baseX_col + c*cellW, baseY + r*cellW, cellW-1, cellW-1);
+    }
+  }
+  ctx.fillStyle='var(--muted)'; ctx.textAlign='center';
+  ctx.fillText('COLUMN-PARALLEL  W[out, in], split dim 0', baseX_col+matW_col/2, baseY-12);
+  ctx.fillText('each rank: [out/TP='+outD/tp+', in='+inD+']  = OUTPUT SHARD', baseX_col+matW_col/2, baseY+matH_col+18);
+
+  /* ---- row-parallel (split INPUT dim = cols of W[out,in]) ---- */
+  for(let c=0; c<inD; c++){
+    const rank = Math.floor(c/(inD/tp));
+    ctx.fillStyle = palette[rank % palette.length];
+    for(let r=0; r<outD; r++){
+      ctx.fillRect(baseX_row + c*cellW, baseY + r*cellW, cellW-1, cellW-1);
+    }
+  }
+  ctx.fillText('ROW-PARALLEL  W[out, in], split dim 1', baseX_row+matW_row/2, baseY-12);
+  ctx.fillText('each rank: [out='+outD+', in/TP='+inD/tp+']  = PARTIAL SUM (needs AllReduce)', baseX_row+matW_row/2, baseY+matH_row+18);
+
+  /* legend strips showing rank colors */
+  ctx.textAlign='left'; ctx.font='10px ui-monospace,monospace';
+  for(let r=0; r<tp; r++){
+    ctx.fillStyle = palette[r % palette.length];
+    ctx.fillRect(baseX_col-50, baseY + (outD/tp)*(r+0.5)*cellW - 6, 12, 12);
+    ctx.fillStyle='#e6edf3';
+    ctx.fillText('rank '+r, baseX_col-34, baseY + (outD/tp)*(r+0.5)*cellW + 4);
+  }
+
+  /* readout */
+  const col_out_shape = '[B, out/TP='+outD/tp+']';
+  const row_out_shape = '[B, out='+outD+']  partial';
+  const col_comm = 'NONE in forward';
+  const row_comm = 'ONE AllReduce (sum)';
+  const el = document.getElementById('shardReadout');
+  el.innerHTML =
+    '<span class="col">COLUMN-PARALLEL</span>: shard=['+outD/tp+', '+inD+'],  output='+col_out_shape+',  comm='+col_comm+'\n'+
+    '<span class="row">ROW-PARALLEL</span>:    shard=['+outD+', '+inD/tp+'],  output='+row_out_shape+',  comm='+row_comm+'\n'+
+    '<b>Per-rank weight memory</b>: 1/TP x the full matrix (identical savings for both).\n'+
+    '<b>The difference</b>: column-par produces an output SHARD (incomplete); row-par produces a PARTIAL SUM (full-size but wrong).';
+}
+
+/* ===== PANEL 2: AllReduce cancels ===== */
+const cc = document.getElementById('cancel');
+function drawCancel(){
+  const ctx = setup(cc), w=cc.clientWidth, h=cc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const tp = 2;   /* fixed for the gold proof */
+  /* layout: X -> [GPU0: A0 -> GeLU -> B0] + [GPU1: A1 -> GeLU -> B1] -> AllReduce -> Y */
+  const xX = 40, yMid = h/2;
+  /* compute the actual numbers */
+  const A0 = colShankA(tp, 0), A1 = colShankA(tp, 1);
+  const B0 = rowShardB(tp, 0), B1 = rowShardB(tp, 1);
+  const Z0 = xAt(A0, X).map(gelu);
+  const Z1 = xAt(A1, X).map(gelu);
+  const Y0 = zBt(B0, Z0);
+  const Y1 = zBt(B1, Z1);
+  const Y_tp = add(Y0, Y1);
+  const Y_full = zBt(B, xAt(A, X).map(gelu));
+
+  /* draw boxes: X, GPU0 pipeline, GPU1 pipeline, AllReduce, Y */
+  const boxW = 130, boxH = 50;
+  function box(x, y, label, sub, color){
+    ctx.strokeStyle=color; ctx.lineWidth=2;
+    ctx.fillStyle='#161b22';
+    ctx.fillRect(x, y, boxW, boxH); ctx.strokeRect(x, y, boxW, boxH);
+    ctx.fillStyle='#e6edf3'; ctx.textAlign='center';
+    ctx.font='bold 12px ui-monospace,monospace';
+    ctx.fillText(label, x+boxW/2, y+20);
+    ctx.fillStyle='var(--muted)'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(sub, x+boxW/2, y+36);
+  }
+  function arrow(x1,y1,x2,y2,color){
+    ctx.strokeStyle=color; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    /* arrowhead */
+    const ang=Math.atan2(y2-y1,x2-x1);
+    ctx.beginPath();
+    ctx.moveTo(x2,y2); ctx.lineTo(x2-6*Math.cos(ang-0.4), y2-6*Math.sin(ang-0.4));
+    ctx.moveTo(x2,y2); ctx.lineTo(x2-6*Math.cos(ang+0.4), y2-6*Math.sin(ang+0.4));
+    ctx.stroke();
+  }
+  const yG0 = 50, yG1 = h-50-boxH, yAR = h/2 - boxH/2;
+  const xCol = xX + boxW + 30;
+  const xGeLU = xCol + boxW + 20;
+  const xRow = xGeLU + boxW + 20;
+  const xAR = xRow + boxW + 40;
+  const xY = xAR + boxW + 30;
+
+  box(xX, yMid-boxH/2, 'X', '[1, 8]', '#8b949e');
+  box(xCol, yG0, 'A_0 (col-par)', '[FFN/2, E]', '#2980b9');
+  box(xCol, yG1, 'A_1 (col-par)', '[FFN/2, E]', '#2980b9');
+  box(xGeLU, yG0, 'GeLU(X@A_0.T)', '[1, FFN/2]', '#27ae60');
+  box(xGeLU, yG1, 'GeLU(X@A_1.T)', '[1, FFN/2]', '#27ae60');
+  box(xRow, yG0, 'B_0 (row-par)', '[E, FFN/2]', '#e67e22');
+  box(xRow, yG1, 'B_1 (row-par)', '[E, FFN/2]', '#e67e22');
+  box(xAR, yAR, 'AllReduce', 'Y_0 + Y_1', '#f1c40f');
+  box(xY, yAR, 'Y = full', '== GeLU(X@A.T)@B.T', '#27ae60');
+
+  arrow(xX+boxW, yMid, xCol, yG0+boxH/2, '#2980b9');
+  arrow(xX+boxW, yMid, xCol, yG1+boxH/2, '#2980b9');
+  arrow(xCol+boxW, yG0+boxH/2, xGeLU, yG0+boxH/2, '#27ae60');
+  arrow(xCol+boxW, yG1+boxH/2, xGeLU, yG1+boxH/2, '#27ae60');
+  arrow(xGeLU+boxW, yG0+boxH/2, xRow, yG0+boxH/2, '#e67e22');
+  arrow(xGeLU+boxW, yG1+boxH/2, xRow, yG1+boxH/2, '#e67e22');
+  arrow(xRow+boxW, yG0+boxH/2, xAR, yAR-8, '#f1c40f');
+  arrow(xRow+boxW, yG1+boxH/2, xAR, yAR+boxH+8, '#f1c40f');
+  arrow(xAR+boxW, yAR+boxH/2, xY, yAR+boxH/2, '#27ae60');
+
+  /* label "no comm" between A and GeLU and B */
+  ctx.fillStyle='#27ae60'; ctx.textAlign='center'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('LOCAL', (xCol+xGeLU)/2+boxW/2, yG0-4);
+  ctx.fillText('LOCAL', (xCol+xGeLU)/2+boxW/2, yG1+boxH+12);
+  ctx.fillText('LOCAL', (xGeLU+xRow)/2+boxW/2, yG0-4);
+  ctx.fillText('LOCAL', (xGeLU+xRow)/2+boxW/2, yG1+boxH+12);
+  /* "would-be AllReduce CANCELLED" annotation between GeLU and B */
+  ctx.fillStyle='#f1c40f';
+  ctx.fillText('AllReduce', (xGeLU+xRow)/2+boxW/2+90, yMid-10);
+  ctx.fillText('CANCELLED', (xGeLU+xRow)/2+boxW/2+90, yMid+4);
+
+  /* numeric readout */
+  const el = document.getElementById('cancelReadout');
+  const maxDiff = Math.max(...Y_tp.map((v,i)=>Math.abs(v-Y_full[i])));
+  el.innerHTML =
+    '<span class="col">Z_0 = GeLU(X @ A_0.T)</span> = '+fmt(Z0)+'   <span class="micro">(LOCAL, rank 0)</span>\n'+
+    '<span class="col">Z_1 = GeLU(X @ A_1.T)</span> = '+fmt(Z1)+'   <span class="micro">(LOCAL, rank 1)</span>\n'+
+    '<span class="row">Y_0 = Z_0 @ B_0.T</span>      = '+fmt(Y0)+'   <span class="micro">(partial sum, rank 0)</span>\n'+
+    '<span class="row">Y_1 = Z_1 @ B_1.T</span>      = '+fmt(Y1)+'   <span class="micro">(partial sum, rank 1)</span>\n'+
+    '<span class="gold">AllReduce(Y_0 + Y_1)</span>  = '+fmt(Y_tp)+'\n'+
+    '<b>full GeLU(X @ A.T) @ B.T</b>  = '+fmt(Y_full)+'\n'+
+    'max|TP_Y - full_Y| = '+maxDiff.toExponential(3)+'   <b>'+((maxDiff < 1e-6)?'OK':'FAIL')+'</b>';
+}
+
+/* ===== PANEL 3: per-layer AllReduce accounting ===== */
+function renderLayer(){
+  const tp = +document.getElementById('tp').value;
+  const E = 8192, B = 1, L = 4096;
+  const N = B*L*E;
+  const bytes = N*2;        /* fp16 */
+  const traffic = (t) => 2*(t-1)/t*bytes;   /* per-rank, ring-AllReduce */
+  const nvlink = (b) => b/(300*1e9)*1e6;    /* us at 300 GB/s */
+  const ib     = (b) => b/(25*1e9)*1e6;     /* us at 25 GB/s */
+  const ar_per_layer = 2;   /* 1 attn + 1 MLP */
+  const per_ar_nv = nvlink(traffic(tp));
+  const per_ar_ib = ib(traffic(tp));
+  const html =
+    '<div class="micro" style="margin:0 0 .4rem">Transformer block under TP='+tp+', B='+B+', L='+L+', E='+E+
+    ' (fp16). N = B*L*E = '+N.toLocaleString()+' elements per AllReduce.</div>'+
+    '<div class="barwrap"><span class="lab">attn O-proj</span>'+
+      '<span class="track"><span class="fill" style="width:100%;background:#f1c40f"></span></span>'+
+      '<span class="num">1 AllReduce / layer</span></div>'+
+    '<div class="barwrap"><span class="lab">MLP down</span>'+
+      '<span class="track"><span class="fill" style="width:100%;background:#f1c40f"></span></span>'+
+      '<span class="num">1 AllReduce / layer</span></div>'+
+    '<div class="barwrap"><span class="lab">TOTAL / layer</span>'+
+      '<span class="track"><span class="fill" style="width:100%;background:#27ae60"></span></span>'+
+      '<span class="num"><b>'+ar_per_layer+' AllReduces / layer</b></span></div>'+
+    '<div class="micro" style="margin:.6rem 0 .2rem">Per-rank traffic per AllReduce: '+
+      (traffic(tp)/2**30).toFixed(3)+' GiB  (ring-AllReduce = 2*(TP-1)/TP * N bytes)</div>'+
+    '<div class="barwrap"><span class="lab">over NVLink</span>'+
+      '<span class="track"><span class="fill" style="width:'+(per_ar_nv/per_ar_ib*100).toFixed(1)+'%;background:#27ae60"></span></span>'+
+      '<span class="num">'+per_ar_nv.toFixed(1)+' us</span></div>'+
+    '<div class="barwrap"><span class="lab">over InfiniBand</span>'+
+      '<span class="track"><span class="fill" style="width:100%;background:#c0392b"></span></span>'+
+      '<span class="num">'+per_ar_ib.toFixed(1)+' us  ('+(per_ar_ib/per_ar_nv).toFixed(0)+'x slower)</span></div>'+
+    '<div class="micro" style="margin-top:.4rem"><b>Conclusion:</b> TP across nodes ('+(per_ar_ib/per_ar_nv).toFixed(0)+
+      'x slower per AllReduce) kills throughput &mdash; keep TP within a node on NVLink. Cross-node scaling belongs to <a href="./ddp.html">DP</a> / Pipeline Parallel (coming).</div>';
+  document.getElementById('layerBars').innerHTML = html;
+}
+
+/* ===== gold-value check vs tensor_parallel.py Section C ===== */
+function goldCheck(){
+  const A0 = colShankA(2, 0), A1 = colShankA(2, 1);
+  const B0 = rowShardB(2, 0), B1 = rowShardB(2, 1);
+  const Z0 = xAt(A0, X).map(gelu);
+  const Z1 = xAt(A1, X).map(gelu);
+  const Y0 = zBt(B0, Z0);
+  const Y1 = zBt(B1, Z1);
+  const Y_tp = add(Y0, Y1);
+  const ok = Math.abs(Y_tp[0] - GOLD_Y00) < 5e-5;
+  const chk = document.getElementById('check');
+  chk.textContent = ok
+    ? 'check: OK — JS Megatron TP matches tensor_parallel.py (Y_full[0,0] = '+Y_tp[0].toFixed(6)+')'
+    : 'check: FAIL — JS got '+Y_tp[0].toFixed(6)+', .py expects '+GOLD_Y00;
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== events ===== */
+function render(){ drawShard(); drawCancel(); renderLayer(); goldCheck(); }
+document.getElementById('tp').addEventListener('input', ()=>{
+  document.getElementById('tpVal').textContent = document.getElementById('tp').value;
+  render();
+});
+document.getElementById('outD').addEventListener('input', ()=>{
+  document.getElementById('outVal').textContent = document.getElementById('outD').value;
+  drawShard();
+});
+document.getElementById('inD').addEventListener('input', ()=>{
+  document.getElementById('inVal').textContent = document.getElementById('inD').value;
+  drawShard();
+});
+window.addEventListener('resize', drawShard);
+
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduler — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad;
+    --wait:#8b949e; --run:#27ae60; --fin:#e67e22;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:260px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  .row{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-start}
+  .row>*{min-width:0}
+  table.trace,tbl{border-collapse:collapse;font-size:.8rem;font-variant-numeric:tabular-nums}
+  table.trace td,table.trace th{border:1px solid #30363d;padding:4px 8px;text-align:center}
+  table.trace th{color:var(--muted);font-weight:600}
+  table.trace tr.cur td{background:#3a2f12;color:#ffd966;font-weight:700}
+  table.trace td.yes{color:var(--green);font-weight:600}
+  table.trace td.no{color:var(--red)}
+  table.trace td.pf{color:var(--orange)}
+  table.trace td.dc{color:#58a6ff}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .micro{color:var(--muted);font-size:.74rem}
+  /* CSS-driven canvas size (breaks the DPR feedback loop on mobile, cf. rope.html) */
+  #budgetBar,#timeline{display:block;width:100%;max-width:1040px;height:200px}
+</style>
+</head>
+<body>
+  <h1>LLM Serving Scheduler — interactive
+    <a class="badge" href="./SCHEDULER.md">SCHEDULER.md</a>
+    <a class="badge" href="./scheduler.py">scheduler.py</a></h1>
+  <div class="sub"><b>The traffic-cop idea:</b> every step the scheduler decides WHO runs and HOW MANY tokens.
+    Drag <b style="color:var(--green)">step</b> below to walk the 4-step trace for 3 sequences (prompt lens [3,5,2], budget 4, block_size 2).
+    Every number is recomputed in JS from the <i>identical</i> logic in <code>scheduler.py</code>.
+    &nbsp;|&nbsp; <a href="./block_manager.html">the allocator it calls each step &rarr;</a>
+    &nbsp;|&nbsp; <a href="./paged_attention.html">the kernel that reads the pages &rarr;</a>
+    &nbsp;|&nbsp; <a href="./kv_cache.html">see the KV-cache pages the scheduler allocates &rarr;</a></div>
+
+  <!-- ===== GLOBAL CONTROL ===== -->
+  <div class="panel">
+    <div class="controls">
+      <label>schedule step <input type="range" id="step" min="0" max="4" value="0" step="1">
+        <span class="val" id="stepVal">0</span> / 4</label>
+      <button id="play">▶ auto-step</button>
+      <span class="micro">3 seqs lens [3,5,2], max_num_batched_tokens=4, block_size=2, max_tokens=2 (ignore_eos). Pool=8 blocks.</span>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 1: STATE MACHINE ===== -->
+  <h2>① Sequence state machine — who is WAITING / RUNNING / FINISHED</h2>
+  <div class="panel">
+    <div id="states"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--wait)"></i>WAITING (prefill not done / preempted)</span>
+      <span><i class="sw" style="background:var(--run)"></i>RUNNING (blocks allocated)</span>
+      <span><i class="sw" style="background:var(--fin)"></i>FINISHED (EOS / max_tokens)</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> step through and watch seq1 sit WAITING across steps 1–2
+      (its chunked prefill isn't complete), then all three hit FINISHED together at step 4.
+      Preemption (RUNNING→WAITING, demo in SCHEDULER.md §5) is the same arrow, just fired by OOM.</div>
+  </div>
+
+  <!-- ===== PANEL 2: TOKEN BUDGET BAR ===== -->
+  <h2>② This step's token budget — every seq's slice must fit in 4</h2>
+  <div class="panel">
+    <canvas id="budgetBar" width="1040" height="200"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--purple)"></i>seq0 slice</span>
+      <span><i class="sw" style="background:var(--blue)"></i>seq1 slice</span>
+      <span><i class="sw" style="background:#1abc9c"></i>seq2 slice</span>
+      <span><i class="sw" style="background:#21262d;outline:1px solid #30363d"></i>unused budget</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> each bar is one step. The colored slices sum to the
+      step's total (3, 4, 3, 3) — never exceeding the budget of 4. seq1's slice at step 2 is 4 (its chunk); at step 3
+      it is 1 (the chunk's tail) sitting beside seq2's slice of 2. Step 4 has three slices of 1 (decode).</div>
+  </div>
+
+  <!-- ===== PANEL 3: FULL TRACE TABLE ===== -->
+  <h2>③ The full schedule trace (the gold centerpiece)</h2>
+  <div class="panel">
+    <div style="overflow-x:auto;min-width:0"><table class="trace" id="traceTable"></table></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> the highlighted row tracks the slider. SCHEDULER.md §7
+      pins this exact table. The <b>total</b> column is the gold-check invariant: every value ≤ 4.</div>
+  </div>
+
+  <!-- ===== PANEL 4: num_cached_tokens GROWTH ===== -->
+  <h2>④ num_cached_tokens growth — seq1's chunked prefill [0,4,5,6]</h2>
+  <div class="panel">
+    <canvas id="timeline" width="1040" height="200"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--purple)"></i>seq0</span>
+      <span><i class="sw" style="background:var(--blue)"></i>seq1 (chunked: 0→4→5→6)</span>
+      <span><i class="sw" style="background:#1abc9c"></i>seq2</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> the blue line (seq1) is the chunked-prefill story: it
+      jumps 0→4 at step 2 (chunk of 4), creeps to 5 at step 3 (the last prompt token), then +1 per decode.
+      This [0,4,5,6] sequence is the second gold-check value badge-verified below.</div>
+  </div>
+
+  <!-- ===== PANEL 5: STATIC vs CONTINUOUS ===== -->
+  <h2>⑤ Why continuous batching: static idle vs continuous fill</h2>
+  <div class="panel">
+    <div class="readout" id="batchingReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> read the static timeline (R0 padded for 3 steps, ~75%
+      useful) vs continuous (R2 reclaims R0's slot at step 4, ~92% useful). This is the Orca (OSDI'22) result:
+      iteration-level scheduling instead of request-level. See SCHEDULER.md §1.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches scheduler.py Section G: totals [3,4,3,3] ≤ 4 AND seq1 growth [0,4,5,6].
+  </div>
+
+<script>
+"use strict";
+/* ========================================================================
+   ground-truth scheduler logic, ported verbatim from scheduler.py
+   (3 seqs, prompt lens [3,5,2], budget=4, block_size=2, max_tokens=2).
+   The JS re-runs the EXACT same schedule() rules so the trace is recomputed,
+   not copy-pasted.
+   ======================================================================== */
+
+const BUDGET = 4, BLOCK = 2, MAX_TOK = 2;
+const PROMPTS = {0:[10,11,12], 1:[20,21,22,23,24], 2:[30,31]};  // seq_id -> prompt
+const COLORS = {0:'#8e44ad', 1:'#2980b9', 2:'#1abc9c'};
+
+/* tiny block manager (just enough for can_append / page accounting) */
+class BlockManager {
+  constructor(n){ this.free=n; this.used=0; }
+  canAllocate(numBlocks){ return this.free >= numBlocks; }
+  allocate(numBlocks){ this.free -= numBlocks; this.used += numBlocks; }
+  deallocate(numBlocks){ this.free += numBlocks; this.used -= numBlocks; }
+  canAppend(seqLen){ return this.free >= ((seqLen % BLOCK) === 1 ? 1 : 0); }
+}
+
+function makeSeq(id){
+  const p = PROMPTS[id];
+  return { id, status:'WAITING', tokens:p.slice(), numTokens:p.length,
+           numPrompt:p.length, numCached:0, numSched:0, isPrefill:true,
+           blockTable:[], finished:false };
+}
+function numBlocks(s){ return Math.ceil(s.numTokens / BLOCK); }
+function completion(s){ return s.numTokens - s.numPrompt; }
+function genToken(s){ return (s.id+1)*100 + (completion(s)+1); }   // deterministic stub model
+
+/* faithful port of Scheduler.schedule + postprocess. Returns per-step record. */
+function runTrace(){
+  const seqs = [makeSeq(0), makeSeq(1), makeSeq(2)];
+  const waiting = seqs.slice();          // [s0,s1,s2]
+  const running = [];
+  const bm = new BlockManager(8);
+  const rows = [];
+  let step = 0;
+  while((waiting.length || running.length) && step < 20){
+    step++;
+    const scheduled = [];
+    let numBatched = 0;
+    let isPrefill = false;
+
+    /* ---- PRIORITY 1: PREFILL ---- */
+    while(waiting.length && scheduled.length < 64){
+      const seq = waiting[0];
+      let remaining = BUDGET - numBatched;
+      if(remaining === 0) break;
+      let numTokens;
+      if(seq.blockTable.length === 0){
+        const nb = numBlocks(seq);
+        if(!bm.canAllocate(nb)) break;            // -1 => stop
+        seq._needBlocks = nb;
+        numTokens = seq.numTokens;                 // no prefix cache in this scenario
+      } else {
+        numTokens = seq.numTokens - seq.numCached;
+      }
+      if(remaining < numTokens && scheduled.length) break;   // chunked rule
+      if(seq.blockTable.length === 0){ bm.allocate(seq._needBlocks); seq.blockTable = new Array(seq._needBlocks).fill(0); }
+      seq.numSched = Math.min(numTokens, remaining);
+      numBatched += seq.numSched;
+      isPrefill = true;
+      if(seq.numCached + seq.numSched === seq.numTokens){
+        seq.status = 'RUNNING';
+        waiting.shift();
+        running.push(seq);
+      }
+      scheduled.push(seq);
+    }
+    if(scheduled.length){
+      /* postprocess prefill */
+      const rec = {step, scheduled: scheduled.map(s=>[s.id, s.numSched]),
+                   total: numBatched, isPrefill:true};
+      scheduled.forEach(s=>{
+        s.numCached += s.numSched;
+        const before = {cached:s.numCached};
+        s.numSched = 0;
+        if(s.numCached < s.numTokens){ /* chunked, no token yet */ }
+        else { s.tokens.push(genToken(s)); s.numTokens++;
+               if(completion(s) === MAX_TOK){ s.status='FINISHED'; bm.deallocate(s.blockTable.length); s.blockTable=[]; s.finished=true; } }
+        s._peak = before.cached;
+      });
+      // record peak cached for ALL seqs this step
+      rec.peak = {}; seqs.forEach(s=> rec.peak[s.id] = s.numCached);
+      scheduled.forEach(s=> rec.peak[s.id] = s._peak);
+      rec.status = {}; seqs.forEach(s=> rec.status[s.id] = s.status);
+      rows.push(rec);
+      continue;
+    }
+
+    /* ---- PRIORITY 2: DECODE ---- */
+    while(running.length && scheduled.length < 64){
+      const seq = running.shift();
+      while(!bm.canAppend(seq.numTokens)){
+        if(running.length){ const v=running.pop(); v.status='WAITING'; v.isPrefill=true;
+          bm.deallocate(v.blockTable.length); v.blockTable=[]; v.numCached=0; waiting.unshift(v); }
+        else { seq.status='WAITING'; seq.isPrefill=true; bm.deallocate(seq.blockTable.length);
+               seq.blockTable=[]; seq.numCached=0; waiting.unshift(seq); break; }
+      }
+      if(seq.status==='WAITING') continue;        // got preempted self
+      seq.numSched = 1; seq.isPrefill = false;
+      if(seq.numTokens % BLOCK === 1){ bm.allocate(1); seq.blockTable.push(0); }
+      scheduled.push(seq);
+    }
+    /* postprocess decode */
+    const rec = {step, scheduled: scheduled.map(s=>[s.id, s.numSched]),
+                 total: scheduled.length, isPrefill:false};
+    scheduled.forEach(s=>{
+      s.numCached += s.numSched;
+      const peak = s.numCached;
+      s.numSched = 0;
+      s.tokens.push(genToken(s)); s.numTokens++;
+      if(completion(s) === MAX_TOK){ s.status='FINISHED'; bm.deallocate(s.blockTable.length); s.blockTable=[]; s.finished=true; }
+      s._peak = peak;
+    });
+    rec.peak = {}; seqs.forEach(s=> rec.peak[s.id] = s.numCached);
+    scheduled.forEach(s=> rec.peak[s.id] = s._peak);
+    rec.status = {}; seqs.forEach(s=> rec.status[s.id] = s.status);
+    // re-enqueue decoded seqs (preserve order)
+    running.unshift(...scheduled.filter(s=>!s.finished));
+    rows.push(rec);
+  }
+  return rows;
+}
+
+const TRACE = runTrace();
+
+/* ===== canvas helper (DPR-aware, breaks the mobile feedback loop) ===== */
+function setup(cv){
+  const dpr = window.devicePixelRatio||1;
+  const w = cv.clientWidth||1040, h = cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: state machine badges ===== */
+function renderStates(step){
+  const el = document.getElementById('states');
+  let h = '<div class="row" style="gap:.6rem">';
+  for(let id=0; id<3; id++){
+    let st, color;
+    if(step===0){ st='WAITING'; color='var(--wait)'; }
+    else { st = TRACE[step-1].status[id]; color = st==='RUNNING'?'var(--run)':st==='FINISHED'?'var(--fin)':'var(--wait)'; }
+    h += `<div style="flex:1;min-width:120px;text-align:center;background:#0a0e14;border:2px solid ${color};border-radius:8px;padding:.7rem">
+            <div style="font-weight:700;color:${color};font-size:.95rem">${st}</div>
+            <div class="micro" style="margin-top:.2rem">seq${id} (prompt ${PROMPTS[id].length})</div>
+          </div>`;
+  }
+  h += '</div>';
+  el.innerHTML = h;
+}
+
+/* ===== PANEL 2: budget bar for the current step ===== */
+function drawBudget(step){
+  const cv = document.getElementById('budgetBar');
+  const ctx = setup(cv); const w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const pad=50, bw=w-pad*2;
+  // budget frame
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1.5;
+  ctx.strokeRect(pad, h/2-30, bw, 60);
+  ctx.fillStyle='#21262d'; ctx.fillRect(pad, h/2-30, bw, 60);
+  if(step===0){
+    ctx.fillStyle='#8b949e'; ctx.font='13px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('(nothing scheduled yet — drag step →)', pad+bw/2, h/2+5);
+  } else {
+    const rec = TRACE[step-1];
+    let x = pad;
+    rec.scheduled.forEach(([id,n])=>{
+      const segW = (n/BUDGET)*bw;
+      ctx.fillStyle = COLORS[id];
+      ctx.fillRect(x, h/2-30, segW, 60);
+      ctx.strokeStyle='rgba(0,0,0,.4)'; ctx.strokeRect(x, h/2-30, segW, 60);
+      // label
+      ctx.fillStyle='#fff'; ctx.font='bold 13px ui-monospace,monospace'; ctx.textAlign='center';
+      if(segW > 24) ctx.fillText(`seq${id}:${n}`, x+segW/2, h/2+5);
+      x += segW;
+    });
+    // total annotation
+    ctx.fillStyle='#8b949e'; ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText(`total ${rec.total} / budget ${BUDGET}`, pad, h-8);
+    ctx.textAlign='right'; ctx.fillStyle = rec.isPrefill?'#e67e22':'#58a6ff';
+    ctx.fillText(rec.isPrefill?'PREFILL':'DECODE', w-pad, h-8);
+  }
+  // scale ticks
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  for(let t=0;t<=BUDGET;t++){ const xx=pad+(t/BUDGET)*bw;
+    ctx.fillText(t, xx, h/2-38); ctx.strokeStyle='#30363d';
+    ctx.beginPath(); ctx.moveTo(xx,h/2-34); ctx.lineTo(xx,h/2-30); ctx.stroke(); }
+}
+
+/* ===== PANEL 3: trace table ===== */
+function renderTraceTable(curStep){
+  const t = document.getElementById('traceTable');
+  let h = '<tr><th>step</th><th>scheduled (seq:toks)</th><th>total</th><th>is_prefill</th><th>note</th></tr>';
+  const notes = ['','prefill','prefill (chunked; seq1 still waiting)','prefill (seq1 tail + seq2)','decode (all 3 → FINISHED)'];
+  TRACE.forEach((r,i)=>{
+    const cls = (i+1===curStep)?' class="cur"':'';
+    const schedStr = r.scheduled.map(([id,n])=>`seq${id}:${n}`).join(', ');
+    const totalCls = r.total<=BUDGET?'yes':'no';
+    const pfCls = r.isPrefill?'pf':'dc';
+    h += `<tr${cls}><td>${r.step}</td><td>${schedStr}</td>`+
+         `<td class="${totalCls}">${r.total}</td>`+
+         `<td class="${pfCls}">${r.isPrefill}</td><td>${notes[r.step]||''}</td></tr>`;
+  });
+  t.innerHTML = h;
+}
+
+/* ===== PANEL 4: cached growth line chart ===== */
+function drawTimeline(curStep){
+  const cv = document.getElementById('timeline');
+  const ctx = setup(cv); const w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=46, padR=16, padT=14, padB=30;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const maxStep=4, maxCached=6;
+  // axes
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(padL,padT+ph); ctx.lineTo(w-padR,padT+ph); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+ph); ctx.stroke();
+  // y labels
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='right';
+  for(let v=0;v<=maxCached;v+=2){ const y=padT+ph-(v/maxCached)*ph;
+    ctx.fillText(v, padL-6, y+3); ctx.strokeStyle='#21262d';
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(padL-3,y); ctx.stroke(); }
+  // x labels
+  ctx.textAlign='center';
+  for(let s=0;s<=maxStep;s++){ const x=padL+(s/maxStep)*pw;
+    ctx.fillText('step '+s, x, padT+ph+16); }
+  // build per-seq cached series (peak per step; step 0 = 0 for all)
+  // cached_peak for seq across steps: prepend 0 at step 0
+  const series = {};
+  for(const id of [0,1,2]){
+    series[id] = [0].concat(TRACE.map(r=>r.peak[id]));
+  }
+  // draw lines
+  for(const id of [0,1,2]){
+    ctx.strokeStyle=COLORS[id]; ctx.lineWidth = id===1?3:2;
+    ctx.beginPath();
+    series[id].forEach((v,i)=>{
+      const x = padL + (i/maxStep)*pw;
+      const y = padT + ph - (v/maxCached)*ph;
+      i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+    // dots
+    series[id].forEach((v,i)=>{
+      const x = padL + (i/maxStep)*pw;
+      const y = padT + ph - (v/maxCached)*ph;
+      ctx.fillStyle = COLORS[id];
+      ctx.beginPath(); ctx.arc(x,y, id===1?4.5:3.5, 0, 2*Math.PI); ctx.fill();
+    });
+  }
+  // highlight current step
+  if(curStep>0){
+    const x = padL + (curStep/maxStep)*pw;
+    ctx.strokeStyle='#e67e22'; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+ph); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // legend on canvas
+  ctx.font='11px ui-monospace,monospace'; ctx.textAlign='left';
+  let lx=padL;
+  for(const id of [0,1,2]){
+    ctx.fillStyle=COLORS[id]; ctx.fillText(`seq${id}`, lx, padT+12); lx+=50;
+  }
+}
+
+/* ===== PANEL 5: static vs continuous (static readout) ===== */
+function renderBatching(){
+  const el = document.getElementById('batchingReadout');
+  const staticUseful = 9, staticTotal = 12;   // R0(3)+R1(6) padded over 6 steps
+  const contUseful = 11, contTotal = 12;       // R2 reclaims R0's slot
+  el.innerHTML =
+    `<b>STATIC</b> (request-level): batch [R0=3 tok, R1=6 tok], run 6 steps.<br>`+
+    `&nbsp;&nbsp;R0 padded idle for steps 4-6 → <b>${staticUseful}/${staticTotal} = 75%</b> useful token-steps.<br>`+
+    `<b>CONTINUOUS</b> (iteration-level, Orca OSDI'22): R2 (2 tok) boards at step 4 in R0's freed slot.<br>`+
+    `&nbsp;&nbsp;<b>${contUseful}/${contTotal} = 92%</b> useful. R2 finished 1 step after R0.<br>`+
+    `<span style="color:var(--green)">→ schedule at the granularity of ONE token, not one request.</span>`;
+}
+
+/* ===== master render ===== */
+function render(){
+  const step = +document.getElementById('step').value;
+  document.getElementById('stepVal').textContent = step;
+  renderStates(step);
+  drawBudget(step);
+  renderTraceTable(step);
+  drawTimeline(step);
+}
+
+/* ===== gold check vs scheduler.py Section G ===== */
+const goldTotals   = [3,4,3,3];
+const goldGrowth1  = [0,4,5,6];
+const jsTotals     = TRACE.map(r=>r.total);
+const jsGrowth1    = TRACE.map(r=>r.peak[1]);
+const totalsOk     = jsTotals.length===goldTotals.length &&
+                     jsTotals.every((v,i)=>v===goldTotals[i]) &&
+                     jsTotals.every(v=>v<=BUDGET);
+const growthOk     = jsGrowth1.length===goldGrowth1.length &&
+                     jsGrowth1.every((v,i)=>v===goldGrowth1[i]);
+const allOk        = totalsOk && growthOk;
+const chk = document.getElementById('check');
+chk.textContent = allOk
+  ? `check: OK — JS totals ${JSON.stringify(jsTotals)} ≤ 4 AND seq1 growth ${JSON.stringify(jsGrowth1)}`
+  : `check: FAIL — totals ${JSON.stringify(jsTotals)} growth ${JSON.stringify(jsGrowth1)}`;
+chk.style.borderColor = allOk?'#27ae60':'#c0392b';
+chk.style.color = allOk?'#27ae60':'#c0392b';
+chk.style.background = allOk?'#1c3a25':'#3a1414';
+
+/* ===== events ===== */
+document.getElementById('step').addEventListener('input', render);
+let playing=false, tid=null;
+document.getElementById('play').addEventListener('click', function(){
+  playing=!playing; this.textContent = playing?'⏸ pause':'▶ auto-step';
+  if(playing){
+    const next = ()=>{
+      let v = (+document.getElementById('step').value + 1) % 5;
+      document.getElementById('step').value = v; render();
+      tid = setTimeout(next, 900);
+    };
+    next();
+  } else clearTimeout(tid);
+});
+window.addEventListener('resize', render);
+
+renderBatching();
+render();
+</script>
+</body>
+</html>

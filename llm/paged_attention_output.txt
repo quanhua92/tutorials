@@ -1,0 +1,198 @@
+paged_attention.py - reference impl. All numbers feed PAGED_ATTENTION.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: the dense-waste problem (why pages exist)
+========================================================================
+All numbers below are COMPUTED here, not hand-waved.
+
+THE 93% EXAMPLE (one request, reserved vs used):
+  max_seq_len reserved = 8192, actual tokens used = 512
+  waste fraction = 1 - 512/8192 = 0.9375 = 93.75%
+  -> 93.75% of this request's slab is dead memory.
+
+PER-REQUEST dense KV bytes (LLaMA-7B shape: 32 layers, 32 KV heads, d=128):
+  2(KV) x 32 x 32 x 8192 x 128 x 2 B = 4,294,967,296 bytes = 4.000 GiB
+100 CONCURRENT requests (used=512 each):
+  reserved = 400.0 GiB, used = 25.0 GiB
+  wasted   = 375.0 GiB (93.8% of reserved)
+  vLLM reports up to ~1.7 GiB per sequence for LLaMA-13B (fp16).
+
+PAGED cache waste bound (only the LAST page of each request is partial):
+| page_size | worst-case internal waste |
+|-----------|---------------------------|
+| 16        | 6.25%  <- vLLM default block size |
+| 128       | 0.78%  <- tiny-llm page_size |
+
+vLLM measured: PagedAttention wastes <4% in practice vs 60%-80% for the
+dense/over-reserving systems it replaced (paper Section 3.2).
+
+[check] 93.75% math: 1 - 512/8192 = 0.9375 -> OK
+[check] per_req bytes == 2*32*32*8192*128*2 = 4294967296 -> OK
+
+========================================================================
+  SECTION B: page pool + free list (the OS frame allocator)
+========================================================================
+page_size = 2, H_kv = 2, D = 8, num_pages = 4
+Backing slab shapes: key_pages (4, 2, 2, 8), value_pages (4, 2, 2, 8)
+  = [num_pages=4, H_kv=2, page_size=2, D=8]
+
+LIFECYCLE (deterministic order: pop() yields 0,1,2,...):
+| step | action            | free_list after | pool.used   |
+|------|-------------------|-----------------|-------------|
+| 1    | allocate() -> 0    | [1, 2, 3]       | [0]         |
+| 2    | allocate() -> 1    | [2, 3]          | [0, 1]      |
+| 3    | allocate() -> 2    | [3]             | [0, 1, 2]   |
+| 4    | free_page(0)      | [0, 3]          | [1, 2]      |
+| 5    | allocate() -> 0    | [3]             | [0, 1, 2]   |
+
+Notice: free_page(0) returns page 0 to the free_list; the NEXT
+allocate() may reuse it (page 0 is recycled, no fragmentation).
+
+[check] 3 allocs yield [0,1,2]: [0, 1, 2] -> OK
+[check] after free(0) then alloc, page 0 reused: OK
+
+========================================================================
+  SECTION C: block_table logical->physical (the GOLD example)
+========================================================================
+page_size = 2. Interleaved two requests so storage is scattered.
+
+BLOCK TABLE (logical_page -> physical_page_id):
+| request | logical pages (in order) | physical pages  | contiguous? |
+|---------|--------------------------|--------------------------------|
+| A       | ['L0', 'L1']             | ['P0', 'P2']     | NO (scattered) |
+| B       | ['L0']                   | ['P1']           | yes          |
+
+A.page_ids  = [0, 2]   (logical 0 -> phys 0, logical 1 -> phys 2)
+A.page_lens = [2, 1]   (both pages full: 2 tokens each)
+B.page_ids  = [1]   (logical 0 -> phys 1)
+B.page_lens = [2]
+pool.used   = [0, 1, 2]
+pool.free   = [3, 4, 5, 6, 7]
+
+Reading A's K,V in LOGICAL order walks physical pages [0, 2] ->
+A's storage is SCATTERED across the pool. The paged attention kernel
+uses THIS block table to gather K,V from non-contiguous physical
+memory, exactly like an OS page table.
+
+LOGICAL POSITION -> PHYSICAL (page_id, slot) for request A:
+| logical pos t | page_idx = t//PS | slot = t%PS | page_id = block_table[t//PS] |
+|---------------|------------------|-------------|------------------------------|
+| 0             | 0                | 0           | 0                            |
+| 1             | 0                | 1           | 0                            |
+| 2             | 1                | 0           | 2                            |
+
+GOLD for the .html gold-check:
+  A logical pos 2 -> page_id 2, slot 0
+  (A.page_ids[1] = 2; pos 2 // PS=2 -> page_idx 1, slot 0)
+
+[check] A.page_ids == [0,2]: True -> OK
+[check] A logical pos 2 -> page_id 2, slot 0: True -> OK
+
+========================================================================
+  SECTION D: _append_chunk (tail-fill then new pages)
+========================================================================
+page_size = 2. Watch how a chunk fills the tail page first, then
+allocates new pages only for the OVERFLOW.
+
+| step | action                      | page_ids     | page_lens    | offset | pool.used    |
+|------|-----------------------------|--------------|--------------|--------|--------------|
+| 1    | append chunk of 3           | [0, 1]       | [2, 1]       | 3      | [0, 1]       |
+| 2    | append chunk of 2 (fills tail) | [0, 1, 2]    | [2, 2, 1]    | 5      | [0, 1, 2]    |
+| 3    | append chunk of 1 (decode)  | [0, 1, 2]    | [2, 2, 2]    | 6      | [0, 1, 2]    |
+
+Step 1: chunk of 3 with PS=2. Page 0 fills (slots 0,1); the 3rd
+  token spills into a NEW page 1 (slot 0 only - partial).
+Step 2: chunk of 2. First token fills page 1's tail (now full);
+  second token allocates page 2 (slot 0). Notice no waste: only the
+  current last page is ever partial.
+Step 3: decode 1 token. Page 2 had 1 slot; +1 -> page 2 now full.
+  ZERO new allocations - the tail-fill ate the whole chunk.
+
+[check] step1: page_ids=[0,1], page_lens=[2,1], offset=3: OK
+[check] step2: page_ids=[0,1,2], page_lens=[2,2,1], offset=5: OK
+[check] step3: page_ids=[0,1,2], page_lens=[2,2,2], offset=6: OK
+
+========================================================================
+  SECTION E: rewind + release lifecycle (the GOLD free-list)
+========================================================================
+After A prefill 3 + B prefill 2 (PS=2):
+  A.page_ids = [0, 1], A.page_lens = [2, 1], A.offset = 3
+  B.page_ids = [2], B.page_lens = [2], B.offset = 2
+  pool.used  = [0, 1, 2]
+  pool.free  = [3, 4, 5]
+
+A.rewind(1) (speculative decode rejected 1 token):
+  A.page_ids = [0]  <- physical page 1 RETURNED to free list
+  A.page_lens = [2]   <- page 0 back to full (2 tokens)
+  A.offset = 2
+  pool.used = [0, 2]
+  pool.free = [1, 3, 4, 5]
+
+A.release() + B.release() (both requests finish):
+  pool.used = []   <- empty
+  pool.free = [0, 1, 2, 3, 4, 5]   <- ALL 6 pages back
+
+GOLD for the .html: after both release(), free_list = [0, 1, 2, 3, 4, 5]
+
+[check] after rewind(1): A.page_ids==[0], page_lens==[2], offset==2: OK
+[check] after both release(): pool.used empty: True -> OK
+[check] after both release(): free_list == [0,1,2,3,4,5]: True -> OK
+
+========================================================================
+  SECTION F: paged attention indirect K/V gather for one query
+========================================================================
+After prefill 3 (PS=2):
+  c.page_ids = [0, 1], c.page_lens = [2, 1], c.offset = 3
+
+THE INDIRECT-LOOKUP FORMULA (kernel's K address):
+  For logical pos 2 of request, head 0, dim 0:
+    page_idx = 2 // 2 = 1
+    slot     = 2 %  2 = 0
+    page_id  = block_table[1] = 1
+    k_idx    = ((page_id*H_kv + kv_head)*page_size + slot)*D + c
+            = ((1*2 + 0)*2 + 0)*8 + 0
+            = 32
+    K via formula   = 0.3010
+    K via tensor[...] = 0.3010  (must match)
+
+Attention output (token 2 as query), head 0, dims 0..3:
+  paged (indirect gather) : [0.7067, 0.7077, 0.7087, 0.7097]
+  dense  (gather+matmul)  : [0.7067, 0.7077, 0.7087, 0.7097]
+
+[check] paged-attn(indirect) == dense-attn(gather) at tol 1e-05: OK
+[check] indirect-lookup formula == tensor index: OK
+
+GOLD for .html: indirect K[page_id=1,head=0,slot=0,dim=0] = 0.3010
+
+========================================================================
+  SECTION G: contrast with dense (paged bytes == dense bytes)
+========================================================================
+Build the same 4-token K,V three ways; assert byte-equality.
+
+| path            | K[0,0,0,:4] (token0)              | K[0,0,3,:4] (token3)              |
+|-----------------|-----------------------------------|-----------------------------------|
+| no-cache (raw)  | [0.101, 0.102, 0.103, 0.104]      | [0.401, 0.402, 0.403, 0.404]      |
+| dense cache     | [0.101, 0.102, 0.103, 0.104]      | [0.401, 0.402, 0.403, 0.404]      |
+| paged cache (PS=2) | [0.101, 0.102, 0.103, 0.104]      | [0.401, 0.402, 0.403, 0.404]      |
+
+paged.page_ids = [0, 1]  (logical 0 -> phys 0, logical 1 -> phys 1)
+paged.page_lens = [2, 2]
+(Even though K is split across 2 physical pages, fetch_full() rebuilds the exact same contiguous tensor.)
+
+[check] dense K  == raw K  ? True
+[check] paged K  == raw K  ? True
+[check] paged K  == dense K? True
+[check] ALL THREE PATHS MATCH: OK
+
+========================================================================
+  GOLD VALUES FOR THE .html (recompute + check)
+========================================================================
+  gold block_table logical pos 2 -> (page_id, slot) = (2, 0)   (expect (2, 0))
+  gold free_list after both release()             = [0, 1, 2, 3, 4, 5]   (expect [0,1,2,3,4,5])
+  gold indirect K[page_id=1,head=0,slot=0,dim=0]   = 0.3010   (expect 0.3010)
+  gold dense==paged==raw K equivalence             = OK
+
+========================================================================
+  DONE - all sections printed; equivalence = OK
+========================================================================

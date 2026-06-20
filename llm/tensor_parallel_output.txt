@@ -1,0 +1,290 @@
+tensor_parallel.py - reference impl. Numbers below feed TENSOR_PARALLEL.md.
+torch = 2.12.1
+SIMULATION: faithful single-process TP=2 (shards as plain tensors,
+            AllReduce as explicit sum; math identical to NCCL).
+
+========================================================================
+  SECTION A: why one matrix doesn't fit (the memory budget)
+========================================================================
+A modern LLM weight matrix is HUGE. Take a single hidden layer of a
+70B-class model: E = 8192, FFN intermediate = 28672 (Llama-2-70B).
+ONE weight matrix (gate_proj) is [28672, 8192] floats.
+
+  gate_proj: [28672, 8192]  = 234,881,024 elements
+             = 0.44 GiB (fp16)   0.88 GiB (fp32)
+
+An H100 has 80 GiB. The MLP block alone has 3 such matrices
+(gate, up, down) = ~1.3 GiB in fp16 PER LAYER. With 80 layers and
+embeddings, the model won't fit on one GPU. Cutting each matrix into
+TP shards is the most surgical fix: TP=8 makes every matrix 8x smaller
+on each GPU, with NO change to the math (proven in Sections C/D).
+
+Per-rank memory after sharding one [28672, 8192] matrix (fp16):
+
+| TP | shard shape        | elements  | bytes/rank (fp16) | savings |
+|----|--------------------|-----------|-------------------|---------|
+| 1  | [28672, 8192]      | 234,881,024 |  0.438 GiB          | baseline |
+| 2  | [14336, 8192]      | 117,440,512 |  0.219 GiB          | 2x smaller |
+| 4  | [7168, 8192]      | 58,720,256 |  0.109 GiB          | 4x smaller |
+| 8  | [3584, 8192]      | 29,360,128 |  0.055 GiB          | 8x smaller |
+
+NOTE: the matrix is sharded along ONE axis. Column-parallel splits
+the OUTPUT dim (rows of W stored as [out,in]); row-parallel splits
+the INPUT dim (cols). The savings are identical; the COMMUNICATION
+they require is NOT (Sections B-C).
+
+[check] sharding reduces per-rank memory by exactly TP x:  OK
+
+========================================================================
+  SECTION B: column-parallel vs row-parallel (split + comm cost)
+========================================================================
+Tiny model: TP=2, W shape (8, 8) = [out=8, in=8], X shape (1, 8)
+
+Full (non-TP) forward:  Y = X @ W.T   -> (1, 8)
+  Y[0] = [-0.8029, +0.4008, -1.2338, +0.4680, -0.0224, -0.8494, +0.7460, +0.3059]
+
+------------------------------------------------------------
+COLUMN-PARALLEL  (split OUTPUT dim; nano-vllm ColumnParallelLinear)
+------------------------------------------------------------
+W stored as [out, in]; split dim 0 -> each rank holds [out/TP, in].
+forward:  Y_r = X @ W_r.T  (X is FULL on every rank) -> [1, out/TP]
+COMM:  NONE in forward. To get full Y, AllGather along last dim.
+
+  rank 0: W_r (4, 8) = W[0*4:1*4, :]
+          Y_r = [-0.8029, +0.4008, -1.2338, +0.4680]   shape (1, 4)
+  rank 1: W_r (4, 8) = W[1*4:2*4, :]
+          Y_r = [-0.0224, -0.8494, +0.7460, +0.3059]   shape (1, 4)
+
+  AllGather (concat along last dim) = [-0.8029, +0.4008, -1.2338, +0.4680, -0.0224, -0.8494, +0.7460, +0.3059]
+  [check] AllGather(Y_0, Y_1) == full Y?  True  (column-parallel: zero comm in forward, AllGather only if needed)
+
+------------------------------------------------------------
+ROW-PARALLEL  (split INPUT dim; nano-vllm RowParallelLinear)
+------------------------------------------------------------
+W stored as [out, in]; split dim 1 -> each rank holds [out, in/TP].
+forward:  partial_r = X_r @ W_r.T  (X_r is rank's INPUT slice)
+COMM:  AllReduce(sum) to combine partials into full Y.
+
+  rank 0: W_r (8, 4) = W[:, 0*4:1*4]
+          X_r (1, 4), partial_r = [-0.6191, +0.5776, -1.0092, +0.5250, +0.1207, -1.0074, -0.0579, +0.3386]  shape (1, 8)
+  rank 1: W_r (8, 4) = W[:, 1*4:2*4]
+          X_r (1, 4), partial_r = [-0.1837, -0.1768, -0.2245, -0.0570, -0.1431, +0.1580, +0.8039, -0.0328]  shape (1, 8)
+
+  AllReduce(sum) = partial_0 + partial_1
+                = [-0.8029, +0.4008, -1.2338, +0.4680, -0.0224, -0.8494, +0.7460, +0.3059]
+  [check] AllReduce(partials) == full Y?  True  (row-parallel: ONE AllReduce per layer)
+
+------------------------------------------------------------
+THE COMM COST TABLE (forward only)
+------------------------------------------------------------
+| style           | split dim  | per-rank output  | comm in forward     |
+|-----------------|------------|------------------|---------------------|
+| column-parallel | output (0) | [B, out/TP]      | NONE (or AllGather) |
+| row-parallel    | input  (1) | [B, out] partial | ONE AllReduce       |
+
+KEY: column-parallel produces a SHARD of the output (cheap, but
+"incomplete"); row-parallel produces a FULL-SIZE but WRONG answer
+(partial sum) that must be AllReduced before anyone can use it.
+
+========================================================================
+  SECTION C: the Megatron MLP trick - AllReduce CANCELS in the middle  (GOLD)
+========================================================================
+Tiny model: TP=2, X (1, 8)=[1, E=8], A (4, 8)=[FFN=4, E], B (8, 4)=[E, FFN]
+
+Vanilla MLP:   Y = GeLU(X @ A.T) @ B.T
+               (one GPU, full matrices, no comm)
+
+Full Y shape (1, 8):   Y[0] = [-0.1784, +0.0385, -0.0017, -0.1101, +0.2278, +0.1560, +0.6214, +0.3550]
+
+============================================================
+Megatron TP=2:  A COLUMN-parallel + B ROW-parallel
+============================================================
+Split A by OUTPUT dim (columns of the math matrix A.T = rows of the
+PyTorch tensor A[FFN,E]). Split B by INPUT dim (rows of B.T = cols
+of B[E,FFN]). Each rank holds A_r=[FFN/TP, E] and B_r=[E, FFN/TP].
+
+GPU 0:  Z_0 = GeLU(X @ A_0.T)   # [1, FFN/TP]   LOCAL
+        Y_0 = Z_0 @ B_0.T       # [1, E]        PARTIAL (sum-like)
+GPU 1:  Z_1 = GeLU(X @ A_1.T)   # [1, FFN/TP]   LOCAL
+        Y_1 = Z_1 @ B_1.T       # [1, E]        PARTIAL
+AllReduce:  Y = Y_0 + Y_1       # ONE collective for the WHOLE block
+
+  rank 0: A_r (2, 8), B_r (8, 2)
+          Z_r = GeLU(X @ A_0.T) = [-0.1295, -0.0808]
+          Y_r = Z_r @ B_0.T     = [+0.0182, +0.0190, +0.0269, -0.0209, +0.0697, +0.0000, -0.0059, -0.0326]  (partial)
+  rank 1: A_r (2, 8), B_r (8, 2)
+          Z_r = GeLU(X @ A_1.T) = [-0.1473, +0.7637]
+          Y_r = Z_r @ B_1.T     = [-0.1966, +0.0195, -0.0286, -0.0892, +0.1581, +0.1559, +0.6273, +0.3876]  (partial)
+
+AllReduce(Y_0 + Y_1) = [-0.1784, +0.0385, -0.0017, -0.1101, +0.2278, +0.1560, +0.6214, +0.3550]
+
+  max|TP_Y - full_Y| = 7.451e-09
+  [check] AllReduce(Y_0 + Y_1) == full GeLU(X@A.T)@B.T?  True
+
+WHY IT WORKS (one paragraph):
+  The full computation is  Y = GeLU(X @ A.T) @ B.T.
+  Split A.T vertically (columns):  A.T = [A_0.T | A_1.T]  so
+    X @ A.T = [X @ A_0.T  |  X @ A_1.T]   (block matmul, no arithmetic)
+  GeLU is ELEMENT-WISE, so it applies block-by-block:
+    GeLU(X @ A.T) = [GeLU(X @ A_0.T) | GeLU(X @ A_1.T)]
+  Now split B.T HORIZONTALLY (rows):  B.T = [B_0.T ; B_1.T]  so that
+  the top rows of B.T eat the left block of GeLU(X @ A.T), bottom rows
+  eat the right block. Block matmul gives:
+    Y = GeLU(X@A_0.T) @ B_0.T  +  GeLU(X@A_1.T) @ B_1.T
+      = Y_0                       +  Y_1
+  which is EXACTLY the partial-sum + AllReduce pattern. The would-be
+  AllReduce between A and B (to materialize the full GeLU(X @ A.T)) is
+  cancelled because B is row-parallel and GeLU is element-wise.
+
+GOLD value (pinned for tensor_parallel.html):
+  Y_full[0]              = [-0.1784, +0.0385, -0.0017, -0.1101, +0.2278, +0.1560, +0.6214, +0.3550]
+  Y_full[0, 0] (scalar)  = -0.178412
+  Y_partial_0[0]         = [+0.0182, +0.0190, +0.0269, -0.0209, +0.0697, +0.0000, -0.0059, -0.0326]
+  Y_partial_1[0]         = [-0.1966, +0.0195, -0.0286, -0.0892, +0.1581, +0.1559, +0.6273, +0.3876]
+[check] gold scalar reproduces from gelu(X @ A.T) @ B.T:  OK
+
+========================================================================
+  SECTION D: attention TP - heads split, O proj AllReduce
+========================================================================
+Tiny model: TP=2, B=1, L=2, E=8, H=4, D=2  -> 2 heads/rank
+
+Full attention (non-TP) forward path:
+  Q,K,V proj -> [B,L,H*D] -> reshape [B,H,L,D] -> attention per head
+  -> reshape back [B,L,H*D] -> O proj -> [B,L,E]
+
+  Y_full[0] = 
+[[+0.0187, -0.0372, -0.0359, -0.0783, -0.0731, -0.0797, -0.0462, +0.0329],
+ [+0.0208, -0.0372, -0.0359, -0.0760, -0.0716, -0.0772, -0.0419, +0.0302]]
+
+============================================================
+TP=2 attention:  QKV COLUMN-parallel (heads split) + O ROW-parallel
+============================================================
+Each rank holds H/TP=2 heads. The QKV weight column-shard is
+[H_local*D, E] per rank. The O weight row-shard is [E, H_local*D].
+Attention is computed LOCALLY on each rank's heads; the row-parallel
+O proj yields a partial sum; AllReduce combines them.
+
+  rank 0: heads [0..1], QKV shard [4, E], O shard [E, 4]
+          partial_0[0] = 
+[[-0.0145, +0.0037, -0.0027, +0.0151, -0.0560, -0.0303, -0.0067, +0.0473],
+ [-0.0120, +0.0036, -0.0028, +0.0175, -0.0532, -0.0285, -0.0031, +0.0445]]
+  rank 1: heads [2..3], QKV shard [4, E], O shard [E, 4]
+          partial_1[0] = 
+[[+0.0331, -0.0409, -0.0332, -0.0935, -0.0171, -0.0494, -0.0396, -0.0144],
+ [+0.0329, -0.0408, -0.0330, -0.0935, -0.0184, -0.0488, -0.0388, -0.0143]]
+
+AllReduce(partial_0 + partial_1)[0] = 
+[[+0.0187, -0.0372, -0.0359, -0.0783, -0.0731, -0.0797, -0.0462, +0.0329],
+ [+0.0208, -0.0372, -0.0359, -0.0760, -0.0716, -0.0772, -0.0419, +0.0302]]
+
+  max|TP_Y - full_Y| = 1.490e-08
+  [check] AllReduce == full attention output?  True
+
+WHY THIS IS ONE AllReduce (the Megatron trick applied to attention):
+  - Q,K,V projections are COLUMN-parallel: each rank owns H/TP heads.
+  - Attention is computed LOCALLY per head; heads don't talk to each
+    other, so NO AllReduce is needed between QKV proj and O proj.
+  - O projection is ROW-parallel: each rank produces a partial sum
+    over its H/TP heads. ONE AllReduce at the end combines them.
+  -> The full attention block costs exactly ONE AllReduce, just like
+     the MLP block. (🔗 GQA: with grouped-query heads, the K,V column
+     shards are smaller than the Q column shard — see Section E.)
+
+========================================================================
+  SECTION E: QKVParallelLinear - packing Q,K,V for GQA  (🔗 GQA)
+========================================================================
+Tiny GQA model: TP=2, E=8, D=2, H_q=4, H_kv=2, n_repeats=2  (🔗 GQA.md)
+
+Packed QKV weight: shape (16, 8) = [(H_q + 2*H_kv)*D, E] = [(4+2*2)*2, 8] = [16, 8]
+
+Layout (nano-vllm QKVParallelLinear, dim 0):
+  [  Q heads 0..3 (8 rows)  |  K heads 0..1 (4 rows)  |  V heads 0..1 (4 rows)  ]
+
+After TP=2 sharding, EACH rank takes 2 Q-heads + 1 K-heads + 1 V-heads:
+
+| rank | Q heads         | K heads         | V heads         | shard rows = (H_q/TP + 2*H_kv/TP)*D |
+|------|-----------------|-----------------|-----------------|----------------------------------|
+| 0    | 0..1            | 0..0            | 0..0            | 8                                |
+| 1    | 2..3            | 1..1            | 1..1            | 8                                |
+
+weight_loader (per rank, builds the packed shard):
+  rank 0: Q[0:4] K[0:2] V[0:2]  -> packed (8, 8)
+  rank 1: Q[4:8] K[2:4] V[2:4]  -> packed (8, 8)
+
+KEY: with GQA (H_kv < H_q), the K,V column-shards are SMALLER than
+the Q column-shard on every rank — exactly the asymmetry GQA introduced.
+The Q heads split cleanly across TP because H_q % TP == 0; the same
+must hold for H_kv (else QKVParallelLinear's `divide()` asserts).
+This is why production GQA configs choose H_kv divisible by the max TP.
+
+[check] H_q=4 and H_kv=2 both divide TP=2:  OK  (else QKVParallelLinear.__init__ asserts via divide())
+
+========================================================================
+  SECTION F: per-layer AllReduce accounting  (🔗 NCCL_COLLECTIVES)
+========================================================================
+Count the AllReduces in one transformer layer under Megatron TP:
+
+| sub-block      | parallel pattern            | AllReduces |
+|----------------|-----------------------------|------------|
+| attention      | QKV col-parallel, O row-par | 1          |
+| MLP            | A col-parallel, B row-par   | 1          |
+|----------------|-----------------------------|------------|
+| TOTAL per layer|                             | 2          |
+
+Each AllReduce moves one tensor of shape [B, L, E] (the block output).
+For a ring-AllReduce of K=TP ranks and N = B*L*E elements:
+  per-rank traffic = 2 * (TP-1)/TP * N * bytes_per_element
+  (🔗 NCCL_COLLECTIVES.md: ring-AllReduce = 2N bytes regardless of TP)
+
+  B=1, L=1, E=8192, TP=2: N=8,192, per-rank traffic = 0.00 GiB (fp16)
+  B=1, L=1, E=8192, TP=4: N=8,192, per-rank traffic = 0.00 GiB (fp16)
+  B=1, L=1, E=8192, TP=8: N=8,192, per-rank traffic = 0.00 GiB (fp16)
+
+  B=1, L=4096, E=8192, TP=2: N=33,554,432, per-rank traffic = 0.06 GiB (fp16)
+  B=1, L=4096, E=8192, TP=4: N=33,554,432, per-rank traffic = 0.09 GiB (fp16)
+  B=1, L=4096, E=8192, TP=8: N=33,554,432, per-rank traffic = 0.11 GiB (fp16)
+
+  B=32, L=4096, E=8192, TP=2: N=1,073,741,824, per-rank traffic = 2.00 GiB (fp16)
+  B=32, L=4096, E=8192, TP=4: N=1,073,741,824, per-rank traffic = 3.00 GiB (fp16)
+  B=32, L=4096, E=8192, TP=8: N=1,073,741,824, per-rank traffic = 3.50 GiB (fp16)
+
+READ: TP doubles the AllReduce count vs no-TP (0 -> 2 per layer), and
+the traffic GROWS with batch and sequence length. This is why TP is
+paired with NVLink (next section) — anything slower would dominate.
+
+========================================================================
+  SECTION G: bandwidth rule - TP lives WITHIN a node (NVLink)
+========================================================================
+TP needs ONE AllReduce per sub-block, EVERY forward pass. Compare
+that to Data Parallel (🔗 DDP), which AllReduces once per OPTIMIZER
+STEP (amortized over many micro-batches). TP's comm frequency is
+orders of magnitude higher -> it needs orders of magnitude more
+bandwidth, or it stalls the GPUs.
+
+| link              | typical bandwidth | use case                  |
+|-------------------|-------------------|---------------------------|
+| NVLink (intra-node)| ~300 GB/s (bi-dir)| TENSOR PARALLEL (here)    |
+| NVSwitch (8x H100) | ~900 GB/s agg.    | large TP within a node    |
+| PCIe Gen5 x16     | ~64 GB/s          | small TP, or CPU fallback |
+| InfiniBand (inter)| ~25-50 GB/s       | DP / Pipeline (🔗 DDP/PP) |
+| Ethernet (RoCE)   | ~12-25 GB/s       | DP across racks           |
+
+RULE OF THUMB: keep TP_size <= GPUs_per_node. Go beyond a single node
+and the AllReduce cost explodes (inter-node bandwidth is ~10x slower).
+For multi-node training, combine TP (intra-node) with DP or Pipeline
+Parallelism (inter-node). This is the 3D parallelism recipe:
+
+  TP (within node, NVLink)  x  DP (across nodes, IB)  x  PP (across)
+
+For one decode step (B=1, L=4096, E=8192, fp16), ONE AllReduce of
+the [B*L*E] block output takes:
+  over NVLink (300 GB/s):   223.7 us
+  over IB     ( 25 GB/s):  2684.4 us   (12x slower)
+=> TP across nodes would spend 12x longer in comm per
+   layer, killing throughput. Keep TP on NVLink. (🔗 NCCL ring-AllReduce)
+
+[check] IB / NVLink bandwidth ratio = 12x slower:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

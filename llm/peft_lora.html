@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoRA / QLoRA / Multi-Adapter Serving — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --teal:#1abc9c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.4rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--orange)}
+  .val{color:var(--orange);font-weight:600;min-width:2ch}
+  .row{display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start}
+  table.q{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.q td,table.q th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.q th{color:var(--muted);font-weight:600}
+  table.q td.gold{color:var(--green);font-weight:700}
+  table.q td.blue{color:#58a6ff}
+  table.q td.orange{color:var(--orange)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.6}
+  .readout b{color:var(--green)}
+  .readout .b{color:#58a6ff}
+  .readout .o{color:var(--orange)}
+  .readout .m{color:var(--muted)}
+  .readout .r{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  .caption{color:var(--ink);font-size:.86rem;background:#0f1a14;border-left:3px solid var(--green);
+           border-radius:0 6px 6px 0;padding:.5rem .7rem;margin:.2rem 0 .7rem}
+  .caption b{color:var(--green)}
+  canvas{display:block;width:100%;max-width:480px;height:180px;background:#0a0e14;border-radius:6px;border:1px solid #30363d}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>LoRA / QLoRA / Multi-Adapter Serving — interactive
+    <a class="badge" href="./PEFT_LORA.md">PEFT_LORA.md</a>
+    <a class="badge" href="./peft_lora.py">peft_lora.py</a></h1>
+  <div class="sub">Drag the <b style="color:var(--orange)">rank r</b> slider and watch the trainable-parameter savings grow.
+    Every number is recomputed in JS with the <i>identical</i> LoRA formula
+    <code>y = W₀x + (α/r)·B(Ax)</code> from <code>peft_lora.py</code> (Hu et al. 2021).
+    &nbsp;|&nbsp; <a href="./quantization.html">W4A16 quant →</a> (QLoRA's NF4 cousin 🔗)</div>
+
+  <!-- ===== PANEL 1: LoRA decomposition ===== -->
+  <h2>① LoRA forward: y = W₀x + (α/r)·B(Ax)  — frozen base + a tiny rank-r side-path</h2>
+  <div class="caption"><b>Two paths, one sum.</b> The input <code>x</code> flows through the frozen <code>W₀</code> (blue,
+    never trained) AND a thin <code>(α/r)·B(Ax)</code> side-path (orange, the only thing trained). Their sum (green) is the
+    output. At init <code>B=0</code> so the orange path is zero — the model is identical to the base until training moves B.</div>
+  <div class="panel">
+    <div class="micro">d = 8, k = 8, r = 2, α = 16 → scale α/r = 8. Fixed <code>x</code>, <code>W₀</code>, <code>A</code>,
+      trained <code>B</code> (all identical to <code>peft_lora.py</code> Section B).</div>
+    <div style="overflow-x:auto;min-width:0"><table class="q" id="decompTable"></table></div>
+    <div class="readout" id="decompOut"></div>
+    <div class="micro" style="margin-top:.5rem"><b>y[0]</b> is the pinned gold value — the footer re-checks it equals
+      <code>0.1808</code> from <code>peft_lora.py</code>. The orange adapter column is the entire per-task "learned" signal:
+      ~0.02 on top of a ~0.2 base.</div>
+  </div>
+
+  <!-- ===== PANEL 2: rank slider -> savings ===== -->
+  <h2>② Rank r → trainable-parameter savings  (full FT d·k vs LoRA r·(d+k))</h2>
+  <div class="caption"><b>Drag r, watch LoRA win.</b> Full fine-tuning trains <code>d·k</code> weights; LoRA trains only
+    <code>r·(d+k)</code>. The savings ratio is ≈ <code>r/min(d,k)</code>. Tiny <code>r</code> → tiny adapter, but too tiny
+    under-fits hard tasks (LoRA recovers full FT as r → rank(W₀)).</div>
+  <div class="panel">
+    <div class="controls">
+      <label>rank r <input type="range" id="r" min="1" max="16" value="2">
+        <span class="val" id="rVal">2</span></label>
+      <label>layer dim d=k <input type="range" id="dim" min="8" max="4096" step="8" value="8">
+        <span class="val" id="dimVal">8</span></label>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <div style="overflow-x:auto;min-width:0"><table class="q" id="savingsTable"></table></div>
+      <div>
+        <div class="micro">full FT (blue) vs LoRA (orange) trainable params — log scale</div>
+        <canvas id="bars" width="480" height="180"></canvas>
+      </div>
+    </div>
+    <div class="readout" id="savingsOut"></div>
+  </div>
+
+  <!-- ===== PANEL 3: grouped GEMM ===== -->
+  <h2>③ Multi-adapter serving — Punica grouped GEMM (one kernel, many adapters)</h2>
+  <div class="caption"><b>One base, many adapters, one batch.</b> Each token in a batch picks its own adapter
+    <code>(A_i, B_i)</code>. A naive loop runs one matmul per adapter; Punica's grouped-GEMM kernel runs them all in one
+    pass. Both give identical numbers — only the GPU utilisation differs.</div>
+  <div class="panel">
+    <div style="overflow-x:auto;min-width:0"><table class="q" id="gemmTable"></table></div>
+    <div class="readout" id="gemmOut"></div>
+    <div class="micro" style="margin-top:.5rem"><b>S-LoRA</b> extends this: thousands of adapters live in paged memory
+      (like PagedAttention for KV cache 🔗), paged in sub-millisecond. One frozen base serves all of them — paid once.</div>
+  </div>
+
+  <!-- ===== PANEL 4: memory comparison ===== -->
+  <h2>④ QLoRA memory — NF4 frozen base (4×) + tiny fp16 adapters 🔗</h2>
+  <div class="caption"><b>Crush the frozen base, keep the adapters precise.</b> The base <code>W₀</code> is frozen anyway, so
+    QLoRA stores it as 4-bit NF4 (4× smaller); the tiny adapters <code>A,B</code> stay fp16 (the only things back-prop
+    touches). Bars are the frozen-base footprint of one <code>[896,896]</code> Qwen3-0.5B layer.</div>
+  <div class="panel">
+    <canvas id="mem" width="480" height="180"></canvas>
+    <div class="readout" id="memOut"></div>
+    <div class="micro" style="margin-top:.5rem">NF4 = 16 levels on the quantiles of a normal (dense near 0), the normal-quantile
+      cousin of <a href="./quantization.html">W4A16's</a> uniform levels. QLoRA paper: a 65B model trains on one 48 GB GPU.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches <code>peft_lora.py</code> Section B gold (<code>y[0] = 0.1808</code> at r=2).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth matrices, copied VERBATIM from peft_lora.py ===== */
+const D = 8, K = 8, ALPHA = 16;
+const W0 = [
+  [ 0.40,-0.20, 0.10, 0.30,-0.15, 0.05, 0.25,-0.10],
+  [-0.10, 0.50,-0.30, 0.20, 0.10,-0.25, 0.15, 0.05],
+  [ 0.20,-0.10, 0.60,-0.20, 0.30, 0.10,-0.05, 0.40],
+  [ 0.15, 0.25,-0.10, 0.45,-0.30, 0.20, 0.10,-0.15],
+  [-0.25, 0.10, 0.20,-0.15, 0.55,-0.10, 0.30, 0.20],
+  [ 0.10,-0.30, 0.15, 0.25,-0.20, 0.50,-0.10, 0.30],
+  [ 0.30, 0.05,-0.25, 0.10, 0.20,-0.15, 0.65,-0.20],
+  [-0.15, 0.40, 0.10,-0.30, 0.25, 0.15,-0.20, 0.55],
+];
+const X = [0.50,-0.30, 0.80,-0.10, 0.40,-0.60, 0.20, 0.70];
+const A = [
+  [ 0.15,-0.20, 0.10, 0.25,-0.05, 0.30,-0.15, 0.08],
+  [-0.10, 0.12, 0.22,-0.18, 0.14,-0.06, 0.09,-0.24],
+];
+const B = [
+  [ 0.10,-0.08],[-0.12, 0.15],[ 0.20, 0.05],[-0.06, 0.18],
+  [ 0.14,-0.10],[-0.09, 0.22],[ 0.16,-0.04],[-0.11, 0.13],
+];
+/* second adapter + the two multi-tenant tokens (peft_lora.py Section F) */
+const A1 = [
+  [ 0.08, 0.18,-0.12, 0.05, 0.22,-0.10, 0.14,-0.06],
+  [-0.16, 0.04, 0.20, 0.09,-0.15, 0.11, 0.07, 0.19],
+];
+const B1 = [
+  [-0.05, 0.14],[ 0.11,-0.09],[-0.18, 0.06],[ 0.07, 0.13],
+  [-0.13, 0.10],[ 0.19,-0.04],[-0.08, 0.17],[ 0.12,-0.11],
+];
+const G0 = [ 0.30,-0.10, 0.50,-0.20, 0.10,-0.40, 0.25, 0.15];
+const G1 = [-0.20, 0.40, 0.10, 0.30,-0.15, 0.20,-0.30, 0.05];
+
+/* ===== linear-algebra primitives (match torch ops) ===== */
+function matVec(M, v){           // M[d][k] @ v[k] -> [d]
+  const d = M.length, k = v.length;
+  const out = new Array(d);
+  for (let i = 0; i < d; i++){ let s = 0; for (let j = 0; j < k; j++) s += M[i][j]*v[j]; out[i] = s; }
+  return out;
+}
+function mvScale(v, a){ return v.map(x => x*a); }
+function vAdd(a, b){ return a.map((x, i) => x + b[i]); }
+
+/* the LoRA forward, IDENTICAL formula to peft_lora.py LoRALinear.__call__ */
+function loraForward(Am, Bm, r, x){
+  const scale = ALPHA / r;
+  const base  = matVec(W0, x);                       // frozen path
+  const ax    = matVec(Am, x);                       // A·x  [r]
+  const adapt = mvScale(matVec(Bm, ax), scale);      // (α/r)·B(Ax)  [d]
+  return { base: base, adapt: adapt, y: vAdd(base, adapt) };
+}
+
+/* ===== PANEL 1: decomposition table ===== */
+function drawDecomp(){
+  const r = 2;
+  const { base, adapt, y } = loraForward(A, B, r, X);
+  let h = '<tr><th>i</th><th>base W₀·x</th><th>adapter (α/r)·B(Ax)</th>'
+        + '<th>y = base + adapter</th></tr>';
+  for (let i = 0; i < D; i++){
+    const gold = (i === 0) ? 'gold' : '';
+    h += `<tr><td>${i}</td><td class="blue">${base[i].toFixed(4)}</td>`
+      + `<td class="orange">${adapt[i].toFixed(4)}</td>`
+      + `<td class="${gold}">${y[i].toFixed(4)}</td></tr>`;
+  }
+  document.getElementById('decompTable').innerHTML = h;
+  document.getElementById('decompOut').innerHTML =
+    `scale = α/r = ${ALPHA}/${r} = <b>${(ALPHA/r).toFixed(4)}</b><br>`
+    + `<span class="m">A ~ N(0,σ²), B = 0 at init ⇒ adapter path = 0 ⇒ model == base on step 0.</span><br>`
+    + `<b>y[0] = ${y[0].toFixed(4)}</b> <span class="m">(pinned gold value, re-checked in the footer)</span>`;
+}
+
+/* ===== PANEL 2: rank slider -> savings ===== */
+function drawSavings(){
+  const r = +document.getElementById('r').value;
+  const dim = +document.getElementById('dim').value;
+  document.getElementById('rVal').textContent = r;
+  document.getElementById('dimVal').textContent = dim;
+  const full = dim*dim;
+  const loraP = r*(dim+dim);
+  const ratio = loraP/full;
+  let h = '<tr><th>quantity</th><th>formula</th><th>value</th></tr>';
+  h += `<tr><td>full FT trainable</td><td class="m">d·k</td><td class="blue">${full.toLocaleString()}</td></tr>`;
+  h += `<tr><td>LoRA trainable</td><td class="m">r·(d+k)</td><td class="orange">${loraP.toLocaleString()}</td></tr>`;
+  h += `<tr><td>ratio</td><td class="m">r(d+k)/(dk)</td><td>${ratio.toFixed(4)}</td></tr>`;
+  h += `<tr><td>savings</td><td class="m">dk / r(d+k)</td><td class="gold">${(full/loraP).toFixed(2)}× fewer</td></tr>`;
+  document.getElementById('savingsTable').innerHTML = h;
+
+  /* log-scale bars: blue (full) vs orange (LoRA) */
+  const cv = document.getElementById('bars');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = cv.clientWidth || 480, ch = cv.clientHeight || 180;
+  const bsw = Math.round(cw*dpr), bsh = Math.round(ch*dpr);
+  if (cv.width !== bsw || cv.height !== bsh){ cv.width = bsw; cv.height = bsh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const Wd = cv.clientWidth, Hd = cv.clientHeight;
+  ctx.clearRect(0,0,Wd,Hd);
+  const pad = 40, barH = 34, gap = 26, baseY = 28;
+  const logFull = Math.log10(full), logLora = Math.log10(Math.max(1,loraP));
+  const logMax = Math.max(logFull, logLora, 1);
+  const wScale = (Wd - pad - 70) / logMax;
+  /* full bar */
+  ctx.fillStyle = '#2980b9';
+  ctx.fillRect(pad, baseY, Math.max(2,logFull*wScale), barH);
+  ctx.fillStyle = '#e6edf3'; ctx.font = '11px ui-monospace,monospace'; ctx.textAlign = 'left';
+  ctx.fillText('full FT d·k = ' + full.toLocaleString(), pad + Math.max(2,logFull*wScale) + 6, baseY + barH/2 + 4);
+  /* LoRA bar */
+  ctx.fillStyle = '#e67e22';
+  ctx.fillRect(pad, baseY + barH + gap, Math.max(2,logLora*wScale), barH);
+  ctx.fillStyle = '#e6edf3';
+  ctx.fillText('LoRA r(d+k) = ' + loraP.toLocaleString(), pad + Math.max(2,logLora*wScale) + 6, baseY + barH + gap + barH/2 + 4);
+  ctx.fillStyle = '#8b949e'; ctx.textAlign = 'right';
+  ctx.fillText('(log scale)', Wd - 4, Hd - 4);
+
+  document.getElementById('savingsOut').innerHTML =
+    `At r=<b>${r}</b>, d=k=<b>${dim}</b>: LoRA trains <span class="o">${loraP.toLocaleString()}</span> params vs `
+    + `<span class="b">${full.toLocaleString()}</span> full-FT = <b>${(full/loraP).toFixed(2)}×</b> fewer. `
+    + `<span class="m">Real GPT-3 layer d=k=12288, r=4 → 1536× fewer (paper: ~10,000× across all adapted layers).</span>`;
+}
+
+/* ===== PANEL 3: grouped GEMM ===== */
+function drawGEMM(){
+  const r = 2, scale = ALPHA/r;
+  const tokens = [G0, G1];
+  const As = [A, A1], Bs = [B, B1], names = ['adapter 0', 'adapter 1'];
+  /* naive per-adapter loop */
+  const yLoop = tokens.map((x, i) => {
+    const base = matVec(W0, x);
+    const adapt = mvScale(matVec(Bs[i], matVec(As[i], x)), scale);
+    return vAdd(base, adapt);
+  });
+  /* grouped GEMM: stack adapters, one batched pass (einsum equivalent) */
+  const Astack = As, Bstack = Bs;
+  const yGrouped = tokens.map((x, i) => {
+    const ax = matVec(Astack[i], x);                  // A_i · x_i  [r]
+    const adapt = mvScale(matVec(Bstack[i], ax), scale);
+    return vAdd(matVec(W0, x), adapt);
+  });
+  let h = '<tr><th>token</th><th>adapter</th><th>y (loop)</th><th>y (grouped GEMM)</th><th>match</th></tr>';
+  let allOk = true;
+  for (let i = 0; i < 2; i++){
+    const ok = yLoop[i].every((v, j) => Math.abs(v - yGrouped[i][j]) < 1e-6);
+    if (!ok) allOk = false;
+    h += `<tr><td>${i}</td><td class="orange">${names[i]}</td>`
+      + `<td>[${yLoop[i].map(v => v.toFixed(4)).join(', ')}]</td>`
+      + `<td class="blue">[${yGrouped[i].map(v => v.toFixed(4)).join(', ')}]</td>`
+      + `<td class="${ok?'gold':'r'}">${ok ? '✓' : '✗'}</td></tr>`;
+  }
+  document.getElementById('gemmTable').innerHTML = h;
+  document.getElementById('gemmOut').innerHTML =
+    `[check] grouped-GEMM == per-adapter loop : <b>${allOk ? 'OK' : 'FAIL'}</b><br>`
+    + `<span class="m">Same numbers — Punica's win is ONE kernel launch for the whole batch instead of N sequential matmuls. `
+    + `S-LoRA pages the adapter matrices so thousands fit in VRAM.</span>`;
+}
+
+/* ===== PANEL 4: memory bars ===== */
+function drawMem(){
+  const n = 896*896;
+  const fp16 = n*2;            // bytes
+  const nf4  = n/2;
+  const adapter = 64*(896+896)*2;   // r=64 adapters, fp16
+  const cv = document.getElementById('mem');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = cv.clientWidth || 480, ch = cv.clientHeight || 180;
+  const bsw = Math.round(cw*dpr), bsh = Math.round(ch*dpr);
+  if (cv.width !== bsw || cv.height !== bsh){ cv.width = bsw; cv.height = bsh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  const Wd = cv.clientWidth, Hd = cv.clientHeight;
+  ctx.clearRect(0,0,Wd,Hd);
+  const items = [
+    { name: 'fp16 base W₀',     bytes: fp16,    color: '#2980b9' },
+    { name: 'NF4 base W₀ (QLoRA)', bytes: nf4, color: '#27ae60' },
+    { name: 'adapter A,B (r=64)',  bytes: adapter, color: '#e67e22' },
+  ];
+  const pad = 130, barH = 30, gap = 16, baseY = 18;
+  const maxB = fp16;
+  const wScale = (Wd - pad - 90) / maxB;
+  ctx.font = '11px ui-monospace,monospace';
+  for (let i = 0; i < items.length; i++){
+    const it = items[i];
+    const y = baseY + i*(barH + gap);
+    ctx.fillStyle = '#8b949e'; ctx.textAlign = 'right';
+    ctx.fillText(it.name, pad - 8, y + barH/2 + 4);
+    ctx.fillStyle = it.color;
+    const w = Math.max(2, it.bytes*wScale);
+    ctx.fillRect(pad, y, w, barH);
+    ctx.fillStyle = '#e6edf3'; ctx.textAlign = 'left';
+    const mb = (it.bytes/1e6);
+    ctx.fillText((mb < 1 ? mb.toFixed(3) : mb.toFixed(2)) + ' MB', pad + w + 6, y + barH/2 + 4);
+  }
+  document.getElementById('memOut').innerHTML =
+    `One Qwen3-0.5B layer [896,896]: fp16 base = <span class="b">${(fp16/1e6).toFixed(3)} MB</span>, `
+    + `NF4 base = <b>${(nf4/1e6).toFixed(3)} MB</b> (<b>4.0×</b> smaller 🔗), `
+    + `r=64 adapter = <span class="o">${(adapter/1e6).toFixed(3)} MB</span>.<br>`
+    + `<span class="m">QLoRA trains only the orange sliver in fp16 while the base lives in 4-bit — a 65B model fits one 48 GB GPU.</span>`;
+}
+
+/* ===== master render ===== */
+function render(){
+  drawDecomp();
+  drawSavings();
+  drawGEMM();
+  drawMem();
+}
+
+/* ===== gold-value check vs peft_lora.py Section B =====
+   default matrices, r=2 -> y[0] must equal 0.1808 (python printed 0.180800) */
+function goldCheck(){
+  const { y } = loraForward(A, B, 2, X);
+  const goldY0 = 0.1808;
+  const ok = Math.abs(y[0] - goldY0) < 1e-3;
+  const chk = document.getElementById('check');
+  chk.textContent = ok
+    ? 'check: OK — JS matches peft_lora.py (y[0] = ' + y[0].toFixed(4) + ' at r=2)'
+    : 'check: FAIL — JS y[0] = ' + y[0].toFixed(6) + ' (expected 0.1808)';
+  chk.style.borderColor = ok ? '#27ae60' : '#c0392b';
+  chk.style.color = ok ? '#27ae60' : '#c0392b';
+  chk.style.background = ok ? '#1c3a25' : '#3a1414';
+}
+
+document.getElementById('r').addEventListener('input', render);
+document.getElementById('dim').addEventListener('input', render);
+window.addEventListener('resize', render);
+render();
+goldCheck();
+</script>
+</body>
+</html>

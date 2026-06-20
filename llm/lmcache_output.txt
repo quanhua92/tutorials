@@ -1,0 +1,191 @@
+lmcache.py - reference impl (FAITHFUL SIMULATION). All numbers below
+feed LMCACHE.md. torch = 2.12.1
+NOTE: no real cluster/RDMA here; tiers are a dict-of-dicts and the
+'pull' is a deterministic copy. Bandwidth/latency numbers are REAL.
+
+
+========================================================================
+  SECTION A: single-node prefix cache recap (🔗 PREFIX_CACHE)
+========================================================================
+One node, a local chunk cache. First request computes + stores the
+prompt's KV chunks (content-addressed by signature). A second request
+with the SAME prompt hits locally and skips prefill.
+
+Prompt = [100, 101, 102, 103, 104, 105]  (chunk_size=2 -> 3 chunks)
+
+First request (COLD): compute + store each chunk's KV locally.
+
+| chunk | tokens    | signature (FNV-1a)   | local action |
+|-------|-----------|----------------------|--------------|
+| c0    | [100, 101] | 0xecd0403d962ff8f4 | STORE in VRAM |
+| c1    | [102, 103] | 0xec2574297233efd4 | STORE in VRAM |
+| c2    | [104, 105] | 0xde27887129c0e434 | STORE in VRAM |
+
+Second request, SAME prompt -> every chunk is a LOCAL HIT:
+
+  c0 0xecd0403d962ff8f4: HIT (reuse KV, skip prefill)
+  c1 0xec2574297233efd4: HIT (reuse KV, skip prefill)
+  c2 0xde27887129c0e434: HIT (reuse KV, skip prefill)
+
+[check] local prefix-cache reuse on the SAME node == full hit : True -> OK
+
+But this cache is BLIND to other nodes. That is the multi-node gap.
+
+========================================================================
+  SECTION B: the multi-node problem (request lands on the WRONG node)
+========================================================================
+node0 processed the prompt earlier -> its KV chunks live in node0 VRAM.
+
+Now the SAME prompt arrives at node1 (load balancer routed it there).
+node1 checks its OWN local tiers:
+
+| chunk | signature            | node0 has it? | node1 local? | verdict |
+|-------|----------------------|---------------|--------------|---------|
+| c0    | 0xecd0403d962ff8f4 | yes (VRAM)    | no           | LOCAL MISS -> recompute prefill |
+| c1    | 0xec2574297233efd4 | yes (VRAM)    | no           | LOCAL MISS -> recompute prefill |
+| c2    | 0xde27887129c0e434 | yes (VRAM)    | no           | LOCAL MISS -> recompute prefill |
+
+[check] every chunk is a LOCAL MISS on node1 : True -> OK
+
+The KV exists in the cluster (on node0) but node1 cannot see it ->
+node1 recomputes the ENTIRE prompt: read ALL model weights + full
+attention. That is the waste LMCache exists to eliminate.
+
+========================================================================
+  SECTION C: the hierarchical memory tiers (REAL bandwidth/capacity)
+========================================================================
+Capacity grows DOWN the ladder; bandwidth SHRINKS DOWN the ladder.
+
+| tier            | typical capacity | bandwidth        | source / note                         |
+|-----------------|------------------|------------------|---------------------------------------|
+| GPU VRAM/HBM    | 40-80 GB         | 3.35 TB/s        | H100 SXM HBM3 (3.35 TB/s); A100 80GB ~2.0 TB/s |
+| CPU DRAM        | 0.5-2 TB         | 64.0 GB/s        | GPU<->CPU over PCIe Gen5 x16 (~64 GB/s; Gen4 ~32) |
+| Local NVMe      | 1-8 TB           | 7.0 GB/s         | PCIe Gen4 x4 SSD (e.g. ~7 GB/s seq read) |
+| Remote S3/Redis | unbounded        | 50.0 GB/s        | datacenter RoCE/IB 400 Gbps (~50 GB/s); WAN S3 ~1-12 |
+
+Cross-node pull path: src tier (e.g. node2 DRAM) -> network (RDMA) ->
+dst VRAM. Effective BW = min(network_BW, dst PCIe_BW). At 400 Gbps
+RoCE (~50 GB/s) and PCIe Gen5 (~64 GB/s) the bottleneck is the NETWORK
+(50 GB/s) — fast enough that moving KV beats recomputing it (Section F).
+
+[check] VRAM bandwidth (3.35 TB/s) >> network pull BW (50 GB/s) : True -> OK
+
+========================================================================
+  SECTION D: chunk-hash signatures + the GLOBAL lookup index
+========================================================================
+Prompt = [100, 101, 102, 103, 104, 105] -> chunks (chunk_size=2):
+
+| chunk | tokens    | signature (content-addressed) |
+|-------|-----------|--------------------------------|
+| c0    | [100, 101] | 0xecd0403d962ff8f4                 |
+| c1    | [102, 103] | 0xec2574297233efd4                 |
+| c2    | [104, 105] | 0xde27887129c0e434                 |
+
+Key property: the signature depends ONLY on the chunk's tokens — so the
+same chunk yields the SAME signature on every node. A global index then
+maps each signature -> the (node, tier) locations that hold its KV.
+
+Global index after node1 cached the prompt (in its DRAM tier):
+
+| signature            | locations        |
+|----------------------|------------------|
+| 0xecd0403d962ff8f4 | node1 DRAM       |
+| 0xec2574297233efd4 | node1 DRAM       |
+| 0xde27887129c0e434 | node1 DRAM       |
+
+Now node0 (which has NOTHING locally) queries the global index for each
+chunk — and finds them ALL on node1:
+
+| chunk | signature            | global hit? | where           |
+|-------|----------------------|-------------|-----------------|
+| c0    | 0xecd0403d962ff8f4 | yes         | node1 DRAM      |
+| c1    | 0xec2574297233efd4 | yes         | node1 DRAM      |
+| c2    | 0xde27887129c0e434 | yes         | node1 DRAM      |
+
+[check] every chunk found via GLOBAL lookup : True -> OK
+
+========================================================================
+  SECTION E: RDMA pull into the local block table (🔗 PAGED_ATTENTION)
+========================================================================
+node0 receives the prompt. Local tiers: EMPTY. Global lookup -> all 3
+chunks live on node1's DRAM. Pull each one into node0's VRAM block
+table (a deterministic copy here; real latency = bytes / BW, Section F).
+
+| chunk | src (node,tier) | pull -> dst | node0 block table | bytes moved |
+|-------|-----------------|-------------|-------------------|-------------|
+| c0    | node1 DRAM  | -> VRAM    | logical 0 -> page 0    | 64 B       |
+| c1    | node1 DRAM  | -> VRAM    | logical 1 -> page 1    | 64 B       |
+| c2    | node1 DRAM  | -> VRAM    | logical 2 -> page 2    | 64 B       |
+
+node0 gathers its request KV by walking the block table (🔗 PAGED):
+  reconstructed shape = (6, 8)
+  [check] pulled+gathered KV == original prompt KV (byte-equal) : True -> OK
+  node0 SKIPPED prefill entirely: the 192 B of KV moved
+  instead of re-running the model over the prompt.
+
+This is the whole point: the KV already existed in the cluster; node0
+just fetched the pages it needed into its block table and carried on.
+
+========================================================================
+  SECTION F: the latency-budget inequality (transfer vs recompute)
+========================================================================
+Reference model (GQA transformer, dims printed + reproducible):
+  layers=24, n_q_heads=16, n_kv_heads=2 (GQA 8:1),
+  head_dim=128, hidden=2048, inter=5504 (SwiGLU), bytes=2
+  body params = 1,038,090,240 (~1.04 B, excl. embeddings)
+  prompt S = 512 tokens
+  reference GPU: A100 80GB SXM (HBM 2.0 TB/s, 312 TFLOPS bf16 peak)
+
+Size_KV = 2(K+V) * layers * n_kv_heads * head_dim * S * bytes
+        = 2 * 24 * 2 * 128 * 512 * 2
+        = 12,582,912 bytes = 12.00 MiB
+
+Latency_transfer = Size_KV / bandwidth, per tier (REAL bandwidths):
+
+| source tier / path      | bandwidth   | Latency_transfer | vs prefill floor |
+|-------------------------|-------------|------------------|------------------|
+| Local DRAM -> VRAM (PCIe Gen5) | 64.0 GB/s   |       0.1966 ms |     17.3x faster    |
+| Local NVMe -> VRAM      | 7.0 GB/s    |       1.7976 ms |      1.9x faster    |
+| Remote node DRAM -> VRAM (RoCE 100G) | 12.5 GB/s   |       1.0066 ms |      3.4x faster    |
+| Remote node DRAM -> VRAM (RoCE 400G) | 50.0 GB/s   |       0.2517 ms |     13.5x faster    |
+
+Recompute (prefill) roofline FLOOR at batch=1:
+  mem-bound (read all weights once) = 2.076 ms
+  compute-bound (2*N*S FLOPs / peak) = 3.407 ms
+  arithmetic intensity = 256 FLOP/B ; crossover = 156 FLOP/B
+  -> COMPUTE-bound; floor = 3.407 ms (IDEAL; real prefill is higher: kernel launch + MFU<1)
+
+BUDGET VERDICT (primary: 400G RoCE pull):
+  Latency_transfer = 12,582,912 / 5e+10 = 251.66 us (0.2517 ms)
+  Latency_prefill  (floor) = 3.407 ms
+  transfer < prefill ? True  (ratio 13.5x)
+
+[check] Latency_transfer < Latency_prefill_floor : True -> OK
+
+GOLD for .html: Size_KV(S=512) = 12582912 bytes; Latency_transfer(S=512, BW=5e+10) = 251.66 us; verdict transfer<prefill = True.
+
+========================================================================
+  SECTION G: local-vs-global hit-rate contrast
+========================================================================
+4 nodes. 4 distinct prompts were cached earlier, one per node
+(round-robin). Now one request for EACH prompt arrives, routed to a
+node chosen by a fixed (deterministic) load-balancer pattern.
+
+| prompt# | cached on node | request routed to | LOCAL hit? | GLOBAL hit? |
+|---------|----------------|-------------------|------------|-------------|
+| 0       | node0           | node0              | yes        | yes         |
+| 1       | node1           | node2              | NO         | yes         |
+| 2       | node2           | node3              | NO         | yes         |
+| 3       | node3           | node1              | NO         | yes         |
+
+LOCAL hit rate  = 1/4 = 25.0%   (only requests that landed on their caching node)
+GLOBAL hit rate = 4/4 = 100.0%   (any node can serve any cached prompt via RDMA pull)
+
+At cluster scale, local-only hits ~1/N = 25.0%; global ~100%.
+LMCache amplifies effective cache reach by ~4x on this workload.
+
+[check] local rate == 1/4 and global rate == 1.0 : True -> OK
+
+========================================================================
+  DONE - all sections printed; LMCache sim gold = OK
+========================================================================

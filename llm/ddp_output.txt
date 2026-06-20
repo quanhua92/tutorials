@@ -1,0 +1,214 @@
+ddp.py - reference impl (faithful single-process K=2 simulation).
+Numbers below feed DDP.md.  torch = 2.12.1
+
+NOTE: no torch.distributed / NCCL is used. Two replicas are held as
+separate tensors and AllReduce is an explicit average. The math is
+identical to real DDP; only the execution model is simplified.
+
+========================================================================
+  SECTION A: the DDP step -- local grads -> AllReduce -> averaged grad
+========================================================================
+world_size K = 2   (we simulate 2 replicas in ONE process)
+
+Both replicas start IDENTICAL (DDP broadcasts rank 0's weights):
+
+  W (rank 0) = [+0.154100, -0.029343, -0.217879, +0.056843, -0.108452, -0.139860, +0.040335, +0.083803, -0.071926, -0.040334, -0.059664, +0.018204]
+  W (rank 1) = [+0.154100, -0.029343, -0.217879, +0.056843, -0.108452, -0.139860, +0.040335, +0.083803, -0.071926, -0.040334, -0.059664, +0.018204]
+
+  [check] W0 == W1 at init?  True
+
+Each rank gets a DIFFERENT mini-batch (B=2, E_in=4):
+  X0 (rank 0 batch, row 0) = [+0.336690, +0.128809, +0.234462, +0.230333]
+  X1 (rank 1 batch, row 0) = [-0.988960, +0.957972, +1.322135, +0.817190]
+
+  [check] X0 != X1 (different data)?  True
+
+--- STEP 1+2: each rank runs fwd+bwd on its OWN batch -> local grad ---
+
+  g0 (rank 0 local grad) = [+0.283542, +0.280142, -0.741705, +0.037271, +0.039551, -0.138614, -0.677840, -0.636189, +1.267672, +0.155872, +0.155462, -0.429742]
+  g1 (rank 1 local grad) = [-0.033977, +0.354733, -0.016214, +0.127422, -0.171269, -0.195930, +0.024608, -0.512199, +0.068287, +0.024687, -0.299299, +0.020984]
+
+  These differ, because the batches differ. Left alone, the two
+  replicas would take different steps and DRIFT apart.
+
+--- STEP 3: AllReduce (average) -- every rank gets the SAME grad ---
+
+  avg = (g0 + g1) / 2 = [+0.124783, +0.317437, -0.378959, +0.082346, -0.065859, -0.167272, -0.326616, -0.574194, +0.667979, +0.090280, -0.071918, -0.204379]
+  rank 0 now holds     = [+0.124783, +0.317437, -0.378959, +0.082346, -0.065859, -0.167272, -0.326616, -0.574194, +0.667979, +0.090280, -0.071918, -0.204379]
+  rank 1 now holds     = [+0.124783, +0.317437, -0.378959, +0.082346, -0.065859, -0.167272, -0.326616, -0.574194, +0.667979, +0.090280, -0.071918, -0.204379]
+
+  [check] both ranks hold the IDENTICAL averaged grad?  True
+
+========================================================================
+  SECTION B: WHY AllReduce keeps replicas identical (the proof)
+========================================================================
+Claim: DDP on K=2 GPUs with batches X0, X1 is MATHEMATICALLY EQUAL to
+single-GPU training on the CONCATENATED batch [X0; X1]. Because the
+loss is a MEAN, the gradient of the mean-of-two-halves equals the
+average of the two half-gradients. So AllReduce-AVERAGE reconstructs
+exactly the gradient one big GPU would have computed.
+
+Single-GPU grad on cat([X0;X1]) (batch 4) = [+0.124783, +0.317437, -0.378959, +0.082346, -0.065859, -0.167272, -0.326616, -0.574194, +0.667979, +0.090280, -0.071918, -0.204379]
+DDP averaged grad (AllReduce of g0,g1)        = [+0.124783, +0.317437, -0.378959, +0.082346, -0.065859, -0.167272, -0.326616, -0.574194, +0.667979, +0.090280, -0.071918, -0.204379]
+
+  [check] DDP avg grad == single-GPU grad?  True   (max|diff| = 5.96e-08)
+
+--- Consequence: the optimizer step is identical everywhere ---
+
+  lr = 0.1
+  W0 after step (rank 0) = [+0.141621, -0.061087, -0.179983, +0.048609, -0.101866, -0.123132, +0.072996, +0.141222, -0.138724, -0.049362, -0.052472, +0.038642]
+  W1 after step (rank 1) = [+0.141621, -0.061087, -0.179983, +0.048609, -0.101866, -0.123132, +0.072996, +0.141222, -0.138724, -0.049362, -0.052472, +0.038642]
+  single-GPU after step  = [+0.141621, -0.061087, -0.179983, +0.048609, -0.101866, -0.123132, +0.072996, +0.141222, -0.138724, -0.049362, -0.052472, +0.038642]
+
+  [check] rank0 == rank1 after step?         True   (no drift)
+  [check] rank0 == single-GPU after step?    True  (DDP==1 big GPU)
+
+  ==> Identical averaged grad  +  identical start  +  identical step
+      ==> replicas are BIT-IDENTICAL after every step. Drift is
+      mathematically impossible. That is the whole point of DDP.
+
+  GOLD pins (used by ddp.html gold-check badge):
+    avg_grad[0,0]      = +0.124783
+    W_after_step[0,0]  = +0.141621   (lr=0.1)
+
+========================================================================
+  SECTION C: gradient accumulation -- faking a big batch, syncing once
+========================================================================
+effective_batch = bs_per_gpu * grad_accum_steps * world_size
+
+  B=2  accum=2  world_size=2  ->  effective batch = 2*2*2 = 8 samples / optimizer step
+
+The require_backward_grad_sync trick (from nanoGPT/train.py):
+  only the LAST micro-step triggers AllReduce; earlier micro-steps
+  accumulate locally with NO cross-rank communication. This avoids
+  doing 2x AllReduces when 1x suffices.
+
+  DDP:  sum_k (sum_micro local_grad/accum) then AllReduce-avg
+        = [+0.399230, -0.563779, -0.283541, +0.404202, -0.501990, -0.501658, +0.680208, -0.123501, -0.763730, -0.010805, -0.036751, -0.177584]
+  single-GPU on all 8 samples = [+0.399230, -0.563779, -0.283541, +0.404202, -0.501990, -0.501658, +0.680208, -0.123501, -0.763730, -0.010805, -0.036751, -0.177584]
+
+  [check] accumulated+synced grad == single-GPU 8-sample grad? True  (max|diff|=5.96e-08)
+
+  ==> Gradient accumulation + a single final AllReduce is EXACTLY
+      equivalent to one giant batch. effective_batch math holds.
+
+========================================================================
+  SECTION D: AMP + GradScaler -- fp16 forward, fp32 master, loss scaling
+========================================================================
+Mixed precision (Micikevicius et al. 2017, arXiv:1710.03740):
+  - forward + backward in fp16 (fast, half the memory)
+  - keep an fp32 MASTER copy of weights (accumulates tiny updates)
+  - fp16 has a TINY range [6e-5, 65504]: small gradients UNDERFLOW to 0
+  - GradScaler multiplies the LOSS by a big constant (e.g. 2^16) so the
+    backward gradients are pushed up into fp16's representable range,
+    then divides them back before the optimizer step.
+  - bfloat16 shares fp32's EXPONENT range -> no underflow -> no scaler.
+
+| grad (fp32)    | fp16(grad) | survived? | bf16(grad) |
+|----------------|------------|-----------|------------|
+| 1e-03          | 1.000e-03  | YES       | 9.995e-04  |
+| 1e-05          | 1.001e-05  | YES       | 1.001e-05  |
+| 1e-07          | 1.192e-07  | YES       | 1.001e-07  |
+| 1e-08          | 0.000e+00  | NO (underflow!) | 1.001e-08  |
+
+  Notice: 1e-8 rounds to 0.0 in fp16 but survives in bf16. fp16's
+  smallest subnormal is ~6e-8, so anything smaller vanishes silently.
+
+--- How GradScaler rescues an underflowing gradient ---
+  true grad      = 1.000e-08  (fp32)
+  fp16(grad)     = 0.000e+00  <-- LOST (underflow to 0)
+  scale = 2^16   = 65536
+  fp16(grad*scale)= 6.552e-04  <-- SURVIVES
+  unscale back   = 9.997e-09  <-- recovered ~true grad
+
+  [check] scaled->fp16->unscaled recovers the true grad?  True
+
+--- The full fp16 step flow (nanoGPT/train.py) ---
+  loss_scaled = loss * S                          # scale up
+  scaler.scale(loss_scaled).backward()            # grads ~Sx bigger
+  scaler.unscale_(optimizer)                      # divide grads back
+  clip_grad_norm_(...)                            # clip on true grads
+  scaler.step(optimizer)                          # skips if inf/nan
+  scaler.update()                                 # adapt S for next step
+
+  bf16 path: drop the scaler entirely (torch.amp.autocast(dtype=bf16)).
+
+========================================================================
+  SECTION E: cosine LR + linear warmup (nanoGPT get_lr)
+========================================================================
+Linear scaling rule (Goyal et al. 2017, arXiv:1706.02677): when you
+multiply the batch size by K, scale the peak LR by K, and WARM UP
+linearly from 0 to avoid early-training instability. Then cosine-decay
+peak -> min_lr for a smooth landing (Chinchilla: decay_iters ~= max_iters).
+
+| it | phase        |     lr |
+|----|--------------|--------|
+|  0 | warmup (linear) | 0.0909 |
+|  2 | warmup (linear) | 0.2727 |
+|  4 | warmup (linear) | 0.4545 |
+|  6 | warmup (linear) | 0.6364 |
+|  8 | warmup (linear) | 0.8182 |
+| 10 | cosine decay | 1.0000 |
+| 15 | cosine decay | 0.9657 |
+| 25 | cosine decay | 0.7222 |
+| 35 | cosine decay | 0.3778 |
+| 45 | cosine decay | 0.1343 |
+| 50 | cosine decay | 0.1000 |
+| 55 | hold @ min_lr | 0.1000 |
+
+  peak=1.0, min_lr=0.1, warmup=10, decay_iters=50
+
+  [check] warmup ramps 0->~peak, cosine starts @peak ends @min_lr, holds after: OK
+
+========================================================================
+  SECTION F: the 20-bytes/param memory breakdown (mixed-precision Adam)
+========================================================================
+Per parameter, DDP mixed-precision training stores:
+
+| component           | bytes/param | why                                   |
+|---------------------|-------------|---------------------------------------|
+| fp16 parameters     |           2 | the model weights used in the fp16 forward |
+| fp16 gradients      |           2 | computed in the fp16 backward         |
+| fp32 master params  |           4 | optimizer's master copy (Micikevicius 2017) |
+| fp32 grad copy      |           4 | upcast fp16 grad for the optimizer    |
+| fp32 Adam momentum  |           4 | first moment (beta1 running avg)      |
+| fp32 Adam variance  |           4 | second moment (beta2 running avg)     |
+| TOTAL               |          20 | ~16N effective (20N raw)              |
+
+Concrete sizes (DDP = this is REPLICATED on every GPU):
+| model        | params    | bytes/param | per-GPU (DDP) |
+|--------------|-----------|-------------|---------------|
+| tiny demo W  |        12 |          20 |        0.00 GB |
+| GPT-2 small  | 124,000,000 |          20 |        2.31 GB |
+| LLaMA-3 8B   | 8,000,000,000 |          20 |      149.01 GB |
+| GPT-3 175B   | 175,000,000,000 |          20 |     3259.63 GB |
+
+  [check] total = 2+2+4+4+4+4 = 20 bytes/param
+  --> DDP replicates ALL 20N bytes on every GPU. That redundancy is
+      exactly what ZeRO-1/2/3 eliminate by sharding these states. 🔗
+      (🔗 QUANTIZATION attacks the 2-byte fp16 weight; ZeRO attacks the
+       16-byte optimizer/grad/master redundancy. Orthogonal axes.)
+
+========================================================================
+  SECTION G: worked 2-GPU DDP sim -- GOLD recap (pinned for ddp.html)
+========================================================================
+The canonical tiny run, all numbers recomputed here so the .html can
+gold-check against them.
+
+  init W[0,:]        = [+0.154100, -0.029343, -0.217879]
+  local grad g0[0,:] = [+0.283542, +0.280142, -0.741705]
+  local grad g1[0,:] = [-0.033977, +0.354733, -0.016214]
+  AllReduce avg[0,:] = [+0.124783, +0.317437, -0.378959]
+  W after step[0,:]  = [+0.141621, -0.061087, -0.179983]   (lr=0.1)
+
+  PINNED GOLD (html recomputes & diffs these):
+    avg_grad[0,0]      = +0.124783
+    avg_grad[1,2]      = -0.167272
+    W_after_step[0,0]  = +0.141621
+    W_after_step[1,2]  = -0.123132
+
+  [check] recap == Section B values?  True
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RadixAttention (Prefix Caching with a Radix Tree) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --waste:#3d4452;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .sh{color:#ffba75}
+  .readout .rd{color:var(--red)}
+  .readout .or{color:var(--orange)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  /* ---- radix tree (DOM) ---- */
+  .tree{font-family:ui-monospace,monospace;font-size:.78rem;margin-top:.4rem;overflow-x:auto}
+  .node{border:1px solid #30363d;border-radius:8px;padding:.45rem .7rem;margin:.3rem 0;
+        background:#0a0e14;transition:all .2s;display:inline-block;min-width:160px}
+  .node .seg{color:var(--ink);font-weight:600}
+  .node .meta{color:var(--muted);font-size:.7rem;margin-top:.15rem}
+  .node .rc{color:var(--green);font-weight:700}
+  .node.root{border-color:var(--muted);background:#161b22}
+  .node.share{border-color:var(--green);background:#0f2418}
+  .node.share .rc{color:var(--green)}
+  .node.leaf{border-color:var(--blue);background:#0f1d2e}
+  .node.new{border-color:var(--orange);background:#2a1d0c;animation:flash .6s}
+  .node.evic{border-color:var(--red);background:#3a1414;opacity:.5;text-decoration:line-through}
+  @keyframes flash{0%{background:#5a3a0c}100%{background:#2a1d0c}}
+  .children{margin-left:1.6rem;border-left:1px dashed #30363d;padding-left:.6rem;margin-top:.25rem}
+  .edgekey{color:var(--orange);font-size:.7rem;margin-left:-.4rem}
+  .tag{display:inline-block;font-size:.64rem;padding:1px 6px;border-radius:4px;margin-left:.4rem;font-weight:700}
+  .tag.share{background:#1c3a25;color:var(--green)}
+  .tag.leaf{background:#0f1d2e;color:#7ab8e0}
+  .tag.new{background:#3a2a0c;color:var(--orange)}
+  /* ---- reuse meter bars ---- */
+  .barRow{display:flex;align-items:center;gap:.6rem;margin:.35rem 0;font-size:.8rem}
+  .barRow .lbl{width:90px;color:var(--muted);text-align:right}
+  .barTrack{flex:1;height:22px;background:#0a0e14;border:1px solid #30363d;border-radius:5px;overflow:hidden;position:relative;min-width:120px}
+  .barFill{height:100%;transition:width .35s;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;color:#012;font-weight:700;font-size:.72rem;font-variant-numeric:tabular-nums}
+  .barFill.flat{background:var(--orange)}
+  .barFill.radix{background:var(--green)}
+  .barFill.shared{background:linear-gradient(90deg,var(--orange) 0%,var(--orange) var(--p,0%),var(--green) var(--p,0%),var(--green) 100%)}
+  table.cmp{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem;width:100%}
+  table.cmp td,table.cmp th{border:1px solid #30363d;padding:4px 8px;text-align:left}
+  table.cmp th{color:var(--muted);font-weight:600}
+  table.cmp tr.win td{background:#0f2418;color:#7ee2a8}
+  table.cmp tr.lose td{background:#2a1d0c;color:#ffba75}
+  table.cmp tr.tot td{background:#161b22;font-weight:700}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>RadixAttention &mdash; Prefix Caching with a Radix Tree &mdash; interactive
+    <a class="badge" href="./PREFIX_CACHE.md">PREFIX_CACHE.md</a>
+    <a class="badge" href="./prefix_cache.py">prefix_cache.py</a></h1>
+  <div class="sub"><b>The family-tree idea:</b> every prompt is a branch. The radix tree stores the KV for the <b style="color:var(--green)">whole tree</b> &mdash;
+    <b>any</b> common prefix (arbitrary length, fork-structured) is shared, with O(L) lookup. Click <b>insert Q1/Q2/Q3</b> below and watch the tree grow, fork,
+    and split. Every number is recomputed in JS from the <i>identical</i> radix-tree logic in <code>prefix_cache.py</code>.
+    &nbsp;|&nbsp; <a href="./block_manager.html">&larr; BLOCK_MANAGER (flat hash: the blind spot)</a>
+    &nbsp;|&nbsp; <a href="./paged_attention.html">paged attention kernel &rarr;</a>
+    &nbsp;|&nbsp; <a href="./PREFIX_CACHE.md#glossary-read-once-refer-back">glossary</a></div>
+
+  <!-- ===== PANEL 1: BUILD THE RADIX TREE ===== -->
+  <h2>&#9312; Build the radix tree &mdash; insert Q1, Q2, Q3 and watch it fork + split</h2>
+  <div class="panel">
+    <div class="controls">
+      <button id="btnQ1">1. insert Q1 = [100,101,102,200,201,202]</button>
+      <button id="btnQ2">2. insert Q2 = [100,101,102,210,211]</button>
+      <button id="btnQ3">3. insert Q3 = [100,101,102,200,201,202,300,301]</button>
+      <button id="btnReset">reset</button>
+    </div>
+    <div class="micro" style="margin-top:.4rem">
+      <b>SYS</b>=[100,101,102] (shared by all 3). <b>Q1/Q3</b> share "what is python" [200,201,202]. <b>Q2</b> forks at token 102 (mid-block for block_size=2).
+      <b>Q2's insert SPLITS</b> the single edge at token 3; <b>Q3's insert</b> extends Q1's branch. The <span style="color:var(--orange)">orange flash</span> = the node just created/modified.
+    </div>
+    <div class="tree" id="tree"></div>
+    <div class="readout" id="insertLog"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--muted)"></i>grey = root</span>
+      <span><i class="sw" style="background:var(--green)"></i>green = shared backbone (ref&ge;2)</span>
+      <span><i class="sw" style="background:var(--blue)"></i>blue = leaf (unique tail)</span>
+      <span><i class="sw" style="background:var(--orange)"></i>orange = just inserted/modified</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> click the buttons in order. <b>Notice</b> Q2's cache-hit = <b>3</b> (the whole system prompt, including the mid-block token 102).
+      The flat hash would give only <b>2</b> here (see panel &#9314;). See <a href="./PREFIX_CACHE.md#4-insert--longest-prefix-match--build-the-tree--section-d-output">PREFIX_CACHE.md &sect;4</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 2: PER-QUERY CACHE HIT ===== -->
+  <h2>&#9313; Per-query cache hit &mdash; the mid-block token 102 IS shared</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> when each request arrived, how many leading tokens were already cached (prefill skipped). Build the tree in panel &#9312; first.
+      The <span style="color:var(--green)">green bar</span> = tokens reused from the tree; the <span style="color:var(--waste)">grey tail</span> = tokens actually computed (prefill).</div>
+    <div id="hitBars"></div>
+    <div class="micro" style="margin-top:.5rem"><b>The key number:</b> Q2 reuses <b style="color:var(--green)">3</b> tokens &mdash; all of SYS=[100,101,102].
+      Token 102 is the <b>first slot of a block</b> whose second slot diverges per query; the flat hash can't reuse it, the radix tree can. That single token is the whole structural advantage (panel &#9314;).</div>
+  </div>
+
+  <!-- ===== PANEL 3: FLAT vs RADIX REUSE METER ===== -->
+  <h2>&#9314; Flat-hash vs radix reuse &mdash; same workload, +1 token on Q2</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>block_size <input type="range" id="bs" min="1" max="4" value="2" step="1">
+        <span class="val" id="bsVal">2</span></label>
+      <span class="micro">drag to see the flat-hash blind spot grow with block_size</span>
+    </div>
+    <div style="overflow-x:auto;min-width:0"><table class="cmp" id="cmp"></table></div>
+    <div id="meter" style="margin-top:.6rem"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Reading:</b> flat-hash and radix <b>agree</b> on Q1 (cold) and Q3 (divergence lands on a block boundary).
+      They <b>disagree on Q2</b>: the 3rd shared token is mid-block, so the flat hash misses it. The total delta = the number of shared tokens the flat hash is structurally blind to.
+      At block_size=2 it's +1; raise it and watch the gap widen. See <a href="./PREFIX_CACHE.md#7-flat-hash-vs-radix-reuse-on-the-same-workload--section-g-output">PREFIX_CACHE.md &sect;7</a>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="checkTotal">check: &hellip;</span>
+    <span class="badge" id="checkQ2" style="margin-left:.4rem">check: &hellip;</span>
+    JS radix tree reproduces <code>prefix_cache.py</code>: total tokens saved = 9; Q2 cache-hit = 3 (flat-hash would give 2).
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+   GROUND-TRUTH: a minimal RadixCache in JS, mirroring prefix_cache.py exactly
+   (same node fields, same match/insert/split/release/evict semantics). This
+   drives every panel. The .py is the source of truth; this is its JS twin.
+============================================================================ */
+
+function makeNode(tokenIds, parent){
+  return {
+    tokenIds: tokenIds.slice(),
+    children: {},                 // firstToken -> node
+    ref: 0,
+    lastAccess: 0,
+    parent: parent || null,
+    isNew: false                  // transient flag for the orange flash
+  };
+}
+function makeRadix(){
+  return {
+    root: makeNode([]),
+    clock: 0,
+    _tick(){ this.clock++; return this.clock; },
+    match(tokens){
+      let node = this.root, i = 0;
+      node.lastAccess = this._tick();
+      while(i < tokens.length){
+        const child = node.children[tokens[i]];
+        if(!child) break;
+        const seg = child.tokenIds;
+        let j = 0;
+        const m = Math.min(seg.length, tokens.length - i);
+        while(j < m && seg[j] === tokens[i+j]) j++;
+        if(j === seg.length){
+          child.lastAccess = this._tick();
+          node = child; i += j;
+        } else break;
+      }
+      return { matched: i, node: node };
+    },
+    insert(tokens){
+      // clear isNew flags from previous insert so only the latest flashes
+      this._clearNew(this.root);
+      let node = this.root;
+      node.ref++; node.lastAccess = this._tick(); node.isNew = true;
+      let i = 0, matched = 0;
+      while(i < tokens.length){
+        const child = node.children[tokens[i]];
+        if(!child) break;
+        const seg = child.tokenIds;
+        let j = 0;
+        const m = Math.min(seg.length, tokens.length - i);
+        while(j < m && seg[j] === tokens[i+j]) j++;
+        if(j === seg.length){
+          child.ref++; child.lastAccess = this._tick(); child.isNew = true;
+          node = child; i += j; matched = i;
+        } else {
+          // SPLIT seg at j: new internal node = seg[:j], old child keeps seg[j:]
+          const split = makeNode(seg.slice(0, j), node);
+          split.ref = child.ref + 1;            // old readers + new request
+          split.lastAccess = this._tick();
+          split.isNew = true;
+          child.tokenIds = seg.slice(j);
+          child.parent = split;
+          node.children[seg[0]] = split;
+          split.children[seg[j]] = child;
+          node = split; i += j; matched = i;
+          break;
+        }
+      }
+      if(i < tokens.length){
+        const leaf = makeNode(tokens.slice(i), node);
+        leaf.ref = 1; leaf.lastAccess = this._tick(); leaf.isNew = true;
+        node.children[tokens[i]] = leaf;
+      }
+      return matched;
+    },
+    release(tokens){
+      let node = this.root;
+      node.ref = Math.max(0, node.ref - 1);
+      let i = 0;
+      while(i < tokens.length){
+        const child = node.children[tokens[i]];
+        if(!child) break;
+        const seg = child.tokenIds;
+        let j = 0;
+        const m = Math.min(seg.length, tokens.length - i);
+        while(j < m && seg[j] === tokens[i+j]) j++;
+        if(j === seg.length){
+          child.ref = Math.max(0, child.ref - 1);
+          node = child; i += j;
+        } else break;
+      }
+    },
+    evictLRULeaves(k){
+      const evicted = [];
+      for(let n = 0; n < k; n++){
+        const leaves = [];
+        const visit = (nd) => {
+          for(const key in nd.children){
+            const ch = nd.children[key];
+            if(Object.keys(ch.children).length === 0 && ch.ref === 0){
+              leaves.push({ la: ch.lastAccess, parent: nd, key: key, node: ch });
+            }
+            visit(ch);
+          }
+        };
+        visit(this.root);
+        if(leaves.length === 0) break;
+        leaves.sort((a, b) => a.la - b.la);
+        const v = leaves[0];
+        delete v.parent.children[v.key];
+        evicted.push(v.node.tokenIds.slice());
+        // upward prune: childless + ref==0 non-root
+        let cur = v.parent;
+        while(cur !== this.root && Object.keys(cur.children).length === 0
+              && cur.ref === 0 && cur.parent){
+          const gp = cur.parent;
+          for(const ck in gp.children){ if(gp.children[ck] === cur){ delete gp.children[ck]; break; } }
+          cur = gp;
+        }
+      }
+      return evicted;
+    },
+    _clearNew(nd){ nd.isNew = false; for(const k in nd.children) this._clearNew(nd.children[k]); },
+    // pretty-collect for rendering
+    allLeaves(){
+      const out = [];
+      const visit = (nd) => {
+        if(Object.keys(nd.children).length === 0 && nd !== this.root) out.push(nd);
+        for(const k in nd.children) visit(nd.children[k]);
+      };
+      visit(this.root);
+      return out;
+    }
+  };
+}
+
+/* ============================================================================
+   GROUND-TRUTH FLAT HASH: FNV-1a 64-bit (BigInt), byte-for-byte identical to
+   prefix_cache.py / block_manager.py. Only FULL blocks are reusable.
+============================================================================ */
+const FNV_OFFSET = 0xcbf29ce484222325n;
+const FNV_PRIME  = 0x100000001b3n;
+const MASK64     = (1n << 64n) - 1n;
+function mix(h, byte){ return ((h ^ BigInt(byte)) * FNV_PRIME) & MASK64; }
+function computeHash(tokenIds, prefix){
+  let h = FNV_OFFSET;
+  if(prefix !== -1){
+    const p = BigInt(prefix);
+    for(let k = 0; k < 8; k++){ h = mix(h, Number((p >> (8n * BigInt(k))) & 0xffn)); }
+  }
+  for(const t of tokenIds){
+    for(let k = 0; k < 4; k++){ h = mix(h, (t >>> (8 * k)) & 0xff); }
+  }
+  return h;
+}
+function hex64(h){ return '0x' + ((h & MASK64).toString(16)).padStart(16, '0'); }
+function flatMatch(tokenIds, bs, hash2tokens){
+  let h = -1n, cached = 0;
+  const nFull = Math.floor(tokenIds.length / bs);
+  for(let i = 0; i < nFull; i++){
+    const blk = tokenIds.slice(i * bs, (i + 1) * bs);
+    h = computeHash(blk, h);
+    const stored = hash2tokens[h.toString(16)];
+    if(stored && stored.length === blk.length && blk.every((t, k) => t === stored[k])){
+      cached += bs;
+    } else break;
+  }
+  return cached;
+}
+function flatInsert(tokenIds, bs, hash2tokens){
+  let h = -1n;
+  const nFull = Math.floor(tokenIds.length / bs);
+  for(let i = 0; i < nFull; i++){
+    const blk = tokenIds.slice(i * bs, (i + 1) * bs);
+    h = computeHash(blk, h);
+    hash2tokens[h.toString(16)] = blk.slice();
+  }
+  return nFull * bs;
+}
+
+/* ============================================================================
+   THE WORKLOAD (identical to prefix_cache.py)
+============================================================================ */
+const SYS = [100, 101, 102];
+const Q1  = [100, 101, 102, 200, 201, 202];
+const Q2  = [100, 101, 102, 210, 211];
+const Q3  = [100, 101, 102, 200, 201, 202, 300, 301];
+const QUERIES = [["Q1", Q1], ["Q2", Q2], ["Q3", Q3]];
+
+/* ============================================================================
+   PANEL 1: build the radix tree interactively
+============================================================================ */
+let rc = makeRadix();
+let inserted = [];          // list of [name, tokens, hit]
+let insertLog = [];
+
+function renderTree(){
+  const el = document.getElementById('tree');
+  el.innerHTML = '';
+  const renderNode = (nd, depth) => {
+    const wrap = document.createElement('div');
+    const node = document.createElement('div');
+    let cls = 'node';
+    let tag = '';
+    if(nd === rc.root){ cls += ' root'; tag = '<span class="tag" style="background:#21262d;color:var(--muted)">root</span>'; }
+    else if(Object.keys(nd.children).length === 0){ cls += ' leaf'; tag = '<span class="tag leaf">leaf</span>'; }
+    else if(nd.ref >= 2){ cls += ' share'; tag = '<span class="tag share">SHARED ref=' + nd.ref + '</span>'; }
+    if(nd.isNew) cls += ' new';
+    node.className = cls;
+    const segLabel = nd.tokenIds.length ? '[' + nd.tokenIds.join(',') + ']' : '(root)';
+    node.innerHTML =
+      '<span class="seg">' + segLabel + '</span>' + tag +
+      '<div class="meta">ref=<span class="rc">' + nd.ref + '</span> &middot; last_access=t' + nd.lastAccess +
+      (Object.keys(nd.children).length ? ' &middot; ' + Object.keys(nd.children).length + ' child(ren)' : '') + '</div>';
+    wrap.appendChild(node);
+    if(Object.keys(nd.children).length){
+      const ch = document.createElement('div');
+      ch.className = 'children';
+      for(const key of Object.keys(nd.children).sort((a, b) => +a - +b)){
+        const row = document.createElement('div');
+        const ek = document.createElement('div');
+        ek.className = 'edgekey';
+        ek.textContent = '└ edge starts at token ' + key;
+        row.appendChild(ek);
+        row.appendChild(renderNode(nd.children[key], depth + 1));
+        ch.appendChild(row);
+      }
+      wrap.appendChild(ch);
+    }
+    return wrap;
+  };
+  el.appendChild(renderNode(rc.root, 0));
+  // log
+  const log = document.getElementById('insertLog');
+  log.innerHTML = insertLog.length
+    ? insertLog.join('\n')
+    : '(empty tree — click an insert button above)';
+}
+function refreshBtns(){
+  document.getElementById('btnQ1').disabled = inserted.length >= 1;
+  document.getElementById('btnQ2').disabled = inserted.length !== 1;
+  document.getElementById('btnQ3').disabled = inserted.length !== 2;
+}
+function doInsert(name, tokens){
+  const hit = rc.insert(tokens);
+  inserted.push([name, tokens, hit]);
+  let note;
+  if(hit === 0) note = 'COLD — whole prompt is new; attach one edge.';
+  else if(hit === tokens.length) note = 'FULL hit — entire prompt cached.';
+  else note = 'PARTIAL — share ' + hit + ' tokens, attach suffix [' + tokens.slice(hit).join(',') + '].';
+  insertLog.push(
+    '>>> insert(' + name + ' = [' + tokens.join(',') + '])\n' +
+    '    cache-hit = <b>' + hit + '</b>  (' + note + ')'
+  );
+  renderTree(); renderHits(); refreshBtns();
+}
+document.getElementById('btnQ1').onclick = () => doInsert('Q1', Q1);
+document.getElementById('btnQ2').onclick = () => doInsert('Q2', Q2);
+document.getElementById('btnQ3').onclick = () => doInsert('Q3', Q3);
+document.getElementById('btnReset').onclick = () => {
+  rc = makeRadix(); inserted = []; insertLog = [];
+  renderTree(); renderHits(); refreshBtns();
+};
+
+/* ============================================================================
+   PANEL 2: per-query cache-hit bars
+============================================================================ */
+function renderHits(){
+  const el = document.getElementById('hitBars');
+  el.innerHTML = '';
+  if(inserted.length === 0){
+    el.innerHTML = '<div class="micro">(build the tree in panel &#9312; first)</div>';
+    return;
+  }
+  inserted.forEach(([name, toks, hit]) => {
+    const row = document.createElement('div');
+    row.className = 'barRow';
+    const maxLen = 8;
+    const hitPct = (hit / maxLen) * 100;
+    const restPct = ((toks.length - hit) / maxLen) * 100;
+    row.innerHTML =
+      '<span class="lbl">' + name + ' (len ' + toks.length + ')</span>' +
+      '<div class="barTrack">' +
+        '<div class="barFill radix" style="width:' + hitPct + '%">' + (hit > 0 ? hit : '') + '</div>' +
+        '<div class="barFill" style="width:' + restPct + '%;background:var(--waste);color:var(--muted)">' + (toks.length - hit) + '</div>' +
+      '</div>' +
+      '<span class="micro" style="width:160px">reuse <b style="color:var(--green)">' + hit + '</b> / compute <b style="color:var(--orange)">' + (toks.length - hit) + '</b></span>';
+    el.appendChild(row);
+  });
+  const tot = inserted.reduce((s, [, , h]) => s + h, 0);
+  const totRow = document.createElement('div');
+  totRow.className = 'barRow';
+  totRow.innerHTML =
+    '<span class="lbl" style="color:var(--green)">TOTAL saved</span>' +
+    '<div class="barTrack"><div class="barFill radix" style="width:' + ((tot / 19) * 100) + '%">' + tot + ' tokens</div></div>' +
+    '<span class="micro" style="width:160px">of 19 prompt tokens</span>';
+  el.appendChild(totRow);
+}
+
+/* ============================================================================
+   PANEL 3: flat-hash vs radix comparison + reuse meter (independent of panel 1)
+============================================================================ */
+function renderCmp(){
+  const bs = +document.getElementById('bs').value;
+  document.getElementById('bsVal').textContent = bs;
+  const t = document.getElementById('cmp');
+  let h = '<tr><th>query</th><th>prompt tokens</th><th>flat-hash hit (bs=' + bs + ')</th><th>radix hit</th><th>delta</th><th>why flat loses</th></tr>';
+  // radix is always the exact shared prefix (independent of bs); compute it
+  const radixHits = {};
+  for(const [name, q] of QUERIES) radixHits[name] = rcGold.match(q).matched;
+  // flat-hash: fresh cache, measure-then-insert per query
+  const flatHits = {};
+  const h2t = {};
+  let totFlat = 0, totRadix = 0;
+  for(const [name, q] of QUERIES){
+    const fh = flatMatch(q, bs, h2t);
+    flatHits[name] = fh;
+    flatInsert(q, bs, h2t);
+    const rh = radixHits[name];
+    const delta = rh - fh;
+    totFlat += fh; totRadix += rh;
+    let why;
+    if(name === 'Q1') why = 'cold (no cache yet)';
+    else if(name === 'Q2') why = 'token 102 mid-block (block1=[' + Q2.slice(bs * Math.floor(SYS.length / bs))[0] + ',...])';
+    else why = 'divergence lands on a block boundary';
+    const cls = delta > 0 ? 'lose' : (delta === 0 && name !== 'Q1' ? 'win' : '');
+    h += '<tr class="' + cls + '"><td>' + name + '</td><td>[' + q.join(',') + ']</td>' +
+         '<td>' + fh + '</td><td>' + rh + '</td><td>' + (delta > 0 ? '<b style="color:var(--orange)">+' + delta + '</b>' : delta) + '</td>' +
+         '<td>' + why + '</td></tr>';
+  }
+  h += '<tr class="tot"><td>TOTAL</td><td></td><td>' + totFlat + '</td><td>' + totRadix + '</td>' +
+       '<td><b style="color:var(--green)">+' + (totRadix - totFlat) + '</b></td><td></td></tr>';
+  t.innerHTML = h;
+  // meter bars
+  const m = document.getElementById('meter');
+  const maxScale = 19;
+  m.innerHTML =
+    '<div class="barRow"><span class="lbl">flat-hash</span>' +
+      '<div class="barTrack"><div class="barFill flat" style="width:' + ((totFlat / maxScale) * 100) + '%">' + totFlat + ' tokens saved</div></div></div>' +
+    '<div class="barRow"><span class="lbl">radix</span>' +
+      '<div class="barTrack"><div class="barFill radix" style="width:' + ((totRadix / maxScale) * 100) + '%">' + totRadix + ' tokens saved</div></div></div>' +
+    '<div class="micro" style="margin-top:.4rem">radix advantage = <b style="color:var(--green)">+' + (totRadix - totFlat) +
+      '</b> token' + ((totRadix - totFlat) === 1 ? '' : 's') + ' on this workload. ' +
+      (bs === 2 ? '(at bs=2 this matches prefix_cache.py Section G exactly: flat=8, radix=9, +1)' : '') + '</div>';
+}
+document.getElementById('bs').addEventListener('input', renderCmp);
+
+/* ============================================================================
+   GOLD CHECK vs prefix_cache.py
+   Build a reference tree (independent of the interactive one) and assert the
+   exact values the .py prints: total saved = 9, Q2 cache-hit = 3.
+============================================================================ */
+const rcGold = makeRadix();
+const goldHits = {};
+let goldTotal = 0;
+for(const [name, q] of QUERIES){
+  const h = rcGold.insert(q);
+  goldHits[name] = h;
+  goldTotal += h;
+}
+// (a) total radix tokens saved == 9  (prefix_cache.py Section E)
+const totalOK = goldTotal === 9 && goldHits.Q1 === 0 && goldHits.Q2 === 3 && goldHits.Q3 === 6;
+const chkT = document.getElementById('checkTotal');
+chkT.textContent = totalOK ? 'check: OK \u2014 JS radix total saved = 9 (Q1:0 + Q2:3 + Q3:6) matches prefix_cache.py \u00a7E'
+                           : 'check: FAIL \u2014 total mismatch (got ' + goldTotal + ')';
+chkT.style.borderColor = totalOK ? '#27ae60' : '#c0392b';
+chkT.style.color = totalOK ? '#27ae60' : '#c0392b';
+chkT.style.background = totalOK ? '#1c3a25' : '#3a1414';
+
+// (b) Q2 cache-hit == 3 AND the flat hash would give only 2 (the mid-block gap)
+const flatH2T = {};
+flatInsert(Q1, 2, flatH2T);
+const q2FlatHit = flatMatch(Q2, 2, flatH2T);
+const q2OK = goldHits.Q2 === 3 && q2FlatHit === 2;
+const chkQ = document.getElementById('checkQ2');
+chkQ.textContent = q2OK ? 'check: OK \u2014 Q2 radix hit = 3, flat-hash hit = 2 (the +1 mid-block gap) matches prefix_cache.py \u00a7G'
+                        : 'check: FAIL \u2014 Q2 mismatch (radix=' + goldHits.Q2 + ', flat=' + q2FlatHit + ')';
+chkQ.style.borderColor = q2OK ? '#27ae60' : '#c0392b';
+chkQ.style.color = q2OK ? '#27ae60' : '#c0392b';
+chkQ.style.background = q2OK ? '#1c3a25' : '#3a1414';
+
+/* ===== initial render ===== */
+refreshBtns();
+renderTree();
+renderHits();
+renderCmp();
+</script>
+</body>
+</html>

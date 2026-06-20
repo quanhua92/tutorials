@@ -1,0 +1,162 @@
+peft_lora.py - reference impl. All numbers below feed PEFT_LORA.md.
+torch = 2.12.1
+LoRA:  y = W₀x + (α/r)·B·A·x   (Hu et al. 2021, arXiv:2106.09685)
+QLoRA: W₀ -> 4-bit NF4, adapters A,B stay fp16 (Dettmers et al. 2023)
+
+========================================================================
+  SECTION A: WHY full fine-tuning does not scale (the memory math)
+========================================================================
+One linear layer of a real model (Qwen3-0.5B hidden dim d=k=896):
+
+  full FT params for ONE layer  = d·k = 896·896 = 802,816 weights
+  trainable weights to STORE    = 802,816  (must back-prop through all)
+
+For GPT-3 175B (the LoRA paper's motivating example), full fine-tuning
+one task needs ~175,000,000,000 new numbers. Serving N=100 personalized
+tasks means 100 independent 175B replicas = ~35 TB of weights.
+
+Even per-LAYER this is the bottleneck: the SAME d×k weight is rewritten
+for every task. LoRA replaces that with a tiny r×(d+k) adapter. See §C.
+
+========================================================================
+  SECTION B: LoRA forward  y = W₀x + (α/r)·B·(A·x)  (worked, d=8,k=8,r=2)
+========================================================================
+d = 8, k = 8, r = 2, α = 16,  scale = α/r = 8.0000
+
+Input x [k=8] : [0.5, -0.3, 0.8, -0.1, 0.4, -0.6, 0.2, 0.7]
+W₀   [d,k]=(8, 8)  (FROZEN, never trained)
+
+Step 0 (paper init): A ~ Gaussian, B = 0  =>  ΔW = B·A = 0
+  y_init  = [0.2, -0.205, 0.96, -0.45, 0.5, 0.045, 0.085, 0.27]
+  W₀·x    = [0.2, -0.205, 0.96, -0.45, 0.5, 0.045, 0.085, 0.27]
+  [check] B=0 ⇒ LoRA output == base output exactly : OK
+  (so step-0 training behaves IDENTICALLY to the pretrained model)
+
+Step 1 (after training): B ← learned values, A unchanged
+  base path  W₀·x            = [0.2, -0.205, 0.96, -0.45, 0.5, 0.045, 0.085, 0.27]
+  adapter    (α/r)·B(A·x)    = [-0.0192, 0.0446, 0.0456, 0.0643, -0.0221, 0.0765, 0.0045, 0.0379]
+  y = base + adapter         = [0.1808, -0.1604, 1.0056, -0.3857, 0.4779, 0.1215, 0.0895, 0.3079]
+
+GOLD (for peft_lora.html to reproduce, r=2):
+  y[0] = 0.180800
+  y    = [0.1808, -0.1604, 1.0056, -0.3857, 0.4779, 0.1215, 0.0895, 0.3079]
+  base = [0.2, -0.205, 0.96, -0.45, 0.5, 0.045, 0.085, 0.27]
+  adapt= [-0.0192, 0.0446, 0.0456, 0.0643, -0.0221, 0.0765, 0.0045, 0.0379]
+
+========================================================================
+  SECTION C: parameter savings  d·k (full FT) vs r·(d+k) (LoRA)
+========================================================================
+Concrete layer d=8, k=8:
+
+  full FT trainable = d·k       = 8·8 = 64
+| r  | LoRA params r·(d+k) | ratio r(d+k)/dk | savings  |
+|----|----------------------|-----------------|----------|
+| 1  | 16                   | 0.2500          | 4.00    x |
+| 2  | 32                   | 0.5000          | 2.00    x |
+| 4  | 64                   | 1.0000          | 1.00    x |
+| 8  | 128                  | 2.0000          | 0.50    x |
+| 16 | 256                  | 4.0000          | 0.25    x |
+
+  At r=2: LoRA trains 32 params vs 64 full-FT = 0.5000 of the weights (2.0x fewer).
+
+Real model (GPT-3 175B, the LoRA paper §4.2): one d×k attention layer
+with d=k=12288, r=4:
+  full FT = 150,994,944  vs  LoRA = 98,304  => 0.000651 = 1536x fewer trainable params
+  (paper: ~10,000x reduction across all adapted layers; checkpoint
+   350GB -> 35MB; VRAM 1.2TB -> 350GB.)
+
+========================================================================
+  SECTION D: assert  (α/r)·B·A == ΔW  and  LoRA output == W₀x + ΔW·x
+========================================================================
+ΔW = (α/r)·B·A, shape (8, 8), rank = 2 (≤ r=2 by construction)
+
+ΔW [0:4, 0:4] corner:
+  +0.1840  -0.2368  -0.0608  +0.3152
+  -0.2640  +0.3360  +0.1680  -0.4560
+  +0.2000  -0.2720  +0.2480  +0.3280
+  -0.2160  +0.2688  +0.2688  -0.3792
+
+[check] lora.delta_W() == (α/r)·B·A            : OK
+[check] rank(B·A) == r = 2                     : OK
+[check] W₀x + (α/r)BAx == (W₀+ΔW)x  (merge OK): OK
+
+This is why you may MERGE at deploy time: replace W₀ with W₀+ΔW and
+the layer becomes a plain linear with ZERO added latency, or keep W₀
+frozen and swap (A,B) per task for multi-adapter serving (§F).
+
+========================================================================
+  SECTION E: QLoRA — NF4-quantized FROZEN base W₀ + fp16 adapters A,B 🔗
+========================================================================
+QLoRA = quantize the FROZEN W₀ to 4-bit NF4 (tiny, never trained), keep
+the SMALL adapters A,B in fp16 (the only things back-prop touches).
+
+NF4 codebook = 16 fixed levels = quantiles of N(0,1), normalized to ±1:
+  [-1.0, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0, 0.0796, 0.1609, 0.2461, 0.3379, 0.4407, 0.5626, 0.723, 1.0]
+  (8 levels densely packed in [-0.28, +0.25] — where weights cluster)
+
+NF4-quantize W₀ [d,k]=(8, 8) with group_size=8:
+  W₀_hat indices [0:4, 0:8] (each ∈ 0..15):
+    15   2  10  14   3   9  13   4
+     5  15   2  12   9   2  11   8
+    11   5  15   4  12   9   6  14
+    11  13   5  15   1  12  10   4
+  scales (absmax per block, first 4): [0.4, 0.5, 0.6, 0.45]
+  max |W₀ - W₀_hat| = 0.0375  (rounding to nearest NF4 level)
+
+QLoRA forward:  y = dequant(W₀)·x + (α/r)·B·(A·x)
+  y_fp16 base (truth) = [0.1808, -0.1604, 1.0056, -0.3857, 0.4779, 0.1215, 0.0895, 0.3079]
+  y_QLoRA (NF4 base)  = [0.1572, -0.1323, 1.0179, -0.3589, 0.4801, 0.108, 0.0769, 0.2974]
+  max |diff|          = 0.0281  (≈ the NF4 base rounding error only; adapter path is EXACT)
+
+Memory of the FROZEN base W₀ [d=896, k=896] (Qwen3-0.5B layer):
+  fp16 base : 802816*2     =  1,605,632 bytes = 1.606 MB
+  NF4  base : 802816/2     =    401,408 bytes = 0.401 MB
+  -> 4.0x smaller base  (4-bit vs 16-bit)
+  (QLoRA paper: 65B model fits in a single 48GB GPU this way.) 🔗
+
+========================================================================
+  SECTION F: multi-adapter serving — Punica grouped GEMM + S-LoRA paged memory
+========================================================================
+Batch of 2 tokens, each routed to its OWN adapter (multi-tenant):
+
+  token 0 x = [0.3, -0.1, 0.5, -0.2, 0.1, -0.4, 0.25, 0.15]  -> adapter 0 (A, B_TRAINED)
+  token 1 x = [-0.2, 0.4, 0.1, 0.3, -0.15, 0.2, -0.3, 0.05]  -> adapter 1 (A', B')
+
+Naive (loop per adapter) — 2 sequential matmuls:
+  y[0] (adapter 0) = [-0.0081, 0.1213, 0.3621, -0.0014, 0.0464, 0.1727, 0.0019, 0.2314]
+  y[1] (adapter 1) = [0.0515, 0.016, 0.0476, 0.3538, 0.0255, 0.0248, -0.101, 0.0399]
+
+Punica grouped GEMM — ONE batched call (einsum) for BOTH adapters:
+  y[0] (adapter 0) = [-0.0081, 0.1213, 0.3621, -0.0014, 0.0464, 0.1727, 0.0019, 0.2314]
+  y[1] (adapter 1) = [0.0515, 0.016, 0.0476, 0.3538, 0.0255, 0.0248, -0.101, 0.0399]
+
+[check] grouped-GEMM output == per-adapter loop output : OK
+[check] shared frozen base W₀ used once for all tokens : OK
+
+S-LoRA adds PAGED adapter memory: thousands of (A_i,B_i) live in a unified
+page table (like PagedAttention for KV cache, 🔗 the Phase-3 sibling). Only
+the adapters referenced by the current batch are paged in — sub-millisecond
+swap, zero duplication of the frozen base. Result: serve 1 base + N adapters
+concurrently on one GPU, paying the base cost once.
+
+========================================================================
+  SECTION G: the serving math — N adapters × tiny r(d+k) vs N full replicas
+========================================================================
+To serve N personalized tasks, how much weight must live in VRAM?
+
+One attention layer d=k=12288 (GPT-3), adapter rank r=64:
+
+| strategy                        | weights in VRAM for N=1000 tasks   |
+|---------------------------------|------------------------------------|
+| N full replicas (full FT)       | 1000·150,994,944 = 151.0 B weights            |
+| 1 base + N LoRA adapters (ours) | 150,994,944 + 1000·1,572,864 = 1.72 B weights       |
+| 1 base + N QLoRA adapters       | 37,748,736(NF4) + 1000·1,572,864 = 1.61 B weights       |
+
+The adapter overhead per task is r·(d+k) = 1,572,864 weights = 1.04% of one full layer. So a THOUSAND adapters add
+only ~10.4 extra base-layers' worth of weights, and the
+frozen base is paid ONCE. That is the whole economics of multi-adapter
+serving (Punica, S-LoRA, vLLM multi-LoRA).
+
+========================================================================
+  DONE - all sections printed
+========================================================================

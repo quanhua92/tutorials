@@ -1,0 +1,204 @@
+nccl_collectives.py - reference impl. All numbers below feed NCCL_COLLECTIVES.md.
+torch = 2.12.1
+NOTE: K ranks are simulated as a list of torch tensors in one process.
+
+========================================================================
+  SECTION A: why collectives - naive P2P does not scale
+========================================================================
+K = 4 GPUs. Each computed its own gradient on its own data batch.
+For DDP, every GPU must end with the SAME summed gradient.
+
+NAIVE 'reduce to a root + broadcast back' (the O(K) trap):
+  - root receives (K-1) gradients of N elements each -> (K-1)*N recv
+  - root sends   (K-1) averaged gradients back       -> (K-1)*N send
+  - root bottleneck (send+recv) = 2*(K-1)*N
+  - TOTAL traffic across the fabric ~ O(K^2 * N)
+  => the root GPU is crushed; adding GPUs makes it WORSE.
+
+NCCL's answer: a COLLECTIVE the hardware executes with optimal
+traffic, so no single rank is a bottleneck. Ring-AllReduce moves
+only ~2N bytes PER GPU regardless of K (Section E).
+
+| strategy             | per-GPU bytes   | scales with K? |
+|----------------------|-----------------|----------------|
+| naive root reduce+bcast | 2*(K-1)*N (root) | NO (root is O(K)) |
+| ring-AllReduce       | 2*(K-1)/K*N ~2N | YES (-> 2N)    |
+
+[check] ring bytes/GPU for K=4, N=16 = 2*(4-1)/4*16 = 24  (pinned gold in Section D)
+[check] naive root bottleneck for K=4, N=16 = 2*(4-1)*16 = 96  = 4.0x the ring cost
+        (and it gets WORSE as K grows: ring stays ~2N, root -> 2(K-1)N)
+
+========================================================================
+  SECTION B: the 5 NCCL primitives (K=4, distinct data so the flow shows)
+========================================================================
+K = 4 ranks. Input (rank r holds a 4-element vector):
+
+  rank 0: [1, 2, 3, 4]
+  rank 1: [11, 12, 13, 14]
+  rank 2: [21, 22, 23, 24]
+  rank 3: [31, 32, 33, 34]
+
+1. BROADCAST  (root=0): rank 0's vector copied to ALL ranks.
+
+| rank | before            | after (all = rank 0) |
+|------|-------------------|-------------------|
+| 0    | [1, 2, 3, 4]      | [1, 2, 3, 4]      |
+| 1    | [11, 12, 13, 14]  | [1, 2, 3, 4]      |
+| 2    | [21, 22, 23, 24]  | [1, 2, 3, 4]      |
+| 3    | [31, 32, 33, 34]  | [1, 2, 3, 4]      |
+
+2. REDUCE  (root=0, op=sum): sum onto rank 0 ONLY. Others unchanged.
+
+| rank | before            | after (sum on root) |
+|------|-------------------|-------------------|
+| 0    | [1, 2, 3, 4]      | [64, 68, 72, 76]  |
+| 1    | [11, 12, 13, 14]  | [11, 12, 13, 14]  |
+| 2    | [21, 22, 23, 24]  | [21, 22, 23, 24]  |
+| 3    | [31, 32, 33, 34]  | [31, 32, 33, 34]  |
+
+  (rank 0 = 1+11+21+31=64, 2+12+22+32=68, 3+13+23+33=72, 4+14+24+34=76)
+3. ALLREDUCE  (op=sum): sum onto EVERY rank. (DDP gradient sync.)
+
+| rank | before            | after (all = sum) |
+|------|-------------------|-------------------|
+| 0    | [1, 2, 3, 4]      | [64, 68, 72, 76]  |
+| 1    | [11, 12, 13, 14]  | [64, 68, 72, 76]  |
+| 2    | [21, 22, 23, 24]  | [64, 68, 72, 76]  |
+| 3    | [31, 32, 33, 34]  | [64, 68, 72, 76]  |
+
+  [check] every rank == sum(all inputs)?  True
+4. REDUCESCATTER  (op=sum): split each vector into 4 chunks of 1; rank r gets the summed chunk r.
+
+| rank | before            | after (1 shard)   |
+|------|-------------------|-------------------|
+| 0    | [1, 2, 3, 4]      | [64]              |
+| 1    | [11, 12, 13, 14]  | [68]              |
+| 2    | [21, 22, 23, 24]  | [72]              |
+| 3    | [31, 32, 33, 34]  | [76]              |
+
+  rank 0 = 1+11+21+31=64 ; rank 1 = 2+12+22+32=68 ; rank 2 = 72 ; rank 3 = 76   (each rank keeps N/K=1 el)
+5. ALLGATHER: each rank contributes its shard; all end with the concat.
+
+| rank | before            | after (all shards) |
+|------|-------------------|-------------------|
+| 0    | [64]              | [64, 68, 72, 76]  |
+| 1    | [68]              | [64, 68, 72, 76]  |
+| 2    | [72]              | [64, 68, 72, 76]  |
+| 3    | [76]              | [64, 68, 72, 76]  |
+
+  (AllGather of the ReduceScatter output REBUILDS the full sum [64,68,72,76] == AllReduce output -> see Section C)
+
+========================================================================
+  SECTION C: identity  AllReduce == ReduceScatter ; then AllGather
+========================================================================
+K = 4, N = 4. Same inputs as Section B.
+
+Two ways to reach 'every rank holds the sum':
+  (1) AllReduce                  -> direct
+  (2) ReduceScatter -> AllGather -> decomposed (this is ZeRO's path)
+
+  max|AllReduce - (ReduceScatter+AllGather)| = 0.000e+00
+  [check] identity holds?  True   (NCCL docs: 'ReduceScatter followed by AllGather is equivalent to AllReduce')
+
+ReduceScatter output (each rank owns ONE summed chunk):
+  rank 0: [64]
+  rank 1: [68]
+  rank 2: [72]
+  rank 3: [76]
+After AllGather, every rank has the full sum [64, 68, 72, 76] == AllReduce output.
+
+========================================================================
+  SECTION D: ring-AllReduce on K=4 ranks (the GOLD example)
+========================================================================
+K = 4 ranks, N = 16 elements/rank, chunk size N/K = 4.
+GOLD input: every rank holds the SAME vector v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+Expected AllReduce (sum of 4 identical copies) = 4*v = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]
+
+Ring result (every rank should hold the full sum):
+  rank 0: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]   == expected? True
+  rank 1: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]   == expected? True
+  rank 2: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]   == expected? True
+  rank 3: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]   == expected? True
+
+Per-GPU bytes (elements SENT during the whole ring):
+  formula  = 2*(K-1)/K*N = 2*3/4*16 = 24
+  measured = 24   (each rank sends 4 els/step * 6 steps)
+  [check] measured == formula?  True  (PINNED GOLD: bytes/GPU = 24)
+
+GOLD pinned for nccl_collectives.html:
+  result (every rank) = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]
+  GOLD scalar result[0] = 4
+  GOLD bytes/GPU        = 24
+  [check] generality: ring with DISTINCT inputs == true sum?  True
+
+========================================================================
+  SECTION E: per-GPU byte cost  ~  2*(K-1)/K*N  ->  ~2N as K grows
+========================================================================
+Fix N = 16 (array size per rank). Vary K (number of ranks):
+
+| K (ranks) | 2*(K-1)/K*N  | ratio to N | ratio to 2N |
+|-----------|--------------|------------|-------------|
+| 2         | 16.00        | 1.000      | 0.500       |
+| 4         | 24.00        | 1.500      | 0.750       |
+| 8         | 28.00        | 1.750      | 0.875       |
+| 16        | 30.00        | 1.875      | 0.938       |
+| 32        | 31.00        | 1.938      | 0.969       |
+| 64        | 31.50        | 1.969      | 0.984       |
+| 256       | 31.88        | 1.992      | 0.996       |
+
+Read it: as K -> infinity, 2*(K-1)/K -> 2, so per-GPU bytes -> 2N.
+Doubling the GPUs does NOT double any GPU's communication.
+That is the scalability promise of ring-AllReduce.
+
+[check] K=4, N=16 -> 2*3/4*16 = 24  (matches Section D gold)
+
+========================================================================
+  SECTION F: bandwidth reality + a worked timing
+========================================================================
+Interconnect bandwidth (per-link, one direction):
+
+| interconnect        | bandwidth    | where used                |
+|---------------------|--------------|---------------------------|
+| NVLink 4.0 (A100)   | ~600 GB/s    | within a node (TP, DDP)   |
+| InfiniBand NDR      | ~50 GB/s     | across nodes (PP, ZeRO)   |
+| PCIe Gen4           | ~64 GB/s     | CPU<->GPU within machine  |
+| Ethernet 100GbE     | ~12.5 GB/s   | commodity clusters        |
+
+Rule of thumb: TP needs NVLink-class bandwidth; PP tolerates
+InfiniBand; ZeRO comms are infrequent and survive slower links.
+
+Worked timing: 1 GB gradient, K=8 GPUs, NVLink ~600 GB/s
+
+  ring-AllReduce per-GPU bytes = 2*(K-1)/K*N = 2*7/8*1GB = 1.75 GB
+  ring time      = 1.75 GB / 600 GB/s = 2.92 ms  (~3.3 ms)
+  naive root     = K*N = 8 GB on the root
+  naive time     = 8 GB / 600 GB/s = 13.33 ms  (~13 ms)
+
+  ring / naive = 0.22x  (ring wins, and the gap WIDENS with K)
+
+[check] ring time ~3.3 ms matches 2*1GB/600GB/s = 3.33 ms (the ~2N approximation)
+
+========================================================================
+  SECTION G: which primitive each distributed strategy uses
+========================================================================
+The 5 primitives are the vocabulary ALL distributed training speaks:
+
+| strategy            | primitives used                  | why |
+|---------------------|----------------------------------|-----|
+| DDP  (data parallel)| AllReduce (gradients)            | every GPU needs the MEAN grad |
+| Tensor Parallelism  | AllReduce (per layer, O-proj)   | sum row-parallel partials within node |
+| ZeRO-1/2            | ReduceScatter + AllGather        | partition grads/states; = AllReduce split |
+| ZeRO-3              | AllGather (fwd) + ReduceScatter (bwd) | reconstruct / discard param shards per layer |
+| Pipeline Parallel   | point-to-point Send/Recv         | pass activations between stage ranks |
+
+Links to sibling bundles (all consume these primitives):
+  DDP             -> AllReduce is its ONLY collective (Section C identity)
+  Tensor Parallel -> one AllReduce per transformer layer (within NVLink node)
+  ZeRO            -> lives on ReduceScatter + AllGather; the identity in
+                     Section C is EXACTLY why ZeRO-1/2 can replace DDP's AllReduce
+
+[check] DDP AllReduce bytes/GPU = 2N (ring); ZeRO-1/2 = RS+AG, same 2N total
+
+========================================================================
+  DONE - all sections printed
+========================================================================

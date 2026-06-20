@@ -1,0 +1,202 @@
+sampling.py - reference impl. All numbers below feed SAMPLING.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: the fixed 8-token logit vector -> softmax / log_softmax
+========================================================================
+LOGITS (V=8) = [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2]
+TOKENS         = ['the', 'cat', 'xyz', 'sat', 'qqq', 'on', 'a', 'mat']
+
+Full distribution (temp=1, no filtering):
+
+| idx | token |  logit  |  prob (softmax)  |  logprob (log_softmax) |
+|-----|-------|---------|------------------|------------------------|
+| 0   | the   | +2.3000 |           0.2377 |                -1.4367 |
+| 1   | cat   | +2.0000 |           0.1761 |                -1.7367 |
+| 2   | xyz   | +0.4000 |           0.0356 |                -3.3367 |
+| 3   | sat   | +1.5000 |           0.1068 |                -2.2367 |
+| 4   | qqq   | +0.1000 |           0.0263 |                -3.6367 |
+| 5   | on    | +2.5000 |           0.2903 |                -1.2367 |
+| 6   | a     | +0.7000 |           0.0480 |                -3.0367 |
+| 7   | mat   | +1.2000 |           0.0791 |                -2.5367 |
+
+  sum(probs) = 1.000000   (must be 1.0)
+
+  [check] logits - logsumexp(logits) == log_softmax(logits):  OK
+  [check] sum(softmax(logits)) == 1.0:                         OK
+
+  argmax = idx 5 ("on")  — this is what greedy decoding would emit.
+
+========================================================================
+  SECTION B: temperature sweep  (softmax(logits / T))
+========================================================================
+Temperature divides the logits BEFORE softmax. Higher T => flatter
+distribution (more diverse / lower-confidence); lower T => sharper
+(more peaked on the argmax). T=0 collapses to a one-hot (= greedy).
+
+| idx | token |  T=0.5   |   T=1.0   |   T=2.0   |
+|-----|-------|----------|-----------|-----------|
+| 0   | the   | 0.2917   | 0.2377    | 0.1858    |
+| 1   | cat   | 0.1601   | 0.1761    | 0.1599    |
+| 2   | xyz   | 0.0065   | 0.0356    | 0.0719    |
+| 3   | sat   | 0.0589   | 0.1068    | 0.1245    |
+| 4   | qqq   | 0.0036   | 0.0263    | 0.0618    |
+| 5   | on    | 0.4351   | 0.2903    | 0.2053    |
+| 6   | a     | 0.0119   | 0.0480    | 0.0835    |
+| 7   | mat   | 0.0323   | 0.0791    | 0.1072    |
+
+  entropy(T=0.5) = 1.3981 nats  (sharper)
+  entropy(T=1.0) = 1.8062 nats
+  entropy(T=2.0) = 1.9984 nats  (flatter => higher)
+
+  top-1 prob share: T=0.5 -> 0.4351, T=1.0 -> 0.2903, T=2.0 -> 0.2053
+
+  [check] top-1 share decreases as T increases (distribution flattens):  OK
+
+========================================================================
+  SECTION C: greedy decoding (temp=0) = argmax
+========================================================================
+greedy(LOGITS) = argmax = idx 5  ("on")
+
+  temp=0 is a SPECIAL CASE: there is no softmax/sampling step at all.
+  Every call returns the SAME token. Deterministic, repetitive, no
+  diversity — used for evaluation / factual QA.
+
+  [check] greedy picks idx 5 ("on"):  OK
+
+========================================================================
+  SECTION D: top-k=3  (keep the 3 highest logits, mask the rest)
+========================================================================
+KEPT   indices: [0, 1, 5]   tokens: ['the', 'cat', 'on']
+MASKED indices: [2, 3, 4, 6, 7]   tokens: ['xyz', 'sat', 'qqq', 'a', 'mat']
+
+
+Top-k=3 distribution (renormalized over the 3 kept):
+
+| idx | token |  logit  |  prob (softmax)  |  logprob (log_softmax) |
+|-----|-------|---------|------------------|------------------------|
+| 0   | the   | +2.3000 |           0.3376 |                -1.0859 |
+| 1   | cat   | +2.0000 |           0.2501 |                -1.3859 |
+| 2   | xyz   |    -inf |           0.0000 |                   -inf |
+| 3   | sat   |    -inf |           0.0000 |                   -inf |
+| 4   | qqq   |    -inf |           0.0000 |                   -inf |
+| 5   | on    | +2.5000 |           0.4123 |                -0.8859 |
+| 6   | a     |    -inf |           0.0000 |                   -inf |
+| 7   | mat   |    -inf |           0.0000 |                   -inf |
+
+  sum(probs) = 1.000000   (must be 1.0)
+
+  The 5 masked tokens now have prob 0; the kept 3 share all the mass.
+  top-k is FIXED-SIZE: it always keeps exactly k, regardless of whether
+  the distribution is peaked or flat. That is its weakness (see Section E).
+
+  [check] top-k=3 kept indices == [0, 1, 5]:  OK
+
+========================================================================
+  SECTION E: top-p=0.6 nucleus  (keep smallest set, cumulative prob >= p)
+========================================================================
+Algorithm (matches tiny-llm make_sampler):
+  1. sort tokens DESCENDING by probability
+  2. compute cumulative sum of the PROBABILITIES (NOT logprobs!)
+  3. keep tokens where cumulative prob < p
+  4. ALWAYS keep the top-1 (nucleus is never empty)
+
+Top-p = 0.6
+
+| rank | idx | token |  prob   | cumsum  | cumsum<0.6? | kept? |
+|------|-----|-------|---------|---------|-------------|-------|
+| 0    | 5   | on    | 0.2903  | 0.2903  | yes         | KEEP |
+| 1    | 0   | the   | 0.2377  | 0.5281  | yes         | KEEP |
+| 2    | 1   | cat   | 0.1761  | 0.7042  | no          | mask |
+| 3    | 3   | sat   | 0.1068  | 0.8110  | no          | mask |
+| 4    | 7   | mat   | 0.0791  | 0.8901  | no          | mask |
+| 5    | 6   | a     | 0.0480  | 0.9381  | no          | mask |
+| 6    | 2   | xyz   | 0.0356  | 0.9737  | no          | mask |
+| 7    | 4   | qqq   | 0.0263  | 1.0000  | no          | mask |
+
+  NUCLEUS (top-p=0.6) = indices [0, 5]  tokens ['the', 'on']
+  nucleus prob mass   = 0.5281  (< p=0.6, because the token that
+  would cross 0.6 is excluded by the `cumsum < p` rule)
+
+  CONTRAST top-k=3 -> kept [0, 1, 5]  vs  top-p=0.6 -> kept [0, 5]
+  Here top-p is STRICTER than top-k: the top-2 already cover 52.8% of
+  the mass, so the 3rd token (which would push cumsum to 70.4%, past
+  0.6) is cut. top-k keeps it anyway. This is top-p ADAPTING to the shape.
+
+  [check] top-p=0.6 nucleus == [0, 5]:  OK
+
+========================================================================
+  SECTION F: PITFALL — cumsum on LOGPROBS (wrong) vs PROBS (right)
+========================================================================
+The single most common top-p bug: accumulate the LOG-probabilities
+instead of the probabilities. Log-probs are NEGATIVE (every logprob
+< 0), so their cumulative sum stays negative forever and is ALWAYS
+less than any positive p. Result: NOTHING gets masked — the 'nucleus'
+is the entire vocabulary. Silent, no error.
+
+p = 0.6
+
+| rank | idx | token |  prob   | cumsum(probs) | <p? |  logprob  | cumsum(logprobs) | <p? |
+|------|-----|-------|---------|---------------|-----|----------|------------------|-----|
+| 0    | 5   | on    | 0.2903  |        0.2903 | yes | -1.2367  |          -1.2367 | yes |
+| 1    | 0   | the   | 0.2377  |        0.5281 | yes | -1.4367  |          -2.6734 | yes |
+| 2    | 1   | cat   | 0.1761  |        0.7042 | no  | -1.7367  |          -4.4100 | yes |
+| 3    | 3   | sat   | 0.1068  |        0.8110 | no  | -2.2367  |          -6.6467 | yes |
+| 4    | 7   | mat   | 0.0791  |        0.8901 | no  | -2.5367  |          -9.1834 | yes |
+| 5    | 6   | a     | 0.0480  |        0.9381 | no  | -3.0367  |         -12.2201 | yes |
+| 6    | 2   | xyz   | 0.0356  |        0.9737 | no  | -3.3367  |         -15.5567 | yes |
+| 7    | 4   | qqq   | 0.0263  |        1.0000 | no  | -3.6367  |         -19.1934 | yes |
+
+  CORRECT (cumsum on probs):     nucleus = [0, 5]   (2 tokens)
+  WRONG    (cumsum on logprobs): nucleus = [0, 1, 2, 3, 4, 5, 6, 7]   (8 tokens — EVERYTHING kept!)
+
+  [check] correct nucleus == [0, 5]:                                OK
+  [check] buggy  nucleus == all 8 tokens (no filtering at all):     OK (it's a bug!)
+
+  FIX: always cumsum(exp(logprobs)) == cumsum(probs). Never the raw logprobs.
+
+========================================================================
+  SECTION G: combined pipeline + seeded sample (the only RNG step)
+========================================================================
+Production order (tiny-llm make_sampler):
+  1. temp==0  -> return argmax (greedy, no RNG)
+  2. top-k    -> mask logits to -inf outside top-k
+  3. top-p    -> mask logits to -inf outside the nucleus
+  4. divide remaining logprobs by temp
+  5. categorical draw (THE only random step)
+
+Config: {'temp': 0.7, 'top_k': 3, 'top_p': 0.6}
+
+After top-k=3 then top-p=0.6, kept indices = [5]
+After /temp=0.7 and renormalize:
+
+| idx | token |   prob   |
+|-----|-------|----------|
+| 0   | the   | 0.0000   |
+| 1   | cat   | 0.0000   |
+| 2   | xyz   | 0.0000   |
+| 3   | sat   | 0.0000   |
+| 4   | qqq   | 0.0000   |
+| 5   | on    | 1.0000   |
+| 6   | a     | 0.0000   |
+| 7   | mat   | 0.0000   |
+
+  torch.manual_seed(0); multinomial -> idx 5 ("on")
+  [check] drawn idx 5 is in the kept set [5]:  OK
+
+  Re-run with the SAME seed -> SAME token. Change the seed -> different
+  token (but always inside the nucleus). That is the only randomness.
+
+========================================================================
+  GOLD VALUES (pin these — .html must reproduce them)
+========================================================================
+  LOGITS vector   : [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2]
+  top-k=3 kept    : [0, 1, 5]   (deterministic, no RNG)
+  top-p=0.6 nucleus: [0, 5]   (deterministic, no RNG)
+  greedy (temp=0) : idx 5   (deterministic, no RNG)
+
+  These three are the gold the .html recomputes and gold-checks against.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

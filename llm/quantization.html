@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>W4A16 Quantization — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --teal:#1abc9c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:.8rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.4rem;align-items:center}
+  input[type=number]{width:5.2rem;background:#0a0e14;color:var(--ink);
+     border:1px solid #30363d;border-radius:5px;padding:3px 6px;font-size:.82rem;
+     font-family:ui-monospace,monospace;text-align:center}
+  input[type=number]:focus{outline:none;border-color:var(--green)}
+  .row{display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start}
+  table.q{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.q td,table.q th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.q th{color:var(--muted);font-weight:600}
+  table.q td.err-pos{color:var(--green)}
+  table.q td.err-neg{color:var(--orange)}
+  table.q td.zero{color:var(--muted)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .r{color:var(--red)}
+  .readout .o{color:var(--orange)}
+  .readout .m{color:var(--muted)}
+  .micro{color:var(--muted);font-size:.74rem}
+  .caption{color:var(--ink);font-size:.86rem;background:#0f1a14;border-left:3px solid var(--green);
+           border-radius:0 6px 6px 0;padding:.5rem .7rem;margin:.2rem 0 .7rem}
+  .caption b{color:var(--green)}
+  .formula{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.5rem 0}
+  .formula button{font-family:ui-monospace,monospace;font-size:.78rem;padding:5px 10px}
+  .formula button.active{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  canvas{display:block;background:#0a0e14;border-radius:6px;border:1px solid #30363d}
+  .bits{display:flex;gap:3px;flex-wrap:wrap;margin-top:.5rem}
+  .nibble{background:#0a0e14;border:1px solid #30363d;border-radius:5px;padding:5px 7px;
+          font-family:ui-monospace,monospace;font-size:.72rem;text-align:center;min-width:54px}
+  .nibble .k{color:var(--muted);font-size:.62rem}
+  .nibble .val{color:var(--green);font-size:1.0rem;font-weight:700}
+  .nibble .hx{color:var(--orange);font-size:.68rem}
+  .nibble.edge{border-color:var(--orange);background:#2a1e10}
+</style>
+</head>
+<body>
+  <h1>W4A16 Group Quantization — interactive
+    <a class="badge" href="./QUANTIZATION.md">QUANTIZATION.md</a>
+    <a class="badge" href="./quantization.py">quantization.py</a></h1>
+  <div class="sub">Edit the <b style="color:var(--green)">8 weight values</b> and watch them quantize to int4,
+    pack into one <code>uint32</code>, dequantize, and feed a quantized matmul. Every number recomputed in JS
+    from the <i>identical</i> MLX-affine formula in <code>quantization.py</code> (dequant:
+    <code>w = scale*w_int + bias</code>, bias in float units).
+    &nbsp;|&nbsp; <a href="./rope.html">RoPE →</a> &nbsp; <a href="./absolute_pe.html">Absolute PE →</a></div>
+
+  <!-- ===== PANEL 1: QUANTIZE ===== -->
+  <h2>① Quantize 8 floats → int4 (0..15) with one per-group scale &amp; bias</h2>
+  <div class="caption"><b>8 weights → 16-level ruler.</b> Type 8 weight values. The
+    quantizer finds ONE ruler (a <code>scale</code> step) + ONE offset (a <code>bias</code>
+    start point) for the whole group, then snaps each weight to its nearest of 16 marks
+    (<code>0..15</code>). The <span style="color:var(--orange)">orange</span> element is the
+    <code>edge</code> (the heaviest extreme) — it lands dead on a mark with <b>zero error</b>.</div>
+  <div class="panel">
+    <div class="controls" id="inputs"></div>
+    <div class="micro" style="margin-top:.5rem">group_size = 8 (real models use 128), bits = 4 → 16 levels.
+      The <span style="color:var(--orange)">orange</span> element is the <code>edge</code> (heavier extreme) —
+      it maps to an int4 level with <b>zero error</b> by MLX's <code>scale = edge/q0</code> trick.</div>
+    <div class="row" style="margin-top:.6rem">
+      <table class="q" id="qTable"></table>
+      <div>
+        <div class="micro">original (grey) vs dequantized (green); error bars (orange)</div>
+        <canvas id="bars" width="460" height="200"></canvas>
+      </div>
+    </div>
+    <div class="readout" id="params"></div>
+  </div>
+
+  <!-- ===== PANEL 2: PACK INTO UINT32 ===== -->
+  <h2>② Pack 8 nibbles into ONE uint32 — bit layout (LSB = w_int[0])</h2>
+  <div class="caption"><b>8 nibbles → 1 box.</b> Each int4 fits in a <i>nibble</i> (4 bits = half a byte).
+    Eight nibbles squeeze into one 32-bit box (<code>uint32</code>). Read the green hex
+    <b>right-to-left</b> to recover the weights in order — that is what the chip stores on disk.</div>
+  <div class="panel">
+    <div class="bits" id="bits"></div>
+    <div class="readout" id="packed"></div>
+    <div class="micro" style="margin-top:.5rem"><code>packed = Σ w_int[k] &lt;&lt; (4*k)</code>; bits[4k:4k+4] = w_int[k].
+      Read the hex right-to-left to recover the nibbles. Unpack reverses it:
+      <code>nibble_k = (packed &gt;&gt; 4*k) &amp; 0xF</code>.</div>
+  </div>
+
+  <!-- ===== PANEL 3: QUANTIZED MATMUL ===== -->
+  <h2>③ Quantized matmul vs float matmul — dequant fused inside the MAC loop</h2>
+  <div class="caption"><b>Same answer, 4× less memory traffic.</b> The weights arrive packed. The kernel
+    unpacks each box, rebuilds the weight (<code>scale×w_int + bias</code>), and multiplies it by the input
+    <i>on the fly</i> — it never builds the full float matrix. Compare the green (quantized) column to the
+    float column: they match to ~2.6%.</div>
+  <div class="panel">
+    <div class="micro">x = [0.5, −0.3, 0.8, −0.1, 0.4, −0.6, 0.2, 0.7] (activation, float16).
+      W is [4, 8]: <b>row 0 = the 8 values above</b>; rows 1–3 are fixed. Each row quantized independently.</div>
+    <table class="q" id="mmTable"></table>
+    <div class="readout" id="mmOut"></div>
+    <div class="micro" style="margin-top:.5rem">The kernel pulls a uint32, unpacks 8 nibbles, dequantizes
+      (<code>scale*w_int + bias</code>), and immediately multiplies by the activation — it never builds the
+      full float weight matrix. That fusion is what makes W4A16 a bandwidth win.</div>
+  </div>
+
+  <!-- ===== PANEL 4: SIGN-CONVENTION TOGGLE (the silent 1.44 bug) ===== -->
+  <h2>④ The silent 1.44-corruption bug — toggle the dequant formula</h2>
+  <div class="caption"><b>Three formulas that all look like "affine dequant".</b> Toggle between them and
+    watch what happens to the rebuilt weight for <code>w_int = 12</code>. MLX and the textbook agree
+    <i>only</i> when you convert the offset's units (<code>zero_point = −bias/scale</code>). Mixing them
+    (formula ③) silently corrupts the weight by <b>~1.44</b> with no error message.</div>
+  <div class="panel">
+    <div class="formula">
+      <button data-mode="mlx" class="active">① MLX: scale·w_int + bias</button>
+      <button data-mode="textbook">② Textbook: scale·(w_int − zp)</button>
+      <button data-mode="wrong">③ Wrong: (w_int + bias)·scale</button>
+    </div>
+    <div class="readout" id="signOut"></div>
+    <div class="micro" style="margin-top:.5rem">Using the live group from panel ①: <code>scale</code>,
+      <code>bias</code>, and <code>w_int[1]</code>. The <b>correct</b> rebuilt weight (formula ①) must equal
+      MLX's <code>0.2·12 + (−1.8) = +0.6000</code> for the default hero row. Formula ③ is the
+      <i>source-guide prose</i> shape — it is what you get if you plug MLX's float-unit <code>bias</code> into a
+      slot that expects an int-unit <code>zero_point</code>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches <code>quantization.py</code> Section C/D gold for the default hero row.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth MLX-affine formula, ported verbatim from quantization.py ===== */
+const N_LEVELS = 15;
+function rint(x){
+  /* round half to even — matches Python round() and C++ std::rint (NOT JS Math.round) */
+  const f = Math.floor(x); const d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return (f % 2 === 0) ? f : f + 1;
+}
+function quantizeGroup(w){           // w: array of 8 numbers -> MLX affine quantize
+  const eps = 1e-7;
+  let wMin = Infinity, wMax = -Infinity;
+  for (const v of w){ if (v < wMin) wMin = v; if (v > wMax) wMax = v; }
+  const mask = Math.abs(wMin) > Math.abs(wMax);
+  let scale = Math.max((wMax - wMin) / N_LEVELS, eps);
+  scale = mask ? scale : -scale;
+  const edge = mask ? wMin : wMax;
+  const q0 = rint(edge / scale);
+  let bias = 0;
+  if (q0 !== 0){ scale = edge / q0; bias = edge; }
+  const wInt = w.map(x => Math.min(Math.max(rint((x - bias) / scale), 0), N_LEVELS));
+  return { scale, bias, wInt, edge, q0, mask, wMin, wMax };
+}
+function packInt4(wInt){             // 8 nibbles -> uint32 (use * not << to avoid 32-bit signed overflow)
+  let p = 0;
+  for (let k = 0; k < 8; k++) p += (wInt[k] & 0xF) * Math.pow(2, 4*k);
+  return p;
+}
+function unpackInt4(packed){         // uint32 -> 8 nibbles
+  const o = [];
+  for (let k = 0; k < 8; k++) o.push(Math.floor(packed / Math.pow(2, 4*k)) % 16);
+  return o;
+}
+function dequant(scale, bias, wi){ return scale * wi + bias; }
+function hex32(p){ return Math.floor(p).toString(16).toUpperCase().padStart(8, '0'); }
+function bin32(p){ return Math.floor(p).toString(2).padStart(32, '0'); }
+
+/* fixed vectors from quantization.py */
+const DEFAULT_W = [-1.80, 0.55, -0.35, 1.20, -0.85, 0.25, -1.15, 1.05];
+const MM_X = [0.50, -0.30, 0.80, -0.10, 0.40, -0.60, 0.20, 0.70];
+const MM_W = [
+  DEFAULT_W.slice(),
+  [ 0.90, -0.40,  1.10, -0.60,  0.80, -1.30,  0.50, -0.90],
+  [-0.50,  1.40, -0.80,  0.60, -1.10,  0.30,  1.60, -0.40],
+  [ 1.30, -0.20,  0.70, -1.00,  0.50, -0.80,  1.10, -0.30],
+];
+
+/* ===== build the 8 number inputs ===== */
+const inputsEl = document.getElementById('inputs');
+const inputNodes = [];
+for (let k = 0; k < 8; k++){
+  const wrap = document.createElement('label');
+  wrap.textContent = 'w[' + k + '] ';
+  const inp = document.createElement('input');
+  inp.type = 'number'; inp.step = '0.05'; inp.value = DEFAULT_W[k];
+  inp.addEventListener('input', render);
+  wrap.appendChild(inp);
+  inputsEl.appendChild(wrap);
+  inputNodes.push(inp);
+}
+function readW(){ return inputNodes.map(i => parseFloat(i.value)); }
+
+/* ===== PANEL 1: quantize table + bars ===== */
+function drawTable(q, w){
+  let h = '<tr><th>k</th><th>w[k]</th><th>(w−bias)/scale</th><th>round</th>'
+        + '<th>w_int</th><th>dequant</th><th>error</th></tr>';
+  for (let k = 0; k < 8; k++){
+    const ratio = (w[k] - q.bias) / q.scale;
+    const wi = q.wInt[k];
+    const dq = dequant(q.scale, q.bias, wi);
+    const err = w[k] - dq;
+    const ecls = Math.abs(err) < 1e-9 ? 'zero' : (err > 0 ? 'err-pos' : 'err-neg');
+    const edgeMark = (w[k] === q.edge) ? ' <span class="micro" style="color:var(--orange)">(edge)</span>' : '';
+    h += `<tr><td>${k}</td><td>${w[k].toFixed(2)}${edgeMark}</td>`
+      + `<td>${ratio.toFixed(4)}</td><td>${rint(ratio)}</td>`
+      + `<td><b style="color:var(--green)">${wi}</b></td>`
+      + `<td>${dq.toFixed(4)}</td><td class="${ecls}">${err>=0?'+':''}${err.toFixed(4)}</td></tr>`;
+  }
+  document.getElementById('qTable').innerHTML = h;
+}
+function drawBars(q, w){
+  const cv = document.getElementById('bars');
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  const Wd = cv.clientWidth, Hd = cv.clientHeight;
+  ctx.clearRect(0, 0, Wd, Hd);
+  const pad = 36, n = 8, bw = (Wd - pad*2) / n;
+  const maxAbs = Math.max(2.0, ...w.map(Math.abs), ...q.wInt.map(i => dequant(q.scale, q.bias, i)));
+  const mid = Hd/2, sc = (Hd/2 - 18) / maxAbs;
+  ctx.strokeStyle = '#21262d'; ctx.beginPath(); ctx.moveTo(pad, mid); ctx.lineTo(Wd-pad, mid); ctx.stroke();
+  for (let k = 0; k < 8; k++){
+    const x = pad + k*bw + bw*0.18, ww = bw*0.28;
+    const dq = dequant(q.scale, q.bias, q.wInt[k]);
+    /* original (grey ghost) */
+    ctx.fillStyle = '#3d4452';
+    const oh = w[k]*sc; ctx.fillRect(x, oh<0?mid:mid-oh, ww, Math.abs(oh));
+    /* dequant (green) */
+    ctx.fillStyle = '#27ae60';
+    const dh = dq*sc;
+    ctx.fillRect(x+ww+2, dh<0?mid:mid-dh, ww, Math.abs(dh));
+    /* error tick (orange) */
+    const err = w[k]-dq;
+    if (Math.abs(err) > 1e-9){
+      ctx.strokeStyle = '#e67e22'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x+ww+2+ww/2, mid - w[k]*sc);
+      ctx.lineTo(x+ww+2+ww/2, mid - dq*sc); ctx.stroke();
+    }
+    ctx.fillStyle = '#8b949e'; ctx.font = '9px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText('w'+k, x+bw/2, Hd-4);
+  }
+  ctx.textAlign = 'left';
+}
+function drawParams(q, w){
+  let maxErr = 0;
+  for (let k = 0; k < 8; k++) maxErr = Math.max(maxErr, Math.abs(w[k] - dequant(q.scale, q.bias, q.wInt[k])));
+  document.getElementById('params').innerHTML =
+    `w_min = <b>${q.wMin.toFixed(2)}</b> &nbsp; w_max = <b>${q.wMax.toFixed(2)}</b><br>`
+    + `mask = |w_min|&gt;|w_max| = <b>${q.mask}</b> &nbsp;→&nbsp; edge = <span class="o">${q.edge.toFixed(2)}</span>`
+    + ` &nbsp; q0 = round(edge/scale) = <b>${q.q0}</b><br>`
+    + `<b>scale</b> = edge/q0 = <b style="color:var(--green)">${q.scale.toFixed(6)}</b><br>`
+    + `<b>bias</b> = edge = <b style="color:var(--green)">${q.bias.toFixed(6)}</b> <span class="m">(FLOAT units)</span><br>`
+    + `dequant: w = scale*w_int + bias &nbsp; max abs error = <b>${maxErr.toFixed(4)}</b> `
+    + `(ceiling = scale/2 = ${(q.scale/2).toFixed(4)})`;
+}
+
+/* ===== PANEL 2: bit layout ===== */
+function drawBits(q){
+  const packed = packInt4(q.wInt);
+  let h = '';
+  for (let k = 0; k < 8; k++){
+    const isEdge = (DEFAULT_W[k] === q.edge) && (q.wInt[k] === (q.edge === q.wMin ? 0 : N_LEVELS));
+    h += `<div class="nibble ${isEdge?'edge':''}">`
+       + `<div class="k">k=${k} bits[${4*k}:${4*k+4}]</div>`
+       + `<div class="val">${q.wInt[k]}</div>`
+       + `<div class="hx">0x${q.wInt[k].toString(16).toUpperCase()} &lt;&lt; ${4*k}</div></div>`;
+  }
+  document.getElementById('bits').innerHTML = h;
+  document.getElementById('packed').innerHTML =
+    `packed = Σ w_int[k] &lt;&lt; (4*k) = <b>${packed.toLocaleString()}</b><br>`
+    + `hex    = <b style="color:var(--green)">0x${hex32(packed)}</b><br>`
+    + `binary = <span class="m">${bin32(packed)}</span><br>`
+    + `unpack check: nibbles k=0..7 = <b>[${unpackInt4(packed).join(', ')}]</b> `
+    + `<span class="m">(must match w_int)</span>`;
+}
+
+/* ===== PANEL 3: quantized matmul ===== */
+function quantizedMatmul(x, W){
+  const N = W.length, E = W[0].length;
+  const out = new Array(N);
+  for (let n = 0; n < N; n++){
+    const q = quantizeGroup(W[n]);
+    let acc = 0;
+    for (let i = 0; i < E; i++){
+      acc += dequant(q.scale, q.bias, q.wInt[i]) * x[i];   // dequant fused in MAC
+    }
+    out[n] = acc;
+  }
+  return out;
+}
+function floatMatmul(x, W){
+  const N = W.length, E = W[0].length;
+  const out = new Array(N);
+  for (let n = 0; n < N; n++){
+    let s = 0; for (let i = 0; i < E; i++) s += W[n][i] * x[i];
+    out[n] = s;
+  }
+  return out;
+}
+function drawMatmul(){
+  /* row 0 of MM_W mirrors the live inputs so panel ① feeds panel ③ */
+  MM_W[0] = readW().slice();
+  const fq = quantizedMatmul(MM_X, MM_W);
+  const ff = floatMatmul(MM_X, MM_W);
+  let h = '<tr><th>output n</th><th>float x@W.T</th><th>quantized (dequant in MAC)</th>'
+        + '<th>abs error</th></tr>';
+  let maxErr = 0;
+  for (let n = 0; n < 4; n++){
+    const e = Math.abs(ff[n] - fq[n]); maxErr = Math.max(maxErr, e);
+    h += `<tr><td>${n}</td><td>${ff[n].toFixed(4)}</td>`
+      + `<td style="color:var(--green)">${fq[n].toFixed(4)}</td>`
+      + `<td>${e.toFixed(4)}</td></tr>`;
+  }
+  document.getElementById('mmTable').innerHTML = h;
+  const ok = maxErr < 0.5;
+  document.getElementById('mmOut').innerHTML =
+    `max abs error = <b style="color:${ok?'var(--green)':'var(--red)'}">${maxErr.toFixed(4)}</b> `
+    + `${ok ? '<span class="m">→ quantized ≈ float ✓</span>' : '<span class="r">→ diverged!</span>'}`;
+}
+
+/* ===== PANEL 4: sign-convention toggle (the silent 1.44 bug) =====
+   three dequant formulas, all "affine"; only ① and ② are correct (and equal
+   iff zero_point = -bias/scale). ③ is the source-guide prose shape -> wrong. */
+let signMode = 'mlx';
+function drawSign(){
+  const q = quantizeGroup(readW());
+  const wi = q.wInt[1];                 // mirror quantization.py Section F (w_int[1])
+  const mlx = dequant(q.scale, q.bias, wi);                 // ① scale*w_int + bias
+  const zp  = -q.bias / q.scale;                            // ② zero_point (int units)
+  const textbook = q.scale * (wi - zp);                     // scale*(w_int - zp)
+  const wrong = (wi + q.bias) * q.scale;                    // ③ (w_int + bias)*scale
+  const target = mlx;                                       // ① is the correct answer
+  const rows = [
+    { m:'mlx',      val:mlx,      tag:'① MLX',       f:`scale·w_int + bias = ${q.scale.toFixed(2)}·${wi} + (${q.bias.toFixed(2)})` },
+    { m:'textbook', val:textbook, tag:'② Textbook',  f:`scale·(w_int − zp) = ${q.scale.toFixed(2)}·(${wi} − (${zp.toFixed(2)}))` },
+    { m:'wrong',    val:wrong,    tag:'③ Wrong',     f:`(w_int + bias)·scale = (${wi} + (${q.bias.toFixed(2)}))·${q.scale.toFixed(2)}` },
+  ];
+  let h = `<b>scale</b> = ${q.scale.toFixed(6)} &nbsp; <b>bias</b> = ${q.bias.toFixed(6)} (float units)`
+    + ` &nbsp; <b>zero_point</b> = −bias/scale = ${zp.toFixed(6)} (int units)<br>`;
+  for (const r of rows){
+    const active = r.m === signMode;
+    const ok = Math.abs(r.val - target) < 1e-6;
+    const color = ok ? 'var(--green)' : 'var(--red)';
+    h += `<div style="margin-top:.3rem;${active ? 'background:#0f1a14;border-left:3px solid '+color+';padding:.3rem .5rem;border-radius:0 5px 5px 0' : 'opacity:'+(active?1:.55)+''}">`
+      + `<span style="color:${color}">${r.tag}: ${r.f} = <b style="color:${color}">${r.val.toFixed(4)}</b></span>`
+      + ` ${ok ? '<span class="m">✓ matches ①</span>' : '<span class="r">✗ off by '+Math.abs(r.val-target).toFixed(4)+'</span>'}`
+      + `</div>`;
+  }
+  document.getElementById('signOut').innerHTML = h;
+  for (const b of document.querySelectorAll('.formula button')){
+    b.classList.toggle('active', b.dataset.mode === signMode);
+  }
+}
+for (const b of document.querySelectorAll('.formula button')){
+  b.addEventListener('click', () => { signMode = b.dataset.mode; drawSign(); });
+}
+
+/* ===== master render ===== */
+function render(){
+  const w = readW();
+  const q = quantizeGroup(w);
+  drawTable(q, w);
+  drawBars(q, w);
+  drawParams(q, w);
+  drawBits(q);
+  drawMatmul();
+  drawSign();
+}
+
+/* ===== gold-value check vs quantization.py Section C/D =====
+   default hero row -> scale 0.2, bias -1.8, packed 0xE3A5F7C0 = 3819304896 */
+function goldCheck(){
+  const q = quantizeGroup(DEFAULT_W);
+  const packed = packInt4(q.wInt);
+  const goldPacked = 3819304896;
+  const goldWInt = [0, 12, 7, 15, 5, 10, 3, 14];
+  const goldDeq = [-1.8, 0.6, -0.4, 1.2, -0.8, 0.2, -1.2, 1.0];
+  const jsDeq = q.wInt.map(wi => dequant(q.scale, q.bias, wi));
+  const packedOk = packed === goldPacked;
+  const wIntOk = q.wInt.every((v, i) => v === goldWInt[i]);
+  const deqOk = jsDeq.every((v, i) => Math.abs(v - goldDeq[i]) < 1e-3);
+  const scaleOk = Math.abs(q.scale - 0.2) < 1e-4 && Math.abs(q.bias - (-1.8)) < 1e-4;
+  const ok = packedOk && wIntOk && deqOk && scaleOk;
+  const chk = document.getElementById('check');
+  chk.textContent = ok
+    ? 'check: OK — JS matches quantization.py (packed 0xE3A5F7C0, dequant [-1.8,0.6,-0.4,1.2,-0.8,0.2,-1.2,1.0])'
+    : 'check: FAIL — mismatch! (packed=' + hex32(packed) + ')';
+  chk.style.borderColor = ok ? '#27ae60' : '#c0392b';
+  chk.style.color = ok ? '#27ae60' : '#c0392b';
+  chk.style.background = ok ? '#1c3a25' : '#3a1414';
+}
+
+window.addEventListener('resize', render);
+render();
+goldCheck();
+</script>
+</body>
+</html>

@@ -1,0 +1,177 @@
+flash_attention.py - reference implementation.
+Numbers below feed FLASH_ATTENTION.md.  torch = 2.12.1
+
+========================================================================
+  SECTION A: NAIVE attention MATERIALIZES [N,N] in HBM
+========================================================================
+N = 8, d = 8, scale = 1/sqrt(d) = 0.3536
+Materialized score matrix S = Q @ K^T * scale, shape (8, 8)
+
+S (the [N,N] matrix that naive attention writes to HBM):
+
+| q\k | k=0 | k=1 | k=2 | k=3 | k=4 | k=5 | k=6 | k=7 |
+|---|---|---|---|---|---|---|---|---|
+| q=0 | -0.1160 | +0.0909 | -0.0998 | -0.4400 | -0.3969 | +0.0736 | +0.4049 | -0.1240 |
+| q=1 | +0.1595 | +0.0673 | -0.0434 | -0.4481 | -0.0200 | +0.0276 | +0.2197 | +0.2710 |
+| q=2 | -0.2861 | +0.1418 | -0.0041 | -0.2182 | +0.2089 | -0.0232 | +0.4081 | +0.2560 |
+| q=3 | +0.0296 | -0.1254 | +0.0781 | -0.4158 | -0.4133 | +0.0830 | +0.2035 | +0.0956 |
+| q=4 | -0.0327 | +0.0913 | +0.1463 | +0.0832 | -0.2202 | -0.0010 | -0.0073 | +0.0617 |
+| q=5 | +0.5159 | +0.0707 | -0.1574 | -0.1376 | -0.5931 | -0.1283 | +0.0715 | -0.1468 |
+| q=6 | +0.1365 | -0.0496 | +0.0134 | +0.0490 | -0.0689 | +0.1214 | -0.2589 | +0.1266 |
+| q=7 | +0.4462 | -0.2285 | +0.0145 | +0.1127 | +0.5438 | +0.3833 | -0.4868 | +0.0673 |
+
+HBM traffic estimate for naive attention (per head, per layer):
+  S written once  : N*N floats = 64 elements = 256 bytes
+  softmax reads S : N*N = 64
+  softmax writes P: N*N = 64
+  out = P @ V     : reads N*N + N*d
+  => leading term ~4*N^2 = 256 floats for the score matrix alone
+
+Scaling to N=8192, d=64 (4-byte float):
+  N*N*4 bytes = 268435456 bytes = 256 MiB per head per layer
+  -> read+written at every one of (layers * heads) calls. Catastrophic.
+
+Naive output (out = softmax(S) @ V), shape (8, 8):
+
+  q=0: [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+  q=1: [-0.0869, -0.1722, -0.1426, +0.0429, +0.1965, -0.1631, +0.1951, -0.1364]
+  q=2: [-0.0483, -0.1822, -0.1586, +0.0177, +0.1988, -0.1705, +0.1755, -0.0755]
+  q=3: [-0.0909, -0.1532, -0.1658, +0.0661, +0.1783, -0.1459, +0.1959, -0.1446]
+  q=4: [-0.0699, -0.1647, -0.1881, +0.0550, +0.1415, -0.1415, +0.1624, -0.1159]
+  q=5: [-0.1143, -0.1606, -0.2405, +0.0533, +0.1633, -0.1072, +0.2689, -0.1515]
+  q=6: [-0.0709, -0.1749, -0.1611, +0.0700, +0.1426, -0.1509, +0.1702, -0.1519]
+  q=7: [-0.0292, -0.1977, -0.1412, +0.0884, +0.1608, -0.1492, +0.2218, -0.1576]
+
+========================================================================
+  SECTION B: standard softmax NEEDS the full row -> streaming is non-obvious
+========================================================================
+Standard (safe) softmax for ONE row needs the global max FIRST:
+
+    m     = max(row)          # must see EVERY element first
+    probs = exp(x - m) / sum(exp(x - m))
+
+If we only hold tile j=0 of the row, its local max is NOT the global
+max. As later tiles reveal larger values, every earlier exp() term was
+computed with the WRONG denominator. Naively this forces materializing
+the whole row -> the [N,N] matrix -> back to square one.
+
+Example: row q=0 of S from Section A. The two K/V tiles (Bc=4):
+
+| tile | keys  | local rowmax | global max so far |
+|------|-------|--------------|-------------------|
+| j=0   | [0, 1, 2, 3] | +0.0909       | +0.0909            |
+| j=1   | [4, 5, 6, 7] | +0.4049       | +0.4049            |
+
+Tile j=1 raises the max from +0.0909 to +0.4049. Any exp() accumulated
+in tile j=0 is now off by a factor of exp(0.0909 - 0.4049). The online
+softmax recurrence (Section C) fixes this WITHOUT keeping the row.
+
+========================================================================
+  SECTION C: ONLINE SOFTMAX on ONE query row (q=0), tile by tile
+========================================================================
+Tracing query row q=0 (one Q-tile Br=N=8) through K/V tiles of size Bc=4 (Tc=2 tiles).
+
+Accumulators start empty: m_old = -inf, l_old = 0, o_old = 0 vector.
+
+  --- K/V tile j=0 (keys [0, 1, 2, 3]) ---
+     scores s        = [-0.1160, +0.0909, -0.0998, -0.4400]
+     rowmax(s)       = +0.0909
+     m_old           = -inf
+     m_new           = max(m_old, rowmax) = +0.0909
+     correction      = exp(m_old - m_new) = 0.0000   <-- rescales ALL prior accumulators
+     p = exp(s-m_new)= [0.8131, 1.0000, 0.8264, 0.5881]
+     l_new           = correction*l_old + sum(p) = 0.0000*0.0000 + 3.2277 = +3.2277
+     o_new           = correction*o_old + p@v_tile =
+                       [-0.4464, -0.2905, -1.0848, +0.1282, +0.1119, -0.0819, +0.6012, -0.2488]
+     (m,l,o) after   = m=+0.0909, l=+3.2277
+  --- K/V tile j=1 (keys [4, 5, 6, 7]) ---
+     scores s        = [-0.3969, +0.0736, +0.4049, -0.1240]
+     rowmax(s)       = +0.4049
+     m_old           = +0.0909
+     m_new           = max(m_old, rowmax) = +0.4049
+     correction      = exp(m_old - m_new) = +0.7305   <-- rescales ALL prior accumulators
+     p = exp(s-m_new)= [0.4485, 0.7180, 1.0000, 0.5893]
+     l_new           = correction*l_old + sum(p) = +0.7305*3.2277 + 2.7558 = +5.1135
+     o_new           = correction*o_old + p@v_tile =
+                       [-0.3441, -0.7496, -1.1122, +0.1029, +0.9256, -0.7843, +1.1381, -0.5088]
+     (m,l,o) after   = m=+0.4049, l=+5.1135
+
+Cross-check (the tiled recurrence must equal this one-shot result):
+  global m  = +0.4049
+  global l  = +5.1135
+  out = o/l = [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+
+========================================================================
+  SECTION D: FULL tiled FlashAttention  Br=Bc=4  on [8,8]
+========================================================================
+N=8, d=8, Br=4, Bc=4  ->  Tr=2 Q-tiles, Tc=2 K/V-tiles
+Each Q-tile streams through BOTH K/V tiles, updating (m,l,o).
+
+Tiled output (out = o / l after the last tile):
+
+  q=0: [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+  q=1: [-0.0869, -0.1722, -0.1426, +0.0429, +0.1965, -0.1631, +0.1951, -0.1364]
+  q=2: [-0.0483, -0.1822, -0.1586, +0.0177, +0.1988, -0.1705, +0.1755, -0.0755]
+  q=3: [-0.0909, -0.1532, -0.1658, +0.0661, +0.1783, -0.1459, +0.1959, -0.1446]
+  q=4: [-0.0699, -0.1647, -0.1881, +0.0550, +0.1415, -0.1415, +0.1624, -0.1159]
+  q=5: [-0.1143, -0.1606, -0.2405, +0.0533, +0.1633, -0.1072, +0.2689, -0.1515]
+  q=6: [-0.0709, -0.1749, -0.1611, +0.0700, +0.1426, -0.1509, +0.1702, -0.1519]
+  q=7: [-0.0292, -0.1977, -0.1412, +0.0884, +0.1608, -0.1492, +0.2218, -0.1576]
+
+[check] max|tiled - naive| = 2.98e-08
+[check] FlashAttention == naive attention (atol=1e-5):  OK  (EXACT, not approximate)
+
+========================================================================
+  SECTION E: per-Q-tile, per-KV-tile (m,l,o) trace for Q-tile i=0
+========================================================================
+Outer loop: Q-tile i=0 (rows q=0..3). Inner loop: K/V tiles j=0..1.
+
+For brevity we print the running max m, normalizer l, and the max
+abs entry of the running output o, AFTER each K/V tile, for each of
+the 4 query rows in Q-tile i=0. Watch m step up and l rescale.
+
+| step | q=0: m / l / |o|max | q=1: m / l / |o|max | q=2: m / l / |o|max | q=3: m / l / |o|max |
+|---|---|---|---|---|
+| j=0   | +0.091/3.228/1.085 | +0.159/3.273/1.093 | +0.142/3.214/1.120 | +0.078/3.379/1.086 |
+| j=1   | +0.405/5.113/1.138 | +0.271/6.409/1.260 | +0.408/5.790/1.151 | +0.204/6.304/1.235 |
+
+Reading the table: at tile j=1, q=0's m jumps +0.091 -> +0.405. The
+prior l and o got multiplied by exp(0.091-0.405)=0.731 before the new
+tile's contributions were added. THAT correction is the whole trick.
+
+========================================================================
+  SECTION F: EQUIVALENCE  tiled == naive  (and the rescaling PITFALL)
+========================================================================
+Run the CORRECT tiled algorithm and a BROKEN one that omits the
+exp(m_old - m_new) rescaling of prior accumulators.
+
+| variant              | max|out - naive| | verdict |
+|----------------------|-------------------|---------|
+| tiled (correct)      | 2.98e-08            | OK      |
+| tiled (no rescaling) | 2.18e-02            | WRONG   |
+
+[check] tiled == naive (atol=1e-5):  OK   (diff=2.98e-08)
+[check] broken diverges:             OK   (diff=2.18e-02 >> 1e-5)
+
+Why the broken one fails: when a later tile raises m, every earlier
+exp(s - m_old) term was computed with a smaller m. They are too large
+by exp(m_old - m_new). Skipping the correction leaves l and o on the
+wrong scale -> output is silently wrong (or NaN if m_old=-inf leaked).
+
+========================================================================
+  GOLD PIN (for FLASH_ATTENTION.md + flash_attention.html)
+========================================================================
+Pinned tiled output for N=8, d=8, seed=0, Br=Bc=4 (MUST equal naive):
+
+  q=0: [-0.0673, -0.1466, -0.2175, +0.0201, +0.1810, -0.1534, +0.2226, -0.0995]
+  q=1: [-0.0869, -0.1722, -0.1426, +0.0429, +0.1965, -0.1631, +0.1951, -0.1364]
+  q=2: [-0.0483, -0.1822, -0.1586, +0.0177, +0.1988, -0.1705, +0.1755, -0.0755]
+  q=3: [-0.0909, -0.1532, -0.1658, +0.0661, +0.1783, -0.1459, +0.1959, -0.1446]
+  q=4: [-0.0699, -0.1647, -0.1881, +0.0550, +0.1415, -0.1415, +0.1624, -0.1159]
+  q=5: [-0.1143, -0.1606, -0.2405, +0.0533, +0.1633, -0.1072, +0.2689, -0.1515]
+  q=6: [-0.0709, -0.1749, -0.1611, +0.0700, +0.1426, -0.1509, +0.1702, -0.1519]
+  q=7: [-0.0292, -0.1977, -0.1412, +0.0884, +0.1608, -0.1492, +0.2218, -0.1576]
+
+========================================================================
+  DONE - all sections printed, all [check] OK
+========================================================================

@@ -1,0 +1,121 @@
+absolute_pe.py - reference impl. Numbers below feed ABSOLUTE_PE.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: frequencies  div_term = base^(2i/E)  (identical roots as RoPE theta)
+========================================================================
+E = 8,  E/2 = 4,  base = 10000
+
+| i | 2i/E | div_term = base^(2i/E) | freq = 1/div_term | = RoPE's theta_j? |
+|---|------|------------------------|-------------------|------------------|
+| 0 | 0.00 | 1.0000                 | 1.000000          | YES (identical) |
+| 1 | 0.25 | 10.0000                | 0.100000          | YES (identical) |
+| 2 | 0.50 | 100.0000               | 0.010000          | YES (identical) |
+| 3 | 0.75 | 1000.0000              | 0.001000          | YES (identical) |
+
+Takeaway: the SAME frequency ladder [1, 0.1, 0.01, 0.001] powers both
+families. Difference: sinusoidal ADDS sin/cos VALUES; RoPE uses them
+as ROTATION ANGLES.
+
+========================================================================
+  SECTION B: the sinusoidal PE table  [L, E]
+========================================================================
+Shape: (64, 8) = [seq_len=64, E=8]
+(First L=4 rows. Even dims = sin, odd dims = cos.)
+
+| m | d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 |
+|---|---|---|---|---|---|---|---|---|
+| 0 | +0.0000 | +1.0000 | +0.0000 | +1.0000 | +0.0000 | +1.0000 | +0.0000 | +1.0000 |
+| 1 | +0.8415 | +0.5403 | +0.0998 | +0.9950 | +0.0100 | +0.9999 | +0.0010 | +1.0000 |
+| 2 | +0.9093 | -0.4161 | +0.1987 | +0.9801 | +0.0200 | +0.9998 | +0.0020 | +1.0000 |
+| 3 | +0.1411 | -0.9900 | +0.2955 | +0.9553 | +0.0300 | +0.9996 | +0.0030 | +1.0000 |
+
+Observations:
+ - row m=0: sin(0)=0 on even dims, cos(0)=+1 on odd dims
+ - high-freq dims (d0,d1) wiggle a lot as m grows
+ - low-freq dims (d6,d7) barely change (smooth global signal)
+
+========================================================================
+  SECTION C: ADD PE to token embeddings  (the operation)
+========================================================================
+Input shape: (1, 4, 8) = [B=1, L=4, E=8]
+Token embedding (content identical across positions, so we can see PE):
+
+  m=0: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+  m=1: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+  m=2: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+  m=3: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+After x = x + PE[m]:
+
+  m=0: [0.1, 1.2, 0.3, 1.4, 0.5, 1.6, 0.7, 1.8]
+  m=1: [0.9415, 0.7403, 0.3998, 1.395, 0.51, 1.6, 0.701, 1.8]
+  m=2: [1.0093, -0.2161, 0.4987, 1.3801, 0.52, 1.5998, 0.702, 1.8]
+  m=3: [0.2411, -0.79, 0.5955, 1.3553, 0.53, 1.5996, 0.703, 1.8]
+
+Notice: position 0 had sin=0,cos=1 added, so it shifts most on the odd
+(cos) dims. Each row now CARRIES its absolute position as part of the
+vector - the dot product Q.K will 'feel' m and n directly.
+
+========================================================================
+  SECTION D: LEARNED PE (nanoGPT wpe) - a lookup table, no formula
+========================================================================
+wpe table shape: (32, 8) = [max_len, E]
+(seeded randn*0.02; in real training these are learned by SGD)
+
+First L=4 rows of wpe:
+
+| m | d0 | d1 | d2 | d3 | d4 | d5 | d6 | d7 |
+|---|---|---|---|---|---|---|---|---|
+| 0 | -0.0225 | -0.0230 | -0.0050 | -0.0087 | +0.0170 | +0.0138 | -0.0063 | -0.0423 |
+| 1 | +0.0064 | -0.0253 | +0.0070 | +0.0062 | +0.0024 | +0.0248 | +0.0223 | -0.0049 |
+| 2 | -0.0271 | -0.0339 | +0.0113 | +0.0159 | +0.0120 | -0.0311 | -0.0068 | +0.0371 |
+| 3 | +0.0150 | -0.0117 | -0.0035 | +0.0037 | +0.0278 | +0.0317 | +0.0189 | -0.0169 |
+
+There is no sin/cos pattern - these are arbitrary learned numbers.
+nanoGPT builds this as  wpe = nn.Embedding(block_size, n_embd)  and
+indexes it by position at the input, right after the token embedding.
+
+========================================================================
+  SECTION E: ABSOLUTE vs RELATIVE - the proof (contrast RoPE Section H)
+========================================================================
+Same fixed raw Q,K as RoPE's proof, but we ADD sinusoidal PE instead of
+rotating. Claim: the Q.K score depends on BOTH m_q and m_k SEPARATELY,
+NOT only on (m_q - m_k).
+
+| m_q | m_k | relative = m_q-m_k |   Q.K score   |
+|-----|-----|-------------------|---------------|
+| 2   | 1   | 1                 | +7.055621 |
+| 5   | 4   | 1                 | +4.901406 |
+| 10  | 9   | 1                 | +7.261821 |
+| 2   | 0   | 2                 | +5.189337 |
+| 5   | 3   | 2                 | +4.768941 |
+| 10  | 8   | 2                 | +6.810799 |
+
+distance=1 scores: ['+7.0556', '+4.9014', '+7.2618']  -> NOT equal
+distance=2 scores: ['+5.1893', '+4.7689', '+6.8108']  -> NOT equal
+
+CONTRAST with RoPE (ROPE.md Section H): there, distance=1 always gave
++0.514498 and distance=2 always gave +0.285792 - identical regardless
+of absolute position. Here they all DIFFER. Adding a position vector
+cannot make absolute positions cancel in the dot product; only the
+rotation trick can.
+
+========================================================================
+  SECTION F: EXTRapolation beyond training length
+========================================================================
+What happens at a position the model never saw?
+
+SINUSOIDAL: smooth function of m -> just keep evaluating it.
+LEARNED wpe: the table only has `max_len` rows.
+  wpe has shape (32, 8) -> rows 0..31
+  Position m=200 -> INDEX ERROR / no row. Out-of-range.
+  This is why GPT-2/nanoGPT hard-cap context at block_size.
+
+LENGTH GENERALIZATION: absolute (esp. learned) is weak here. RoPE +
+YaRN/NTK-aware scaling generalize to longer contexts far more
+gracefully. (Modern LLMs chose RoPE largely for this reason.)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

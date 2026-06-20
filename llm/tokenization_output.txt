@@ -1,0 +1,188 @@
+tokenization.py - reference impl. All numbers below feed TOKENIZATION.md.
+Pure Python (no torch, no third-party tokenizer libs).
+GPT-2 pre-tok regex (verbatim, openai/gpt-2 src/encoder.py):
+  's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+
+
+========================================================================
+  SECTION A: the 4-stage tokenizer pipeline on a sample sentence
+========================================================================
+Raw text        : "Hello, world! It's 2024."
+
+Stage 1 - NORMALIZATION
+  GPT-2/GPT-4 do NONE (raw bytes). BERT: NFD + lowercase + strip
+  accents. SentencePiece default: NFKC. Here we show GPT-2 -> identity.
+  normalized     : "Hello, world! It's 2024."   (unchanged)
+
+Stage 2 - PRE-TOKENIZATION (GPT-2 regex, ASCII approximation)
+  pattern        : 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+  pre-tokens     : ['Hello', ',', ' world', '!', ' It', "'s", ' 2024', '.']
+
+Stage 3 - MODEL (BPE merges applied per pre-token; see Section B/C)
+  each pre-token is byte-encoded then greedily merged by learned rank
+
+Stage 4 - POST-PROCESSOR (append template / special tokens)
+  e.g. GPT-2 appends '<|endoftext|>'; Qwen3 wraps '<|im_start|>...<|im_end|>'
+  final          : ['Hello', ',', ' world', '!', ' It', "'s", ' 2024', '.'] + ['<|endoftext|>']   -> int IDs
+
+[check] pipeline runs end-to-end on sample: OK
+
+========================================================================
+  SECTION B: BPE TRAINING on the fixed gold corpus - every merge step
+========================================================================
+Corpus lines (pre-tokenized by whitespace):
+    'low low low low low'
+    'lower lower newest newest newest'
+    'newest widest widest'
+
+Word frequencies (pre-tokens, weighted):
+| word    | freq |
+|---------|------|
+| low     |    5 |
+| lower   |    2 |
+| newest  |    4 |
+| widest  |    2 |
+
+Initial base vocabulary (sorted unique chars):
+    ['d', 'e', 'i', 'l', 'n', 'o', 'r', 's', 't', 'w']   (size 10)
+
+Merge sequence (tie-break: highest count, then earliest first-seen):
+| rank | pair          | -> new token | count | vocab size |
+|------|---------------|--------------|-------|------------|
+|    0 | ('l', 'o')        | lo           |     7 |         11 |
+|    1 | ('lo', 'w')        | low          |     7 |         12 |
+|    2 | ('e', 's')        | es           |     6 |         13 |
+|    3 | ('es', 't')        | est          |     6 |         14 |
+|    4 | ('n', 'e')        | ne           |     4 |         15 |
+|    5 | ('ne', 'w')        | new          |     4 |         16 |
+|    6 | ('new', 'est')        | newest       |     4 |         17 |
+|    7 | ('low', 'e')        | lowe         |     2 |         18 |
+|    8 | ('lowe', 'r')        | lower        |     2 |         19 |
+|    9 | ('w', 'i')        | wi           |     2 |         20 |
+|   10 | ('wi', 'd')        | wid          |     2 |         21 |
+|   11 | ('wid', 'est')        | widest       |     2 |         22 |
+
+Final vocabulary (base chars ++ merges), in insertion order:
+    ['d', 'e', 'i', 'l', 'n', 'o', 'r', 's', 't', 'w', 'lo', 'low', 'es', 'est', 'ne', 'new', 'newest', 'lowe', 'lower', 'wi', 'wid', 'widest']
+    vocab size = 22
+
+========================================================================
+  SECTION C: BPE ENCODING of new words -> token IDs (greedy by merge rank)
+========================================================================
+Encoding rule: split word to chars, repeatedly merge the adjacent
+pair with the LOWEST learned rank (all occurrences per pass) [GPT-2 bpe()].
+
+| word    | char split               | BPE pieces        | token IDs      |
+|---------|--------------------------|-------------------|----------------|
+| lowest  | ['l', 'o', 'w', 'e', 's', 't'] | ['low', 'est']    | [11, 13]       |
+| newer   | ['n', 'e', 'w', 'e', 'r'] | ['new', 'e', 'r'] | [15, 1, 6]     |
+| low     | ['l', 'o', 'w']          | ['low']           | [11]           |
+| newest  | ['n', 'e', 'w', 'e', 's', 't'] | ['newest']        | [16]           |
+| widest  | ['w', 'i', 'd', 'e', 's', 't'] | ['widest']        | [21]           |
+| xyz     | ['x', 'y', 'z']          | ['x', 'y', 'z']   | [UNK] (byte-fallback in real GPT-2) |
+
+[check] merge sequence matches pinned gold (12 merges): OK
+[check] encode "lowest" -> [low, est] -> IDs [11, 13]: OK
+[check] encode "newer"  -> [new, e, r]  -> IDs [15, 1, 6]: OK
+[check] every training word encodes to a single token: OK
+
+========================================================================
+  SECTION D: WORDPIECE contrast (BERT) - greedy LONGEST-match + ## prefix
+========================================================================
+WordPiece [Schuster & Nakajima 2012; BERT] does NOT use merge ranks.
+It greedily grabs the LONGEST vocabulary prefix at each step; the first
+piece is bare, continuations get the `##` prefix; a miss yields [UNK].
+
+WordPiece vocab (excerpt, 32 entries): ['low','new','est','er','##est','##er','##e','##r', ...]
+
+| word    | BPE pieces (Sec C)   | WordPiece pieces     | difference            |
+|---------|----------------------|----------------------|-----------------------|
+| lowest  | ['low', 'est']       | ['low', '##est']     | same split, but uses ## continuation prefix |
+| newer   | ['new', 'e', 'r']    | ['new', '##er']      | WordPiece grabs '##er' (longest match) |
+
+CONTRAST: BPE encoded 'newer' as [new, e, r] (no 'er' merge was ever
+learned, rank-greedy stops there). WordPiece's longest-match finds '##er'
+directly in the dictionary. Different ALGORITHM -> different segmentation.
+
+wordpiece('xyz') = ['[UNK]']   (first char 'x' absent -> [UNK]; byte-level BPE/GPT-2 would NEVER produce [UNK]).
+
+[check] WordPiece 'lowest'->['low','##est'], 'newer'->['new','##er']: OK
+
+========================================================================
+  SECTION E: SENTENCEPIECE - raw stream, space -> U+2581 ▁, NO pre-split
+========================================================================
+SentencePiece [Kudo & Richardson 2018, arXiv:1808.06226] trains the
+subword model directly on the RAW byte/char stream. Spaces are not
+separators to be discarded; they are escaped to the meta-symbol
+ '▁' (U+2581) and treated as a normal character. This is why it
+is LANGUAGE INDEPENDENT and works for CJK (which has no word spaces).
+
+raw text   : 'low low new new'
+SP stream  : 'low▁low▁new▁new'     (spaces -> '▁')
+char stream: ['l', 'o', 'w', '▁', 'l', 'o', 'w', '▁', 'n', 'e', 'w', '▁', 'n', 'e', 'w']
+
+BPE trained on the stream (1 unit, no pre-tokenization):
+| rank | pair                  | -> new token | count |
+|------|-----------------------|--------------|-------|
+|    0 | ('w', '▁')             | 'w▁'         |     3 |  <- space-trailing token
+|    1 | ('l', 'o')             | 'lo'         |     2 |
+|    2 | ('lo', 'w▁')             | 'low▁'       |     2 |  <- space-trailing token
+|    3 | ('n', 'e')             | 'ne'         |     2 |
+|    4 | ('low▁', 'low▁')             | 'low▁low▁'   |     1 |  <- space is INSIDE the token (crosses a former word boundary)
+|    5 | ('low▁low▁', 'ne')             | 'low▁low▁ne' |     1 |  <- space is INSIDE the token (crosses a former word boundary)
+|    6 | ('low▁low▁ne', 'w▁')             | 'low▁low▁new▁' |     1 |  <- space is INSIDE the token (crosses a former word boundary)
+|    7 | ('low▁low▁new▁', 'ne')             | 'low▁low▁new▁ne' |     1 |  <- space is INSIDE the token (crosses a former word boundary)
+
+KEY POINT: because there is no pre-tokenization, merges can GLUE a
+word-final character to the following space (and beyond). Real
+SentencePiece vocabularies are full of space-leading tokens like
+ '▁'+word (e.g. ▁the) and a few cross-boundary ones.
+
+Detokenization is lossless:  ''.join(pieces).replace('▁',' ')
+  -> round-trips the original text exactly (no lost spaces).
+
+CJK demo: '你好世界'
+  as a char stream : ['你', '好', '世', '界']  (4 chars)
+  as UTF-8 bytes   : [228, 189, 160, 229, 165, 189, 228, 184, 150, 231, 149, 140]  (12 bytes)
+  A whitespace pre-tokenizer would see the WHOLE sentence as ONE
+  'word' (no spaces to split on) -> useless. SentencePiece streams it
+  and byte-fallback (3 bytes/CJK char) keeps it tokenizable. This is
+  why Llama / Qwen / ALBERT ship SentencePiece-style tokenizers.
+
+[check] SP stream round-trips via ▁->space replace: OK
+
+========================================================================
+  SECTION F: NORMALIZATION - NFD / NFKC (who does what)
+========================================================================
+Unicode normalization is Stage 1 of the pipeline. Two forms matter:
+
+  NFD  = canonical Decomposition (split precomposed chars)
+  NFKC = Compatibility + Canonical Composition (fold ligatures etc.)
+
+Example 1 - accented letter (NFC precomposed vs NFD decomposed):
+  NFC  'caf\u00e9'  : 'café'  cps ['U+0063', 'U+0061', 'U+0066', 'U+00E9']
+  NFD              : 'café'  cps ['U+0063', 'U+0061', 'U+0066', 'U+0065', 'U+0301']
+  -> NFD splits U+00E9 'é' into 'e' (U+0065) + combining acute (U+0301).
+
+Example 2 - compatibility folding (NFKC; this is NOT done by NFD/NFC):
+  ligature '\ufb01'  : 'ﬁ'        cps ['U+FB01']
+  NFKC             : 'fi'        cps ['U+0066', 'U+0069']
+  -> NFKC unfolds the ﬁ ligature into 'f' + 'i'.
+
+Example 3 - NFKC on a fraction:
+  '\u00bd'         : '½'    cps ['U+00BD']
+  NFKC             : '1⁄2'   cps ['U+0031', 'U+2044', 'U+0032']
+  -> ½ becomes '1⁄2' (digit, fraction slash, digit).
+
+WHO NORMALIZES (web-verified):
+  GPT-2 / GPT-4 (tiktoken) : NONE - operates on raw bytes.
+  BERT                      : NFD + lowercase + strip combining marks
+                              (its BasicTokenizer), then WordPiece.
+  SentencePiece (default)   : NFKC ('nmt_nfkc' normalization spec).
+
+[check] NFD of 'café' = c,a,f,e,U+0301: OK
+[check] NFKC of 'ﬁ' = f,i: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

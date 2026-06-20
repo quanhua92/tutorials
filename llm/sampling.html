@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sampling — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --fast:#f1948a; --slow:#85c1e9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:220px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  canvas{width:100%;height:auto;display:block;background:#0a0e14;border-radius:8px;border:1px solid #30363d}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat tr.keep td{background:#1c3a25;color:#7ee29b;font-weight:700}
+  table.heat tr.mask td{color:var(--muted);opacity:.6}
+  table.heat tr.draw td{background:#3a2f12;color:#ffd966;font-weight:800}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .r{color:var(--red)}
+  .readout .o{color:var(--orange)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 14px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  .presets{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.5rem}
+  .presets button{padding:3px 10px;font-size:.74rem}
+</style>
+</head>
+<body>
+  <h1>Sampling Strategies — interactive
+    <a class="badge" href="./SAMPLING.md">SAMPLING.md</a>
+    <a class="badge" href="./sampling.py">sampling.py</a></h1>
+  <div class="sub">Drag <b style="color:var(--green)">temp / top-k / top-p</b> and watch the kept
+    <b style="color:var(--green)">nucleus (green)</b> vs the masked tail
+    <b style="color:var(--red)">(red)</b>. Every number is recomputed in JS from the <i>identical</i>
+    formula in <code>sampling.py</code>.
+    &nbsp;|&nbsp; <a href="./rope.html">← RoPE</a> &nbsp; <a href="./absolute_pe.html">absolute PE →</a></div>
+
+  <!-- ===== INTUITION + GLOSSARY ===== -->
+  <div class="panel">
+    <b>The big idea (no code needed):</b> picking the next word is like
+    <b>rolling a loaded die</b> — one face per possible word. The model gives
+    every face a score (<b>logit</b>); we convert scores into odds that sum to 1
+    (<b>softmax</b>), then we either always take the top face
+    (<b style="color:var(--red)">greedy</b>), flatten/sharpen the die
+    (<b style="color:#f1c40f">temperature</b>), or blank out faces before rolling
+    (<b style="color:var(--green)">top-k / top-p</b>).
+    <div class="legend" style="margin-top:.6rem">
+      <span><b>logit</b> = a raw score for a word (bigger = liked more)</span>
+      <span><b>softmax</b> = scores → probabilities that sum to 1</span>
+      <span><b>prob</b> = a share of the total, in [0,1]</span>
+    </div>
+    <div class="legend" style="margin-top:.3rem">
+      <span><b>temperature T</b> = how flat the die is (high = flatter/random)</span>
+      <span><b>top-k</b> = keep k best faces, blank the rest</span>
+      <span><b>top-p (nucleus)</b> = keep the smallest set covering p of the mass</span>
+      <span><b>cumsum</b> = running total of the <u>probabilities</u></span>
+    </div>
+  </div>
+
+  <!-- ===== GLOBAL CONTROLS ===== -->
+  <div class="panel">
+    <div class="controls">
+      <label>temperature T
+        <input type="range" id="temp" min="0.1" max="2.0" value="1.0" step="0.05">
+        <span class="val" id="tempVal">1.00</span></label>
+      <label>top-k
+        <input type="range" id="topk" min="0" max="8" value="0" step="1">
+        <span class="val" id="topkVal">0</span></label>
+      <label>top-p
+        <input type="range" id="topp" min="0" max="1" value="1.0" step="0.05">
+        <span class="val" id="toppVal">1.00</span></label>
+    </div>
+    <div class="presets">
+      <button data-t="0" data-k="0" data-p="1">greedy (T=0)</button>
+      <button data-t="1" data-k="0" data-p="1">pure (T=1)</button>
+      <button data-t="1" data-k="3" data-p="1">top-k=3</button>
+      <button data-t="1" data-k="0" data-p="0.6">top-p=0.6</button>
+      <button data-t="0.7" data-k="3" data-p="0.6">prod (T=.7,k=3,p=.6)</button>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>Quick start:</b> click a preset, then watch panel ①.
+      <b>top-k=0</b> / <b>top-p=1.0</b> mean "no filtering" (off). Fixed 8-token vocab,
+      logits = [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2] (same as <code>sampling.py</code>).</div>
+  </div>
+
+  <!-- ===== PANEL 1: DISTRIBUTION BARS ===== -->
+  <h2>① The distribution after filtering — green = kept, red = masked to −inf</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.5rem"><b>Bars = each word's probability.</b>
+      Drag <b>top-p</b> and watch the green nucleus shrink/grow; red bars are masked out.
+      Drag <b>temperature</b> to sharpen/flatten. The grey ghost bars show the raw
+      odds with no filter. Click <b>draw</b> in panel ③ to see which word is picked.</div>
+    <canvas id="bars" width="1100" height="280"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>kept (in nucleus / top-k)</span>
+      <span><i class="sw" style="background:var(--red)"></i>masked to −inf (prob → 0)</span>
+      <span><i class="sw" style="background:var(--orange)"></i>last draw (seeded)</span>
+      <span><i class="sw" style="background:#3d4452"></i>raw prob (no filter, T=1) for reference</span>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 2: NUCLEUS TABLE ===== -->
+  <h2>② The top-p nucleus, sorted — cumsum on PROBABILITIES (not logprobs!)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.5rem"><b>Words sorted most-likely first.</b>
+      The <b>cumsum</b> column is a running total of the <u>probabilities</u>. We keep every
+      word while the total is still under <b>top-p</b> (green), and we <u>always</u> keep the #1
+      word so the nucleus is never empty. This table is exactly what
+      <code>sampling.py</code> Section E prints.</div>
+    <table class="heat" id="nucTable"></table>
+    <div class="micro" style="margin-top:.5rem"><b>The #1 bug:</b> if you cumsum the raw scores
+      (logprobs) instead of the probabilities, the total stays negative and <i>every</i> word is
+      kept — silent garbage. <a href="./SAMPLING.md#8-the-pitfall-cumsum-on-logprobs-not-probs--section-f-output">Why cumsum must be on probs →</a></div>
+  </div>
+
+  <!-- ===== PANEL 3: SAMPLE ===== -->
+  <h2>③ The only random step — seeded categorical draw</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.5rem">Filtering (panels ①②) is fully deterministic. This
+      is the <b>only</b> roll of the die. Fix the <b>seed</b> and you get the same word every time;
+      change the seed and you get a different word — always inside the green nucleus.</div>
+    <div class="controls">
+      <label>seed
+        <input type="range" id="seed" min="0" max="20" value="0" step="1">
+        <span class="val" id="seedVal">0</span></label>
+      <button id="draw">🎲 draw 1 token</button>
+      <button id="draw20">draw 20×</button>
+    </div>
+    <div class="readout" id="sampleOut">— press "draw" —</div>
+    <div class="micro" style="margin-top:.5rem">Same seed + same config ⇒ always the same token
+      (Python uses <code>torch.manual_seed</code>; this page uses a seeded LCG that mimics it).</div>
+  </div>
+
+  <!-- ===== PANEL 4: GOLD CHECK ===== -->
+  <h2>④ Gold-check vs sampling.py (deterministic, no RNG)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.5rem">This page recomputes the three frozen
+      <b>gold</b> values printed by <code>sampling.py</code>'s GOLD section and checks they match.
+      If you ever see <b style="color:var(--red)">FAIL</b>, the JS formula drifted from the Python.</div>
+    <div class="readout" id="gold"></div>
+    <div class="micro" style="margin-top:.5rem">Gold: greedy=5, top-k=3→[0,1,5], top-p=0.6→[0,5].
+      <a href="./SAMPLING.md#12-cheat-sheet">Cheat sheet →</a></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS top-k/top-p match sampling.py gold.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth, copied verbatim from sampling.py ===== */
+const LOGITS = [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2];
+const TOKENS = ["the","cat","xyz","sat","qqq","on","a","mat"];
+const V = LOGITS.length;
+
+/* log_softmax(z) = z - logsumexp(z)   (numerically stable) */
+function logsumexp(z){
+  let m = Math.max(...z);
+  return m + Math.log(z.reduce((s,v)=>s+Math.exp(v-m),0));
+}
+function logSoftmax(z){ const lse=logsumexp(z); return z.map(v=>v-lse); }
+function softmax(z){ return logSoftmax(z).map(Math.exp); }
+
+/* temperature: softmax(z / T) */
+function tempSoftmax(z,T){ return softmax(z.map(v=>v/T)); }
+
+/* top-k mask: keep k highest, rest -inf  -> returns {logits, keptIdxSet} */
+function topkMask(z,k){
+  if(k<=0 || k>=z.length) return {logits:z.slice(), kept:new Set(z.map((_,i)=>i))};
+  const idx = z.map((v,i)=>({v,i})).sort((a,b)=>b.v-a.v).slice(0,k).map(o=>o.i);
+  const kept = new Set(idx);
+  const out = z.map((v,i)=>kept.has(i)?v: -Infinity);
+  return {logits:out, kept};
+}
+/* top-p nucleus mask: sort desc by prob, cumsum probs INCLUSIVELY (matches
+   sampling.py: cumsum(sorted_probs) < p), keep where inclusive cumsum < p,
+   and ALWAYS keep top-1. */
+function toppMask(z,p){
+  if(p>=1) return {logits:z.slice(), kept:new Set(z.map((_,i)=>i))};
+  const probs = softmax(z);
+  const order = probs.map((v,i)=>({v,i})).sort((a,b)=>b.v-a.v);
+  let cum=0; const kept=new Set();
+  for(let r=0;r<order.length;r++){
+    cum += order[r].v;                       // INCLUSIVE cumsum up to rank r
+    if(r===0 || cum < p){ kept.add(order[r].i); }
+    else break;                              // cumsum monotonic -> safe to stop
+  }
+  const out = z.map((v,i)=>kept.has(i)?v: -Infinity);
+  return {logits:out, kept};
+}
+
+/* full pipeline: top-k -> top-p -> /temp -> renormalize */
+function pipeline(temp,k,p){
+  let z = LOGITS.slice();
+  let kept = new Set(z.map((_,i)=>i));
+  if(temp===0){ // greedy
+    const arg = z.indexOf(Math.max(...z));
+    return {probs:z.map((_,i)=>i===arg?1:0), kept:new Set([arg]), greedy:true, arg};
+  }
+  if(k>0){ const r=topkMask(z,k); z=r.logits; kept=r.kept; }
+  if(p<1){ const r=toppMask(z,p); z=r.logits; kept=intersection(kept,r.kept); }
+  // divide by temp, renormalize over kept
+  const scaled = z.map(v=> v===-Infinity? -Infinity : v/temp);
+  const finite = scaled.filter(v=>v!==-Infinity);
+  const lse = logsumexp(finite);
+  const probs = scaled.map(v=> v===-Infinity? 0 : Math.exp(v-lse));
+  return {probs, kept, greedy:false};
+}
+function intersection(a,b){ const s=new Set(); a.forEach(x=>{if(b.has(x))s.add(x);}); return s; }
+
+/* ===== seeded RNG (mulberry32) — mimics torch.manual_seed reproducibility ===== */
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function categoricalDraw(probs, seed){
+  const rng = mulberry32(seed + 1);  // +1 so seed=0 isn't a fixed point
+  const u = rng(); let acc=0;
+  for(let i=0;i<probs.length;i++){
+    acc += probs[i];
+    if(u <= acc) return i;
+  }
+  return probs.length-1;
+}
+
+/* ===== canvas helpers ===== */
+function setup(cv){ const dpr=window.devicePixelRatio||1;
+  cv.width=cv.clientWidth*dpr; cv.height=cv.clientHeight*dpr;
+  const ctx=cv.getContext('2d'); ctx.scale(dpr,dpr); return ctx; }
+
+/* ----- PANEL 1: distribution bars ----- */
+const bars=document.getElementById('bars');
+const rawProbs = softmax(LOGITS);  // ghost reference (T=1, no filter)
+function drawBars(pipe, drawIdx){
+  const ctx=setup(bars), w=bars.clientWidth, h=bars.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const labels=TOKENS.map((t,i)=>`${i}:${t}`);
+  const n=V, pad=46, bw=(w-pad*2)/n, cx0=pad;
+  const maxProb=Math.max(0.5, ...pipe.probs);
+  const baseY=h-30, scale=(h-50)/maxProb;
+  // axis
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(pad,baseY); ctx.lineTo(w-pad,baseY); ctx.stroke();
+  // ghost raw probs (T=1, no filter)
+  rawProbs.forEach((v,i)=>{
+    const x=cx0+i*bw+bw*0.10, bww=bw*0.18;
+    ctx.fillStyle='#2d333b';
+    ctx.fillRect(x, baseY-v*scale, bww, v*scale);
+  });
+  // active probs
+  pipe.probs.forEach((v,i)=>{
+    const kept = pipe.kept.has(i);
+    const x=cx0+i*bw+bw*0.34, bww=bw*0.52;
+    ctx.fillStyle = kept ? '#27ae60' : '#c0392b';
+    if(v>0.0005){
+      ctx.fillRect(x, baseY-v*scale, bww, v*scale);
+    } else if(kept){
+      // tiny sliver so a kept-but-tiny bar is still visible
+      ctx.fillRect(x, baseY-2, bww, 2);
+    } else {
+      // masked: draw a thin red line at baseline
+      ctx.fillRect(x, baseY-2, bww, 2);
+    }
+    // value label
+    ctx.fillStyle = kept ? '#7ee29b' : '#8b4a44';
+    ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText(v.toFixed(3), x+bww/2, baseY-v*scale-5);
+    // draw marker
+    if(drawIdx===i){
+      ctx.fillStyle='#e67e22';
+      ctx.beginPath(); ctx.arc(x+bww/2, baseY-v*scale-16, 5, 0, 2*Math.PI); ctx.fill();
+      ctx.font='bold 11px ui-monospace,monospace';
+      ctx.fillText('▼ draw', x+bww/2, baseY-v*scale-22);
+    }
+  });
+  // x labels
+  ctx.fillStyle='#8b949e'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+  labels.forEach((lb,i)=>ctx.fillText(lb, cx0+i*bw+bw/2, h-10));
+}
+
+/* ----- PANEL 2: nucleus table (uses raw LOGITS, shows the top-p algorithm) ----- */
+function fillNucTable(p){
+  const t=document.getElementById('nucTable');
+  let H='<tr><th>rank</th><th>idx</th><th>token</th><th>prob</th><th>cumsum(probs)</th>'+
+        '<th>cumsum&lt;p?</th><th>kept?</th></tr>';
+  const probs = softmax(LOGITS);
+  const order = probs.map((v,i)=>({v,i})).sort((a,b)=>b.v-a.v);
+  let cum=0;
+  order.forEach((o,r)=>{
+    cum += o.v;                                  // INCLUSIVE cumsum (== sampling.py)
+    const lt = (r===0) ? true : (cum < p);       // top-1 always kept
+    const kept = (r===0) ? true : (cum < p);
+    const cls = kept ? 'keep' : 'mask';
+    H+=`<tr class="${cls}"><td>${r}</td><td>${o.i}</td><td>${TOKENS[o.i]}</td>`+
+       `<td>${o.v.toFixed(4)}</td><td>${cum.toFixed(4)}</td>`+
+       `<td>${lt?'yes':'no'}</td><td>${kept?'KEEP':'mask'}</td></tr>`;
+  });
+  t.innerHTML=H;
+}
+
+/* ----- PANEL 3: sample ----- */
+function doDraw(n){
+  const temp=+document.getElementById('temp').value;
+  const k=+document.getElementById('topk').value;
+  const p=+document.getElementById('topp').value;
+  const seed=+document.getElementById('seed').value;
+  const pipe=pipeline(temp,k,p);
+  const el=document.getElementById('sampleOut');
+  if(n===1){
+    const idx=categoricalDraw(pipe.probs, seed);
+    const mass=[...pipe.kept].reduce((s,i)=>s+pipe.probs[i],0);
+    el.innerHTML =
+      `config: temp=<b>${temp.toFixed(2)}</b>, top-k=<b>${k}</b>, top-p=<b>${p.toFixed(2)}</b>, seed=<b>${seed}</b><br>`+
+      `kept nucleus = <b>{${[...pipe.kept].sort((a,b)=>a-b).join(', ')}}</b> `+
+      `(${pipe.kept.size} token${pipe.kept.size>1?'s':''}, mass ${mass.toFixed(4)})<br>`+
+      `categorical draw → <span class="o">idx ${idx} ("${TOKENS[idx]}")</span> `+
+      `(p=${pipe.probs[idx].toFixed(4)})`;
+    render(idx);
+  } else {
+    const counts=new Array(V).fill(0);
+    for(let s=0;s<n;s++){ const idx=categoricalDraw(pipe.probs, seed+s); counts[idx]++; }
+    let rows = counts.map((c,i)=>c>0?`idx ${i} ("${TOKENS[i]}"): <b>${c}</b>`:null)
+                     .filter(x=>x).join(' &nbsp;|&nbsp; ');
+    el.innerHTML =
+      `config: temp=<b>${temp.toFixed(2)}</b>, top-k=<b>${k}</b>, top-p=<b>${p.toFixed(2)}</b>, `+
+      `seed=<b>${seed}</b>+0..${n-1}<br>`+
+      `${n} draws → ${rows}`;
+    render();
+  }
+}
+
+/* ----- PANEL 4: gold check ----- */
+function renderGold(){
+  // greedy
+  const argmax = LOGITS.indexOf(Math.max(...LOGITS));
+  // top-k=3
+  const tk3 = topkMask(LOGITS,3).kept;
+  const tk3s=[...tk3].sort((a,b)=>a-b);
+  // top-p=0.6
+  const tp6 = toppMask(LOGITS,0.6).kept;
+  const tp6s=[...tp6].sort((a,b)=>a-b);
+  const el=document.getElementById('gold');
+  el.innerHTML =
+    `greedy (temp=0)      → idx <b>${argmax}</b> ("${TOKENS[argmax]}")<br>`+
+    `top-k=3 kept         → [${tk3s.join(', ')}]   tokens [${tk3s.map(i=>'"'+TOKENS[i]+'"').join(', ')}]<br>`+
+    `top-p=0.6 nucleus    → [${tp6s.join(', ')}]   tokens [${tp6s.map(i=>'"'+TOKENS[i]+'"').join(', ')}]<br>`+
+    `<span class="micro">(these match sampling.py GOLD section exactly)</span>`;
+  // badge
+  const ok = (argmax===5) && (JSON.stringify(tk3s)===JSON.stringify([0,1,5])) &&
+             (JSON.stringify(tp6s)===JSON.stringify([0,5]));
+  const chk=document.getElementById('check');
+  chk.textContent = ok ? 'check: OK — JS top-k/top-p match sampling.py gold (greedy=5, k3=[0,1,5], p.6=[0,5])'
+                       : 'check: FAIL — mismatch!';
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== master render ===== */
+let lastDraw=null;
+function render(drawIdx){
+  const temp=+document.getElementById('temp').value;
+  const k=+document.getElementById('topk').value;
+  const p=+document.getElementById('topp').value;
+  document.getElementById('tempVal').textContent=temp.toFixed(2);
+  document.getElementById('topkVal').textContent=k;
+  document.getElementById('toppVal').textContent=p.toFixed(2);
+  const pipe=pipeline(temp,k,p);
+  drawBars(pipe, drawIdx);
+  fillNucTable(p);
+}
+
+/* ===== events ===== */
+['temp','topk','topp'].forEach(id=>document.getElementById(id).addEventListener('input',()=>render()));
+document.getElementById('seed').addEventListener('input',function(){
+  document.getElementById('seedVal').textContent=this.value;
+});
+document.getElementById('draw').addEventListener('click',()=>doDraw(1));
+document.getElementById('draw20').addEventListener('click',()=>doDraw(20));
+document.querySelectorAll('.presets button').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.getElementById('temp').value=b.dataset.t;
+    document.getElementById('topk').value=b.dataset.k;
+    document.getElementById('topp').value=b.dataset.p;
+    render();
+  });
+});
+window.addEventListener('resize',()=>render());
+
+renderGold();
+render();
+</script>
+</body>
+</html>

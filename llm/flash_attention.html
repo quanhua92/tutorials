@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashAttention — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --fast:#f1948a; --slow:#85c1e9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:220px;accent-color:var(--green);vertical-align:middle}
+  input[type=number]{width:64px;background:#0a0e14;color:var(--ink);border:1px solid #30363d;
+                     border-radius:5px;padding:2px 6px;font-size:.85rem}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  table.heat{border-collapse:collapse;font-size:.74rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 6px;text-align:center;min-width:3.4ch}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat td.maxcell{color:#ffd966;font-weight:700;outline:1px solid #ffd966}
+  table.out{border-collapse:collapse;font-size:.74rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.out td,table.out th{border:1px solid #30363d;padding:3px 6px;text-align:center;min-width:4ch}
+  table.out th{color:var(--muted);font-weight:600}
+  table.out tr.ttl td{background:#1c2a14;color:var(--green);font-weight:700}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.7rem .9rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .hi{color:#ffd966;font-weight:700}
+  .readout .corr{color:var(--orange);font-weight:700}
+  .readout .bad{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  .costbig{font-family:ui-monospace,monospace;font-size:1.05rem;color:var(--red);font-weight:700}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+</style>
+</head>
+<body>
+  <h1>FlashAttention — interactive
+    <a class="badge" href="./FLASH_ATTENTION.md">FLASH_ATTENTION.md</a>
+    <a class="badge" href="./flash_attention.py">flash_attention.py</a></h1>
+  <div class="sub">Naive attention <b style="color:var(--red)">materializes an [N,N] matrix in HBM</b>;
+    FlashAttention <b style="color:var(--green)">tiles K,V through SRAM</b> carrying a running
+    max&nbsp;<code>m</code>, sum&nbsp;<code>l</code>, output&nbsp;<code>o</code> — and is <b>EXACT</b>.
+    Every number is recomputed in JS from the <i>identical</i> formula in <code>flash_attention.py</code>.
+    &nbsp;|&nbsp; <a href="./rope.html">position half (RoPE) →</a></div>
+  <div class="sub" style="border-left:3px solid var(--green);padding:.5rem .8rem;background:#0d1f14">
+    <b style="color:var(--green)">How to read this page (no code needed):</b>
+    attention builds a giant <b>N×N score table</b>. Naive code writes it to <b style="color:var(--red)">slow HBM</b>
+    and reads it back — that shuffling, not the math, is what's slow. FlashAttention does the work in
+    <b style="color:var(--green)">tiny tiles in fast SRAM</b> instead, so the big table is never written to slow memory.
+    The clever bit is <b>online softmax</b>: keep a running <b>HIGH SCORE</b> (<code>m</code>),
+    <b>SUM</b> (<code>l</code>), and <b>OUTPUT</b> (<code>o</code>); whenever a tile reveals a higher score,
+    multiply the past by a <b style="color:var(--orange)">correction factor</b> to fix its scale. Divide <code>o/l</code> at the end.
+    Step through the panels below — the green badge at the bottom proves the answer is identical to naive.</div>
+
+  <!-- ===== PANEL 1: NAIVE [N,N] + HBM COST ===== -->
+  <h2>① Naive attention materializes an [N,N] score matrix in HBM — drag N</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>sequence length N <input type="range" id="nN" min="4" max="14" value="8" step="1">
+        <span class="val" id="nNVal">8</span></label>
+      <span class="micro">d = 8, scale = 1/√d. Q,K regenerated deterministically per N (the N=8 case is the pinned gold below).</span>
+    </div>
+    <div class="micro" style="margin:.2rem 0 .6rem;max-width:760px">
+      <b>What you're looking at:</b> the <b>N×N table of "how much each token cares about each other token"</b>.
+      The gold cell in each row is that row's <b>highest score</b> — the one softmax must know first. Drag N up:
+      the table grows as <b>N²</b>, and at <b>N=8192</b> it becomes <b style="color:var(--red)">256&nbsp;MiB</b> —
+      written to <b style="color:var(--red)">slow HBM</b> and read right back at <i>every</i> layer of every head. That round-trip is the bottleneck.</div>
+    <div class="row">
+      <div>
+        <div class="micro">scores S = Q@K<sup>T</sup>·scale &nbsp; [<span id="dimLbl">8×8</span>] — row max in <b style="color:#ffd966">gold</b></div>
+        <table class="heat" id="scoreHeat"></table>
+      </div>
+      <div>
+        <div class="micro">HBM traffic for the score matrix (naive, ~4N² floats)</div>
+        <table class="out" id="costTbl"></table>
+        <div class="micro" style="margin-top:.5rem;max-width:330px">At <b>N=8192, d=64</b> (4-byte float):
+          <span class="costbig">N²·4 = 256&nbsp;MiB</span> per head per layer — read+written at every layer.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 2: STEP THROUGH TILED ALGORITHM ===== -->
+  <h2>② Step through the tiled online-softmax — watch m, l, o and the rescaling factor</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>query row q <input type="number" id="qr" min="0" max="7" value="0"></label>
+      <label>tiles done <input type="range" id="step" min="0" max="2" value="0" step="1">
+        <span class="val" id="stepVal">0</span></label>
+      <span class="micro">N=8, Bc=4 → 2 K/V tiles. Step 0=before, 1=after tile j=0, 2=after tile j=1 (final ÷ l).</span>
+    </div>
+    <div class="micro" style="margin:.2rem 0 .4rem;max-width:760px">
+      <b>How to use this:</b> pick a query row (start with <b>q=0</b>), then slide <b>tiles done → 1 → 2</b>.
+      Watch the running <b style="color:#ffd966">HIGH SCORE</b> <code>m</code>, running <b>SUM</b> <code>l</code>, and
+      running <b>OUTPUT</b> <code>o</code> update each chunk. The <b style="color:var(--orange)">correction = exp(m_old − m_new)</b>
+      lights up <b>orange</b> whenever a tile reveals a <b>new higher score</b> — that factor shrinks the past to the new scale.
+      Try <b>q=0</b>: at tile 1 the correction jumps to <b style="color:var(--orange)">0.7305</b> (a new max appeared). That single factor is the whole trick.</div>
+    <div class="readout" id="tileTrace"></div>
+    <div class="micro" style="margin-top:.5rem">The <b style="color:var(--orange)">correction = exp(m_old − m_new)</b>
+      rescales ALL prior accumulators when the running max rises. On the first tile it is <b>0</b> (no past to fix); if the max
+      does not change it is <b>1</b> (nothing to fix). Step q=0 to tile 1: correction jumps to 0.7305.
+      That single factor is the whole trick (<a href="./FLASH_ATTENTION.md">FLASH_ATTENTION.md §3</a>).</div>
+  </div>
+
+  <!-- ===== PANEL 3: TILED vs NAIVE SIDE BY SIDE ===== -->
+  <h2>③ Tiled FlashAttention vs naive — identical output (EXACT, not approximate)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:.2rem 0 .5rem;max-width:760px">
+      <b>The payoff:</b> the left table (tiled, never builds the big matrix) and the right table (naive, builds it) are
+      <b style="color:var(--green)">mathematically identical</b> — the biggest difference across all 64 entries is pure
+      float noise (~3e-8). Same multiplications, far fewer trips to slow memory. This is why FlashAttention is called
+      <b>exact</b>, not an approximation.</div>
+    <div class="row">
+      <div>
+        <div class="micro">tiled output  out = o / l</div>
+        <table class="out" id="tiledTbl"></table>
+      </div>
+      <div>
+        <div class="micro">naive output  softmax(Q@K<sup>T</sup>/√d)@V</div>
+        <table class="out" id="naiveTbl"></table>
+      </div>
+    </div>
+    <div class="readout" id="diffOut"></div>
+    <div class="micro" style="margin-top:.5rem">Same FLOPs (2N²d), far less HBM traffic. The two are mathematically identical.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    <b>The green badge is the proof:</b> the tiled answer computed here in JS (row q=0) matches the
+    <code>flash_attention.py</code> gold pin exactly. If it ever turns red, the page's formula has drifted from the code.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth data, copied verbatim from flash_attention.py make_inputs(seed=0) ===== */
+const D = 8, SCALE = 1/Math.sqrt(D), Bc = 4;
+const Q = [
+ [-0.56,-0.58,-0.13,-0.22, 0.42, 0.35,-0.16,-1.06],
+ [ 0.16,-0.63, 0.17, 0.15, 0.06, 0.62, 0.56,-0.12],
+ [-0.68,-0.85, 0.28, 0.40, 0.30,-0.78,-0.17, 0.93],
+ [ 0.38,-0.29,-0.09, 0.09, 0.69, 0.79, 0.47,-0.42],
+ [-0.31, 0.02,-0.25, 0.12, 0.22, 0.06, 0.32, 0.22],
+ [-0.05, 0.40,-0.14, 0.03, 0.26, 1.15,-0.73,-0.79],
+ [-0.34, 0.44, 0.53, 0.09,-0.12,-0.20, 0.27,-0.20],
+ [-0.22, 0.37, 0.76, 1.71,-0.77,-0.62, 0.91,-0.28]];
+const K = [
+ [-0.28, 0.46, 0.56, 0.64,-0.74, 1.28,-0.24, 0.17],
+ [-0.81,-0.27,-0.24,-0.25,-0.53, 0.56,-0.07, 0.40],
+ [-0.05, 0.34,-0.42, 0.00, 0.42,-0.20, 0.52, 0.18],
+ [-0.12, 1.15,-0.94,-0.02,-0.52,-0.48, 0.02, 0.36],
+ [ 0.82,-0.68, 0.17, 0.26,-1.31,-0.85,-0.11, 0.14],
+ [ 0.12, 0.04, 0.17, 0.23, 0.23,-0.43, 0.39,-0.46],
+ [-0.11,-1.22,-0.04,-0.02, 0.48, 0.17,-0.46,-0.03],
+ [-0.31,-0.23, 0.96,-0.20, 0.06, 0.58, 0.46, 0.69]];
+const V = [
+ [-0.44,-0.21,-0.40, 0.28, 0.31, 0.23, 0.98,-0.53],
+ [-0.04, 0.06,-0.30,-0.62,-0.05,-0.52,-0.16, 0.12],
+ [-0.13, 0.06, 0.12, 0.58, 0.14, 0.19,-0.10,-0.06],
+ [ 0.10,-0.39,-0.95, 0.07,-0.35, 0.16, 0.08, 0.19],
+ [ 0.48,-0.50, 0.15,-0.05, 0.50,-0.25, 0.38, 0.31],
+ [ 0.16, 0.11,-0.06, 0.18,-0.16,-0.54, 0.12,-0.70],
+ [-0.03,-0.18,-0.78,-0.18, 0.54, 0.07, 0.79, 0.39],
+ [-0.54,-0.36, 0.74, 0.14, 0.33,-0.50,-0.59,-0.60]];
+
+/* ===== seeded RNG for the variable-N panel (independent of the pinned Q,K,V) ===== */
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0;
+  let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296; }; }
+function genQK(N, seed){
+  const g=mulberry32(seed);
+  const mk=()=>Array.from({length:N},()=>Array.from({length:D},()=>Math.round((g()*2-1)*0.5*100)/100));
+  return {q:mk(),k:mk()};
+}
+function scoresOf(Qq,Kk){ // [N][N]
+  const N=Qq.length, S=Array.from({length:N},()=>new Array(N).fill(0));
+  for(let i=0;i<N;i++)for(let j=0;j<N;j++){let s=0;for(let c=0;c<D;c++)s+=Qq[i][c]*Kk[j][c];S[i][j]=s*SCALE;}
+  return S;
+}
+
+/* ===== naive attention (materializes [N,N]) ===== */
+function naiveAttn(Qq,Kk,Vv){
+  const N=Qq.length, S=scoresOf(Qq,Kk);
+  const out=Array.from({length:N},()=>new Array(D).fill(0));
+  for(let i=0;i<N;i++){
+    let m=-Infinity; for(let j=0;j<N;j++)m=Math.max(m,S[i][j]);
+    let l=0; const e=new Array(N); for(let j=0;j<N;j++){e[j]=Math.exp(S[i][j]-m);l+=e[j];}
+    for(let c=0;c<D;c++){let s=0;for(let j=0;j<N;j++)s+=e[j]*Vv[j][c];out[i][c]=s/l;}
+  }
+  return {S,out};
+}
+
+/* ===== tiled FlashAttention (online softmax), mirroring flash_attention.py =====
+   Returns out[N][D] and trace[r] = [ {j,c0,scores,rowmax,mOld,mNew,corr,lOld,lNew,oMax}, ... ] */
+function tiledAttn(Qq,Kk,Vv,Br,Bcol){
+  const N=Qq.length, Tr=Math.ceil(N/Br), Tc=Math.ceil(N/Bcol);
+  const out=Array.from({length:N},()=>new Array(D).fill(0));
+  const trace=Array.from({length:N},()=>[]);
+  for(let i=0;i<Tr;i++){
+    const r0=i*Br, br=Math.min(Br,N-r0);
+    const m=new Array(br).fill(-Infinity), l=new Array(br).fill(0);
+    const o=Array.from({length:br},()=>new Array(D).fill(0));
+    for(let j=0;j<Tc;j++){
+      const c0=j*Bcol, bc=Math.min(Bcol,N-c0);
+      const s=Array.from({length:br},()=>new Array(bc).fill(0));
+      const rowmax=new Array(br).fill(-Infinity);
+      for(let a=0;a<br;a++)for(let b=0;b<bc;b++){let ss=0;for(let c=0;c<D;c++)ss+=Qq[r0+a][c]*Kk[c0+b][c];ss*=SCALE;s[a][b]=ss;if(ss>rowmax[a])rowmax[a]=ss;}
+      const mOld=m.slice(), lOld=l.slice(), mNew=new Array(br), corr=new Array(br);
+      for(let a=0;a<br;a++){mNew[a]=Math.max(m[a],rowmax[a]);corr[a]=Math.exp(m[a]-mNew[a]);}
+      for(let a=0;a<br;a++){
+        let psum=0; const pe=new Array(bc); for(let b=0;b<bc;b++){pe[b]=Math.exp(s[a][b]-mNew[a]);psum+=pe[b];}
+        l[a]=corr[a]*l[a]+psum;
+        for(let c=0;c<D;c++){let pv=0;for(let b=0;b<bc;b++)pv+=pe[b]*Vv[c0+b][c];o[a][c]=corr[a]*o[a][c]+pv;}
+        m[a]=mNew[a];
+        trace[r0+a].push({j,c0,bc,scores:s[a].slice(),rowmax:rowmax[a],
+          mOld:mOld[a],mNew:mNew[a],corr:corr[a],lOld:lOld[a],lNew:l[a],
+          o:o[a].slice()});
+      }
+    }
+    for(let a=0;a<br;a++)for(let c=0;c<D;c++)out[r0+a][c]=o[a][c]/l[a];
+  }
+  return {out,trace};
+}
+
+/* ===== formatters ===== */
+function fmt(x,w){ w=w||6; return (x>=0?'+':'')+x.toFixed(4); }
+function oMax(v){ let m=0; for(const x of v)m=Math.max(m,Math.abs(x)); return m; }
+
+/* ----- PANEL 1: score heatmap + cost ----- */
+function drawPanel1(){
+  const N=+document.getElementById('nN').value;
+  document.getElementById('nNVal').textContent=N;
+  document.getElementById('dimLbl').textContent=N+'×'+N;
+  const {q,k}=genQK(N, 1337+N);
+  const S=scoresOf(q,k);
+  // global range for color scaling
+  let lo=Infinity,hi=-Infinity; for(let i=0;i<N;i++)for(let j=0;j<N;j++){lo=Math.min(lo,S[i][j]);hi=Math.max(hi,S[i][j]);}
+  const span=(hi-lo)||1;
+  let H='<tr><th>q\k</th>'; for(let j=0;j<N;j++)H+=`<th>k=${j}</th>`; H+='</tr>';
+  for(let i=0;i<N;i++){
+    let rm=-Infinity,ami=0; for(let j=0;j<N;j++)if(S[i][j]>rm){rm=S[i][j];ami=j;}
+    H+=`<tr><td>q=${i}</td>`;
+    for(let j=0;j<N;j++){
+      const t=(S[i][j]-lo)/span; // 0..1
+      const r=Math.round(40+205*(1-t)), g=Math.round(30+30*t), b=Math.round(40+40*t);
+      const cls=j===ami?' class="maxcell"':'';
+      H+=`<td${cls} style="background:rgb(${r},${g},${b})">${S[i][j].toFixed(3)}</td>`;
+    }
+    H+='</tr>';
+  }
+  document.getElementById('scoreHeat').innerHTML=H;
+  // cost table
+  const n2=N*N;
+  let C='<tr><th>N</th><th>N² cells</th><th>~4N² floats</th><th>N²·4 bytes</th></tr>';
+  C+=`<tr class="ttl"><td>${N}</td><td>${n2}</td><td>${4*n2}</td><td>${(n2*4)} B</td></tr>`;
+  C+='<tr><td>64</td><td>4 096</td><td>16 384</td><td>16 KB</td></tr>';
+  C+='<tr><td>1 024</td><td>1 048 576</td><td>4 194 304</td><td>4 MB</td></tr>';
+  C+='<tr><td>8 192</td><td>67 108 864</td><td>268 435 456</td><td><b style="color:var(--red)">256 MiB</b></td></tr>';
+  document.getElementById('costTbl').innerHTML=C;
+}
+
+/* ----- PANEL 2: tile trace ----- */
+let TRACE=null;
+function drawPanel2(){
+  const qr=+document.getElementById('qr').value;
+  const step=+document.getElementById('step').value;
+  document.getElementById('stepVal').textContent=step;
+  if(qr<0||qr>7) return;
+  const el=document.getElementById('tileTrace');
+  const tr=TRACE[qr];
+  let H=`<b>Query row q=${qr}</b> &nbsp; accumulators start: m=-∞, l=0, o=0<br>`;
+  if(step===0){
+    H+=`<span class="hi">[before any tile]</span> &nbsp; m_old = -∞, l_old = 0.0000, o_old = 0<br>`;
+    H+=`slide "tiles done" → 1 to process K/V tile j=0 (keys 0..3).`;
+    el.innerHTML=H; return;
+  }
+  for(let s=0;s<step;s++){
+    const r=tr[s];
+    const mOldStr = isFinite(r.mOld) ? r.mOld.toFixed(4) : '-∞';
+    const corrStr = isFinite(r.mOld) ? r.corr.toFixed(4) : '0.0000';
+    const keys=Array.from({length:r.bc},(_,b)=>r.c0+b);
+    H+=`<b>K/V tile j=${r.j} (keys [${keys.join(', ')}])</b><br>`;
+    H+=`&nbsp; scores s &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= [${r.scores.map(x=>fmt(x)).join(', ')}]<br>`;
+    H+=`&nbsp; rowmax(s) &nbsp;&nbsp;= ${fmt(r.rowmax)}<br>`;
+    H+=`&nbsp; m_old &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${mOldStr}<br>`;
+    H+=`&nbsp; m_new &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= max(m_old, rowmax) = ${fmt(r.mNew)}<br>`;
+    H+=`&nbsp; <span class="corr">correction = exp(m_old − m_new) = ${corrStr}</span> &nbsp;← rescales prior l,o<br>`;
+    const pe=r.scores.map(x=>Math.exp(x-r.mNew));
+    H+=`&nbsp; p=exp(s-m_new) = [${pe.map(x=>x.toFixed(4)).join(', ')}]<br>`;
+    H+=`&nbsp; l_new &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= correction*l_old + sum(p) = ${corrStr}*${r.lOld.toFixed(4)} + ${pe.reduce((a,b)=>a+b,0).toFixed(4)} = <b>${r.lNew.toFixed(4)}</b><br>`;
+    H+=`&nbsp; o_new &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= correction*o_old + p@v_tile<br>`;
+    if(s===step-1){
+      H+=`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= [${r.o.map(x=>fmt(x)).join(', ')}]<br>`;
+      H+=`&nbsp; (m,l,o) after = m=${r.mNew.toFixed(4)}, l=${r.lNew.toFixed(4)}`;
+      if(step===2){ const odiv=r.o.map(x=>x/r.lNew); H+=`<br>&nbsp; <span class="hi">FINAL out = o / l = [${odiv.map(x=>fmt(x)).join(', ')}]</span>`; }
+      H+='<br>';
+    }
+  }
+  el.innerHTML=H;
+}
+
+/* ----- PANEL 3: tiled vs naive ----- */
+function drawPanel3(){
+  const tiledRes=tiledAttn(Q,K,V,4,4);
+  const naiveRes=naiveAttn(Q,K,V);
+  const mktbl=(M,cls)=>{ let h=`<tr><th>q\d</th>`; for(let c=0;c<D;c++)h+=`<th>d${c}</th>`; h+='</tr>';
+    for(let i=0;i<M.length;i++){ h+=`<tr class="${cls||''}"><td>${i}</td>`+M[i].map(x=>`<td>${x.toFixed(4)}</td>`).join('')+`</tr>`; }
+    return h; };
+  document.getElementById('tiledTbl').innerHTML=mktbl(tiledRes.out);
+  document.getElementById('naiveTbl').innerHTML=mktbl(naiveRes.out);
+  let maxd=0; for(let i=0;i<8;i++)for(let c=0;c<D;c++)maxd=Math.max(maxd,Math.abs(tiledRes.out[i][c]-naiveRes.out[i][c]));
+  const ok=maxd<1e-4;
+  document.getElementById('diffOut').innerHTML=
+    `max|tiled − naive| over all 64 entries = <b>${maxd.toExponential(2)}</b> &nbsp; `+
+    `<span class="${ok?'':'bad'}">${ok?'✓ EXACT (identical to naive)':'✗ MISMATCH'}</span><br>`+
+    `Same FLOPs (2·N²·d = ${2*8*8*D}), but tiled never materializes the 8×8 matrix in HBM.`;
+  return tiledRes;
+}
+
+/* ===== events ===== */
+document.getElementById('nN').addEventListener('input',drawPanel1);
+document.getElementById('qr').addEventListener('input',drawPanel2);
+document.getElementById('step').addEventListener('input',drawPanel2);
+window.addEventListener('resize',drawPanel1);
+
+/* ===== gold-value check vs flash_attention.py GOLD PIN (q=0 tiled output) ===== */
+const tiledAll=tiledAttn(Q,K,V,4,4);
+TRACE=tiledAll.trace;
+const goldQ0=[-0.0673,-0.1466,-0.2175, 0.0201, 0.1810,-0.1534, 0.2226,-0.0995];
+const jsQ0=tiledAll.out[0];
+const okGold=jsQ0.every((v,i)=>Math.abs(v-goldQ0[i])<5e-4);
+const chk=document.getElementById('check');
+chk.textContent = okGold ? 'check: OK — JS tiled == flash_attention.py gold (q=0)' : 'check: FAIL — mismatch!';
+chk.style.borderColor = okGold?'#27ae60':'#c0392b';
+chk.style.color = okGold?'#27ae60':'#c0392b';
+chk.style.background = okGold?'#1c3a25':'#3a1414';
+
+drawPanel1();
+drawPanel3();
+drawPanel2();
+</script>
+</body>
+</html>

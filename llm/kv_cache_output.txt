@@ -1,0 +1,154 @@
+kv_cache.py - reference impl. All numbers below feed KV_CACHE.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: no cache -> recompute K,V every step (O(L^2))
+========================================================================
+Generating 5 tokens by re-running the model on the WHOLE prefix each step.
+
+| step t | seq len processed | K,V tokens computed this step | token-0 K,V recomputed? (times so far) |
+|--------|-------------------|-------------------------------|---------------------------------------|
+| 1      | 1                 | 1                             | yes (1)                                   |
+| 2      | 2                 | 2                             | yes (2)                                   |
+| 3      | 3                 | 3                             | yes (3)                                   |
+| 4      | 4                 | 4                             | yes (4)                                   |
+| 5      | 5                 | 5                             | yes (5)                                   |
+
+Total K/V token-projections over 5 decode steps:
+  no-cache : 1+2+3+4+5 = 15   (= L(L+1)/2 = O(L^2))
+  w/ cache : 5                  (1 per step = O(L))
+  token-0's K,V computed  : 5x without cache, 1x with cache
+  speedup (projections)   : 3.0x
+
+[check] no-cache cost L(L+1)/2 = 15 == printed 15 -> OK
+
+========================================================================
+  SECTION B: dense cache shape evolution (prefill 3 -> decode 1)
+========================================================================
+Pre-allocated cache shape: (1, 2, 8, 8)  = [B=1, H_kv=2, max_seq_len=8, D=8]
+Reserved bytes (K+V): 1024  (fp32; 512.0 for one of K or V)
+
+PREFILL 3 tokens:
+  cache.k[:,:,:offset,:].shape = (1, 2, 3, 8)  (offset now 3)
+DECODE 1 token:
+  cache.k[:,:,:offset,:].shape = (1, 2, 4, 8)  (offset now 4)
+  Q for this step has shape  : [1, H_q, 1, D]   <- ONLY the new token
+  attention is Q[1,d] @ K[4,d]^T = O(S=4) per step, not O(S^2)
+
+Note: the slab [B,H_kv,max_seq_len=8,D] is reserved NO MATTER the offset.
+      Here offset=4 but max_seq_len=8 -> 50.0% of the slab is unused right now.
+
+========================================================================
+  SECTION C: fragmentation math (why dense wastes, why paged doesn't)
+========================================================================
+All numbers below are COMPUTED here, not hand-waved. (fp16/bf16 = 2 B)
+
+THE 93% EXAMPLE (max_seq_len vs actual usage, one request):
+  max_seq_len reserved = 8192, actual tokens used = 512
+  waste fraction = 1 - used/max = 1 - 512/8192 = 0.9375 = 93.75%
+  -> 93.75% of this request's reserved slab is dead memory.
+
+PER-REQUEST dense KV bytes (LLaMA-7B shape: 32 layers, 32 KV heads, d=128):
+  2(KV) x 32 x 32 x 8192 x 128 x 2 B = 4,294,967,296 bytes = 4.000 GiB
+  vLLM reports up to ~1.7 GiB for LLaMA-13B (more layers/heads) per seq.
+
+100 CONCURRENT requests, reserved vs actually used (used=512 each):
+  reserved = 400.0 GiB
+  used     = 25.0 GiB
+  wasted   = 375.0 GiB (93.8% of reserved)
+  (This dead slab caps your batch size -> caps throughput.)
+
+PAGED cache waste bound (only the LAST page of each request is partial):
+| page_size | worst-case internal waste |
+|-----------|---------------------------|
+| 4         | 25.00% |
+| 16        | 6.25%  <- vLLM default block size |
+| 128       | 0.78%  <- tiny-llm page_size (real) |
+
+vLLM measured: PagedAttention wastes <4% in practice vs 60%-80% for the
+dense/over-reserving systems it replaced. (Sources: vLLM blog + paper.)
+
+[check] 93.75% math: 1 - 512/8192 = 0.9375 -> OK
+[check] per_req bytes == 2*32*32*8192*128*2 = 4294967296 -> OK
+
+========================================================================
+  SECTION D: paged pool + block_table (logical -> non-contiguous physical)
+========================================================================
+page_size = 4. Interleaved two requests so storage is scattered.
+
+BLOCK TABLE (logical_page -> physical_page_id):
+| request | logical pages (in order)        | physical pages      | contiguous? |
+|---------|----------------------------------|------------------------------------|
+| A       | ['L0', 'L1']                     | ['P0', 'P2']         | NO (scattered) |
+| B       | ['L0', 'L1']                     | ['P1', 'P3']         | NO (scattered) |
+
+Reading request A's K,V in logical order walks physical pages [0, 2] -> the data is scattered across the pool.
+The paged attention kernel uses THIS block table to gather K,V from
+non-contiguous physical memory, exactly like an OS page table.
+
+GOLD block_table for the .html:
+  A.page_ids = [0, 2]
+  B.page_ids = [1, 3]
+  A.page_lens = [4, 4]
+  B.page_lens = [4, 1]
+
+========================================================================
+  SECTION E: offset correctness -> no-cache == dense == paged
+========================================================================
+Scenario: 4 tokens. Prefill tokens 0..2, then DECODE token 3.
+
+K-cache (full, head h=0) — three paths must agree:
+| path            | K[0,0,0,:4] (token0)              | K[0,0,3,:4] (token3)              |
+|-----------------|-----------------------------------|-----------------------------------|
+| all-at-once     | [0.101, 0.102, 0.103, 0.104]      | [-0.4541, 0.2641, 0.3906, 0.4028] |
+| dense           | [0.101, 0.102, 0.103, 0.104]      | [-0.4541, 0.2641, 0.3906, 0.4028] |
+| paged           | [0.101, 0.102, 0.103, 0.104]      | [-0.4541, 0.2641, 0.3906, 0.4028] |
+
+[check] dense full-K  == all-at-once K ? True
+[check] paged full-K  == all-at-once K ? True
+[check] paged full-K  == dense full-K   ? True
+[check] dense attn(token3)  == full attn(token3) ? True
+[check] paged attn(token3)  == full attn(token3) ? True
+[check] WRONG-offset decode differs from correct ? True  (proves offset matters -> see ROPE.md)
+
+[check] ALL THREE PATHS MATCH (no-cache == dense == paged): OK
+
+GOLD for .html: dense-K == paged-K == all-at-once-K at tol 1e-05 -> OK
+
+========================================================================
+  SECTION F: rewind(n) on paged cache (speculative decoding, no off-by-one)
+========================================================================
+Start: prefill 5 tokens, page_size=4.
+  page_ids  = [0, 1]   (logical -> physical)
+  page_lens = [4, 1]   (page 0 full, page 1 has 1 token)
+  offset    = 5
+  free_list before rewind = [2, 3, 4, 5, 6, 7]
+
+rewind(1): speculative draft rejected 1 token.
+  page_ids  = [0]   <- physical page 1 RETURNED to free list
+  page_lens = [4]   <- page 0 back to full (4 tokens)
+  offset    = 4
+  free_list after rewind  = [1, 2, 3, 4, 5, 6, 7]
+  pool.used = [0]
+
+THE OFF-BY-ONE TRAP (why rewind uses CEIL, not floor):
+| offset | rewind(n) | new_offset | ceil(new/PS) pages kept | floor would keep | correct? |
+|--------|-----------|------------|--------------------------|------------------|----------|
+| 4      | 1         | 3          | 1                        | 0                | yes (ceil) |
+| 5      | 1         | 4          | 1                        | 1                | yes (ceil) |
+| 8      | 1         | 7          | 2                        | 1                | yes (ceil) |
+| 5      | 5         | 0          | 0                        | 0                | yes (ceil) |
+| 4      | 4         | 0          | 0                        | 0                | yes (ceil) |
+| 9      | 1         | 8          | 2                        | 2                | yes (ceil) |
+
+At offset=8 rewind(1): new=7. ceil(7/4)=2 pages kept (correct: 4+3).
+  floor(7/4)=1 would DROP a still-needed page -> silent data loss.
+At offset=5 rewind(1): new=4. ceil(4/4)=1 page kept (correct: 4 fill it).
+  A naive 'new_offset//page_size' is WRONG at exact multiples.
+
+[check] page returned to free_list after rewind(1): True -> OK
+[check] offset after rewind(1) == 4: True -> OK
+
+========================================================================
+  DONE - all sections printed; equivalence gold = OK
+========================================================================

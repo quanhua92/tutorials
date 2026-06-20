@@ -1,0 +1,217 @@
+normalization.py - reference implementation. All numbers below feed
+NORMALIZATION.md.
+torch = 2.12.1
+Lineage: LayerNorm (2016) -> RMSNorm (2019)
+
+========================================================================
+  SECTION A: LayerNorm step by step  (mean -> var -> normalize -> affine)
+========================================================================
+Input x (E=8): [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+gamma (learned scale) = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+beta  (learned shift) = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+eps = 1e-05
+
+Two reduction passes:
+  pass 1  mean(x)             = 4.500000
+  pass 2  var = mean((x-mu)^2) = 5.250000   (BIASED, divides by E not E-1)
+          sqrt(var + eps)      = 2.291290
+
+Step-by-step per dimension:
+LayerNorm(x): centered, normalized, + affine -> out
+
+| field | x | x - mean | (x-mean)/std | *gamma+beta |
+|---|---|---|---|---|
+| d0 | +1.000000 | -3.500000 | -1.527524 | -1.527524 |
+| d1 | +2.000000 | -2.500000 | -1.091088 | -1.091088 |
+| d2 | +3.000000 | -1.500000 | -0.654653 | -0.654653 |
+| d3 | +4.000000 | -0.500000 | -0.218218 | -0.218218 |
+| d4 | +5.000000 | +0.500000 | +0.218218 | +0.218218 |
+| d5 | +6.000000 | +1.500000 | +0.654653 | +0.654653 |
+| d6 | +7.000000 | +2.500000 | +1.091088 | +1.091088 |
+| d7 | +8.000000 | +3.500000 | +1.527524 | +1.527524 |
+
+Two things happened: (1) subtract mean -> centered at 0;
+(2) divide by std -> unit variance. gamma/beta then re-scale/shift.
+
+========================================================================
+  SECTION B: RMSNorm step by step  (mean(square) -> RMS -> normalize -> *gamma)
+========================================================================
+Input x (E=8): [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+gamma (learned scale) = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   (no beta!)
+eps = 1e-05
+
+ONE reduction pass (no mean subtraction):
+  mean(x^2) = (1/E) * sum(x_i^2) = 25.500000
+  RMS = sqrt(mean(x^2) + eps)    = 5.049753
+  NOTE: mean(x) was 4.500000 but RMSNorm IGNORES it.
+
+Step-by-step per dimension:
+RMSNorm(x): x^2, normalize by RMS, * gamma -> out
+
+| field | x | x^2 | x/RMS | *gamma |
+|---|---|---|---|---|
+| d0 | +1.000000 | +1.000000 | +0.198029 | +0.198029 |
+| d1 | +2.000000 | +4.000000 | +0.396059 | +0.396059 |
+| d2 | +3.000000 | +9.000000 | +0.594088 | +0.594088 |
+| d3 | +4.000000 | +16.000000 | +0.792118 | +0.792118 |
+| d4 | +5.000000 | +25.000000 | +0.990147 | +0.990147 |
+| d5 | +6.000000 | +36.000000 | +1.188177 | +1.188177 |
+| d6 | +7.000000 | +49.000000 | +1.386206 | +1.386206 |
+| d7 | +8.000000 | +64.000000 | +1.584236 | +1.584236 |
+
+One thing happened: divide by RMS -> unit MEAN SQUARE (not unit variance).
+The mean is NOT removed, so the output keeps a constant scale per token.
+
+========================================================================
+  SECTION C: LayerNorm vs RMSNorm side by side on the SAME input
+========================================================================
+Same input x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+Running statistics computed on x:
+  mean(x)        = +4.500000     <- LayerNorm uses this (subtract)
+  var(x) [biases]= 5.250000     <- LayerNorm divides by sqrt(this)
+  mean(x^2)      = 25.500000     <- RMSNorm divides by sqrt(this)
+
+Outputs (gamma=ones, beta=zeros so this is the raw normalized vector):
+LayerNorm vs RMSNorm output on identical x
+
+| field | x | LayerNorm | RMSNorm | diff (LN-RN) |
+|---|---|---|---|---|
+| d0 | +1.000000 | -1.527524 | +0.198029 | -1.725553 |
+| d1 | +2.000000 | -1.091088 | +0.396059 | -1.487147 |
+| d2 | +3.000000 | -0.654653 | +0.594088 | -1.248742 |
+| d3 | +4.000000 | -0.218218 | +0.792118 | -1.010336 |
+| d4 | +5.000000 | +0.218218 | +0.990147 | -0.771930 |
+| d5 | +6.000000 | +0.654653 | +1.188177 | -0.533524 |
+| d6 | +7.000000 | +1.091088 | +1.386206 | -0.295118 |
+| d7 | +8.000000 | +1.527524 | +1.584236 | -0.056712 |
+
+KEY OBSERVATIONS:
+  - LayerNorm output has mean  ~ 0: +0.000000
+  - RMSNorm   output has mean  ~ +0.891133  (NOT centered)
+  - Both have unit-ish spread, but LN centers at 0; RMSN does not.
+  - max|LN - RN| = 1.725553  <- a real difference.
+
+They are NOT interchangeable: swapping them silently changes every
+activation. Read the checkpoint config (Qwen/Llama = RMSNorm).
+
+========================================================================
+  SECTION D: float32 upcast is MANDATORY in bfloat16  (why we upcast)
+========================================================================
+Problem: bfloat16 has only 8 mantissa bits (vs float32's 23). Squaring
+small values AND summing them loses precision; in the worst case the sum
+of squares underflows to 0, RMS becomes sqrt(eps), and the output EXPLODES.
+
+PART 1: precision loss  (small activations, eps = 1e-5)
+
+Input x (8 small values, stored as bfloat16):
+  ['0.0010', '0.0020', '0.0015', '0.0030', '0.0025', '0.0018', '0.0022', '0.0017']
+mean(x^2) computed each way:
+  bfloat16 (no upcast) : 4.202127e-06
+  float32  (upcast)    : 4.189518e-06
+  ratio (bf16 / f32)   : 1.00301  <- bf16 over-estimates
+
+max| no-upcast  -  upcast | over the output = 1.278e-03
+bfloat16 out: ['0.2656', '0.5312', '0.3984', '0.7969', '0.6641', '0.4785', '0.5820', '0.4512']
+float32  out: ['0.2653', '0.5306', '0.3990', '0.7980', '0.6643', '0.4780', '0.5833', '0.4517']
+
+The two normalizations DIFFER because bf16's 8 mantissa bits cannot
+hold the sum of squares faithfully. In production (E=4096+) this error
+compounds across the reduction. Upcasting to float32 before squaring is
+cheap insurance and is what every production RMSNorm does.
+
+PART 2: catastrophic underflow  (tiny activations, eps = 0)
+
+Input x (8 tiny values, stored as bfloat16):
+  ['1.00e-22', '2.00e-22', '2.99e-22', '4.00e-22', '5.00e-22', '5.99e-22', '7.01e-22', '8.01e-22']
+mean(x^2) with eps = 0:
+  bfloat16 (no upcast) : 0.000e+00   <- rounds to EXACTLY 0
+  float32  (upcast)    : 2.550e-43   <- tiny but nonzero
+
+x / sqrt(mean(x^2))  with eps = 0:
+  bfloat16 (no upcast) : contains NaN/inf? True   <- DEAD
+  float32  (upcast)    : max |out| = 1.5855  (finite, correct)
+
+Without the upcast, the bf16 sum of squares underflows to 0 and (with
+eps=0) the division blows up to NaN. Adding eps=1e-5 prevents the NaN
+but still yields a WRONG scale whenever the true mean-square is below
+eps. Upcasting to float32 before squaring is the robust fix: it preserves
+the true (tiny) mean-square so the division stays well-conditioned.
+
+This is why every production RMSNorm (LLaMA, Qwen, Mistral, Gemma) upcasts
+x to float32 before squaring, then casts back. See rmsnorm_from_scratch.
+
+========================================================================
+  SECTION E: gold value + assert from-scratch == torch reference
+========================================================================
+THE GOLD VALUE  (pinned into normalization.html for the JS gold-check):
+  RMSNorm(x=[1..8], eps=1e-05, gamma=ones) =
+  [0.198029, 0.396059, 0.594088, 0.792118, 0.990147, 1.188177, 1.386206, 1.584236]
+
+  mean(x^2) = 25.500000    RMS = sqrt(mean(x^2)+eps) = 5.049753
+  (HTML JS recomputes 1/RMS = 0.198029  and multiplies each x[i].)
+
+[check] from-scratch RMSNorm == manual  x * (1/RMS):  OK
+[check] from-scratch RMSNorm == x * rsqrt(mean(x^2)+eps):  OK
+
+[check] from-scratch LayerNorm == torch.nn.LayerNorm:  OK
+[check] from-scratch LayerNorm == F.layer_norm:  OK
+
+Both from-scratch implementations agree with torch's references bit-for-bit
+(within float32 tolerance). The formulas in this file ARE the definitions.
+
+========================================================================
+  SECTION F: full batch  B=1, L=4, E=8  (a real forward call)
+========================================================================
+Input shape: (1, 4, 8) = [B=1, L=4, E=8]
+Normalization is over the LAST axis (E=8), independently per token.
+
+Input x[b=0] (L rows x E cols):
+  m=0: [0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]
+  m=1: [0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28]
+  m=2: [0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38]
+  m=3: [0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48]
+
+Output RMSNorm(x) x[b=0] (each row normalized to unit mean-square):
+  m=0: [0.7491, 0.8173, 0.8854, 0.9535, 1.0216, 1.0897, 1.1578, 1.2259]
+  m=1: [0.8533, 0.894, 0.9346, 0.9753, 1.0159, 1.0565, 1.0972, 1.1378]
+  m=2: [0.8965, 0.9255, 0.9544, 0.9833, 1.0122, 1.0411, 1.0701, 1.099]
+  m=3: [0.9201, 0.9425, 0.965, 0.9874, 1.0099, 1.0323, 1.0548, 1.0772]
+
+[check] RMS per token BEFORE: [0.1468, 0.2461, 0.3458, 0.4456]
+[check] RMS per token AFTER : [0.9998, 0.9999, 1.0, 1.0]
+        (after ~= 1.0 for every token -> RMSNorm did its job)
+
+========================================================================
+  SECTION G: the lineage  LayerNorm -> RMSNorm  (why each step)
+========================================================================
+
+LayerNorm   Ba, Kiros, Hinton 2016  (arXiv:1607.06450)
+    out = (x - mean) / sqrt(var + eps) * gamma + beta
+    - 2 reduction passes (mean, then var)
+    - 2 affine params per feature (gamma, beta)
+    - gives re-centering AND re-scaling invariance
+    - GPT-2 / nanoGPT / original Transformer use this
+
+        |
+        |  Zhang & Sennrich (2019) hypothesized:
+        |  "re-centering invariance is dispensable;
+        |   re-scaling invariance is what actually helps."
+        |  -> drop the mean subtraction, keep only the RMS scaling.
+        v
+
+RMSNorm     Zhang & Sennrich 2019  (arXiv:1910.07467, NeurIPS 2019)
+    out = (x / sqrt(mean(x^2) + eps)) * gamma
+    - 1 reduction pass (mean of squares only)
+    - 1 affine param per feature (gamma; NO beta)
+    - gives re-scaling invariance only
+    - 7%-64% faster than LayerNorm at comparable accuracy (the paper)
+    - LLaMA / Mistral / Qwen / Gemma / Falcon all use this
+
+MANDATORY in both: float32 upcast of x before squaring when running in
+bfloat16/fp16 (else sum-of-squares underflows -> NaN). See Section D.
+
+
+========================================================================
+  DONE - all sections printed
+========================================================================

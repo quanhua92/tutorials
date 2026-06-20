@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Causal Mask + QK-Norm — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --allow:#1c3a25; --block:#2a1414;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  table.grid{border-collapse:collapse;font-size:.82rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.grid td,table.grid th{border:1px solid #30363d;padding:6px 12px;text-align:center;min-width:3.4rem}
+  table.grid th{color:var(--muted);font-weight:600}
+  table.grid td.allow{background:var(--allow);color:#7ee2a0;font-weight:600}
+  table.grid td.block{background:var(--block);color:#e07070}
+  table.grid td.diag{box-shadow:inset 0 0 0 2px var(--orange)}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:4px 9px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat td.zero{color:var(--muted)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 14px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .kbox{font-family:ui-monospace,monospace;background:#0a0e14;border:1px solid var(--orange);
+        color:var(--orange);padding:2px 8px;border-radius:4px;font-size:.8rem}
+</style>
+</head>
+<body>
+  <h1>Causal Mask + QK-Norm — interactive
+    <a class="badge" href="./CAUSAL_MASK.md">CAUSAL_MASK.md</a>
+    <a class="badge" href="./causal_mask.py">causal_mask.py</a></h1>
+  <div class="sub">Drag <b style="color:var(--green)">L</b> (query len) and
+    <b style="color:var(--green)">S</b> (key len) and watch the causal triangle slide by
+    <span class="kbox">k = S − L</span>. Toggle prefill vs decode. Every mask cell is recomputed
+    in JS from the <i>identical</i> formula in <code>causal_mask.py</code>.
+    &nbsp;|&nbsp; <a href="./rope.html">the offset theme in RoPE →</a></div>
+
+  <div class="panel" style="border-left:3px solid var(--green)">
+    <div class="micro" style="font-size:.84rem;color:var(--ink)">
+      <b>What am I looking at?</b> &nbsp;A language model reads a sentence one token at a time.
+      Each token may only read the notes written <b>before</b> it, never after. The grid below is
+      the "bouncer" that enforces that rule: <b style="color:#7ee2a0">green = allowed</b>
+      (score 0), <b style="color:#e07070">red = blocked</b> (score −∞ → 0% probability after
+      softmax). Row = the token asking the question; column = the note it wants to read.
+    </div>
+  </div>
+
+  <!-- ===== GLOBAL CONTROL ===== -->
+  <div class="panel">
+    <div class="controls">
+      <label>query length L <input type="range" id="L" min="1" max="6" value="4" step="1">
+        <span class="val" id="LVal">4</span></label>
+      <label>key length S <input type="range" id="S" min="1" max="8" value="4" step="1">
+        <span class="val" id="SVal">4</span></label>
+      <button id="prefillBtn">prefill: L=S=4</button>
+      <button id="decodeBtn">decode: L=1, S=6</button>
+      <span class="micro">mask is [L, S]; <span class="kbox">k = S − L = <b id="kVal">0</b></span></span>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 1: THE MASK GRID ===== -->
+  <h2>① The causal mask grid [L, S] — green = attend (0), red = block (−∞)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.4rem"><b>Try this:</b> set L=1, S=4 (decode) and watch
+      the single row turn all-green — the lone new token may read its whole history. Now imagine
+      the diagonal did <i>not</i> slide (k=0): that row would be one green then all red — the token
+      cut off after the first word. That bug is silent garbage.</div>
+    <table class="grid" id="maskGrid"></table>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--allow)"></i>0 = ALLOWED (query attends)</span>
+      <span><i class="sw" style="background:var(--block)"></i>−∞ = MASKED (future position)</span>
+      <span><i class="sw" style="background:transparent;box-shadow:inset 0 0 0 2px var(--orange)"></i>the k-shifted diagonal</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem">The triangle is built by
+      <code>tril(ones((L,S)), diagonal=S−L)</code>. In prefill (L=S) the diagonal sits at 0 → standard
+      triangle. In decode (L=1, S=N) it slides right by N−1 → the single row becomes all-allowed.</div>
+  </div>
+
+  <!-- ===== PANEL 2: PREFILL vs DECODE ===== -->
+  <h2>② Prefill vs Decode — same formula, two regimes</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.4rem"><b>Toggle prefill vs decode</b> with the buttons
+      above and watch the allowed/blocked grid shift its diagonal. <b>Prefill</b> = the first pass
+      over the whole prompt (many tokens, L=S). <b>Decode</b> = generating one new token per step
+      (L=1, S=the whole history so far). Same one-line formula, the diagonal just moves.</div>
+    <div class="row">
+      <div style="flex:1;min-width:280px">
+        <div class="micro"><b>PREFILL</b> &nbsp; L = S, k = 0 → standard lower-triangle</div>
+        <table class="grid" id="prefillGrid"></table>
+      </div>
+      <div style="flex:1;min-width:280px">
+        <div class="micro"><b>DECODE</b> &nbsp; L = 1, S = N, k = N−1 → one row, all-allowed</div>
+        <table class="grid" id="decodeGrid"></table>
+      </div>
+    </div>
+    <div class="micro" style="margin-top:.5rem">Same <code>causal_mask(L,S)</code> call produces both.
+      Forgetting the offset on decode (i.e. using k=0) collapses the new token's attention to key 0
+      only — silent garbage. (See CAUSAL_MASK.md §4.)</div>
+  </div>
+
+  <!-- ===== PANEL 3: MASKED ATTENTION HEATMAP ===== -->
+  <h2>③ Masked attention on a fixed [B=1,H=1,L=4,S=4,D=8] input</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.4rem"><b>What this shows:</b> run the full masked
+      attention once on a tiny fixed input. Because V is one-hot, the output numbers ARE the
+      attention probabilities. Notice every cell strictly above the diagonal is exactly
+      <b>0.0000</b> — the bouncer killed the future. Row l=0 is [1,0,0,0] (token 0 sees only
+      itself); row l=3 spreads across all four keys.</div>
+    <div class="row">
+      <div>
+        <div class="micro"><b>PROBABILITIES</b> probs[l,s] after softmax (masked cells are 0)</div>
+        <table class="heat" id="probsGrid"></table>
+      </div>
+      <div>
+        <div class="micro"><b>OUTPUT</b> out[l,:] = probs · V (dims 4..7 are always 0)</div>
+        <table class="heat" id="outGrid"></table>
+      </div>
+    </div>
+    <div class="micro" style="margin-top:.5rem">Row l=0 is [1,0,0,0] (token 0 attends only to itself).
+      Row l=3 spreads across all four keys. Every strictly-upper-triangular cell is exactly 0.</div>
+  </div>
+
+  <!-- ===== PANEL 4: QK-NORM BOUNDING ===== -->
+  <h2>④ QK-Norm (Qwen3) — bound Q,K norms, keep softmax alive</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.4rem"><b>What this shows:</b> before comparing queries
+      and keys, we quietly re-scale each one (RMSNorm) so their dot products don't blow up. Drag the
+      <b>input scale</b> slider up and toggle QK-Norm off: watch <span style="color:var(--red)">max
+      |score|</span> shoot past 10 (softmax saturates → one-hot → gradients vanish → training
+      stalls). Turn QK-Norm back on and the scores snap back to a bounded range.</div>
+    <div class="controls">
+      <label>input scale <input type="range" id="scale" min="1" max="10" value="5" step="0.5">
+        <span class="val" id="scaleVal">5.0</span></label>
+      <label><input type="checkbox" id="qkOn" checked> apply QK-Norm (RMSNorm, weight=1)</label>
+    </div>
+    <div class="readout" id="qkReadout"></div>
+    <div class="micro" style="margin-top:.5rem">RMSNorm on the D axis pins each Q/K vector's RMS to
+      ~1 (so ‖q‖ = √D = 2.828), which caps the pre-softmax score magnitude. With big inputs and no
+      QK-Norm the logits blow up to ±60 → softmax saturates → gradients vanish → training stalls.
+      (See CAUSAL_MASK.md §5.)</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    The numbers here are not made up — the page recomputes the fixed-input attention
+    <code>out[l=3,:]</code> with the identical formula as <code>causal_mask.py</code> Section C and
+    confirms they match.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formula, copied verbatim from causal_mask.py ===== */
+const D = 8, SQRTD = Math.sqrt(D);
+function dot(a,b){ let s=0; for(let i=0;i<a.length;i++) s+=a[i]*b[i]; return s; }
+/* mask[l,s] = 0 if allowed else -Infinity ; allowed iff s <= l + (S-L) */
+function maskAllowed(l, s, L, S){ return s <= l + (S - L); }
+function buildMask(L, S){
+  const m = [];
+  for(let l=0;l<L;l++){ const row=[]; for(let s=0;s<S;s++)
+    row.push(maskAllowed(l,s,L,S) ? 0 : -Infinity); m.push(row); }
+  return m;
+}
+/* softmax along last axis, in place safe with -Inf */
+function softmaxRow(row){
+  const finite = row.filter(x=>Number.isFinite(x));
+  const mx = finite.length ? Math.max.apply(null,finite) : 0;
+  let sum = 0; const out = row.map(x=>{ const e = Number.isFinite(x) ? Math.exp(x-mx) : 0; sum+=e; return e; });
+  return out.map(e=> sum>0 ? e/sum : 0);
+}
+/* per-head RMSNorm on the D axis, weight=ones */
+function rmsnormVec(x, eps){ eps=eps||1e-6;
+  let ms=0; for(let i=0;i<x.length;i++) ms+=x[i]*x[i];
+  const rms = Math.sqrt(ms/x.length + eps);
+  return x.map(v=>v/rms);
+}
+
+/* ===== hardcoded inputs from causal_mask.py Section C (NO RNG -> JS-exact) ===== */
+const Q = [
+  [ 0.5,  0.2, -0.1,  0.4,  0.3, -0.2,  0.1,  0.5],   // l=0
+  [ 0.1, -0.4,  0.3,  0.2, -0.5,  0.1,  0.4, -0.3],   // l=1
+  [-0.3,  0.5,  0.2, -0.1,  0.4,  0.3, -0.2,  0.1],   // l=2
+  [ 0.4,  0.1, -0.3,  0.5,  0.2, -0.4,  0.3,  0.1],   // l=3
+];
+const K = [
+  [ 0.2, -0.1,  0.4,  0.3, -0.2,  0.5,  0.1,  0.3],   // s=0
+  [ 0.5,  0.2, -0.3,  0.1,  0.4,  0.3, -0.1,  0.2],   // s=1
+  [-0.1,  0.4,  0.2, -0.5,  0.3,  0.1,  0.4, -0.2],   // s=2
+  [ 0.3, -0.2,  0.5,  0.1, -0.4,  0.2,  0.3,  0.1],   // s=3
+];
+/* V is one-hot per key so out[l,d] == probs[l,d] for d=0..3 */
+const V = [
+  [1,0,0,0,0,0,0,0],[0,1,0,0,0,0,0,0],[0,0,1,0,0,0,0,0],[0,0,0,1,0,0,0,0],
+];
+/* masked attention on the fixed 4x4 input -> returns {probs, out} */
+function fixedAttention(){
+  const L=4, S=4; const mask = buildMask(L,S);
+  const probs = [], out = [];
+  for(let l=0;l<L;l++){
+    const scores = [];
+    for(let s=0;s<S;s++) scores.push( dot(Q[l],K[s]) / SQRTD + mask[l][s] );
+    const p = softmaxRow(scores); probs.push(p);
+    const o = new Array(D).fill(0);
+    for(let s=0;s<S;s++) for(let d=0;d<D;d++) o[d] += p[s]*V[s][d];
+    out.push(o);
+  }
+  return {probs, out};
+}
+
+/* ===== renderers ===== */
+function renderMaskGrid(L, S){
+  const t = document.getElementById('maskGrid');
+  let h = `<tr><th>l \\ s</th>` + Array.from({length:S},(_,s)=>`<th>s=${s}</th>`).join('') + `</tr>`;
+  for(let l=0;l<L;l++){
+    h += `<tr><td>l=${l}</td>`;
+    for(let s=0;s<S;s++){
+      const allowed = maskAllowed(l,s,L,S);
+      const isDiag = (s === l + (S-L));   // the shifted main diagonal
+      const cls = (allowed?'allow':'block') + (isDiag?' diag':'');
+      h += `<td class="${cls}">${allowed?'0':'−∞'}</td>`;
+    }
+    h += `</tr>`;
+  }
+  t.innerHTML = h;
+  document.getElementById('kVal').textContent = (S-L);
+}
+
+function renderStaticGrid(tableId, L, S){
+  const t = document.getElementById(tableId);
+  let h = `<tr><th>l \\ s</th>` + Array.from({length:S},(_,s)=>`<th>${s}</th>`).join('') + `</tr>`;
+  for(let l=0;l<L;l++){
+    h += `<tr><td>${l}</td>`;
+    for(let s=0;s<S;s++){
+      const allowed = maskAllowed(l,s,L,S);
+      const isDiag = (s === l + (S-L));
+      const cls = (allowed?'allow':'block') + (isDiag?' diag':'');
+      h += `<td class="${cls}">${allowed?'0':'−∞'}</td>`;
+    }
+    h += `</tr>`;
+  }
+  t.innerHTML = h;
+}
+
+function renderAttentionHeatmap(){
+  const {probs,out} = fixedAttention();
+  const S=4, L=4;
+  // probs grid
+  let ph = `<tr><th>l \\ s</th>` + Array.from({length:S},(_,s)=>`<th>s=${s}</th>`).join('') + `</tr>`;
+  for(let l=0;l<L;l++){
+    ph += `<tr><td>l=${l}</td>`;
+    for(let s=0;s<S;s++){
+      const p = probs[l][s];
+      const masked = p === 0 && !maskAllowed(l,s,L,S);
+      // color intensity by value
+      const g = Math.round(28 + p*180);
+      const bg = p>0 ? `rgb(${Math.round(28-p*20)},${g},${Math.round(40+p*100)})` : '#0d1117';
+      ph += `<td style="background:${bg};color:${p>0.01?'#7ee2a0':'#8b949e'}">${p.toFixed(4)}</td>`;
+    }
+    ph += `</tr>`;
+  }
+  document.getElementById('probsGrid').innerHTML = ph;
+  // out grid
+  let oh = `<tr><th>l \\ d</th>` + Array.from({length:D},(_,d)=>`<th>d${d}</th>`).join('') + `</tr>`;
+  for(let l=0;l<L;l++){
+    oh += `<tr><td>l=${l}</td>`;
+    for(let d=0;d<D;d++){
+      const v = out[l][d];
+      const g = Math.round(28 + v*180);
+      const bg = v>0 ? `rgb(${Math.round(28-v*20)},${g},${Math.round(40+v*100)})` : '#0d1117';
+      oh += `<td style="background:${bg};color:${v>0.01?'#7ee2a0':'#8b949e'}">${v.toFixed(4)}</td>`;
+    }
+    oh += `</tr>`;
+  }
+  document.getElementById('outGrid').innerHTML = oh;
+}
+
+function renderQKNorm(){
+  const scale = +document.getElementById('scale').value;
+  const qkOn = document.getElementById('qkOn').checked;
+  document.getElementById('scaleVal').textContent = scale.toFixed(1);
+  // use the fixed Q,K scaled by `scale`; report norms + score stats
+  let maxQnorm=0, maxKnorm=0, maxRMSq=0, maxAbsScore=0, sumSq=0, nScore=0;
+  const qUse = Q.map(r=>r.map(v=>v*scale));
+  const kUse = K.map(r=>r.map(v=>v*scale));
+  const qN = qkOn ? qUse.map(r=>rmsnormVec(r)) : qUse;
+  const kN = qkOn ? kUse.map(r=>rmsnormVec(r)) : kUse;
+  qN.forEach(r=>{ const n=Math.sqrt(dot(r,r)); if(n>maxQnorm)maxQnorm=n;
+    const rms=Math.sqrt(dot(r,r)/r.length); if(rms>maxRMSq)maxRMSq=rms; });
+  kN.forEach(r=>{ const n=Math.sqrt(dot(r,r)); if(n>maxKnorm)maxKnorm=n; });
+  for(let l=0;l<qN.length;l++) for(let s=0;s<kN.length;s++){
+    const sc = dot(qN[l],kN[s])/SQRTD; const a=Math.abs(sc);
+    if(a>maxAbsScore)maxAbsScore=a; sumSq+=sc*sc; nScore++;
+  }
+  const std = Math.sqrt(sumSq/nScore);
+  const sqrtD = SQRTD.toFixed(4);
+  const el = document.getElementById('qkReadout');
+  el.innerHTML =
+    `input scale × ${scale.toFixed(1)} &nbsp;|&nbsp; QK-Norm: <b>${qkOn?'ON':'OFF'}</b><br>`+
+    `max ‖q‖ = <b>${maxQnorm.toFixed(4)}</b> &nbsp;(with QK-Norm → √D = ${sqrtD})<br>`+
+    `max ‖k‖ = <b>${maxKnorm.toFixed(4)}</b><br>`+
+    `max RMS(q) = <b>${maxRMSq.toFixed(4)}</b> &nbsp;(with QK-Norm → 1.0000)<br>`+
+    `max |score| = <b class="${maxAbsScore>10?'bad':''}">${maxAbsScore.toFixed(4)}</b> &nbsp;(softmax saturates &gt; ~10)<br>`+
+    `std(scores) = <b class="${std>5?'bad':''}">${std.toFixed(4)}</b><br>`+
+    `<span class="micro">${qkOn
+      ? '✓ QK-Norm pins ‖q‖,‖k‖ → scores stay bounded → softmax well-conditioned.'
+      : '✗ without QK-Norm, large inputs → logits blow up → softmax saturates → gradients vanish.'}</span>`;
+}
+
+/* ===== master render ===== */
+function render(){
+  let L = +document.getElementById('L').value;
+  let S = +document.getElementById('S').value;
+  if(S < L){ S = L; document.getElementById('S').value = S; }
+  if(L > S){ L = S; document.getElementById('L').value = L; }
+  document.getElementById('LVal').textContent = L;
+  document.getElementById('SVal').textContent = S;
+  renderMaskGrid(L, S);
+  renderStaticGrid('prefillGrid', 4, 4);
+  renderStaticGrid('decodeGrid', 1, 6);
+  renderAttentionHeatmap();
+  renderQKNorm();
+}
+
+/* ===== events ===== */
+['L','S','scale','qkOn'].forEach(id=>{
+  const el = document.getElementById(id);
+  el.addEventListener('input', render);
+  if(el.type==='checkbox') el.addEventListener('change', render);
+});
+function setMode(L,S){ document.getElementById('L').value=L; document.getElementById('S').value=S;
+  render(); }
+document.getElementById('prefillBtn').addEventListener('click', ()=>setMode(4,4));
+document.getElementById('decodeBtn').addEventListener('click', ()=>setMode(1,6));
+window.addEventListener('resize',render);
+
+/* ===== gold-value check vs causal_mask.py Section C =====
+   out[l=3,:] on the fixed Q,K,V must equal the .py output:
+   [0.2429, 0.2788, 0.2336, 0.2446, 0.0, 0.0, 0.0, 0.0]   */
+const gold = [0.2429, 0.2788, 0.2336, 0.2446, 0.0, 0.0, 0.0, 0.0];
+const {out: goldOut} = fixedAttention();
+const ok = goldOut[3].every((v,i)=>Math.abs(v - gold[i]) < 5e-4);
+const chk = document.getElementById('check');
+chk.textContent = ok
+  ? 'check: OK — JS out[l=3,:] matches causal_mask.py Section C'
+  : 'check: FAIL — mismatch!';
+chk.style.borderColor = ok ? '#27ae60' : '#c0392b';
+chk.style.color = ok ? '#27ae60' : '#c0392b';
+chk.style.background = ok ? '#1c3a25' : '#3a1414';
+
+render();
+</script>
+</body>
+</html>

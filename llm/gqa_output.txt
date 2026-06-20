@@ -1,0 +1,141 @@
+gqa.py - reference impl. All numbers below feed GQA.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: the three attention configs  (MHA -> MQA -> GQA)
+========================================================================
+Fix H_q = 14 query heads (as in Qwen3-0.5B). Now vary H_kv:
+
+| config | H_q | H_kv | n_repeats = H_q//H_kv | KV heads per Q-head |
+|--------|-----|------|------------------------|---------------------|
+| MHA    | 14  | 14   | 1                      | 1 own               |
+| GQA    | 14  | 2    | 7                      | 1 shared by 7       |
+| MQA    | 14  | 1    | 14                     | 1 shared by 14      |
+
+Read it as a slider on H_kv:
+  - MHA  (H_kv = H_q): each Q-head gets its OWN K,V  -> best quality, most memory
+  - GQA  (1 < H_kv < H_q): groups of Q-heads share  -> sweet spot
+  - MQA  (H_kv = 1): ALL Q-heads share ONE K,V      -> least memory, quality drops
+
+GQA is literally an interpolation between MHA and MQA (Ainslie 2023):
+  H_kv = H_q  ->  MHA ;  H_kv = 1  ->  MQA ;  anything between -> GQA.
+
+========================================================================
+  SECTION B: KV-cache memory  =  num_layers * 2 * H_kv * S * D
+========================================================================
+During autoregressive decode, every step reloads the WHOLE key/value
+cache from HBM (Shazeer 2019, arXiv:1911.02150). That cost scales with
+H_kv, NOT H_q. Cutting H_kv cuts memory bandwidth linearly.
+
+elements_per_layer = 2 * H_kv * S * D      (the 2 = one K + one V)
+bytes_per_layer    = elements * bytes_per_element   (2 for fp16)
+
+Qwen3-0.5B: H_q=14, H_kv=2, D=64, layers=28, S=4096
+
+| variant | H_kv | elements/layer = 2*H_kv*S*D | bytes/layer (fp16) | savings vs MHA   |
+|---------|------|----------------------------|--------------------|------------------|
+| MHA     | 14   | 7,340,032                  | 14.00    MiB        | 1.0x (baseline)  |
+| GQA     | 2    | 1,048,576                  | 2.00     MiB        | 7.0x smaller     |
+| MQA     | 1    | 524,288                    | 1.00     MiB        | 14.0x smaller    |
+
+Total KV cache (all 28 layers), GQA, fp16, S=4096:
+  = 28 * 2 * 2 * 4096 * 64 * 2 bytes
+  = 29,360,128 elements = 58,720,256 bytes = 56.0 MiB
+
+If this were MHA (H_kv=14), the cache would be 7x bigger. THAT is why Qwen3/Llama/Mistral chose GQA.
+
+[check] savings ratio GQA vs MHA == H_q/H_kv == 14/2 == 7x:  OK
+
+========================================================================
+  SECTION C: the broadcast reshape trick (shapes at every step)
+========================================================================
+Tiny model: B=1, H_q=4, H_kv=2, L=4, S=4, D=8, n_repeats=2
+
+Input shapes (attention layout, AFTER the [B,L,H,D]->[B,H,L,D] transpose):
+  q: (1, 4, 4, 8)   = [B, H_q,  L, D]
+  k: (1, 2, 4, 8)   = [B, H_kv, S, D]
+  v: (1, 2, 4, 8)   = [B, H_kv, S, D]
+
+GOAL: each Q-head in group g uses KV head g. Group g = Q-heads [g*2 .. g*2+2-1].
+
+Step 1 - reshape to expose groups (KV is NEVER copied):
+  q -> qg: (1, 4, 4, 8)  ->  (1, 2, 2, 4, 8)   = [B, H_kv, n_repeats, L, D]
+  k -> kg: (1, 2, 4, 8)  ->  (1, 2, 1, 4, 8)   = [B, H_kv, 1,        S, D]   <- size-1 broadcasts
+  v -> vg: (1, 2, 4, 8)  ->  (1, 2, 1, 4, 8)   = [B, H_kv, 1,        S, D]
+
+Step 2 - scores = qg @ kg^T * 1/sqrt(D). The size-1 KV axis broadcasts
+across the n_repeats axis, so all Q-heads in a group hit the SAME KV head:
+  scores: (1, 2, 2, 4, 4)  = [B, H_kv, n_repeats, L, S]
+
+Step 3 - softmax over S, then @ vg (also broadcasts over n_repeats):
+  probs:  (1, 2, 2, 4, 4)  = [B, H_kv, n_repeats, L, S]
+  out:    (1, 2, 2, 4, 8)  = [B, H_kv, n_repeats, L, D]
+
+Step 4 - flatten the (H_kv, n_repeats) axes back to H_q:
+  result: (1, 4, 4, 8)  = [B, H_q, L, D]
+
+KEY POINT: k and v stayed [B, H_kv, S, D] the whole time. We materialized
+ZERO extra KV. The savings (Section B) are real, not just bookkeeping.
+
+========================================================================
+  SECTION D: GQA == MHA-with-repeated-KV  (equivalence proof + GOLD)
+========================================================================
+Tiny model: H_q=4, H_kv=2, D=8, L=4, n_repeats=2
+
+Two ways to compute the SAME thing:
+  (1) GQA       : reshape+broadcast, KV never copied
+  (2) MHA-repeat: repeat_interleave KV to H_q heads, then plain MHA
+
+  max|GQA - MHA-repeat| = 1.490e-08
+  [check] GQA == MHA(repeated KV)?  True  (atol=1e-6)  ->  the broadcast trick is provably exact
+
+Why repeat_INTERLEAVE (not repeat)? It yields CONTIGUOUS groups:
+  k heads (H_kv=2)    map to repeated k heads (H_q=4):
+    Q-head 0 -> KV-head 0
+    Q-head 1 -> KV-head 0
+    Q-head 2 -> KV-head 1
+    Q-head 3 -> KV-head 1
+  (i.e. Q-heads 0..1 all share KV-head 0, Q-heads 2..3 share KV-head 1, ...)
+
+GOLD value (pinned for gqa.html) - GQA output, Q-head h=0, all positions:
+  out[h=0, m=0] = [+0.1477, +0.1235, +0.1470, +0.2909, -0.0165, +0.1233, -0.1583, -0.0593]
+  out[h=0, m=1] = [+0.1701, +0.1540, +0.1353, +0.2926, -0.0287, +0.1402, -0.1822, -0.0644]
+  out[h=0, m=2] = [+0.1984, +0.0860, +0.1432, +0.3035, -0.0228, +0.0652, -0.1475, -0.1401]
+  out[h=0, m=3] = [+0.1580, +0.1518, +0.1443, +0.2910, -0.0318, +0.1529, -0.1785, -0.0530]
+
+GOLD scalar out[h=0, m=0, d=0] = +0.147747   (compact .html check)
+[check] gold scalar reproduces from gqa_attention():  OK
+
+========================================================================
+  SECTION E: pitfall - reshape ORDER matters  [...,H_kv,n_repeats,...] not [...,n_repeats,H_kv,...]
+========================================================================
+Tiny model: H_q=4, H_kv=2, n_repeats=2
+
+Q-heads are laid out as CONTIGUOUS groups in the H_q axis:
+  H_q axis: [ g0h0, g0h1 | g1h0, g1h1 ]   (group 0 = Q0,Q1; group 1 = Q2,Q3)
+  correct KV mapping:  Q0->KV0, Q1->KV0, Q2->KV1, Q3->KV1
+
+reshape [H_q] -> (H_kv, n_repeats)  = (2, 2) splits ROW-MAJOR:
+  -> [[g0h0, g0h1], [g1h0, g1h1]]   = group structure PRESERVED  ✓
+reshape [H_q] -> (n_repeats, H_kv)  = (2, 2) splits ROW-MAJOR:
+  -> [[g0h0, g1h0], [g0h1, g1h1]]   = STRIPED, groups SCRAMBLED  ✗
+
+Correct reshape [..., H_kv, n_repeats, ...]  vs  WRONG reshape [..., n_repeats, H_kv, ...]:
+  max|correct - wrong| = 0.6535
+  num elements that differ (>|1e-4|): 64 / 128
+
+Output, Q-head h=1, position m=0  (h=1 is where the two orderings diverge):
+  CORRECT (Q1->KV0): [+0.1724, +0.1228, +0.1341, +0.2949, -0.0143, +0.0997, -0.1632, -0.0864]
+  WRONG   (Q1->KV1): [-0.2905, -0.0170, +0.0757, -0.0709, +0.0046, +0.1739, +0.3920, -0.3487]
+  (head h=0 is identical in both, since Q0->KV0 either way; the
+   scramble shows up on the MIDDLE heads of each group.)
+
+WHY wrong order scrambles (the pairing flips for middle heads):
+  CORRECT pairing: Q0->KV0, Q1->KV0, Q2->KV1, Q3->KV1
+  WRONG   pairing: Q0->KV0, Q1->KV1, Q2->KV0, Q3->KV1
+  Q1 and Q2 get the WRONG KV head. No error is raised - silent garbage.
+FIX: always reshape q to [..., H_kv, n_repeats, L, D], k/v to [..., H_kv, 1, S, D].
+
+========================================================================
+  DONE - all sections printed
+========================================================================

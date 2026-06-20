@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KV Cache (Dense → Paged) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#8e44ad; --waste:#3d4452;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  /* memory map cells */
+  .strip{display:flex;gap:2px;flex-wrap:wrap;margin:.2rem 0 .1rem}
+  .cell{width:26px;height:26px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+        font-size:.62rem;color:#0d1117;font-weight:700;font-family:ui-monospace,monospace}
+  .cell.used{background:var(--green)}
+  .cell.waste{background:var(--waste)}
+  .cell.pageA{background:var(--blue);color:#fff}
+  .cell.pageB{background:var(--purple);color:#fff}
+  .cell.pageFree{background:var(--waste);color:var(--muted)}
+  .reqLabel{font-size:.78rem;color:var(--muted);min-width:90px;font-family:ui-monospace,monospace}
+  .pct{font-size:.78rem;font-variant-numeric:tabular-nums;font-weight:600}
+  table.kv{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.kv td,table.kv th{border:1px solid #30363d;padding:3px 8px;text-align:center}
+  table.kv th{color:var(--muted);font-weight:600}
+  table.kv tr.ok td{background:#1c3a25;color:#7ee2a8}
+  table.kv tr.bad td{background:#3a1414;color:#ff9c9c}
+</style>
+</head>
+<body>
+  <h1>KV Cache — Dense &rarr; Paged &mdash; interactive
+    <a class="badge" href="./KV_CACHE.md">KV_CACHE.md</a>
+    <a class="badge" href="./kv_cache.py">kv_cache.py</a></h1>
+  <div class="sub">Watch the cache grow token-by-token, watch pages scatter across the physical pool, and
+    rewind rejected draft tokens. Every number is recomputed in JS from the <i>identical</i> logic in
+    <code>kv_cache.py</code>. &nbsp;|&nbsp; <a href="./rope.html">the offset link &rarr; RoPE</a>
+    &nbsp;|&nbsp; <a href="./KV_CACHE.md#glossary-read-once-refer-back">need a term? see the glossary</a></div>
+
+  <!-- ===== PANEL 1: DENSE vs PAGED MEMORY MAP ===== -->
+  <h2>&#9312; Dense vs Paged memory map &mdash; drag <b style="color:var(--green)">tokens used</b></h2>
+  <div class="panel">
+    <div class="controls">
+      <label>tokens used <input type="range" id="used" min="1" max="16" value="2" step="1">
+        <span class="val" id="usedVal">2</span></label>
+      <span class="micro">Dense reserves max_len=16 up-front (tiny demo of the 8192 problem). Paged uses page_size=4.</span>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <div style="flex:1;min-width:320px">
+        <div class="micro"><b style="color:var(--orange)">DENSE</b> &mdash; one pre-allocated slab per request (grey = wasted shelf space, reserved but never written)</div>
+        <div class="strip" id="denseStrip"></div>
+        <div class="pct" id="densePct"></div>
+      </div>
+      <div style="flex:1;min-width:320px">
+        <div class="micro"><b style="color:var(--green)">PAGED</b> &mdash; only the pages you need; waste &lt; 1/page_size (last page partial, shown grey)</div>
+        <div class="strip" id="pagedStrip"></div>
+        <div class="pct" id="pagedPct"></div>
+      </div>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>Caption:</b> dense lights up its full <code>max_len</code> shelf the moment a request arrives &mdash; most
+      of it stays dark forever. Paged lights up only as many pages as the request actually fills. At used=1: dense wastes
+      15/16 = <b>93.75%</b> (the 512/8192 example in miniature); paged wastes 3/4 = 25%. Scale dense to max_len=8192, used=512
+      and you get exactly the 93.75% from <a href="./KV_CACHE.md#4-fragmentation-math--section-c-output">KV_CACHE.md &sect;4</a>.</div>
+  </div>
+
+  <!-- ===== PANEL 2: STEP-THROUGH (prefill / decode / rewind) ===== -->
+  <h2>&#9313; Step-through: prefill &rarr; decode &rarr; rewind (paged, page_size=4)</h2>
+  <div class="panel">
+    <div class="controls">
+      <button id="btnPrefill">Prefill 3</button>
+      <button id="btnDecode">Decode +1</button>
+      <button id="btnRewind">Rewind 1</button>
+      <button id="btnReset">Reset</button>
+      <span class="micro">request A only (pool has 8 physical pages, ids 0..7). Watch page_ids &amp; free_list update.</span>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <div style="flex:1;min-width:300px">
+        <div class="micro">Physical page pool (ids 0..7) &mdash; blue = owned by A, grey = free. Each page holds up to 4 tokens.</div>
+        <div class="strip" id="poolStrip"></div>
+        <div class="micro" style="margin-top:.3rem">The number under each owned page is <code>live/4</code> &mdash; how full that physical page is.</div>
+      </div>
+      <div style="flex:1;min-width:300px">
+        <div class="micro">Cache state &mdash; the INDEX CARD (block table): logical page &rarr; physical page id</div>
+        <div class="readout" id="stateOut"></div>
+      </div>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>Caption:</b> click <i>Prefill 3</i> (grabs page 0), then <i>Decode +1</i> a few times. When offset crosses a
+      page boundary (4&rarr;5, 8&rarr;9, ...) a NEW physical page is allocated &mdash; note how A's pages end up
+      <b>non-contiguous</b> when interleaved with another request (see <a href="./KV_CACHE.md#5-pagedattention-os-virtual-memory-for-kv--section-d-output">KV_CACHE.md &sect;5</a>).
+      <i>Rewind 1</i> returns whole pages to the free list &mdash; using <b>ceil</b>, never floor (the off-by-one trap,
+      <a href="./KV_CACHE.md#8-rewindn--speculative-decoding-and-the-off-by-one-trap">KV_CACHE.md &sect;8</a>).</div>
+  </div>
+
+  <!-- ===== PANEL 3: OFFSET CORRECTNESS CHECK ===== -->
+  <h2>&#9314; Offset correctness: cached decode == full precompute (the RoPE link)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> token 3's cached K (head h=0, first 4 dims) is <b>byte-identical</b> whether you
+      compute all 4 tokens at once, or prefill 3 then decode token 3. The cache stores <b>already-rotated</b> K,V, so decode
+      must rotate the new token at its TRUE position (<code>offset=3</code>), not at <code>m=0</code>. The WRONG path rotates
+      at m=0 &rarr; diverges &mdash; that's the proof the offset is mandatory (see <a href="./rope.html">RoPE</a> &sect;10).</div>
+    <table class="kv" id="offsetTable"></table>
+    <div class="micro" style="margin-top:.5rem"><b>Caption:</b> the three correct rows (green) show the SAME K[3] vector &mdash; the cache changes <i>when</i>
+      K[3] is computed, never <i>what</i> it is. The wrong-offset row (red) differs &mdash; proving <code>slice(3,4)</code>
+      is not optional. Numbers match <a href="./KV_CACHE.md#7-the-invariant-no-cache--dense--paged-proof-with-numbers">KV_CACHE.md &sect;7</a>.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="checkGold">gold: &hellip;</span>
+    <span class="badge" id="checkK" style="margin-left:.4rem">check: &hellip;</span>
+    JS reproduces <code>kv_cache.py</code> Section D (block table: A=[0,2], B=[1,3]) &amp; Section E (K equivalence:
+    K[3] = [-0.4541, 0.2641, 0.3906, 0.4028]).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth constants (match kv_cache.py) ===== */
+const D = 8, HALF = 4, BASE = 10000, PS = 4, NPAGE = 8;
+
+/* ===== RoPE ground-truth formula, copied verbatim from rope.html / rope.py ===== */
+function theta(j){ return Math.pow(BASE, -j/HALF); }
+function rotate(vec, m){                 // split-layout rotation of a length-8 vector at position m
+  const x1=vec.slice(0,HALF), x2=vec.slice(HALF), out=new Array(D);
+  for(let j=0;j<HALF;j++){
+    const c=Math.cos(m*theta(j)), s=Math.sin(m*theta(j));
+    out[j]     = x1[j]*c - x2[j]*s;      // real
+    out[HALF+j]= x2[j]*c + x1[j]*s;      // imag
+  }
+  return out;
+}
+/* deterministic K like make_kv in kv_cache.py: head h, token p */
+function rawK(p, h){
+  const v=new Array(D);
+  for(let d=0;d<D;d++) v[d]=0.1*(p+1)+0.01*h+0.001*(d+1);
+  return v;
+}
+
+/* ===== paged pool + cache, mirroring PagedKVPool / PagedKVCache in kv_cache.py ===== */
+function makePool(np, ps){ return {ps, np, free:Array.from({length:np},(_,i)=>np-1-i), used:new Set()}; } // pop()->0,1,2..
+function alloc(pool){ const id=pool.free.pop(); pool.used.add(id); return id; }
+function freeP(pool,id){ pool.used.delete(id); pool.free.push(id); }
+function makeCache(pool){ return {pool, page_ids:[], page_lens:[], offset:0}; }
+function cacheUpdate(c, L){
+  const ps=c.pool.ps; let start=0;
+  if(c.page_ids.length && c.page_lens[c.page_lens.length-1] < ps){
+    const li=c.page_ids.length-1, pid=c.page_ids[li], pstart=c.page_lens[li];
+    const take=Math.min(ps-pstart, L);
+    c.page_lens[li]+=take; start=take;
+  }
+  while(start<L){
+    const end=Math.min(start+ps, L), pid=alloc(c.pool);
+    c.page_ids.push(pid); c.page_lens.push(end-start); start=end;
+  }
+  c.offset+=L;
+}
+function cacheRewind(c, n){
+  const ps=c.pool.ps, newOff=c.offset-n;
+  const target=Math.ceil(newOff/ps);                       // CEIL — the off-by-one trap
+  while(c.page_ids.length>target){ const pid=c.page_ids.pop(); c.page_lens.pop(); freeP(c.pool,pid); }
+  if(target>0) c.page_lens[target-1]=newOff - ps*(target-1);
+  c.offset=newOff;
+}
+
+/* ===== PANEL 1: memory map ===== */
+const usedEl=document.getElementById('used');
+function cell(cls, txt){ const d=document.createElement('div'); d.className='cell '+cls; d.textContent=txt; return d; }
+function renderMap(){
+  const used=+usedEl.value; document.getElementById('usedVal').textContent=used;
+  const maxLen=16;
+  // dense strip
+  const ds=document.getElementById('denseStrip'); ds.innerHTML='';
+  for(let i=0;i<maxLen;i++) ds.appendChild(cell(i<used?'used':'waste', i<used?(i):''));
+  const dWaste=maxLen-used, dPct=100*(1-used/maxLen);
+  document.getElementById('densePct').innerHTML=
+    `<span style="color:var(--green)">${used} used</span> + <span style="color:var(--waste)">${dWaste} wasted</span> &nbsp;=&nbsp; <b style="color:var(--orange)">${dPct.toFixed(1)}% wasted</b> (reserved ${maxLen})`;
+  // paged strip
+  const pagesNeed=Math.ceil(used/PS), reserved=pagesNeed*PS, pWaste=reserved-used;
+  const ps2=document.getElementById('pagedStrip'); ps2.innerHTML='';
+  for(let pgi=0;pgi<pagesNeed;pgi++){
+    const live=Math.min(PS, used-pgi*PS);
+    for(let s=0;s<PS;s++) ps2.appendChild(cell(s<live?'used':'waste', (pgi*PS+s)<used?(pgi*PS+s):''));
+  }
+  const pPct=reserved? 100*pWaste/reserved : 0;
+  document.getElementById('pagedPct').innerHTML=
+    `<span style="color:var(--green)">${used} used</span> + <span style="color:var(--waste)">${pWaste} wasted (last page)</span> &nbsp;=&nbsp; <b style="color:var(--green)">${pPct.toFixed(1)}% wasted</b> (${pagesNeed} page${pagesNeed!=1?'s':''} reserved)`;
+}
+
+/* ===== PANEL 2: step-through ===== */
+let stepPool=makePool(NPAGE,PS), stepCache=makeCache(stepPool);
+function renderStep(){
+  // pool strip
+  const strip=document.getElementById('poolStrip'); strip.innerHTML='';
+  for(let pid=0;pid<NPAGE;pid++){
+    const owned=stepCache.page_ids.indexOf(pid);
+    if(owned>=0){
+      const live=stepCache.page_lens[owned];
+      const d=document.createElement('div'); d.className='cell pageA';
+      d.textContent=pid; d.title='physical page '+pid+' (A owns '+live+'/'+PS+')';
+      // overlay fill via outline thickness feel: use opacity on width by stacking
+      strip.appendChild(d);
+      // small fill marker
+      const fm=document.createElement('div'); fm.className='micro';
+      fm.style.cssText='width:26px;text-align:center;font-size:.6rem;color:var(--blue)';
+      fm.textContent=live+'/'+PS;
+      strip.appendChild(fm);
+    } else {
+      const d=cell('pageFree', pid); d.title='free page '+pid; strip.appendChild(d);
+      const fm=document.createElement('div'); fm.className='micro';
+      fm.style.cssText='width:26px;text-align:center;font-size:.6rem;color:var(--muted)';
+      fm.textContent='free'; strip.appendChild(fm);
+    }
+  }
+  // state
+  const so=document.getElementById('stateOut');
+  so.innerHTML =
+    `offset        = <b>${stepCache.offset}</b>\n`+
+    `page_ids      = <b>[${stepCache.page_ids.join(', ')}]</b>   (logical -> physical)\n`+
+    `page_lens     = <b>[${stepCache.page_lens.join(', ')}]</b>\n`+
+    `pool.used     = [${[...stepPool.used].sort((a,b)=>a-b).join(', ')}]\n`+
+    `pool.free     = [${stepPool.free.slice().sort((a,b)=>a-b).join(', ')}]`;
+}
+document.getElementById('btnPrefill').onclick=()=>{ cacheUpdate(stepCache,3); renderStep(); };
+document.getElementById('btnDecode').onclick=()=>{ cacheUpdate(stepCache,1); renderStep(); };
+document.getElementById('btnRewind').onclick=()=>{ if(stepCache.offset>0){ cacheRewind(stepCache,1); renderStep(); } };
+document.getElementById('btnReset').onclick=()=>{ stepPool=makePool(NPAGE,PS); stepCache=makeCache(stepPool); renderStep(); };
+
+/* ===== PANEL 3: offset correctness ===== */
+function renderOffset(){
+  const t=document.getElementById('offsetTable');
+  const correct=rotate(rawK(3,0), 3);          // decode token 3 at TRUE position 3
+  const wrong  =rotate(rawK(3,0), 0);          // the bug: rotate at position 0
+  const gold   =[-0.4541, 0.2641, 0.3906, 0.4028];
+  const fmt=a=>a.map(x=>(x>=0?'+':'')+x.toFixed(4)).join('  ');
+  let h='<tr><th>path</th><th>RoPE offset</th><th>K[3] (h=0, d0..d3)</th><th>== gold?</th></tr>';
+  const rows=[
+    ['all-at-once (no cache)','slice(0,4)', correct, true],
+    ['dense cache decode','slice(3,4)', correct, true],
+    ['paged cache decode','slice(3,4)', correct, true],
+    ['WRONG (the bug)','slice(0,1)', wrong, false],
+  ];
+  rows.forEach(r=>{
+    const ok=r[3] && correct.every((v,i)=>Math.abs(v-gold[i])<5e-4);
+    h+=`<tr class="${r[3]?(ok?'ok':''):'bad'}"><td>${r[0]}</td><td>${r[1]}</td><td>${fmt(r[2])}</td><td>${r[3]?(ok?'&#10003;':'&#10007;'):'&#10007; diverges'}</td></tr>`;
+  });
+  t.innerHTML=h;
+}
+
+/* ===== GOLD CHECK vs kv_cache.py ===== */
+// (a) block table: reproduce Section D allocation for 2 interleaved requests
+const gpool=makePool(NPAGE,PS), gA=makeCache(gpool), gB=makeCache(gpool);
+cacheUpdate(gA,4); cacheUpdate(gB,4); cacheUpdate(gA,1); cacheUpdate(gB,1); cacheUpdate(gA,3);
+const goldBlockOK =
+  JSON.stringify(gA.page_ids)==='[0,2]' && JSON.stringify(gB.page_ids)==='[1,3]' &&
+  JSON.stringify(gA.page_lens)==='[4,4]' && JSON.stringify(gB.page_lens)==='[4,1]';
+const chkGold=document.getElementById('checkGold');
+chkGold.textContent = goldBlockOK ? 'gold: OK — block_table A=[0,2] B=[1,3] matches kv_cache.py §D' : 'gold: FAIL — block table mismatch!';
+chkGold.style.borderColor = goldBlockOK?'#27ae60':'#c0392b';
+chkGold.style.color = goldBlockOK?'#27ae60':'#c0392b';
+chkGold.style.background = goldBlockOK?'#1c3a25':'#3a1414';
+
+// (b) K equivalence: JS K[3] == kv_cache.py Section E output
+const jsK3=rotate(rawK(3,0),3);
+const expectK3=[-0.4541,0.2641,0.3906,0.4028];
+const kOK=jsK3.slice(0,4).every((v,i)=>Math.abs(v-expectK3[i])<5e-4);
+const chkK=document.getElementById('checkK');
+chkK.textContent = kOK ? 'check: OK — JS K[3] matches kv_cache.py §E' : 'check: FAIL — K mismatch!';
+chkK.style.borderColor = kOK?'#27ae60':'#c0392b';
+chkK.style.color = kOK?'#27ae60':'#c0392b';
+chkK.style.background = kOK?'#1c3a25':'#3a1414';
+
+/* ===== wire up + initial render ===== */
+usedEl.addEventListener('input', ()=>{ renderMap(); });
+window.addEventListener('resize', renderStep);
+renderMap();
+renderStep();
+renderOffset();
+</script>
+</body>
+</html>

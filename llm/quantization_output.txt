@@ -1,0 +1,177 @@
+quantization.py - reference impl. All numbers below feed QUANTIZATION.md.
+torch = 2.12.1
+MLX-affine W4A16: dequant w = scale*w_int + bias (bias in FLOAT units)
+
+========================================================================
+  SECTION A: WHY quantize - memory of a weight matrix (FP16 vs W4A16)
+========================================================================
+One linear layer weight [N=896, E=896] (Qwen3-0.5B hidden dim):
+  FP16 (bfloat16): 896*896*2 =    1,605,632 bytes = 1.606 MB
+  W4A16 group_size=  8: packed=  401,408 B + scales/biases=401,408 B =     802,816 bytes = 0.803 MB  -> 2.00x smaller
+  W4A16 group_size=128: packed=  401,408 B + scales/biases=25,088 B =     426,496 bytes = 0.426 MB  -> 3.76x smaller
+
+Decode is BANDWIDTH-bound: weights stream from HBM every token,
+activations are computed and stay on-chip. So shrinking the STATIC
+weight footprint (4x) directly speeds up inference; keeping
+activations in 16-bit preserves accuracy (per LLM.int8() findings).
+
+Tiny hero example (group_size=8, one row of 8 weights):
+  FP16    : 8 * 2              = 16 bytes
+  W4A16   : 1 uint32 (4 bytes) + scale(2)+bias(2) = 8 bytes  -> 2.0x
+  (group_size=128 amortizes the scale/bias overhead -> ~3.8x)
+
+========================================================================
+  SECTION B: quantize ONE row of 8 floats -> scale, bias, 8 int4 values
+========================================================================
+Input weight row w (group_size=8, bits=4):
+  w = [-1.8, 0.55, -0.35, 1.2, -0.85, 0.25, -1.15, 1.05]
+
+Step 1-4 of the MLX affine quantizer (see quantize_group docstring):
+  w_min=-1.80  w_max=+1.20
+  mask = |w_min|>|w_max| = 1.80>1.20 = True
+  edge = w_min = -1.80   (the 'heavier' extreme -> maps to int4 with ZERO error)
+  scale = edge/q0 = -1.80/-9 = 0.200000
+  bias  = edge    = -1.800000   (in FLOAT units, same scale as w)
+
+Per-element quantize:  w_int = clip(round((w - bias)/scale), 0, 15)
+
+| k |   w[k]   | (w-bias)/scale | round | w_int | dequant  |  error   |
+|---|---------|----------------|-------|-------|----------|----------|
+| 0 | -1.80   |        +0.0000 |     0 |     0 | -1.8000  | +0.0000   |
+| 1 | +0.55   |       +11.7500 |    12 |    12 | +0.6000  | -0.0500   |
+| 2 | -0.35   |        +7.2500 |     7 |     7 | -0.4000  | +0.0500   |
+| 3 | +1.20   |       +15.0000 |    15 |    15 | +1.2000  | +0.0000   |
+| 4 | -0.85   |        +4.7500 |     5 |     5 | -0.8000  | -0.0500   |
+| 5 | +0.25   |       +10.2500 |    10 |    10 | +0.2000  | +0.0500   |
+| 6 | -1.15   |        +3.2500 |     3 |     3 | -1.2000  | +0.0500   |
+| 7 | +1.05   |       +14.2500 |    14 |    14 | +1.0000  | +0.0500   |
+
+RESULT: scale=0.2000  bias=-1.8000  w_int=[0, 12, 7, 15, 5, 10, 3, 14]
+Note: the extreme (w[0]=-1.80) maps to w_int=0 and the other
+extreme (w[3]=+1.20) maps to w_int=15 - both ZERO error, by
+construction (bias=edge, scale=edge/q0). Interior weights drift up
+to +/- scale/2 = +-0.1000.
+
+========================================================================
+  SECTION C: PACK 8 int4 values into ONE uint32 (bit layout)
+========================================================================
+w_int = [0, 12, 7, 15, 5, 10, 3, 14]
+       = ['0x0', '0xc', '0x7', '0xf', '0x5', '0xa', '0x3', '0xe']  (one nibble each)
+
+Packing:  packed = sum_k  w_int[k] << (4*k)
+          bits[4k : 4k+4] = w_int[k]
+
+Bit layout of the uint32 (bit 31 = MSB, bit 0 = LSB):
+
+  bit range  | k | shift | w_int[k] | hex nibble
+  ------------|---|-------|----------|-----------
+  [ 0:4 ]      | 0 |     0 |        0 | 0x0
+  [ 4:8 ]      | 1 |     4 |       12 | 0xc
+  [ 8:12]      | 2 |     8 |        7 | 0x7
+  [12:16]      | 3 |    12 |       15 | 0xf
+  [16:20]      | 4 |    16 |        5 | 0x5
+  [20:24]      | 5 |    20 |       10 | 0xa
+  [24:28]      | 6 |    24 |        3 | 0x3
+  [28:32]      | 7 |    28 |       14 | 0xe
+
+packed (decimal) = 3819304896
+packed (hex)     = 0xE3A5F7C0
+packed (binary)  = 11100011101001011111011111000000
+
+Read the hex string RIGHT-TO-LEFT to recover w_int in order:
+  0xE3A5F7C0  -> nibbles k=0..7 = [0, 12, 7, 15, 5, 10, 3, 14]
+
+========================================================================
+  SECTION D: UNPACK the uint32 + DEQUANT back to float; error per element
+========================================================================
+Stored on-chip: ONE uint32 = 0xE3A5F7C0 (= 3819304896), plus
+scale=0.2000 and bias=-1.8000 (both float16).
+
+Unpack: nibble_k = (packed >> 4*k) & 0xF
+  unpacked = [0, 12, 7, 15, 5, 10, 3, 14]
+  [check] unpack(pack(w_int)) == w_int :  OK
+
+Dequant:  w_float = scale * w_int + bias   (MLX convention, +bias)
+
+| k | w_orig | w_int | dequant = s*wi+b |  error  |
+|---|--------|-------|------------------|---------|
+| 0 | -1.80  |   0   | 0.20*0+(-1.80) = -1.8000 | +0.0000  |
+| 1 | +0.55  |  12   | 0.20*12+(-1.80) = +0.6000 | -0.0500  |
+| 2 | -0.35  |   7   | 0.20*7+(-1.80) = -0.4000 | +0.0500  |
+| 3 | +1.20  |  15   | 0.20*15+(-1.80) = +1.2000 | +0.0000  |
+| 4 | -0.85  |   5   | 0.20*5+(-1.80) = -0.8000 | -0.0500  |
+| 5 | +0.25  |  10   | 0.20*10+(-1.80) = +0.2000 | +0.0500  |
+| 6 | -1.15  |   3   | 0.20*3+(-1.80) = -1.2000 | +0.0500  |
+| 7 | +1.05  |  14   | 0.20*14+(-1.80) = +1.0000 | +0.0500  |
+
+Max abs error   = 0.0500  (= scale/2 = 0.1000 ceiling)
+Mean abs error  = 0.0375
+
+GOLD (for QUANTIZATION.html to reproduce):
+  scale   = 0.19999999470180935
+  bias    = -1.7999999523162842
+  w_int   = [0, 12, 7, 15, 5, 10, 3, 14]
+  packed  = 3819304896  (0xE3A5F7C0)
+  dequant = [-1.8, 0.6, -0.4, 1.2, -0.8, 0.2, -1.2, 1.0]
+
+========================================================================
+  SECTION E: quantized matmul vs float matmul  [1,8] @ [8,4]
+========================================================================
+x (activation, float16) shape [1, 8]:
+  [0.5, -0.3, 0.8, -0.1, 0.4, -0.6, 0.2, 0.7]
+W (weight, float16) shape [4, 8] - each row quantized independently:
+  row 0: [-1.8, 0.55, -0.35, 1.2, -0.85, 0.25, -1.15, 1.05]
+  row 1: [0.9, -0.4, 1.1, -0.6, 0.8, -1.3, 0.5, -0.9]
+  row 2: [-0.5, 1.4, -0.8, 0.6, -1.1, 0.3, 1.6, -0.4]
+  row 3: [1.3, -0.2, 0.7, -1.0, 0.5, -0.8, 1.1, -0.3]
+
+FLOAT matmul  x @ W.T  =  [-1.45, 2.08, -1.95, 2.06]
+
+QUANT matmul (dequant in MAC) = [-1.5, 2.08, -2.0267, 1.9987]
+
+| output n | float    | quantized | abs error |
+|----------|----------|-----------|-----------|
+| 0        | -1.4500  | -1.5000   | 0.0500    |
+| 1        | +2.0800  | +2.0800   | 0.0000    |
+| 2        | -1.9500  | -2.0267   | 0.0767    |
+| 3        | +2.0600  | +1.9987   | 0.0612    |
+
+Max abs error  = 0.0767
+Mean rel error = 0.0259  (2.59%)
+[check] max abs error 0.0767 < 0.5 :  OK  (quantized ~= float)
+[check] quantized matmul shape == [1,4] :  OK
+
+========================================================================
+  SECTION F: SIGN-CONVENTION PITFALL - MLX (+bias) vs textbook (-zero_point)
+========================================================================
+Using the hero group: scale=0.2000, bias=-1.8000 (float units),
+w_int[1] = 12 (the second weight, w[1]=+0.55).
+
+Three dequant formulas, all claiming to be 'the' affine dequant:
+
+(1) MLX actual (this file, mlx/backend/cpu/quantized.cpp):
+    w = scale*w_int + bias = 0.20*12 + (-1.80) = +0.6000  CORRECT
+
+(2) Textbook zero-point (GPTQ/AWQ papers):
+    zero_point = -bias/scale = -(-1.80)/0.20 = 9.0000  (INT units!)
+    w = scale*(w_int - zero_point) = 0.20*(12 - 9.0000) = +0.6000  CORRECT
+
+(3) Source-guide PROSE 'w = (w_int + bias)*scale' (MISLEADING):
+    w = (w_int + bias)*scale = (12 + (-1.80))*0.20 = +2.0400  WRONG!
+
+  (3) is off by 1.4400 - silently. If you plug MLX's
+  float-unit `bias` into the textbook `(w_int + X)*scale` shape, you get
+  garbage. The two conventions are algebraically equal ONLY when
+  zero_point = -bias/scale (note the /scale: int units vs float units).
+
+[check] MLX (1) == textbook (2) when zp=-bias/scale :  OK
+[check] source-guide prose (3) != MLX (1)            :  OK (it's wrong)
+
+RULE: pick ONE convention and store its parameters with the right units.
+  MLX checkpoint  -> dequant = scale*w_int + bias     (bias: float units)
+  GPTQ checkpoint -> dequant = scale*(w_int - zp)     (zp:   int units)
+Never cross them.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

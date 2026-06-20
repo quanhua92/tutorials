@@ -1,0 +1,177 @@
+causal_mask.py - reference impl. Numbers below feed CAUSAL_MASK.md.
+torch = 2.12.1
+
+Three intertwined attention mechanics:
+  (1) WHY causal: add -inf at future positions before softmax
+  (2) The k=(S-L) diagonal offset: one formula for prefill + decode
+  (3) QK-Norm (Qwen3): per-head RMSNorm on Q,K before the dot-product
+
+========================================================================
+  SECTION A: prefill causal mask  [L=4, S=4], k=(S-L)=0
+========================================================================
+L = 4 (query length),  S = 4 (key length)
+k = (S - L) = 0  -> standard lower-triangular triangle
+
+Reading the grid:  0 = ALLOWED,  -inf = MASKED (future position)
+
+PREFILL mask  mask[l,s]   (0=attend, -inf=blocked)
+
+| l (query) \ s (key) | s=0 | s=1 | s=2 | s=3 |
+| --- | --- | --- | --- | --- |
+| l=0 | +0.0 | -inf | -inf | -inf |
+| l=1 | +0.0 | +0.0 | -inf | -inf |
+| l=2 | +0.0 | +0.0 | +0.0 | -inf |
+| l=3 | +0.0 | +0.0 | +0.0 | +0.0 |
+
+Token i attends ONLY to positions 0..i. The diagonal and below is
+open; everything strictly above the diagonal (the future) is -inf.
+After softmax, masked positions get probability EXACTLY 0 (because
+exp(-inf) = 0). This is what makes the LM autoregressive.
+
+========================================================================
+  SECTION B: decode causal mask  [L=1, S=4], k=(S-L)=3
+========================================================================
+L = 1 (one new query token),  S = 4 (all cached keys)
+k = (S - L) = 3  -> shifts the triangle so the single row is
+                              entirely inside the allowed region
+
+Reading the grid:  0 = ALLOWED,  -inf = MASKED
+
+DECODE mask  mask[l,s]   (the one query may attend to ALL keys)
+
+| l (query) \ s (key) | s=0 | s=1 | s=2 | s=3 |
+| --- | --- | --- | --- | --- |
+| l=0 | +0.0 | +0.0 | +0.0 | +0.0 |
+
+This is the WHOLE point of k=(S-L): during decode, the new token is
+the LAST token, so it must see ALL previous keys. The offset slides
+the triangle right by (S-L) so the single row becomes all-allowed.
+
+Without the offset (k=0), the decode row would be [0,-inf,-inf,-inf]
+and the new token could only see the FIRST key -> garbage.
+Section D demonstrates exactly that bug.
+
+========================================================================
+  SECTION C: full masked attention  B=1, H=1, L=4, S=4, D=8
+========================================================================
+Shapes:  q (1, 1, 4, 8)  k (1, 1, 4, 8)  v (1, 1, 4, 8)
+         mask (4, 4)   (broadcast over B,H)
+
+v is one-hot per key, so out[l] on dims 0..3 == probs[l,:] exactly.
+
+[check] my SDPA == torch SDPA (atol=1e-6)?  True
+
+Masked attention PROBABILITIES  probs[l,s]  (row l sums to 1,
+masked entries are exactly 0):
+
+
+
+| l (query) \ s (key) | s=0 | s=1 | s=2 | s=3 |
+| --- | --- | --- | --- | --- |
+| l=0 | 1.0000 | 0.0000 | 0.0000 | 0.0000 |
+| l=1 | 0.5624 | 0.4376 | 0.0000 | 0.0000 |
+| l=2 | 0.3139 | 0.3309 | 0.3552 | 0.0000 |
+| l=3 | 0.2429 | 0.2788 | 0.2336 | 0.2446 |
+
+Row l=0 puts 100% on s=0 (only itself). Row l=3 spreads over s=0..3.
+Every masked entry is 0.0000 - exactly the autoregressive property.
+
+Attention OUTPUT out[l] = sum_s probs[l,s] * v[s]. Because v is
+one-hot, out[l,d] == probs[l,d] for d=0..3 (and 0 for d>=4):
+
+| l | out[0]  out[1]  out[2]  out[3]  out[4]  out[5]  out[6]  out[7] |
+|---|--------|--------|--------|--------|--------|--------|--------|--------|
+| 0 | +1.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 |
+| 1 | +0.5624 +0.4376 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 |
+| 2 | +0.3139 +0.3309 +0.3552 +0.0000 +0.0000 +0.0000 +0.0000 +0.0000 |
+| 3 | +0.2429 +0.2788 +0.2336 +0.2446 +0.0000 +0.0000 +0.0000 +0.0000 |
+
+[GOLD] out[0,0,0,:] (the l=0 row, single-token attention output) =
+       [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+[GOLD] out[0,0,3,:] (the l=3 row, full-causal-row output) =
+       [0.2429, 0.2788, 0.2336, 0.2446, 0.0, 0.0, 0.0, 0.0]
+(these are the values causal_mask.html gold-checks against)
+
+========================================================================
+  SECTION D: the WRONG mask on decode (k=0 instead of k=S-L)
+========================================================================
+Decode shape: L=1, S=4. New token is the LAST key (position 3).
+
+CORRECT: k = S - L = 3  -> mask shape [1,4]:
+
+
+| l \ s | s=0 | s=1 | s=2 | s=3 |
+| --- | --- | --- | --- | --- |
+| l=0 | +0.0 | +0.0 | +0.0 | +0.0 |
+
+WRONG:   k = 0            -> mask shape [1,4] (forgot the offset):
+
+
+| l \ s | s=0 | s=1 | s=2 | s=3 |
+| --- | --- | --- | --- | --- |
+| l=0 | +0.0 | -inf | -inf | -inf |
+
+Resulting attention weights over keys s=0..3:
+
+| mask used       | probs[0] | probs[1] | probs[2] | probs[3] |
+|-----------------|----------|----------|----------|----------|
+| CORRECT k=3     | 0.4195 | 0.1553 | 0.3751 | 0.0501 |
+| WRONG   k=0     | 1.0000 | 0.0000 | 0.0000 | 0.0000 |
+
+The WRONG mask puts 100%% on s=0 and 0%% on s=1,2,3 - so the new
+decoded token would attend ONLY to the FIRST token of the whole
+prompt and ignore everything after. The output collapses to v[0],
+not a real weighted average. That is silent garbage: no crash, no
+error, just wrong numbers. Always use k=(S-L).
+
+========================================================================
+  SECTION E: QK-Norm (Qwen3) - per-head RMSNorm on Q and K BEFORE dot
+========================================================================
+Inputs deliberately scaled x5 (B=1, L=4, H=2, D=8).
+RMSNorm weight initialised to all-ones so only the RESCALE shows.
+
+| quantity                       | WITHOUT QK-Norm | WITH QK-Norm |
+|--------------------------------|-----------------|--------------|
+| max ||q||  (per token,per head)|   20.0820        |   2.8284     |
+| max ||k||  (per token,per head)|   20.8228        |   2.8284     |
+| max RMS(q) (per token,per head)|   7.1001        |   1.0000     |
+| max abs score  (Q.K / sqrt(D)) |   61.7954        |   1.6563     |
+| std of scores                  |   23.9671        |   0.8721     |
+
+[check] with weight=1, ||q_normed|| = sqrt(D) = 2.8284?  max observed = 2.8284  -> OK
+
+Why this matters: softmax saturates when logits spread > ~10. With
+x5 inputs the raw scores range over ~+/-15 -> near-one-hot softmax ->
+near-zero gradients -> training stalls. After QK-Norm the scores are
+bounded (because ||q|| and ||k|| are pinned), so softmax stays in the
+well-conditioned regime. This is the 'cheap training insurance' that
+Qwen3, OLMo2, Gemma2, etc. all adopted. See CAUSAL_MASK.md Sources.
+
+========================================================================
+  SECTION F: shape choreography  [B,L,H,D] <-> [B,H,L,D]
+========================================================================
+The Qwen3 attention forward pass, with the shape printed at every
+step. The ORDER is what bites people (see CAUSAL_MASK.md pitfalls).
+
+| step                                           | shape          |
+|------------------------------------------------|----------------|
+| 1. project        q = linear(x, wq).reshape(B,L,H,D) | (1, 4, 2, 8)   |
+| 2. QK-Norm        q = rms_norm(q, q_norm[H,D])         (on D axis, BEFORE RoPE) | (1, 4, 2, 8)   |
+| 3. RoPE           q = rope(q, offset=slice(0,L))       (L axis is the position axis) | (1, 4, 2, 8)   |
+| 4. transpose      q = q.transpose(1,2)                 -> [B,H,L,D] | (1, 2, 4, 8)   |
+| 5. attention      scores = q @ k^T * scale + mask      -> [B,H,L,S] | (1, 2, 4, 4)   |
+| 6. transpose back q = q.transpose(1,2)                 -> [B,L,H,D] | (1, 4, 2, 8)   |
+| 7. reassemble     out = q.reshape(B, L, H*D)           -> [B,L,E] | (1, 4, 16)     |
+
+KEY: steps 2 and 3 (QK-Norm, RoPE) happen while the tensor is still
+[B,L,H,D] - because position is the L axis and both QK-Norm and RoPE
+need to index per-position (L). AFTER the transpose to [B,H,L,D] the
+L axis is in the wrong slot for the cos/sin lookup, so doing RoPE
+post-transpose is the #1 silent-corruption bug.  See ROPE.md section 6.
+
+The mask [L,S] is added at step 5 and broadcasts over the B and H
+axes of scores [B,H,L,S] - same mask for every batch, every head.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

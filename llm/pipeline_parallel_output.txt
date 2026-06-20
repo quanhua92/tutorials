@@ -1,0 +1,354 @@
+pipeline_parallel.py - reference impl (faithful single-process simulation).
+Numbers below feed PIPELINE_PARALLEL.md.  torch = 2.12.1
+
+SIMULATION: K pipeline stages x M micro-batches, each op = 1 time-slot.
+No torch.distributed / NCCL / multi-GPU. The schedule SHAPE, the bubble
+fraction, and the activation-memory arithmetic are EXACT to a real run.
+Only the comm LATENCY is skipped (see Section F for the handoff pattern).
+
+========================================================================
+  SECTION A: why tensor parallelism isn't enough (cross-node model)
+========================================================================
+Tensor Parallelism (TENSOR_PARALLEL) shards each weight MATRIX across
+GPUs WITHIN a node (NVLink, ~300 GB/s). But two limits remain:
+
+  1. TP_size <= GPUs_per_node  (going cross-node on IB is ~12x slower
+     per AllReduce - the comm dominates; see TENSOR_PARALLEL.md sec 7).
+  2. Even TP=8 on an 8-GPU DGX node caps at ~8x memory reduction.
+
+A 175B model in fp16 = 350 GB; TP=8 still needs ~44 GB per rank - fits
+an 80 GB H100, but a 1T-class model does not. To scale ACROSS nodes,
+we need an axis that is tolerant of InfiniBand latency (~25-50 GB/s).
+
+Pipeline Parallelism is that axis: split the model's LAYERS across K
+stages (one node each). Comm is POINT-TO-POINT send/recv of one
+activation tensor at each stage boundary - tiny vs TP's per-layer
+AllReduce, and it pipelines cleanly over IB.
+
+Concrete memory: Llama-2-70B has L=80 transformer layers, E=8192.
+
+  per layer (3 MLP matrices, fp16):   1.312 GiB
+  total model (80 layers, fp16):     105.00 GiB
+
+Splitting L=80 layers across K PP stages shrinks per-stage memory:
+
+| K (stages) | layers/stage | per-stage model (fp16) | savings |
+|------------|--------------|------------------------|---------|
+| 1          | 80           |       105.000 GiB       | baseline |
+| 2          | 40           |        52.500 GiB       | 2x smaller |
+| 4          | 20           |        26.250 GiB       | 4x smaller |
+| 8          | 10           |        13.125 GiB       | 8x smaller |
+| 16         | 5            |         6.562 GiB       | 16x smaller |
+
+READ: K=8 PP stages cut each node's model footprint 8x. Combined with
+TP=8 WITHIN each node, a 70B model fits with room for activations + KV
+cache. This is the 3D parallelism recipe: TP (intra-node) x PP (inter-
+node) x DP (data-replicated throughput).  (TENSOR_PARALLEL sec 7)
+
+[check] PP partitions layers across nodes; TP partitions matrices within:  OK
+
+========================================================================
+  SECTION B: naive pipeline - the bubble (K=4, M=1 -> 75% idle)
+========================================================================
+Naive pipeline = ONE batch through K stages. Each stage does 1 forward
+then waits for the backward to come home. Most GPUs idle most of the
+time - that idle time is the BUBBLE.
+
+
+Naive GPipe schedule  (K=4, M=1):
+T = 8 slots  (K=4 stages, M=1 micro-batches; each cell = 1 op)
+
+          0   1   2   3   4   5   6   7
+GPU0:   F0   .   .   .   .   .   .  B0
+GPU1:    .  F0   .   .   .   .  B0   .
+GPU2:    .   .  F0   .   .  B0   .   .
+GPU3:    .   .   .  F0  B0   .   .   .
+
+  per-stage: 2 busy + 6 idle = 8 slots   -> bubble = 6/8 = 0.7500 (75.00%)
+  peak in-flight micro-batches (activation memory multiplier): 1
+  [check] bubble == (K-1)/(K+M-1) = (4-1)/(4+1-1) = 3/4 = 0.750000:  OK
+
+Reading the Gantt like a story:
+  - GPU0 does F0 at slot 0, then sits IDLE for 6 slots, then does B0.
+  - GPU3 doesn't even START until slot 3 (waits for F0 to traverse
+    GPU0 -> GPU1 -> GPU2 -> GPU3). Then it does B0 immediately.
+  - 6 of 8 slots on every stage are idle. That's the bubble.
+
+Why this hurts: every stage is a ~$30k H100 and it spends 75% of its
+time waiting. The fix is to keep the pipeline FULL by overlapping many
+micro-batches - which is exactly GPipe (Section C).
+
+[check] bubble_fraction(4,1) = 0.7500 = 75.00%  (the worst case):  OK
+[check] peak_in_flight = 1 (= M = 1):  OK
+
+========================================================================
+  SECTION C: GPipe - micro-batching fills the pipeline (bubble shrinks)
+========================================================================
+GPipe (Huang et al. 2019, arXiv:1811.06965): split each mini-batch into
+M micro-batches and PIPELINE them. Stage k starts micro-batch m+1 as soon
+as it has handed m+1's activations forward - so all stages stay busy in
+the steady state. Only the FILL (first K-1 slots) and DRAIN (last K-1
+slots) are idle.
+
+
+GPipe schedule  (K=4, M=8):
+T = 22 slots  (K=4 stages, M=8 micro-batches; each cell = 1 op)
+
+          0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21
+GPU0:   F0  F1  F2  F3  F4  F5  F6  F7   .   .   .   .   .   .  B7  B6  B5  B4  B3  B2  B1  B0
+GPU1:    .  F0  F1  F2  F3  F4  F5  F6  F7   .   .   .   .  B7  B6  B5  B4  B3  B2  B1  B0   .
+GPU2:    .   .  F0  F1  F2  F3  F4  F5  F6  F7   .   .  B7  B6  B5  B4  B3  B2  B1  B0   .   .
+GPU3:    .   .   .  F0  F1  F2  F3  F4  F5  F6  F7  B7  B6  B5  B4  B3  B2  B1  B0   .   .   .
+
+  per-stage: 16 busy + 6 idle = 22 slots   -> bubble = 6/22 = 0.2727 (27.27%)
+  peak in-flight micro-batches (activation memory multiplier): 8
+  [check] bubble == (K-1)/(K+M-1) = (4-1)/(4+8-1) = 3/11 = 0.272727:  OK
+
+Reading the Gantt:
+  - The F's form a descending staircase (fill); the B's form an
+    ascending one (drain). In between, every stage is busy every slot.
+  - GPU0 forwards micro-batches 0..7 in slots 0..7, then idles 8..11
+    (waiting for backwards to arrive from GPU3), then does B7..B0.
+  - GPU3 is the mirror: idle 0..2, busy 3..10, idle 11..13.
+
+The bubble formula (proven in the schedule):
+  per-stage idle = 2*(K-1)        [K-1 to fill + K-1 to drain]
+  total slots    = 2*(K+M-1)
+  bubble frac    = (K-1)/(K+M-1)
+
+Rule of thumb (Megatron-LM SC21): keep M >= 4K so the bubble is small.
+
+| K | M  | bubble = (K-1)/(K+M-1) | comment                  |
+|---|----|------------------------|--------------------------|
+| 4 | 1  | 0.7500  (75.00%)       | M=1 (worst)              |
+| 4 | 4  | 0.4286  (42.86%)       | M=K                      |
+| 4 | 8  | 0.2727  (27.27%)       | M=2K                     |
+| 4 | 16 | 0.1579  (15.79%)       | M=4K (rule of thumb)     |
+| 4 | 32 | 0.0857  ( 8.57%)       | M >> K (good)            |
+| 4 | 64 | 0.0448  ( 4.48%)       | M >> K (good)            |
+| 8 | 32 | 0.1795  (17.95%)       | M=4K (rule of thumb)     |
+
+[check] bubble_fraction(4,8) = (4-1)/(4+8-1) = 3/11 = 0.272727:  OK
+[check] peak_in_flight = 8 (= M = 8):  OK
+         (GPipe holds ALL M micro-batch activations until backward)
+
+========================================================================
+  SECTION D: 1F1B - start backward EARLY, cut activation memory M -> K
+========================================================================
+1F1B / PipeDream-Flush (Narayanan et al. SC21, arXiv:2104.04473): as
+soon as the FIRST micro-batch reaches the LAST stage, start its backward.
+Then alternate 1 Forward / 1 Backward at every stage. The bubble is the
+SAME shape and size as GPipe - but no stage ever holds more than K
+in-flight micro-batches (vs M for GPipe).
+
+
+1F1B schedule  (K=4, M=8):
+T = 22 slots  (K=4 stages, M=8 micro-batches; each cell = 1 op)
+
+          0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21
+GPU0:   F0  F1  F2  F3   .   .   .  B0  F4  B1  F5  B2  F6  B3  F7  B4   .  B5   .  B6   .  B7
+GPU1:    .  F0  F1  F2   .   .  B0  F3  B1  F4  B2  F5  B3  F6  B4  F7  B5   .  B6   .  B7   .
+GPU2:    .   .  F0  F1   .  B0  F2  B1  F3  B2  F4  B3  F5  B4  F6  B5  F7  B6   .  B7   .   .
+GPU3:    .   .   .  F0  B0  F1  B1  F2  B2  F3  B3  F4  B4  F5  B5  F6  B6  F7  B7   .   .   .
+
+  per-stage: 16 busy + 6 idle = 22 slots   -> bubble = 6/22 = 0.2727 (27.27%)
+  peak in-flight micro-batches (activation memory multiplier): 4
+  [check] bubble == (K-1)/(K+M-1) = (4-1)/(4+8-1) = 3/11 = 0.272727:  OK
+
+Reading the Gantt (compare to GPipe above):
+  - GPU3 (last stage) alternates F0 B0 F1 B1 ... as soon as it can.
+  - GPU0 (first stage) does 3 warmup forwards (K-1), then enters the
+    1F1B steady state. It never has more than 4 micro-batch activation
+    sets live at once.
+  - Total time is IDENTICAL to GPipe (T = 2*(K+M-1) = 22 slots) - 1F1B
+    saves MEMORY, not bubble.
+
+Peak activation memory (in micro-batches of activations):
+
+  GPipe  peak in-flight = 8  (= M = 8)
+  1F1B   peak in-flight = 4  (= K = 4)
+  reduction             = 8/4 = 2.0x  (for M=8 >> K=4: huge win)
+
+WHY 1F1B's memory is bounded at K (one paragraph):
+  A stage k must hold micro-batch m's activations from F(m,k) until B(m,k).
+  In GPipe all M forwards finish before any backward starts, so all M
+  activation sets are live simultaneously. 1F1B inserts B's between F's:
+  stage k does K-k-1 warmup F's, then alternates 1F-1B. After the warmup
+  every new F is paired with a B that frees an old activation set, so the
+  in-flight count never exceeds K-k (max over k = K at stage 0). This is
+  exactly the SC21 paper's claim: 'activations stashed for p or fewer
+  microbatches' (p = K = number of stages).
+
+| K | M  | GPipe mem (M x) | 1F1B mem (K x) | reduction |
+|---|----|-----------------|----------------|-----------|
+| 4 | 8  | 8               | 4              | 2.0x      |
+| 4 | 16 | 16              | 4              | 4.0x      |
+| 4 | 32 | 32              | 4              | 8.0x      |
+| 4 | 64 | 64              | 4              | 16.0x      |
+| 8 | 32 | 32              | 8              | 4.0x      |
+| 8 | 64 | 64              | 8              | 8.0x      |
+
+[check] 1F1B peak_in_flight(4,8) == K == 4:  OK
+[check] 1F1B bubble == GPipe bubble == (K-1)/(K+M-1) = 0.272727:  OK
+         (same total time T = 2*(K+M-1); 1F1B trades nothing for the
+          memory win - it is a pure scheduling improvement.)
+
+========================================================================
+  SECTION E: interleaved 1F1B - V virtual stages shrink the bubble
+========================================================================
+Interleaved 1F1B (Megatron-LM SC21 sec 4.2): give each device V virtual
+stages, each holding a SMALLER chunk of layers. Instead of
+GPU0 = layers 0..L/K-1, we get e.g. (V=2):
+
+  Standard PP (K=4 GPUs, 16 layers, V=1):
+    GPU0: L0-3     GPU1: L4-7     GPU2: L8-11    GPU3: L12-15
+
+  Interleaved PP (K=4 GPUs, 16 layers, V=2):
+    GPU0: L0-1, L8-9     GPU1: L2-3, L10-11
+    GPU2: L4-5, L12-13   GPU3: L6-7, L14-15
+
+Each micro-batch now hops K*V times instead of K, but each hop is 1/V
+the work (fewer layers per virtual stage). The fill/drain cost is still
+K-1 'device-hops', but in wall-clock time each hop costs (tf+tb)/V, so
+the bubble shrinks by V:
+
+  bubble_interleaved = ((K-1)/V) / (M + (K-1)/V) = (K-1) / (K + M*V - 1)
+
+| K | M | V | bubble = (K-1)/(K+M*V-1) | vs non-interleaved |
+|---|---|---|--------------------------|-------------------|
+| 4 | 8  | 1 | 0.2727  (27.27%)          |
+| 4 | 16 | 1 | 0.1579  (15.79%)          |
+| 4 | 32 | 1 | 0.0857  ( 8.57%)          |
+| 8 | 16 | 1 | 0.3043  (30.43%)          |
+|---|---|---|--------------------------|-------------------|
+| 4 | 8  | 2 | 0.1579  (15.79%)          |  (0.58x smaller)
+| 4 | 16 | 2 | 0.0857  ( 8.57%)          |  (0.54x smaller)
+| 4 | 32 | 2 | 0.0448  ( 4.48%)          |  (0.52x smaller)
+| 8 | 16 | 2 | 0.1795  (17.95%)          |  (0.59x smaller)
+|---|---|---|--------------------------|-------------------|
+| 4 | 8  | 4 | 0.0857  ( 8.57%)          |  (0.31x smaller)
+| 4 | 16 | 4 | 0.0448  ( 4.48%)          |  (0.28x smaller)
+| 4 | 32 | 4 | 0.0229  ( 2.29%)          |  (0.27x smaller)
+| 8 | 16 | 4 | 0.0986  ( 9.86%)          |  (0.32x smaller)
+|---|---|---|--------------------------|-------------------|
+
+[check] interleaved(4,8,V=2) = (4-1)/(4+8*2-1) = 3/19 = 0.157895:  OK
+[check] vs V=1 (0.2727): 0.58x smaller bubble:  OK
+
+TRADEOFF: interleaving cuts the bubble but adds V-1 EXTRA point-to-point
+sends per micro-batch per device (the virtual stages must hand off to
+each other). On slow interconnects this can negate the bubble win, so V
+is usually 2..4 in practice.  (NCCL_COLLECTIVES sec P2P send/recv)
+
+========================================================================
+  SECTION F: P2P activation handoff at stage boundaries  (NCCL_COLLECTIVES)
+========================================================================
+Pipeline Parallelism's communication is POINT-TO-POINT send/recv, NOT
+AllReduce. Each stage sends one activation tensor forward and one
+gradient tensor backward - per micro-batch, per stage boundary:
+
+  forward:  stage k  --[send a_(m,k)]-->  stage k+1
+  backward: stage k+1  --[send g_(m,k+1)]-->  stage k
+
+Dependency edges (one micro-batch m, all K stages):
+
+  forward chain: F(m=0,k=0) -> F(m=0,k=1) -> F(m=0,k=2) -> F(m=0,k=3)
+  backward chain: B(m=0,k=3) -> B(m=0,k=2) -> B(m=0,k=1) -> B(m=0,k=0)
+
+Each '->' is one ncclSend / ncclRecv pair. The tensor shipped is the
+stage's output activation [B_micro, L_slice, E] (forward) or the
+gradient of that tensor (backward). It is TINY compared to TP's
+AllReduce (which moves the full [B, L, E] block output twice per
+layer) - that is why PP tolerates InfiniBand while TP does not.
+
+For K=4 stages, M=2 micro-batches, one mini-batch ships:
+  forward P2P sends: (K-1)*M = 3*2 = 6
+  backward P2P sends: (K-1)*M = 3*2 = 6
+  total P2P transfers: 12
+
+Each transfer is one activation tensor of shape [B_micro, L_slice, E].
+  example size (B_micro=1, L_slice=1024, E=8192, fp16): 16.00 MiB per send
+  per mini-batch comm volume: 12 * 16.00 MiB = 0.188 GiB
+
+Contrast with TENSOR_PARALLEL: TP does 2 AllReduces PER LAYER, each of
+shape [B, L, E] over NVLink. PP does 2*(K-1) P2P sends PER MICRO-BATCH,
+each of shape [B_micro, L_slice, E]. PP's comm is rare + small +
+tolerates IB latency; TP's is frequent + large + needs NVLink.
+
+| axis      | op           | frequency           | link needed   |
+|-----------|--------------|---------------------|---------------|
+| TP        | AllReduce    | 2x per layer        | NVLink (~300) |
+| PP        | P2P send/recv| 2*(K-1) per mini-bt | IB (~25-50)   |
+| DP (DDP)  | AllReduce    | 1x per optim step   | IB (~25-50)   |
+
+[check] PP uses P2P send/recv (not AllReduce) -> IB-tolerant:  OK
+
+========================================================================
+  SECTION G: the gold table - bubble + memory across (K, M, V)  (GOLD)
+========================================================================
+The centerpiece: how bubble fraction and peak activation memory scale
+with K (stages), M (micro-batches), and V (virtual stages/device).
+
+All numbers are computed by the formulas asserted above; the .html
+gold-check recomputes the K=4, M=8 row in JS.
+
+| K | M  | V | bubble (frac) | bubble %  | GPipe mem | 1F1B mem | interleaved bubble |
+|---|----|---|---------------|-----------|-----------|----------|--------------------|
+| 4 | 1  | 1 | 0.750000      |   75.00%  |         1 |        4 |  V=1: 0.7500 (75.00%)   |
+| 4 | 4  | 1 | 0.428571      |   42.86%  |         4 |        4 |  V=1: 0.4286 (42.86%)   |
+| 4 | 8  | 1 | 0.272727      |   27.27%  |         8 |        4 |  V=1: 0.2727 (27.27%)   |
+| 4 | 16 | 1 | 0.157895      |   15.79%  |        16 |        4 |  V=1: 0.1579 (15.79%)   |
+| 4 | 32 | 1 | 0.085714      |    8.57%  |        32 |        4 |  V=1: 0.0857 (8.57%)   |
+| 4 | 64 | 1 | 0.044776      |    4.48%  |        64 |        4 |  V=1: 0.0448 (4.48%)   |
+| 4 | 8  | 2 | 0.157895      |   15.79%  |         8 |        4 |  V=2: 0.1579 (15.79%)   |
+| 4 | 8  | 4 | 0.085714      |    8.57%  |         8 |        4 |  V=4: 0.0857 (8.57%)   |
+| 8 | 8  | 1 | 0.466667      |   46.67%  |         8 |        8 |  V=1: 0.4667 (46.67%)   |
+| 8 | 32 | 1 | 0.179487      |   17.95%  |        32 |        8 |  V=1: 0.1795 (17.95%)   |
+| 8 | 32 | 2 | 0.098592      |    9.86%  |        32 |        8 |  V=2: 0.0986 (9.86%)   |
+| 8 | 64 | 4 | 0.026616      |    2.66%  |        64 |        8 |  V=4: 0.0266 (2.66%)   |
+
+GOLD pins (recomputed by pipeline_parallel.html for the check badge):
+  bubble_fraction(K=4, M=8)        = (4-1)/(4+8-1) = 3/11
+                                   = 0.272727
+  1F1B peak mem multiplier (K=4)   = 4
+  interleaved(K=4, M=8, V=2)       = 3/19 = 0.157895
+
+[check] GOLD bubble_fraction(4,8) == 3/11 == 0.272727:  OK
+[check] GOLD 1F1B mem multiplier == K == 4:  OK
+[check] GOLD interleaved(4,8,2) == 3/19 == 0.157895:  OK
+
+========================================================================
+  SECTION H: PyTorch torch.distributed.pipelining API (the production face)
+========================================================================
+PyTorch >= 2.4 ships ScheduleGPipe and Schedule1F1B. You split the
+model with PipelineStage and let the schedule drive the send/recv:
+
+  from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+
+  # 1. each rank keeps ONLY its slice of layers (meta device = no memory)
+  with torch.device('meta'):
+      model = Transformer()
+      if stage_index == 0:
+          del model.layers['1']; model.norm = None; model.output = None
+      elif stage_index == 1:
+          model.tok_embeddings = None; del model.layers['0']
+
+  # 2. wrap in a PipelineStage; pick a schedule
+  stage = PipelineStage(model, stage_index, num_stages=2, device=device)
+  schedule = ScheduleGPipe(stage, n_microbatches=8)   # or Schedule1F1B
+
+  # 3. rank 0 feeds input; every rank calls step()
+  if rank == 0:
+      schedule.step(x)        # x is split into micro-batches automatically
+  else:
+      output = schedule.step()   # recv activations, run, send forward
+
+Under the hood ScheduleGPipe implements Section C's all-forward-then-all-
+backward; Schedule1F1B implements Section D's interleaved schedule. The
+P2P send/recv (Section F) is inserted automatically at stage boundaries.
+
+[check] ScheduleGPipe == Section C; Schedule1F1B == Section D:  OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

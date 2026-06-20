@@ -1,0 +1,217 @@
+moe_routing.py - reference impl. Numbers below feed MOE_ROUTING.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: dense FFN vs sparse MoE (params + FLOPs decoupling)
+========================================================================
+Tiny model: D=8, F=16 (expert intermediate), E=4 experts, k=2
+
+Counting only the FFN/MoE parameters (attention excluded):
+
+| design                 | params stored | params active/token | FLOPs/token |
+|------------------------|---------------|---------------------|-------------|
+| dense SwiGLU FFN       |           384 |                 384 |         768 |
+| MoE  E=4 k=2 (total)    |          1536 |                 768 |        1536 |
+
+[check] total/active ratio = E/k = 4/2 = 2.0x -> 1536/768 = 2.0x   : OK
+
+Real models (the whole point of MoE):
+| model          | total params | active/token | k of E   |
+|----------------|--------------|--------------|----------|
+| Mixtral 8x7B   | 46.7B        | 12.9B        | 2 of 8   |
+| DeepSeek-V3    | 671B         | 37B          | 8 of 256 |
+
+DeepSeek-V3: 671B of knowledge on the wall, but each token runs only
+37B of it -- a 671B-capacity model at ~37B speed (aux-loss-free).
+Sources: Mixtral arXiv:2401.04088, DeepSeek-V3 arXiv:2412.19437.
+
+========================================================================
+  SECTION B: top-k routing math -- KeepTopK + softmax
+========================================================================
+Router weights W_g shape: (4, 8) = [E=4, D=8]
+Input x shape: (1, 4, 8) = [B=1, L=4, D=8]
+H(x) = x . W_g^T  ->  router logits shape (1, 4, 4) = [B, L, E]
+
+For EACH token, KeepTopK zeroes all but top-k, then softmax over the
+survivors renormalizes them to sum=1 (the Mixtral convention).
+
+Token m=0 (the gold centerpiece token) walked by hand:
+
+  x[0,0]         = [+0.9635, +0.7436, +0.4504, -1.0528, +0.3392, -0.6173, -0.0215, -0.8023]
+  H[0,0] logits  = [+0.0952, +0.3465, -0.0658, -0.0547]   (one score per expert)
+  top-2 values = [+0.3465, +0.0952]
+  top-2 experts= [1, 0]          <- the chosen specialists
+  KeepTopK[0,0]  = [+0.0952, +0.3465, -inf, -inf]
+  G[0,0] weights = [+0.4375, +0.5625, +0.0000, +0.0000]   (only top-2 nonzero, sum=1.0000)
+
+All tokens -- router decisions:
+| m | H[0,m] (4 logits)                          | top-k experts | G[0,m] (4 gate weights)            |
+|---|---------------------------------------------|---------------|------------------------------------|
+| 0 | +0.095 +0.347 -0.066 -0.055                 | 1,0           | +0.437 +0.563 +0.000 +0.000        |
+| 1 | +0.141 +0.232 +0.376 +0.061                 | 2,1           | +0.000 +0.464 +0.536 +0.000        |
+| 2 | +0.011 -0.042 -0.371 +0.222                 | 3,0           | +0.447 +0.000 +0.000 +0.553        |
+| 3 | +0.130 +0.052 -0.142 +0.132                 | 3,0           | +0.500 +0.000 +0.000 +0.500        |
+
+[check] every token: sum(G) == 1 (max dev 0.0e+00) : OK
+[check] every token: exactly k=2 nonzero gate weights          : OK
+
+Gold pin for the .html (token m=0):
+  selected experts = [1, 0]
+  gate weights     = [+0.437497, +0.562503, +0.000000, +0.000000]
+
+========================================================================
+  SECTION C: expert combination -- y = sum_i G_i * E_i(x)
+========================================================================
+Each expert is a full SwiGLU MLP (down(silu(gate)*up)). The router
+picks k=2 of E=4 per token, then the MoE output is the gate-weighted
+sum of ONLY those 2 experts' outputs (the other 2 never run).
+
+Token m=0 routed to experts [1, 0] (gate weights [0.5625, 0.4375]):
+
+| expert i | ran? | G[0,0,i] | E_i(x[0,0]) (first 4 of 8)            |
+|----------|------|-----------|--------------------------------------|
+| 0        | YES  | +0.4375    | +0.010 -0.012 -0.004 +0.006 ...            |
+| 1        | YES  | +0.5625    | +0.007 +0.006 -0.008 -0.012 ...            |
+| 2        | no   | +0.0000    | -0.013 +0.011 -0.010 +0.006 ...            |
+| 3        | no   | +0.0000    | -0.002 +0.020 -0.003 +0.010 ...            |
+
+Hand reconstruction of y[0,0] = sum of (G_i * E_i) over the active:
+  y[0,0] = G_1*E_1 + G_0*E_0
+         = [+0.008519, -0.001960, -0.006698, -0.004337, -0.006180, -0.000598, -0.001436, -0.006064]
+MoE class output y[0,0] = [+0.008519, -0.001960, -0.006698, -0.004337, -0.006180, -0.000598, -0.001436, -0.006064]
+
+[check] hand sum == MoE class output  : OK
+
+Gold pin y[0,0,0] = 0.008519  (the .html recomputes this)
+
+========================================================================
+  SECTION D: auxiliary losses -- load-balance + router z-loss
+========================================================================
+Router collapse: without a push, the receptionist sends everything to
+1-2 favorite experts and the rest never train. Two losses fix this.
+
+For our N=4 tokens, per-expert statistics:
+| expert i | f_i (frac of tokens routed) | P_i (avg gate prob) | f_i*P_i |
+|----------|------------------------------|---------------------|---------|
+| 0        | 0.7500                       | 0.3461              | +0.2596  |
+| 1        | 0.5000                       | 0.2566              | +0.1283  |
+| 2        | 0.2500                       | 0.1340              | +0.0335  |
+| 3        | 0.5000                       | 0.2632              | +0.1316  |
+
+L_bal = E * sum_i f_i * P_i = 4 * 0.553034 = 2.212137
+  (minimum when balanced is k=2; larger => more imbalanced)
+  sum(f) = 2.0000  (== k, since each token picks k)
+  sum(P) = 1.0000  (== 1, gate weights renormalize)
+
+L_z = (1/N) sum_j (log sum_i e^H_i)^2 = 2.164589
+  (penalizes LARGE logits -> keeps router numerically stable)
+
+[check] sum(f)==k and sum(P)==1   : OK
+[check] L_bal >= k (=2) since balanced is the min : True  OK
+
+========================================================================
+  SECTION E: token dropping + expert capacity
+========================================================================
+When experts live on separate GPUs (Expert Parallelism, §G), each GPU
+needs a fixed-size buffer. Expert Capacity C caps how many tokens one
+expert may process per step:
+
+  C = capacity_factor * N*k/E = 1.0 * 4*2/4 = 2.0
+  (each expert may process at most 2 tokens; overflow is DROPPED)
+
+Routing results vs capacity (the dropping decision):
+| expert i | tokens received | capacity C | action                  |
+|----------|-----------------|------------|-------------------------|
+| 0        | 3               | 2          | DROP 1 (only 2 run, rest -> residual) |
+| 1        | 2               | 2          | exact fit               |
+| 2        | 1               | 2          | PAD 1 zero(s)           |
+| 3        | 2               | 2          | exact fit               |
+
+[check] total tokens dropped this step = 1
+
+Dropping degrades quality at inference (a dropped token skips its MLP
+update entirely -> just the residual). Production servers (ZeroServe,
+vLLM) use no-drop / dynamic-capacity routing instead. DeepSeek-V3's
+aux-loss-free balancing (§F) keeps load even so C is rarely hit.
+
+========================================================================
+  SECTION F: DeepSeek-V3 -- shared + fine-grained + aux-loss-free bias
+========================================================================
+DeepSeek-V3 (arXiv:2412.19437) adds three things to classic top-k MoE:
+
+(1) SHARED expert -- always on, captures common features so routed
+    experts can specialize.   y = y_shared + y_routed
+
+(2) FINE-GRAINED -- split one fat expert (F=16) into 2 thin ones
+    (F=8 each). top-k now mixes more specialized knowledge per
+    token without raising total params. (demonstrated conceptually)
+
+(3) AUX-LOSS-FREE bias -- instead of a gradient-pushing L_bal, add a
+    learnable bias b_i to the router logits:
+        G(x)_i = softmax( H(x)_i + b_i )
+    and nudge b_i up/down by real load (no gradient to the model).
+
+Token m=0, bias b = [0.0, 0.0, 0.3, 0.0]:
+  plain   H[0,0]      top-2 experts = [1, 0]
+  biased  H[0,0]+b    top-2 experts = [1, 2]  (expert 2 nudged by +0.30 -> flips out expert 0)
+
+[check] bias changes routing decision?  True  (OK)
+
+DeepSeek-V3 uses 256 routed + 1 shared expert, k=8: 671B total / 37B
+active. The aux-loss-free bias keeps all 256 experts evenly loaded with
+ZERO gradient interference into the main loss (unlike L_bal in §D).
+
+========================================================================
+  SECTION G: expert parallelism (EP) + grouped GEMM  [sketch, 1 device]
+========================================================================
+In Expert Parallelism, each expert lives on a DIFFERENT GPU. Routing
+then needs an All-to-All communication (everyone sends everyone):
+
+  step 1: each GPU computes router logits for its local tokens.
+  step 2: All-to-All -- each token is sent to the GPU owning its top-k.
+  step 3: each GPU runs ONLY its expert(s) on the tokens it received.
+  step 4: All-to-All (reverse) -- send outputs back to the origin GPU.
+  step 5: each origin GPU weights the returned outputs by G and sums.
+
+(This is a SKETCH -- no real multi-GPU here. 🔗 TENSOR_PARALLEL covers
+the collective primitives like All-to-All used in step 2/4.)
+
+GROUPED GEMM -- the kernel that makes step 3 fast:
+  After routing, expert i gets M_i tokens, and the M_i DIFFER per expert.
+  torch.bmm needs equal batch sizes -> you'd have to PAD every expert's
+  buffer to max(M_i) (wasteful). Grouped GEMM (CUTLASS/Triton) runs all
+  E independent (M_i x N x K) matmuls in ONE kernel, no padding.
+
+Our tiny model's token->expert assignment (the ragged input to grouped GEMM):
+| expert i | tokens assigned (M_i)     | M_i |
+|----------|---------------------------|-----|
+| 0        | t0, t2, t3                | 3   |
+| 1        | t0, t1                    | 2   |
+| 2        | t1                        | 1   |
+| 3        | t2, t3                    | 2   |
+
+M_i is NOT uniform -> exactly the ragged case grouped GEMM solves.
+DeepSeek-V3 / Mixtral training/inference engines all use grouped GEMM
+
+========================================================================
+  SECTION H: worked routing trace -- the gold centerpiece
+========================================================================
+End-to-end trace for all L=4 tokens. This is the single canonical
+example the .html recomputes and gold-checks.
+
+| m | x[0,m] (D=8)                            | top-k experts | G weights (the 2 nonzero)        | y[0,m,0]  |
+|---|------------------------------------------|---------------|----------------------------------|-----------|
+| 0 | +0.96 +0.74 +0.45 -1.05 +0.34 -0.62 -0.02 -0.80 | [1, 0]        | E1=0.5625, E0=0.4375             | +0.008519 |
+| 1 | -0.38 +0.82 -0.20 -0.70 -0.36 -0.28 -0.38 +0.38 | [2, 1]        | E2=0.536, E1=0.464               | -0.001809 |
+| 2 | +0.82 -0.08 -0.25 +0.22 -0.38 +0.54 +0.40 +0.84 | [3, 0]        | E3=0.5526, E0=0.4474             | -0.003753 |
+| 3 | +0.64 +0.65 +0.31 +0.67 -0.12 +0.02 -0.13 +0.43 | [3, 0]        | E3=0.5004, E0=0.4996             | -0.002115 |
+
+GOLD: token m=0 -> experts [1, 0], gates [0.562503, 0.437497], y[0,0,0] = 0.008519
+The .html recomputes the full router -> top-k -> experts -> output
+pipeline in JS from the IDENTICAL formulas and pins y[0,0,0] above.
+
+[check] MoE(x) == sum_i G_i * E_i(x) over ALL 4 experts : OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

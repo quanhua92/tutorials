@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoE Routing — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#9b59b6; --yellow:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:4ch;text-align:right;font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap;line-height:1.45}
+  .readout b{color:var(--green)}
+  .readout .h{color:var(--yellow)}
+  .readout .g{color:var(--orange)}
+  .readout .e{color:var(--blue)}
+  .readout .y{color:var(--purple)}
+  .micro{color:var(--muted);font-size:.74rem}
+  canvas{display:block;width:100%;max-width:1100px;height:auto;background:#0d1117;border-radius:6px}
+  #router{height:260px}
+  #route{height:340px}
+  #balance{height:220px}
+</style>
+</head>
+<body>
+  <h1>Mixture-of-Experts Routing — top-k gating, load balance, DeepSeek-V3 — interactive
+    <a class="badge" href="./MOE_ROUTING.md">MOE_ROUTING.md</a>
+    <a class="badge" href="./moe_routing.py">moe_routing.py</a></h1>
+  <div class="sub"><b>For newcomers:</b> a dense FFN runs ALL its params per token. MoE replaces it with a <b>router</b>
+    (the receptionist) + <b>E expert MLPs</b> (specialists), and each token goes to only the <b>top-k</b>.
+    Drag <b style="color:var(--green)">token m</b>, <b>E</b>, and <b>k</b> below — every number is recomputed live in JS
+    from the <i>identical</i> formula in <code>moe_routing.py</code>. &nbsp;|&nbsp;
+    <a href="./mlp_activation.html">&rarr; dense SwiGLU</a> &nbsp;
+    <a href="./gqa.html">&rarr; GQA</a> &nbsp;
+    <a href="./tensor_parallel.html">&rarr; tensor parallel</a> &nbsp;
+    <a href="./sampling.html">&rarr; sampling</a></div>
+
+  <!-- ===== PANEL 1: ROUTER LOGITS -> TOP-K GATE ===== -->
+  <h2>① Router: logits H → KeepTopK → softmax gate G (pick a token)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> pick a <b>token m</b>. Yellow bars are the 4 raw
+      router logits <code>H = x·W_gᵀ</code>. KeepTopK zeroes all but the top-<b>k</b>, then softmax renormalizes the
+      survivors to sum=1 — those are the orange <b>gate weights G</b>. Only the lit experts actually run.</div>
+    <div class="controls">
+      <label>token m <input type="range" id="m" min="0" max="3" value="0" step="1"><span class="val" id="mVal">0</span></label>
+      <label>experts E <input type="range" id="E" min="2" max="4" value="4" step="1"><span class="val" id="EVal">4</span></label>
+      <label>top-k <input type="range" id="k" min="1" max="3" value="2" step="1"><span class="val" id="kVal">2</span></label>
+    </div>
+    <canvas id="router" width="1100" height="260"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--yellow)"></i>H(x) router logits (raw scores)</span>
+      <span><i class="sw" style="background:var(--orange)"></i>G(x) gate weights (active top-k, sum=1)</span>
+      <span><i class="sw" style="background:var(--grid)"></i>inactive expert (G=0, never runs)</span>
+    </div>
+    <div class="readout" id="routerReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: EXPERT ROUTING DIAGRAM + OUTPUT ===== -->
+  <h2>② Expert routing: token → top-k SwiGLU experts → weighted sum → output</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> the selected token (left) is sent to its top-k
+      experts (middle, each a full SwiGLU MLP 🔗 <code>mlp_activation</code>). Outputs are weighted by G and summed into
+      the per-token output vector (right, D=8 dims). Slide <b>k</b> to see more/fewer experts contribute.</div>
+    <canvas id="route" width="1100" height="340"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--ink)"></i>input token x[D]</span>
+      <span><i class="sw" style="background:var(--blue)"></i>active expert (SwiGLU) + its gate G</span>
+      <span><i class="sw" style="background:var(--grid)"></i>inactive expert</span>
+      <span><i class="sw" style="background:var(--purple)"></i>output y = Σ Gᵢ·Eᵢ(x)</span>
+    </div>
+    <div class="readout" id="routeReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Structure:</b> <code>y = Σᵢ G(x)ᵢ · Eᵢ(x)</code>, each
+      <code>Eᵢ(x) = down(silu(gate(x)) · up(x))</code> (Shazeer 2020 SwiGLU). Total params ∝ E, active params ∝ k.</div>
+  </div>
+
+  <!-- ===== PANEL 3: LOAD BALANCE + CAPACITY ===== -->
+  <h2>③ Load balance across the batch + the router-collapse problem</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> these bars count how many of the 4 tokens each
+      expert received (the <code>fᵢ</code> in the load-balance loss <code>L_bal = E·Σ fᵢPᵢ</code>). With small E/k an
+      imbalance is easy — that is <b>router collapse</b>, fixed by L_bal (+ z-loss). The dashed line is the capacity
+      <code>C = capacity·N·k/E</code>: bars past it would be <b>dropped</b> in expert-parallel training.</div>
+    <canvas id="balance" width="1100" height="220"></canvas>
+    <div class="readout" id="balanceReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check —</b> three green badges mean the live JS math reproduces the exact numbers printed by
+    <code>moe_routing.py</code> (so this page is not making anything up):
+    <span class="badge" id="check1">check 1: …</span>
+    <span class="badge" id="check2">check 2: …</span>
+    <span class="badge" id="check3">check 3: …</span>
+    <br><br>
+    Verified: token m=0 routing (experts + gates), and the full MoE forward output <code>y[0,0,0]</code> on the seeded
+    weights all match the Python output (E=4, k=2).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth weights (seeded) from moe_routing.py build_tiny_moe() ===== */
+const W = {"x": [0.963458, 0.743642, 0.450359, -1.052761, 0.339209, -0.617272, -0.021534, -0.802333, -0.376068, 0.824361, -0.196239, -0.701803, -0.363941, -0.279715, -0.384419, 0.381223, 0.821158, -0.079799, -0.248699, 0.219795, -0.379066, 0.539159, 0.4004, 0.84031, 0.639562, 0.648211, 0.305233, 0.667369, -0.115812, 0.02088, -0.125788, 0.429929], "w_router": [0.012685, 0.13564, 0.056322, -0.010393, -0.035746, 0.039174, -0.068009, 0.024094, 0.046981, 0.124263, 0.05403, -0.114544, -0.145923, -0.162809, 0.038337, -0.01718, -0.318965, 0.159144, -0.002467, -0.084661, 0.00293, -0.057207, -0.125463, 0.004861, 0.117049, -0.054102, -0.071156, 0.005753, 0.062625, -0.177356, -0.02205, 0.274668], "experts": [{"gate": [-0.09785, -0.059919, -0.036973, -0.002386, -0.061352, -0.225503, 0.106367, 0.166968, -0.091905, 0.101506, -0.331326, -0.025031, -0.000179, -0.091199, -0.097535, 0.155947, -0.104118, 0.242838, -0.002591, 0.074095, -0.02382, -0.186103, 0.102657, 0.094912, 0.132028, -0.090448, -0.091372, -0.13005, -0.017883, -0.077538, 0.021478, -0.045786, -0.046788, -0.149733, -0.018991, 0.167172, -0.098682, -0.085565, 0.113619, -0.179406, 0.00928, -0.046641, -0.049075, 0.059737, -0.088228, -0.065975, 0.048472, 0.081876, 0.028525, -0.088365, 0.050527, -0.032881, -0.034103, 0.064053, 0.033782, -0.151338, -0.064788, -0.022519, -0.002818, 0.174693, 0.090398, 0.046591, 0.23531, -0.066967, 0.286826, 0.078316, -0.078915, -0.226204, 0.089339, 0.101756, 0.162926, -0.063356, 0.08191, -0.242357, 0.035836, -0.03473, 0.147059, -0.050736, -0.013106, -0.044409, 1.7e-05, -0.076132, 0.014519, -0.108305, -0.098236, -0.071802, 0.07892, -0.08498, -0.031507, -0.058532, -0.079092, 0.054573, 0.063578, -0.036111, 0.07746, 0.032449, 0.090537, -0.008905, -0.088507, -0.014753, -0.006877, -0.081758, -0.01871, -0.071609, 0.077114, 0.05369, 0.118715, -0.173486, 0.083546, -0.184039, -0.165077, -0.0962, -0.101948, 0.088935, -0.042589, 0.062647, -0.105655, -0.030791, 0.012934, -0.032971, 0.163662, 0.070107, -0.003038, -0.145755, -0.054776, 0.202102, -0.041645, 0.304515], "up": [0.037138, 0.076072, -0.182538, -0.005966, 0.120682, -0.010021, -0.043266, -0.12064, -0.060988, -0.089156, 0.157566, 0.007173, 0.083528, 0.080892, -0.00994, 0.097136, 0.094228, -0.012754, 0.001887, -0.052156, 0.037725, 0.151169, -0.052149, 0.011962, 0.067908, -0.02302, -0.097645, 0.145844, 0.050271, -0.140415, -0.083979, 0.10982, -0.027594, 0.046446, 0.097992, -0.06665, -0.054047, -0.021263, 0.146728, -0.041463, -0.03394, 0.042186, 0.102085, 0.026312, 0.047163, -0.107367, 0.117664, 0.028529, -0.191056, 0.009585, -0.046167, -0.018859, 0.037128, -0.022816, 0.038564, 0.023983, 0.126996, 0.042103, -0.076997, -0.076108, 0.071307, 0.080161, 0.115805, -0.050709, -0.105036, -0.072396, 0.123681, 0.101527, -0.014033, -0.033485, 0.124641, 0.01541, 0.123497, -0.006407, 0.01633, -0.144576, -0.102043, 0.170711, 0.031222, -0.095504, -0.144991, 0.088421, 0.154537, -0.048694, 0.084709, 0.03287, -0.018952, 0.043274, 0.076879, -0.219238, 0.089598, -0.053023, -0.177356, 0.010866, -0.036459, 0.063307, 0.158259, 0.101512, 0.094064, 0.024341, 0.026589, -0.20123, -0.053848, 0.077869, 0.059086, -0.204533, -0.010455, -0.059882, 0.02828, -0.060834, -0.085897, 0.083617, -0.11775, 0.000602, -0.053924, 0.022338, 0.153384, -0.045903, -0.124141, -0.111271, 0.077545, -0.057836, -0.035831, 0.070907, 0.085538, -0.039756, 0.293288, 0.108113], "down": [0.092132, 0.076076, -0.052856, 0.099125, -0.024474, 0.10005, -0.111272, 0.070958, -0.153575, -0.171219, -0.074308, -0.117066, -0.01387, -0.215435, -0.073743, -0.050333, 0.04301, -0.058968, 0.044524, 0.017418, 0.004249, 0.206255, 0.244057, 0.098511, 0.092897, -0.142816, -0.008924, 0.018302, -0.001334, -0.135677, 0.037841, -0.101517, -0.091876, 0.050312, 0.031188, -0.056678, 0.079185, -0.045313, -0.070464, 0.010957, 0.124974, -0.100641, -0.138633, 0.008638, -0.037905, -0.202255, 0.069328, -0.057083, -0.062635, -0.060709, -0.040612, 0.164265, 0.057494, -0.038133, 0.032169, -0.092422, -0.049653, 0.049917, 0.096724, 0.106387, 0.048708, -0.080821, 0.079283, -0.031544, 0.228271, 0.044709, -0.065946, 0.255581, -0.026378, -0.052694, 0.11369, 0.090119, -0.037869, -0.218118, 0.002231, 0.112887, -0.146543, -0.178132, 0.037739, 0.013026, -0.128918, -0.117293, 0.038398, -0.135109, 0.091546, -0.244275, -0.061569, -0.126318, -0.032538, -0.071902, 0.065834, 0.137371, 0.069067, 0.125633, 0.077724, 0.072292, -0.248401, 0.044222, 0.199072, -0.122876, -0.108666, 0.157667, 0.238069, 0.045597, -0.042015, 0.008586, -0.055388, 0.065619, 0.028398, -0.035628, -0.055891, -0.042179, -0.020695, 0.091588, -0.165051, 0.090077, -0.238794, -0.140767, 0.012938, 0.09328, 0.099577, 0.072117, -0.158345, -0.014027, -0.319053, 0.040705, 0.012032, -0.036428]}, {"gate": [0.043373, -0.007417, -0.204418, -0.001757, 0.068389, 0.018781, -0.071262, -0.003808, 0.06248, 0.011412, 0.01994, -0.124152, 0.025541, 0.019339, 0.099079, -0.193251, -0.006176, 0.014568, 0.025945, -0.121268, 0.025134, 0.043905, -0.027327, -0.158021, -0.020642, -0.060911, 0.131, 0.308644, 0.141275, 0.007638, 0.098577, 0.092881, -0.007906, 0.022507, -0.033845, -0.175895, 0.157561, 0.157126, -0.008506, 0.018997, 7e-06, -0.052496, 0.095411, -0.069871, -0.007944, 0.152327, -0.000798, 0.125383, 0.103775, 0.122296, 0.128333, -0.074498, 0.053322, -0.062498, -0.057824, 0.081694, 0.056204, -0.102544, 0.006603, 0.013312, -0.104356, -0.135503, -0.027909, -0.090848, -0.009775, -0.149967, 0.037914, -0.052464, -0.076969, -0.094154, 0.01124, 0.05459, -0.061188, 0.005022, -0.08706, -0.056186, 0.092396, -0.069545, 0.102042, -0.065718, 0.015853, 0.105828, -0.012086, 0.21682, -0.045978, 0.214453, -0.080129, 0.079701, -0.061245, 0.075056, -0.171527, 0.198635, 0.089194, 0.01946, -0.09804, -0.066206, 0.145375, 0.014363, 0.15971, 0.014933, 0.158635, 0.013478, -0.08869, -0.073302, 0.065159, -0.055216, 0.019406, -0.084007, 0.048709, 0.06205, 0.091187, 0.02234, 0.028171, 0.111925, -0.093413, 0.012211, -0.139071, 0.038732, -0.154157, -0.007642, 0.081606, 0.015003, -0.144005, 0.021848, 0.03718, -0.078818, -0.075445, 0.081053], "up": [-0.097561, -0.059597, -0.014856, 0.135274, -0.00833, -0.05672, -0.118813, 0.121117, 0.173665, -0.0765, 0.156131, 0.02979, 0.050832, 0.030272, 0.027013, 0.134014, -0.04106, -0.022205, 0.052096, -0.005849, -0.082453, -0.05035, 0.067445, 0.023754, -0.116022, 0.036807, 0.113041, 0.087057, 0.00828, -0.061607, 0.169955, 0.006031, -0.063961, 0.210436, 0.061441, 0.068983, 0.049766, 0.105074, 0.024147, 0.079674, 0.035544, -0.024072, -0.007294, -0.014905, -0.033793, -0.014186, -0.0074, 0.072245, -0.077887, 0.003227, -0.235784, 0.023923, -0.167245, 0.080454, 0.010348, -0.056108, 0.037765, 0.043648, 0.125764, 0.012974, -0.119758, 0.035888, 0.013398, -0.17483, 0.037165, -0.100067, -0.095452, -0.104298, -0.157322, 0.11985, 0.115432, -0.008113, 0.087662, 0.042888, -0.010365, 0.081609, 0.065518, -0.122059, -0.06947, 0.079402, -0.024011, -0.113781, 0.034733, 0.230212, 0.119244, 0.018462, -0.038151, -0.081787, 0.036726, -0.034373, -0.065987, -0.028532, 0.108182, -0.095629, -0.043407, -0.167677, -0.018795, 0.007942, -0.078162, -0.025167, -0.059605, -0.007487, -0.008827, -0.092908, 0.073061, -0.041237, -0.008103, -0.041663, -0.180611, -0.037473, -0.064454, 0.02357, -0.188533, 0.157141, 0.119996, 0.010844, -0.053329, -0.096854, 0.001629, 0.144157, 0.014284, 0.135576, -0.09433, -0.073343, -0.113326, -0.065588, -0.058771, -0.060447], "down": [0.034303, -0.004595, 0.021773, -0.091025, -0.060791, -0.110427, -0.146796, -0.115946, -0.082377, -0.018403, -0.012107, -0.094031, 0.109541, 0.036404, -0.042109, -0.101816, 0.137575, 0.043049, -0.067569, -0.130236, -0.097475, -0.038497, 0.084861, -0.028161, 0.071076, 0.074285, 0.240199, -0.015329, 0.128044, 0.029753, 0.023739, 0.02498, -0.137716, 0.108639, 0.057851, -0.053822, -0.214836, -0.063682, 0.131499, -0.140075, 0.01301, -0.024511, -0.014434, 0.007568, 0.038024, -0.010063, 0.153433, -0.01666, -0.131621, -0.02531, -0.074424, 0.025469, 0.013753, -0.006199, 0.174116, -0.171807, -0.024712, -0.033981, 0.011199, 0.079712, -0.054314, -0.010708, 0.078644, -0.147425, 0.04414, 0.249276, 0.007323, -0.065154, 0.018706, 0.049495, 0.024543, 0.026958, -0.094134, -0.076545, -0.076818, 0.113145, 0.003578, 0.0285, -0.229679, -0.007638, 0.337351, 0.173905, 0.014206, 0.054126, 0.012291, 0.027531, 0.178075, -0.16973, 0.024338, -0.01748, -0.046117, -0.01588, -0.024873, 0.043666, 0.007447, -0.2092, -0.170368, 0.028325, -0.055226, -0.081065, -0.019984, -0.155892, 0.124279, -0.004203, -0.065821, -0.04041, 0.017692, 0.031564, -0.127043, 0.043081, -0.060662, -0.011348, 0.009411, 0.19843, -0.013185, 0.057457, -0.114646, 0.124446, -0.021225, -0.012733, -0.20414, -0.080585, -0.120632, -0.056396, 0.038301, 0.110504, 0.107878, 0.022138]}, {"gate": [-0.17692, 0.02305, -0.086436, -0.008793, 0.106916, -0.088578, 0.177246, -0.091621, 0.007757, 0.026593, -0.085345, -0.097712, 0.044303, -0.148762, -0.080233, 0.289156, -0.143431, 0.014276, 0.11284, 0.064683, -0.032482, 0.074365, 0.068579, 0.152128, 0.038164, 0.176734, 0.01878, 0.065126, -0.084779, -0.206454, 0.006785, -0.030106, -0.123978, -0.032368, 0.036629, 0.004551, 0.073651, 0.033247, 0.065577, -0.048983, -0.218586, -0.085594, 0.180321, -0.08905, 0.001032, -0.029011, 0.059464, 0.045645, 0.045321, -0.053879, -0.2027, -0.028178, 0.044086, -0.015953, 0.029835, 0.120094, -0.146183, 0.087749, 0.06552, 0.021372, 0.042242, -0.121406, -0.076254, 0.137326, -0.013967, -0.036352, -0.051393, -0.021706, 0.010514, -0.006511, -0.230511, -0.033418, -0.069218, -0.059356, 0.107709, 0.011571, -0.013154, 0.001299, -0.118435, 0.243624, 0.083251, 0.095179, 0.10349, 0.182642, 0.032452, 0.034793, 0.050728, 0.020451, 0.004489, 0.023418, 0.015564, 0.199604, 0.256107, -0.014106, 0.018995, 0.053425, -0.035156, -0.099502, -0.032993, -0.056453, -0.011096, 0.19351, 0.068579, 0.017161, -0.195156, -0.075694, -0.13831, -0.108223, -0.094657, 0.111187, -0.175736, -0.035861, 0.001365, 0.020136, -0.058745, 0.150762, 0.053255, 0.029201, -0.128917, 0.041848, -0.19191, 0.099967, 0.028969, 0.181429, -0.067592, -0.07577, -0.172106, 0.080419], "up": [-0.110198, -0.045382, 0.13196, -0.007123, -0.077094, -0.1998, -0.058608, 0.034026, 0.046749, -0.032889, -0.08949, -0.025004, -0.197988, -0.001, 0.030468, -0.022357, 0.081959, -0.09201, -0.077081, 0.173567, -0.059271, -0.073792, -0.088898, 0.260014, -0.083534, -0.06263, -0.01572, 0.202415, -0.121208, -0.154202, 0.01802, -0.028181, -0.092614, -0.112746, -0.008538, 0.096596, 0.011112, 0.143496, -0.000132, 0.133547, 0.087881, -0.026507, 0.065301, 0.0358, 0.155297, -0.125086, 0.031279, -0.043672, -0.068669, 0.034109, -0.135989, -0.106962, -0.127031, 0.114533, 0.034771, 0.089891, -0.01558, -0.021683, -0.167962, -0.045233, 0.080223, 0.049977, -0.045723, 0.111981, -0.116992, 0.051752, 0.029755, 0.043326, -0.021396, -0.11353, -0.010748, -0.039927, 0.091674, 0.105074, -0.0737, 0.151378, -0.049348, -0.015523, -0.103626, 0.051652, 0.085654, 0.031318, -0.022457, -0.042018, 0.053471, -0.020285, -0.082928, 0.123109, -0.222358, 0.041759, -0.04028, 0.080609, 0.067807, -0.013012, 0.074558, -0.031171, 0.002155, -0.056155, 0.088425, -0.094198, -0.103679, 0.016965, 0.037722, 0.063658, -0.117627, -0.079801, 0.036106, 0.063185, -0.150226, 0.123516, 0.106741, -0.037987, -0.02301, 0.151114, -0.053072, -0.225414, -0.034589, -0.084531, 0.01765, 0.081863, 0.020418, -0.106147, 0.142043, -0.137097, -0.003944, -0.070262, -0.011336, -0.004552], "down": [0.106633, 0.107098, -0.089005, -0.083408, 0.058433, 0.190539, 0.090476, -0.056024, -0.074101, -0.154952, 0.00123, -0.316708, -0.118685, -0.071038, 0.110275, 0.004145, 0.08211, -0.004946, 0.021147, -0.080675, 0.040261, 0.060729, 0.049759, 0.0175, 0.086883, 0.292172, -0.081447, 0.093108, -0.011941, 0.136755, 0.061393, 0.046255, -0.078041, 0.040972, -0.056668, -0.077234, -0.115933, 0.014218, -0.214071, -0.044158, -0.058322, 0.020624, -0.217162, -0.067676, -0.023036, -0.077544, -0.000228, 0.062951, -0.04315, -0.122517, 0.014223, -0.066061, 0.097824, 0.076268, -0.017599, 0.19821, 0.015983, -0.083062, 0.04679, 0.02365, 0.1076, -0.091324, -0.087877, -0.096918, 0.084585, -0.017382, 0.126267, 0.201882, 0.066017, 0.016452, 0.042623, -0.062461, -0.09749, 0.068949, 0.0322, 0.131974, -0.019397, 0.058944, 0.009868, -0.054179, -0.041557, -0.008265, -0.111926, -0.15818, 0.077307, -0.040591, -0.009289, -0.070942, -0.165147, 0.080763, -0.14829, 0.220427, 0.073008, 0.021871, 0.130859, 0.0217, -0.197372, 0.161434, -0.089765, -0.004691, 0.029923, -0.129299, -0.04184, -0.066511, 0.114925, -0.0053, -0.176731, -0.015506, 0.127187, 0.070783, -0.070624, -0.051516, -0.108868, 0.11015, 0.025952, 0.142739, -0.201406, -0.114172, 0.039421, 0.113234, 0.094357, 0.030709, 0.065384, -0.053406, 0.127035, 0.01382, -0.06415, -0.173583]}, {"gate": [0.118148, -0.224248, -0.112458, -0.03931, 0.127988, -0.016307, -0.079371, -0.009741, 0.086294, 0.133887, 0.001798, 0.002024, 0.051432, 0.212049, 0.080521, -0.041436, 0.101926, 0.063661, -0.121835, -0.191765, 0.10392, 0.011983, -0.033579, -0.023524, -0.042351, -0.109611, 0.141501, 0.047485, -0.191048, -0.128052, 0.206536, 0.029648, 0.030938, 0.124631, 0.020946, 0.090418, 0.153796, -0.012498, -0.05928, 0.059984, 0.106244, -0.089533, 0.135045, -0.011896, 0.011591, -0.02568, 0.025813, -0.06853, 0.154802, -0.048719, 0.104844, -0.039389, 0.087042, 0.177574, 0.058616, -0.029598, -0.009841, 0.063504, 0.092209, -0.125672, -0.137227, -0.028698, -0.150481, 0.048155, -0.038261, -0.087841, 0.121993, -0.112044, -0.018518, 0.175312, 0.179436, 0.052158, -0.169152, -0.047566, 0.093584, 0.024202, -0.107603, 0.050571, 0.004013, -0.015919, 0.116624, -0.01624, -0.050462, -0.044174, -0.156681, -0.03793, 0.011184, -0.066621, -0.069794, -0.107354, 0.174224, -0.012398, -0.25963, -0.118022, 0.015076, 0.09487, 0.050152, -0.078193, 0.033564, 0.008057, -0.092209, 0.040905, 0.082866, 0.156713, 0.109402, -0.086063, 0.116104, 0.047084, 0.0929, 0.06627, -0.122679, -0.138703, 0.100547, -0.032776, 0.099118, -0.063995, 0.01768, -0.030737, 0.026077, 0.06142, 0.091398, 0.219715, -0.02575, 0.059698, 0.112132, -0.278221, 0.012255, -0.256594], "up": [0.060258, 0.181944, -0.091381, 0.104694, -0.068349, -0.017008, 0.062215, 0.067396, -0.12277, 0.007397, 0.184838, -0.158862, -0.078577, -0.033076, 0.092058, 0.122573, 0.085411, 0.040184, 0.180634, 0.112995, -0.240467, 0.116083, -0.003702, -0.047821, -0.220107, 0.022995, -0.11249, -0.063334, -0.100501, -0.142064, 0.018119, 0.329745, 0.021115, -0.104201, 0.096819, -0.010447, -0.000188, 0.096813, -0.087331, -0.209742, 0.152884, 0.046437, 0.022571, -0.058619, 0.111618, -0.006237, 0.053033, -0.117881, -0.052018, 0.053359, 0.09414, -0.042426, -0.025228, 0.049937, 0.162308, 0.126592, -0.01004, -0.033043, -0.118768, 0.013769, 0.015521, -0.221535, 0.124351, -0.013446, 0.067308, -0.039555, -0.199605, -0.099155, -0.020728, 0.038865, -0.070977, -0.023933, 0.121391, 0.054138, -0.026896, 0.016986, 0.017571, 0.085724, 0.007261, -0.033124, 0.091029, 0.018041, -0.066389, -0.067447, 0.204168, 0.001463, -0.014429, -0.029728, -0.024849, -0.013799, -0.033769, 0.089493, 0.078955, 0.0557, -0.003587, 0.092341, -0.020064, 0.208313, -0.040227, -0.006032, -0.149701, -0.0825, 0.177184, -0.294984, 0.175536, 0.251091, -0.042239, 0.114956, 0.087582, 0.26912, -0.009267, 0.030316, -0.120484, -0.065814, 0.087055, 0.055274, -0.042839, -0.184885, -0.032074, -0.127963, -0.04668, 0.113641, -0.029609, -0.064339, -0.163155, -0.082358, -0.172878, -0.032908], "down": [-0.001616, -0.038585, 0.078328, 0.00047, 0.027229, 0.017983, -0.125877, 0.112835, -0.022672, 0.040194, -0.09225, 0.099475, 0.10534, 0.00264, 0.041748, 0.009218, 0.064875, -0.014899, -0.045556, -0.228863, 0.069129, 0.239807, 0.095769, -0.076569, -0.151394, -0.1587, -0.009052, 0.024, -0.115376, 0.046094, 0.011397, 0.214574, 0.160517, 0.287296, -0.017634, -0.112192, -0.080999, 0.048696, 0.036921, -0.027347, -0.094495, 0.01193, -0.051978, -0.221994, 0.011473, -0.118456, -0.210727, 0.075085, 0.210865, 0.016015, 0.065693, -0.005382, 0.055817, 0.181197, 0.032146, -0.028524, -0.012451, 0.034675, -0.106676, 0.080577, -0.157355, 0.051474, 0.124642, -0.003239, 0.11341, -0.015528, -0.040218, -0.01113, -0.073564, 0.082371, 0.099508, -0.064873, 0.115327, 0.120699, -0.081058, 0.254365, -0.119372, -0.053562, 0.104476, 0.083304, 0.134398, -0.02112, -0.227457, -0.014148, 0.001209, -0.061338, -0.041853, -0.200597, -0.15117, -0.049312, -0.158444, -0.095997, 0.199398, -0.088229, -0.215271, -0.194046, 0.054729, 0.15622, -0.06222, 0.038387, 0.109195, 0.027096, -0.161548, 0.08978, 0.200603, 0.065869, -0.055518, -0.010134, 0.14216, -0.073271, 0.058712, 0.039953, 0.048119, -0.066915, -0.009372, 0.093116, -0.054418, -0.24254, 0.116843, -0.11834, -0.068426, -0.070737, -0.002742, 0.180911, -0.002277, 0.027463, -0.042814, -0.06183]}], "D": 8, "F": 16, "E": 4, "k": 2};
+const X = W.x, WR = W.w_router, EX = W.experts;
+const D = W.D, F = W.F, EMAX = W.E;   /* EMAX=4 baked experts available */
+
+/* ===== math: identical formulas to moe_routing.py ===== */
+function sigmoid(x){ return 1.0/(1.0+Math.exp(-x)); }
+function silu(x){ return x*sigmoid(x); }
+function dot(a,b){ let s=0; for(let i=0;i<b.length;i++) s+=a[i]*b[i]; return s; }
+function linear(x,w,out,inn){
+  /* w is flat [out*inn], row-major: w[o*inn + i]; returns [out] */
+  const y=new Array(out);
+  for(let o=0;o<out;o++){ let s=0; const base=o*inn; for(let i=0;i<inn;i++) s+=w[base+i]*x[i]; y[o]=s; }
+  return y;
+}
+function expertForward(xRow, ei){
+  /* EX[ei]: {gate:[F*D], up:[F*D], down:[D*F]} ; returns [D] */
+  const g = linear(xRow, EX[ei].gate, F, D);
+  const u = linear(xRow, EX[ei].up,   F, D);
+  const gated = new Array(F);
+  for(let i=0;i<F;i++) gated[i] = silu(g[i]) * u[i];
+  return linear(gated, EX[ei].down, D, F);
+}
+function routerLogits(xRow, E){
+  return linear(xRow, WR.slice(0, E*D), E, D);   /* use first E experts */
+}
+function softmax(z){
+  let mx=-Infinity; for(const v of z) if(v>mx) mx=v;
+  let s=0; const out=new Array(z.length);
+  for(let i=0;i<z.length;i++){ out[i]=Math.exp(z[i]-mx); s+=out[i]; }
+  for(let i=0;i<z.length;i++) out[i]/=s; return out;
+}
+function keepTopkMask(z,k){
+  /* return {masked:[-inf except topk], idx:[k selected sorted desc by value]} identical to keep_topk() */
+  const order = z.map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]);
+  const keep = new Set(order.slice(0,k).map(p=>p[1]));
+  const masked = z.map((v,i)=> keep.has(i)? v : -Infinity);
+  const idx = order.slice(0,k).map(p=>p[1]);
+  return {masked, idx};
+}
+function moeGate(xRow, E, k){
+  const H = routerLogits(xRow, E);
+  const {masked, idx} = keepTopkMask(H, k);
+  const G = softmax(masked);
+  return {H, G, idx};
+}
+function moeForward(xRow, E, k){
+  const {H, G, idx} = moeGate(xRow, E, k);
+  const y = new Array(D).fill(0);
+  for(let i=0;i<E;i++){
+    if(G[i]!==0){
+      const eo = expertForward(xRow, i);
+      for(let d=0;d<D;d++) y[d] += G[i]*eo[d];
+    }
+  }
+  return {H, G, idx, y};
+}
+const fmt = (v,p=4)=> (v>=0?'+':'')+v.toFixed(p);
+const vec = (a,p=4)=> '['+a.map(v=>fmt(v,p)).join(', ')+']';
+
+/* ===== canvas helpers ===== */
+function setup(cv,h){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||1100;
+  if(cv._h!==h){ cv.style.height=h+'px'; cv._h=h; }
+  const bh=Math.round(h*dpr), bw=Math.round(w*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return {ctx,w,h};
+}
+function barBase(ctx,x0,y0,w,h){ ctx.strokeStyle='#21262d'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x0+w,y0); ctx.stroke(); }
+
+/* ===== PANEL 1: router logits + gate weights ===== */
+const routerCv=document.getElementById('router');
+function drawRouter(m,E,k){
+  const {ctx,w,h}=setup(routerCv,260);
+  ctx.clearRect(0,0,w,h);
+  const xRow = X.slice(m*D,(m+1)*D);
+  const {H,G,idx}=moeGate(xRow,E,k);
+  const padL=50,padR=30,padT=40,padB=54;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const colW=pw/E;
+  // logit scale
+  let lmax=0.6; for(const v of H) lmax=Math.max(lmax,Math.abs(v));
+  const yMid=padT+ph*0.42;
+  const sclG=ph*0.42;        // gate bars (0..1)
+  const sclH=ph*0.42/lmax;   // logit bars (symmetric)
+  // labels
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('router logits H  (yellow, ±scale)  +  gate weights G  (orange, 0..1)', w/2, 18);
+  // zero line
+  ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(padL,yMid); ctx.lineTo(w-padR,yMid); ctx.stroke();
+  ctx.fillStyle='#8b949e'; ctx.font='9px ui-monospace,monospace'; ctx.fillText('0', padL-10, yMid+3);
+  ctx.fillText('1', padL-10, yMid-sclG+3);
+  const active=new Set(idx);
+  for(let i=0;i<E;i++){
+    const cx=padL+i*colW+colW/2;
+    const bw=Math.min(46,colW-14);
+    // logit bar (from zero line)
+    const lh=H[i]*sclH;
+    ctx.fillStyle='#f1c40f';
+    ctx.fillRect(cx-bw/2, lh<0?yMid:yMid-lh, bw, Math.abs(lh));
+    // gate bar (from zero line, downward band) scaled by sclG
+    const gh=G[i]*sclG;
+    ctx.fillStyle = active.has(i) ? '#e67e22' : '#21262d';
+    ctx.fillRect(cx-bw/2, yMid, bw, gh);
+    // value labels
+    ctx.fillStyle='#f1c40f'; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(H[i].toFixed(3), cx, yMid-lh+(lh<0?12:-4));
+    ctx.fillStyle = active.has(i)?'#e67e22':'#8b949e';
+    ctx.fillText(G[i].toFixed(3), cx, yMid+gh+11);
+    // expert label
+    ctx.fillStyle = active.has(i)?'#e6edf3':'#8b949e';
+    ctx.font='bold 11px ui-monospace,monospace';
+    ctx.fillText('E'+i, cx, h-padB+18);
+    ctx.fillStyle = active.has(i)?'#27ae60':'#8b949e';
+    ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(active.has(i)?'ACTIVE':'off', cx, h-padB+32);
+  }
+}
+function renderRouterReadout(m,E,k){
+  const xRow=X.slice(m*D,(m+1)*D);
+  const {H,G,idx}=moeGate(xRow,E,k);
+  const gsum=G.reduce((a,b)=>a+b,0);
+  document.getElementById('routerReadout').innerHTML =
+    `x[0,${m}]     = ${vec(xRow)}\n` +
+    `<span class="h">H[0,${m}]</span>     = ${vec(H)}   (raw logits)\n` +
+    `top-${k} experts = [${idx.join(', ')}]\n` +
+    `<span class="g">G[0,${m}]</span>     = ${vec(G)}   (sum = ${gsum.toFixed(4)})`;
+}
+
+/* ===== PANEL 2: expert routing diagram ===== */
+const routeCv=document.getElementById('route');
+function drawRoute(m,E,k){
+  const {ctx,w,h}=setup(routeCv,340);
+  ctx.clearRect(0,0,w,h);
+  const xRow=X.slice(m*D,(m+1)*D);
+  const {G,idx,y}=moeForward(xRow,E,k);
+  const active=new Set(idx);
+  // 3 columns: token | experts | output
+  const padL=20,padR=20,padT=34,padB=20;
+  const cw=(w-padL-padR)/3;
+  const colTok=padL+cw*0.5, colExp=padL+cw*1.5, colOut=padL+cw*2.5;
+  // title
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('INPUT x', colTok, padT-12);
+  ctx.fillText('EXPERTS (SwiGLU)', colExp, padT-12);
+  ctx.fillText('OUTPUT y', colOut, padT-12);
+  // input token box (small D=8 mini bars)
+  const midY=h/2;
+  const ibw=18, ih=130, istart=midY-ih/2;
+  let xmax=0.6; for(const v of xRow) xmax=Math.max(xmax,Math.abs(v));
+  for(let d=0;d<D;d++){
+    const bx=colTok-ibw/2;
+    const hh=(xRow[d]/xmax)*(ih/2);
+    ctx.fillStyle='#e6edf3'; ctx.fillRect(bx, hh<0?midY:midY-hh, ibw, Math.abs(hh));
+  }
+  barBase(ctx,colTok-ibw/2-3,midY+ih/2+2,ibw+6,1);
+  ctx.fillStyle='#8b949e'; ctx.font='9px ui-monospace,monospace'; ctx.fillText('x[D=8]', colTok, midY+ih/2+16);
+  // experts column
+  const expW=Math.min(64,cw-30), expH=(h-padT-padB-10)/E - 6;
+  for(let i=0;i<E;i++){
+    const ey=padT+5 + i*(expH+6);
+    const ex=colExp-expW/2;
+    const on=active.has(i);
+    ctx.fillStyle = on? 'rgba(41,128,185,'+(0.25+0.55*G[i])+')' : '#161b22';
+    ctx.strokeStyle = on? '#2980b9' : '#30363d';
+    ctx.lineWidth = on?2:1;
+    ctx.fillRect(ex,ey,expW,expH); ctx.strokeRect(ex,ey,expW,expH);
+    ctx.fillStyle = on? '#e6edf3':'#8b949e'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('E'+i, colExp, ey+14);
+    ctx.fillStyle = on? '#e67e22':'#8b949e'; ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(on?('G='+G[i].toFixed(3)):'G=0', colExp, ey+28);
+    ctx.fillStyle='#8b949e'; ctx.font='8px ui-monospace,monospace';
+    ctx.fillText(on?'SwiGLU':'(off)', colExp, ey+expH-6);
+    // arrow from token to expert
+    ctx.strokeStyle = on? '#2980b9':'#21262d'; ctx.lineWidth=on?1.6:1;
+    ctx.globalAlpha = on? Math.max(0.35,G[i]) : 0.4;
+    ctx.beginPath(); ctx.moveTo(colTok+ibw/2+2, midY); ctx.lineTo(ex, ey+expH/2); ctx.stroke();
+    ctx.globalAlpha=1;
+    if(on){ // arrowhead
+      ctx.fillStyle='#2980b9'; ctx.beginPath();
+      ctx.moveTo(ex,ey+expH/2); ctx.lineTo(ex+6,ey+expH/2-3); ctx.lineTo(ex+6,ey+expH/2+3); ctx.fill();
+    }
+    // arrow from expert to output (only active)
+    if(on){
+      ctx.strokeStyle='#9b59b6'; ctx.lineWidth=1.6; ctx.globalAlpha=Math.max(0.35,G[i]);
+      ctx.beginPath(); ctx.moveTo(ex+expW,ey+expH/2); ctx.lineTo(colOut-ibw/2-2,midY); ctx.stroke();
+      ctx.globalAlpha=1;
+    }
+  }
+  // output vector
+  let ymax=0.02; for(const v of y) ymax=Math.max(ymax,Math.abs(v));
+  for(let d=0;d<D;d++){
+    const bx=colOut-ibw/2;
+    const hh=(y[d]/ymax)*(ih/2);
+    ctx.fillStyle='#9b59b6'; ctx.fillRect(bx, hh<0?midY:midY-hh, ibw, Math.abs(hh));
+  }
+  barBase(ctx,colOut-ibw/2-3,midY+ih/2+2,ibw+6,1);
+  ctx.fillStyle='#9b59b6'; ctx.font='9px ui-monospace,monospace'; ctx.fillText('y[D=8]', colOut, midY+ih/2+16);
+}
+function renderRouteReadout(m,E,k){
+  const xRow=X.slice(m*D,(m+1)*D);
+  const {G,idx,y}=moeForward(xRow,E,k);
+  let lines = `x[0,${m}] = ${vec(xRow)}\nrouted to: ` +
+    idx.map(i=>`E${i} (G=${G[i].toFixed(4)})`).join('  +  ');
+  lines += `\n<span class="y">y[0,${m}]</span> = ${vec(y,6)}  =  Σ Gᵢ·Eᵢ(x)`;
+  lines += `\n<b>y[0,${m},0] = ${y[0].toFixed(6)}</b>  (E=${E}, k=${k})`;
+  document.getElementById('routeReadout').innerHTML = lines;
+}
+
+/* ===== PANEL 3: load balance across batch ===== */
+const balanceCv=document.getElementById('balance');
+function drawBalance(E,k){
+  const {ctx,w,h}=setup(balanceCv,220);
+  ctx.clearRect(0,0,w,h);
+  const padL=50,padR=30,padT=28,padB=40;
+  const pw=w-padL-padR, ph=h-padT-padB;
+  const N=4;
+  // count tokens per expert
+  const cnt=new Array(E).fill(0);
+  for(let m=0;m<N;m++){
+    const {idx}=moeGate(X.slice(m*D,(m+1)*D), E, k);
+    for(const i of idx) cnt[i]++;
+  }
+  const colW=pw/E;
+  let cmax=Math.max(2,...cnt);
+  const scl=ph/cmax;
+  // capacity line C = capacity_factor*N*k/E (factor=1)
+  const C = N*k/E;
+  const yC = padT+ph - C*scl;
+  // grid
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('tokens received per expert (across N=4 tokens)', w/2, 16);
+  ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(padL,padT+ph); ctx.lineTo(w-padR,padT+ph); ctx.stroke();
+  // bars
+  for(let i=0;i<E;i++){
+    const cx=padL+i*colW+colW/2;
+    const bw=Math.min(60,colW-16);
+    const hh=cnt[i]*scl;
+    ctx.fillStyle='#27ae60'; ctx.fillRect(cx-bw/2, padT+ph-hh, bw, hh);
+    ctx.fillStyle='#e6edf3'; ctx.font='bold 12px ui-monospace,monospace';
+    ctx.fillText(cnt[i], cx, padT+ph-hh-5);
+    ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText('E'+i, cx, padT+ph+16);
+    ctx.fillStyle='#8b949e'; ctx.font='8px ui-monospace,monospace';
+    ctx.fillText('fᵢ='+(cnt[i]/N).toFixed(2), cx, padT+ph+30);
+  }
+  // capacity line
+  ctx.strokeStyle='#c0392b'; ctx.lineWidth=1.5; ctx.setLineDash([5,4]);
+  ctx.beginPath(); ctx.moveTo(padL,yC); ctx.lineTo(w-padR,yC); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#c0392b'; ctx.font='9px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillText('capacity C='+C.toFixed(1)+'  (drop above)', padL+4, yC-4);
+}
+function renderBalanceReadout(E,k){
+  const N=4;
+  const cnt=new Array(E).fill(0); let bal=0; let Psum=0;
+  for(let m=0;m<N;m++){
+    const xRow=X.slice(m*D,(m+1)*D);
+    const {idx,G}=moeGate(xRow,E,k);
+    for(const ii of idx) cnt[ii]++;
+    for(let i=0;i<E;i++) bal += (cnt[i]/N)*0; // placeholder, recompute below
+  }
+  // recompute f_i, P_i, L_bal cleanly
+  const f=new Array(E).fill(0), P=new Array(E).fill(0);
+  for(let m=0;m<N;m++){
+    const {idx,G}=moeGate(X.slice(m*D,(m+1)*D),E,k);
+    for(const ii of idx) f[ii]+=1;
+    for(let i=0;i<E;i++) P[i]+=G[i];
+  }
+  let Lbal=0; let fsum=0,Psum2=0;
+  for(let i=0;i<E;i++){ f[i]/=N; P[i]/=N; Lbal+=f[i]*P[i]; fsum+=f[i]; Psum2+=P[i]; }
+  Lbal*=E;
+  document.getElementById('balanceReadout').innerHTML =
+    `fᵢ (token fraction routed) = [${f.map(v=>v.toFixed(2)).join(', ')}]   Σf=${fsum.toFixed(2)} (==k=${k})\n` +
+    `Pᵢ (avg gate prob)         = [${P.map(v=>v.toFixed(3)).join(', ')}]   ΣP=${Psum2.toFixed(3)} (==1)\n` +
+    `<b>L_bal = E·Σ fᵢPᵢ = ${Lbal.toFixed(4)}</b>   (min when balanced = k=${k}; bigger ⇒ more collapsed)`;
+}
+
+/* ===== master render ===== */
+function render(){
+  const m=+document.getElementById('m').value;
+  let E=+document.getElementById('E').value;
+  let k=+document.getElementById('k').value;
+  if(k>=E) k=E-1;       // keep k < E so there's sparsity
+  document.getElementById('k').max=E-1;
+  if(+document.getElementById('k').value>k) document.getElementById('k').value=k;
+  document.getElementById('mVal').textContent=m;
+  document.getElementById('EVal').textContent=E;
+  document.getElementById('kVal').textContent=k;
+  drawRouter(m,E,k); renderRouterReadout(m,E,k);
+  drawRoute(m,E,k); renderRouteReadout(m,E,k);
+  drawBalance(E,k); renderBalanceReadout(E,k);
+}
+
+/* ===== events ===== */
+['m','E','k'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+window.addEventListener('resize',render);
+
+/* ===== gold-value checks vs moe_routing.py (always E=4, k=2, m=0) ===== */
+// check 1: token m=0 -> experts [1,0] with gates [0.562503, 0.437497]
+const g1 = moeGate(X.slice(0,D), 4, 2);
+const expIdx = g1.idx.join(',');
+const ok1 = (expIdx==='1,0') && Math.abs(g1.G[1]-0.562503)<1e-4 && Math.abs(g1.G[0]-0.437497)<1e-4;
+const c1=document.getElementById('check1');
+c1.textContent = ok1 ? `check 1: OK — m=0 → experts [${expIdx}], gates [${g1.G[1].toFixed(4)}, ${g1.G[0].toFixed(4)}]`
+                     : `check 1: FAIL — m=0 → experts [${expIdx}], gates [${g1.G[1].toFixed(4)}, ${g1.G[0].toFixed(4)}]`;
+c1.style.borderColor=ok1?'#27ae60':'#c0392b'; c1.style.color=ok1?'#27ae60':'#c0392b'; c1.style.background=ok1?'#1c3a25':'#3a1414';
+
+// check 2: full MoE forward, y[0,0,0] == 0.008519
+const ygold = moeForward(X.slice(0,D), 4, 2).y[0];
+const ok2 = Math.abs(ygold-0.008519)<1e-4;
+const c2=document.getElementById('check2');
+c2.textContent = ok2 ? `check 2: OK — y[0,0,0]=${ygold.toFixed(6)} == 0.008519`
+                     : `check 2: FAIL — y[0,0,0]=${ygold.toFixed(6)} ≠ 0.008519`;
+c2.style.borderColor=ok2?'#27ae60':'#c0392b'; c2.style.color=ok2?'#27ae60':'#c0392b'; c2.style.background=ok2?'#1c3a25':'#3a1414';
+
+// check 3: gate weights sum to 1 (the renormalization invariant)
+let ok3=true; for(let m=0;m<4;m++){ const s=moeGate(X.slice(m,D),4,2).G.reduce((a,b)=>a+b,0); if(Math.abs(s-1)>1e-5) ok3=false; }
+const c3=document.getElementById('check3');
+c3.textContent = ok3 ? `check 3: OK — ΣG == 1 for all 4 tokens (renormalized top-k)`
+                     : `check 3: FAIL — gates do not sum to 1`;
+c3.style.borderColor=ok3?'#27ae60':'#c0392b'; c3.style.color=ok3?'#27ae60':'#c0392b'; c3.style.background=ok3?'#1c3a25':'#3a1414';
+
+render();
+</script>
+</body>
+</html>

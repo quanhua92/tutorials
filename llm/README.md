@@ -41,20 +41,29 @@ graph LR
         PL[PEFT_LORA]
         LM[LMCACHE]
     end
-    subgraph p4["Phase 4 — Distributed primitives (comms → replica → shard)"]
+    subgraph p4["Phase 4 — Distributed primitives (comms → replica → shard → schedule)"]
         direction LR
         NCCL[NCCL_COLLECTIVES]
         DDP[DDP]
         TP[TENSOR_PARALLEL]
+        PP[PIPELINE_PARALLEL]
+        Z[ZERO]
+    end
+    subgraph p5["Phase 5 — Next-gen (sparse MoE, speculative decode)"]
+        direction LR
+        MOE[MOE_ROUTING]
+        SPEC[SPECULATIVE_DECODING]
     end
     p1 --> p2
     p2 --> p3
     p3 --> p4
+    p4 --> p5
 
     style p1 fill:#eaf2f8,stroke:#2980b9
     style p2 fill:#fdecea,stroke:#c0392b
     style p3 fill:#eafaf1,stroke:#27ae60
-    style p4 fill:#fef9e7,stroke:#f1c40f
+    style p4 fill:#eafaf1,stroke:#27ae60
+    style p5 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style F fill:#f5b7b1,stroke:#c0392b
 ```
 
@@ -66,11 +75,15 @@ graph LR
 - BLOCK_MANAGER's chained hash ⟷ PREFIX_CACHE's radix tree (flat dedup vs arbitrary-prefix sharing)
 - SCHEDULER consumes BLOCK_MANAGER's allocation; CUDA_GRAPHS captures SCHEDULER's steady-state decode
 - DDP & TENSOR_PARALLEL both consume NCCL_COLLECTIVES (grad AllReduce vs Megatron's AllReduce)
+- ZERO partitions what DDP replicates ⟷ DDP (the redundancy ZeRO eliminates is exactly DDP's full copy)
+- PIPELINE_PARALLEL splits work *across layers* vs TENSOR_PARALLEL within a single layer (both need NCCL_COLLECTIVES)
+- MOE_ROUTING's sparse expert FFN ⟷ MLP_ACTIVATION's dense SwiGLU (same FFN, top-k routed instead of always-on)
+- SPECULATIVE_DECODING's rejection sampling ⟷ SAMPLING (same distribution) and its draft-chain KV rewind ⟷ KV_CACHE
 - PEFT_LORA's grouped GEMM + LMCACHE's hierarchy extend the serving engine beyond dense inference
 
 ---
 
-## 📚 All 21 bundles at a glance
+## 📚 All 25 bundles at a glance
 
 Every row is the 4-file bundle: `.py` (ground truth) · `.md` (guide) · `.html` (interactive).
 Also commit `*_output.txt` (captured stdout — see each `.md`'s `> From X.py Section Y:` callouts).
@@ -98,6 +111,10 @@ Also commit `*_output.txt` (captured stdout — see each `.md`'s `> From X.py Se
 | 19 | **NCCL collectives** — P2P comms → NCCL 5 primitives + ring-AllReduce (2N bytes regardless of K) | 4 | [`nccl_collectives.py`](./nccl_collectives.py) | [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) | [`nccl_collectives.html`](./nccl_collectives.html) |
 | 20 | **DDP** — single-GPU training → DDP: full replica + grad AllReduce + AMP + grad accumulation + cosine LR | 4 | [`ddp.py`](./ddp.py) | [`DDP.md`](./DDP.md) | [`ddp.html`](./ddp.html) |
 | 21 | **Tensor parallel** — matrices too big for 1 GPU → Megatron column/row parallel (AllReduce cancels across MLP/attn) | 4 | [`tensor_parallel.py`](./tensor_parallel.py) | [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md) | [`tensor_parallel.html`](./tensor_parallel.html) |
+| 22 | **Pipeline parallel** — TP not enough → GPipe micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | 4 | [`pipeline_parallel.py`](./pipeline_parallel.py) | [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) | [`pipeline_parallel.html`](./pipeline_parallel.html) |
+| 23 | **ZeRO** — DDP redundancy (20N bytes) → ZeRO 1/2/3 partition opt-state/grad/params | 4 | [`zero.py`](./zero.py) | [`ZERO.md`](./ZERO.md) | [`zero.html`](./zero.html) |
+| 24 | **MoE routing** — dense FFN (all params active) → top-k sparse MoE + load-balance/z-loss + DeepSeek aux-free | 5 | [`moe_routing.py`](./moe_routing.py) | [`MOE_ROUTING.md`](./MOE_ROUTING.md) | [`moe_routing.html`](./moe_routing.html) |
+| 25 | **Speculative decoding** — 1 token/step (memory-bound) → draft+verify parallel (rejection sampling, exact dist) | 5 | [`speculative_decoding.py`](./speculative_decoding.py) | [`SPECULATIVE_DECODING.md`](./SPECULATIVE_DECODING.md) | [`speculative_decoding.html`](./speculative_decoding.html) |
 
 > The 11 files map to the **10 key problems** in the curriculum — position
 > encoding is one problem split across two sibling bundles (`ROPE` ↔ `ABSOLUTE_PE`).
@@ -130,6 +147,10 @@ graph TD
     Q --> R["18. NCCL_COLLECTIVES<br/>ring AllReduce"]
     R --> S["19. DDP<br/>replica + grad sync"]
     R --> T["20. TENSOR_PARALLEL<br/>Megatron sharding"]
+    T --> U["21. PIPELINE_PARALLEL<br/>across-layer microbatching"]
+    U --> V["22. ZERO<br/>partition what DDP replicates"]
+    V --> W["23. MOE_ROUTING<br/>sparse expert FFN"]
+    W --> X["24. SPECULATIVE_DECODING<br/>draft + verify"]
     style D fill:#eafaf1,stroke:#27ae60
     style I fill:#f5b7b1,stroke:#c0392b
     style K fill:#eafaf1,stroke:#27ae60
@@ -161,7 +182,8 @@ cd research
 for n in normalization mlp_activation gqa causal_mask tokenization sampling \
          flash_attention quantization kv_cache rope absolute_pe \
          paged_attention block_manager scheduler prefix_cache cuda_graphs peft_lora lmcache \
-         nccl_collectives ddp tensor_parallel; do
+         nccl_collectives ddp tensor_parallel \
+         pipeline_parallel zero moe_routing speculative_decoding; do
   uv run python $n.py >/dev/null 2>&1 && echo "  $n.py: OK" || echo "  $n.py: FAILED"
   python3 -c "import re;open('/tmp/_j.js','w').write(re.search(r'<script>(.*)</script>',open('$n.html').read(),re.S).group(1))" 2>/dev/null
   node --check /tmp/_j.js 2>/dev/null && echo "  $n.html JS: OK" || echo "  $n.html JS: FAIL"
@@ -189,5 +211,5 @@ diff them against `{name}_output.txt` to audit any value.
 > recomputed in JS with the identical formula and gold-checked against it. Every
 > formula is fact-checked against the original paper. Nothing is hand-waved.**
 
-That single discipline is what lets these guides scale to 21+ topics without
+That single discipline is what lets these guides scale to 25+ topics without
 drifting into "trust me" math.

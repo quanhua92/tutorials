@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Parallelism — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --fwd:#2980b9; --bwd:#e67e22;
+    --bubble:#3a1414; --idle:#0a0e14;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .fwd{color:var(--fwd)}
+  .readout .bwd{color:var(--bwd)}
+  .readout .gold{color:var(--gold)}
+  .readout .red{color:var(--red)}
+  .micro{color:var(--muted);font-size:.74rem}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.25rem 0}
+  .barwrap .lab{width:90px;color:var(--muted);font-size:.78rem}
+  .barwrap .track{flex:1;height:20px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d;display:flex}
+  .barwrap .fill{height:100%}
+  .barwrap .num{width:120px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+  #gantt{display:block;width:100%;max-width:980px;height:280px}
+  #memchart{display:block;width:100%;max-width:980px;height:220px}
+  table.heat{border-collapse:collapse;font-size:.76rem;font-variant-numeric:tabular-nums;margin-top:.4rem;width:100%}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 6px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat tr.gold td{background:#3a2f12;color:#ffd966;font-weight:700}
+</style>
+</head>
+<body>
+  <h1>Pipeline Parallelism (PP) — interactive
+    <a class="badge" href="./PIPELINE_PARALLEL.md">PIPELINE_PARALLEL.md</a>
+    <a class="badge" href="./pipeline_parallel.py">pipeline_parallel.py</a></h1>
+  <div class="sub">Drag <b style="color:var(--green)">K</b> (stages) and <b style="color:var(--green)">M</b> (micro-batches) and watch the
+    <b style="color:var(--blue)">forward</b>/<b style="color:var(--orange)">backward</b> Gantt redraw. The
+    <b style="color:var(--red)">bubble</b> (red cells) is idle GPU time = <code>(K-1)/(K+M-1)</code>. Toggle GPipe vs 1F1B:
+    same bubble, but 1F1B cuts peak activation memory from <b>M&times;</b> to <b>K&times;</b>. Every number is recomputed live
+    in JS from the <i>identical</i> formula in <code>pipeline_parallel.py</code> — a faithful single-process simulation;
+    the bubble &amp; P2P arithmetic is exact (no real multi-GPU on this platform).
+    &nbsp;|&nbsp; <a href="./tensor_parallel.html">TENSOR_PARALLEL</a> (shards within a layer) &middot;
+    <a href="./ddp.html">DDP</a> (data-parallel) &middot;
+    <a href="./nccl_collectives.html">NCCL collectives</a> (the P2P send/recv) &middot;
+    <a href="./zero.html">ZeRO</a> (the data-parallel memory win, complements PP across nodes)</div>
+
+  <!-- ===== PANEL 1: GANTT ===== -->
+  <h2>&#9312; Pipeline Gantt &mdash; GPipe vs 1F1B (the bubble is the red gap)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b>K</b> and <b>M</b>. Each row is a GPU stage, each column is a
+      time-slot, each cell is one op (<b style="color:var(--blue)">F m</b>=forward of micro-batch m,
+      <b style="color:var(--orange)">B m</b>=backward). Red cells = idle (the bubble).
+      <b style="color:var(--green)">GPipe</b>: all forwards then all backwards (peak mem = M).
+      <b style="color:var(--green)">1F1B</b>: alternate F/B early (peak mem = K, same bubble).</div>
+    <div class="controls">
+      <label>K (stages) <input type="range" id="K" min="2" max="8" value="4">
+        <span class="val" id="KVal">4</span></label>
+      <label>M (micro-batches) <input type="range" id="M" min="1" max="16" value="8">
+        <span class="val" id="MVal">8</span></label>
+      <span class="micro">|</span>
+      <button id="btnGPipe" class="active">GPipe schedule</button>
+      <button id="btn1F1B">1F1B schedule</button>
+    </div>
+    <canvas id="gantt" width="980" height="280"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--fwd)"></i>forward F(m,k)</span>
+      <span><i class="sw" style="background:var(--bwd)"></i>backward B(m,k)</span>
+      <span><i class="sw" style="background:var(--bubble);border:1px solid #c0392b"></i>bubble (idle)</span>
+    </div>
+    <div class="readout" id="ganttReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: BUBBLE FORMULA + MEMORY ===== -->
+  <h2>&#9313; Bubble <code>(K-1)/(K+M-1)</code> &amp; peak memory M&times; vs K&times;</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> GPipe and 1F1B have the SAME bubble fraction, but 1F1B's peak activation
+      memory is bounded at <b>K</b> in-flight micro-batches (vs <b>M</b> for GPipe). For <b>M &gt;&gt; K</b> this is a
+      huge memory win for free. Drag <b>M</b> up and watch the GPipe bar grow while the 1F1B bar stays flat.</div>
+    <div class="barwrap"><span class="lab">bubble fraction</span>
+      <span class="track"><span class="fill" id="bubbleFill" style="background:var(--red);width:27.3%"></span></span>
+      <span class="num" id="bubbleNum">0.2727 (27.27%)</span></div>
+    <div class="barwrap"><span class="lab">GPipe mem (M&times;)</span>
+      <span class="track"><span class="fill" id="gpipeMemFill" style="background:var(--fwd);width:50%"></span></span>
+      <span class="num" id="gpipeMemNum">8 &times; act</span></div>
+    <div class="barwrap"><span class="lab">1F1B mem (K&times;)</span>
+      <span class="track"><span class="fill" id="f1bMemFill" style="background:var(--green);width:25%"></span></span>
+      <span class="num" id="f1bMemNum">4 &times; act</span></div>
+    <div class="barwrap"><span class="lab">memory cut</span>
+      <span class="track"><span class="fill" id="cutFill" style="background:var(--gold);width:50%"></span></span>
+      <span class="num" id="cutNum">2.0&times; smaller</span></div>
+    <div class="micro" style="margin-top:.4rem"><b>Rule of thumb:</b> keep <code>M &ge; 4*K</code> so bubble &le; ~16%.
+      At <code>K=4, M=16</code>: bubble = 3/19 = 15.79%.</div>
+  </div>
+
+  <!-- ===== PANEL 3: INTERLEAVED + GOLD TABLE ===== -->
+  <h2>&#9314; Interleaved 1F1B shrinks the bubble &mdash; V virtual stages/device</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> giving each device <b>V</b> virtual stages cuts the bubble to
+      <code>(K-1)/(K+M*V-1)</code>. The <span style="background:#3a2f12;color:#ffd966;padding:0 4px">gold row</span>
+      is the pinned reference (<code>K=4, M=8</code>) that the check badge below verifies against
+      <code>pipeline_parallel.py</code> Section G.</div>
+    <label>V (virtual stages/device) <input type="range" id="V" min="1" max="4" value="1">
+      <span class="val" id="VVal">1</span></label>
+    <div class="readout" id="interleavedReadout" style="margin-top:.6rem"></div>
+    <table class="heat" id="goldTable" style="margin-top:.8rem"></table>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS recompute matches pipeline_parallel.py Section G (bubble_fraction(4,8) = 3/11 = 0.272727; 1F1B mem = K = 4).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formulas (mirror pipeline_parallel.py exactly) ===== */
+function bubbleFraction(K, M){ return (K - 1) / (K + M - 1); }
+function bubbleInterleaved(K, M, V){ return (K - 1) / (K + M * V - 1); }
+
+/* ===== GPipe schedule (mirror schedule_gpipe) ===== */
+/* returns {g, T} where g[k][t] = null | ['F', m] | ['B', m] */
+function ganttGPipe_(K, M){
+  const T = 2 * (M + K - 1);
+  const g = Array.from({length: K}, () => new Array(T).fill(null));
+  for (let m = 0; m < M; m++)
+    for (let k = 0; k < K; k++)
+      g[k][m + k] = ['F', m];
+  const fwdEnd = M + K - 1;
+  for (let m = 0; m < M; m++)
+    for (let k = 0; k < K; k++)
+      g[k][fwdEnd + (M - 1 - m) + (K - 1 - k)] = ['B', m];
+  return {g, T};
+}
+
+/* ===== 1F1B schedule (mirror schedule_1f1b: warmup + steady 1F1B + cooldown) ===== */
+function gantt1F1B_(K, M){
+  const seqs = [];
+  for (let k = 0; k < K; k++){
+    const seq = [];
+    const warmup = Math.min(K - k - 1, M);
+    const steady = M - warmup;
+    let fi = 0, bi = 0;
+    for (let i = 0; i < warmup; i++){ seq.push(['F', fi]); fi++; }
+    for (let i = 0; i < steady; i++){ seq.push(['F', fi]); fi++; seq.push(['B', bi]); bi++; }
+    while (bi < M){ seq.push(['B', bi]); bi++; }
+    seqs.push(seq);
+  }
+  const fwdT = {}, bwdT = {};
+  const ptr = new Array(K).fill(0);
+  const key = (m, k) => m + ',' + k;
+  let t = 0, done = 0;
+  const total = 2 * M * K;
+  while (done < total){
+    for (let k = 0; k < K; k++){
+      if (ptr[k] >= seqs[k].length) continue;
+      const op = seqs[k][ptr[k]][0], m = seqs[k][ptr[k]][1];
+      if (op === 'F'){
+        if (k === 0 || (fwdT[key(m, k - 1)] !== undefined && fwdT[key(m, k - 1)] < t)){
+          fwdT[key(m, k)] = t; ptr[k]++; done++;
+        }
+      } else {
+        if (k === K - 1 || (bwdT[key(m, k + 1)] !== undefined && bwdT[key(m, k + 1)] < t)){
+          bwdT[key(m, k)] = t; ptr[k]++; done++;
+        }
+      }
+    }
+    t++;
+  }
+  const T = t;
+  const g = Array.from({length: K}, () => new Array(T).fill(null));
+  for (const ky in fwdT){ const [m, k] = ky.split(',').map(Number); g[k][fwdT[ky]] = ['F', m]; }
+  for (const ky in bwdT){ const [m, k] = ky.split(',').map(Number); g[k][bwdT[ky]] = ['B', m]; }
+  return {g, T};
+}
+
+/* ===== peak in-flight microbatches (mirror peak_in_flight) ===== */
+function peakInFlight(g, K){
+  const T = g[0].length;
+  let peak = 0;
+  for (let k = 0; k < K; k++){
+    const delta = new Array(T + 1).fill(0);
+    for (let t = 0; t < T; t++){
+      const c = g[k][t];
+      if (!c) continue;
+      if (c[0] === 'F') delta[t] += 1;
+      else delta[t + 1] -= 1;
+    }
+    let cur = 0, pk = 0;
+    for (let t = 0; t < T; t++){ cur += delta[t]; pk = Math.max(pk, cur); }
+    peak = Math.max(peak, pk);
+  }
+  return peak;
+}
+
+/* ===== canvas helper ===== */
+function setup(cv){
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 980, h = cv.clientHeight || 280;
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (cv.width !== bw || cv.height !== bh){ cv.width = bw; cv.height = bh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); return ctx;
+}
+
+/* ===== PANEL 1: Gantt canvas ===== */
+let MODE = 'gpipe';
+const gc = document.getElementById('gantt');
+function drawGantt(){
+  const ctx = setup(gc), w = gc.clientWidth, h = gc.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const K = +document.getElementById('K').value;
+  const M = +document.getElementById('M').value;
+  const {g, T} = (MODE === 'gpipe') ? ganttGPipe_(K, M) : gantt1F1B_(K, M);
+
+  const leftPad = 56, topPad = 22, rightPad = 10, botPad = 10;
+  const gridW = w - leftPad - rightPad;
+  const gridH = h - topPad - botPad;
+  const cellW = Math.min(46, gridW / T);
+  const cellH = Math.min(46, gridH / K);
+  const originX = leftPad;
+  const originY = topPad;
+
+  /* draw cells */
+  ctx.font = 'bold 11px ui-monospace,monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let k = 0; k < K; k++){
+    for (let t = 0; t < T; t++){
+      const x = originX + t * cellW, y = originY + k * cellH;
+      const c = g[k][t];
+      if (!c){
+        /* bubble */
+        ctx.fillStyle = '#1c0a0a';
+        ctx.fillRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        ctx.strokeStyle = '#3a1414';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        if (cellW > 14){
+          ctx.fillStyle = '#5a2424';
+          ctx.fillText('.', x + cellW / 2, y + cellH / 2);
+        }
+      } else if (c[0] === 'F'){
+        ctx.fillStyle = '#1a3a5c';
+        ctx.fillRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        ctx.strokeStyle = '#2980b9';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        if (cellW > 18){
+          ctx.fillStyle = '#9ec9e8';
+          ctx.fillText('F' + c[1], x + cellW / 2, y + cellH / 2);
+        }
+      } else {
+        ctx.fillStyle = '#3a2410';
+        ctx.fillRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        ctx.strokeStyle = '#e67e22';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+        if (cellW > 18){
+          ctx.fillStyle = '#f5b980';
+          ctx.fillText('B' + c[1], x + cellW / 2, y + cellH / 2);
+        }
+      }
+    }
+  }
+  /* row labels (GPUk) */
+  ctx.font = '11px ui-monospace,monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#8b949e';
+  for (let k = 0; k < K; k++){
+    ctx.fillText('GPU' + k, originX - 6, originY + k * cellH + cellH / 2);
+  }
+  /* time slot axis (every few slots to avoid clutter) */
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  const step = (T > 22) ? Math.ceil(T / 16) : 1;
+  for (let t = 0; t < T; t += step){
+    ctx.fillText(t, originX + t * cellW + cellW / 2, originY - 4);
+  }
+  ctx.fillText('t (slots) ->', w - rightPad - 40, originY - 4);
+
+  /* readout */
+  const bf = bubbleFraction(K, M);
+  const busy = 2 * M, idle = T - 2 * M;
+  const pif = peakInFlight(g, K);
+  const el = document.getElementById('ganttReadout');
+  const scheduleName = (MODE === 'gpipe') ? 'GPipe' : '1F1B';
+  const memMult = (MODE === 'gpipe') ? M : K;
+  const memLabel = (MODE === 'gpipe') ? '= M' : '= K';
+  el.innerHTML =
+    '<b>' + scheduleName + ' schedule</b>  (K=' + K + ', M=' + M + '):  T = ' + T + ' slots,  ' +
+    'per-stage ' + busy + ' busy + <span class="red">' + idle + ' idle (bubble)</span> = ' + T + '\n' +
+    '<span class="red">bubble</span>  = ' + idle + '/' + T + ' = ' +
+    '(' + (K-1) + ')/(' + (K+M-1) + ') = <b>' + bf.toFixed(6) + '</b> (' + (bf*100).toFixed(2) + '%)\n' +
+    '<span class="fwd">peak in-flight</span> = <b>' + pif + '</b>  ' + memLabel +
+    '   (peak activation memory multiplier;  ' +
+    (MODE === 'gpipe' ? 'GPipe holds ALL M forwards until backward' : '1F1B bounded at K (=stages)') + ')';
+}
+
+/* ===== PANEL 2: bubble + memory bars ===== */
+function drawBars(){
+  const K = +document.getElementById('K').value;
+  const M = +document.getElementById('M').value;
+  const bf = bubbleFraction(K, M);
+  const gpMem = M;
+  const f1bMem = K;
+  const cut = gpMem / f1bMem;
+  const maxScale = Math.max(M, K, 1);
+
+  document.getElementById('bubbleFill').style.width = (bf * 100).toFixed(2) + '%';
+  document.getElementById('bubbleNum').textContent = bf.toFixed(4) + ' (' + (bf * 100).toFixed(2) + '%)';
+  document.getElementById('gpipeMemFill').style.width = (gpMem / maxScale * 100).toFixed(1) + '%';
+  document.getElementById('gpipeMemNum').textContent = gpMem + ' x act  (= M)';
+  document.getElementById('f1bMemFill').style.width = (f1bMem / maxScale * 100).toFixed(1) + '%';
+  document.getElementById('f1bMemNum').textContent = f1bMem + ' x act  (= K)';
+  document.getElementById('cutFill').style.width = Math.min(100, cut / maxScale * 100 * 2).toFixed(1) + '%';
+  document.getElementById('cutNum').textContent = cut.toFixed(2) + 'x smaller  (M/K)';
+}
+
+/* ===== PANEL 3: interleaved + gold table ===== */
+function renderInterleaved(){
+  const K = +document.getElementById('K').value;
+  const M = +document.getElementById('M').value;
+  const V = +document.getElementById('V').value;
+  const bfV = bubbleInterleaved(K, M, V);
+  const bf1 = bubbleFraction(K, M);
+  const el = document.getElementById('interleavedReadout');
+  el.innerHTML =
+    '<b>Interleaved 1F1B</b>  (K=' + K + ', M=' + M + ', V=' + V + '):\n' +
+    'bubble = (' + (K-1) + ')/(' + K + '+' + M + '*' + V + '-1) = ' + (K-1) + '/' + (K + M*V - 1) +
+    ' = <span class="gold">' + bfV.toFixed(6) + '</span> (' + (bfV*100).toFixed(2) + '%)\n' +
+    'vs V=1 (' + bf1.toFixed(4) + '): <b>' + (bfV/bf1).toFixed(3) + 'x</b> smaller bubble';
+}
+
+function renderGoldTable(){
+  const configs = [
+    [4, 1, 1], [4, 4, 1], [4, 8, 1], [4, 16, 1], [4, 32, 1], [4, 64, 1],
+    [4, 8, 2], [4, 8, 4],
+    [8, 8, 1], [8, 32, 1], [8, 32, 2], [8, 64, 4],
+  ];
+  let html = '<thead><tr><th>K</th><th>M</th><th>V</th><th>bubble (frac)</th><th>bubble %</th>' +
+             '<th>GPipe mem</th><th>1F1B mem</th></tr></thead><tbody>';
+  for (const [K, M, V] of configs){
+    const bf = bubbleInterleaved(K, M, V);
+    const isGold = (K === 4 && M === 8 && V === 1);
+    html += '<tr class="' + (isGold ? 'gold' : '') + '"><td>' + K + '</td><td>' + M + '</td><td>' + V +
+            '</td><td>' + bf.toFixed(6) + '</td><td>' + (bf*100).toFixed(2) + '%</td>' +
+            '<td>' + M + ' x</td><td>' + K + ' x</td></tr>';
+  }
+  html += '</tbody>';
+  document.getElementById('goldTable').innerHTML = html;
+}
+
+/* ===== GOLD-CHECK: recompute pinned values, diff against pipeline_parallel.py ===== */
+function goldCheck(){
+  /* PINNED from pipeline_parallel.py Section G:
+     bubble_fraction(4, 8) = (4-1)/(4+8-1) = 3/11 = 0.2727272727...
+     1F1B mem multiplier   = K = 4
+     interleaved(4, 8, 2)  = 3/19 = 0.1578947368...                          */
+  const GOLD_BUBBLE_48 = 3 / 11;          /* 0.27272727... */
+  const GOLD_MEM_K4   = 4;
+  const GOLD_INTERLEAVED_482 = 3 / 19;    /* 0.15789473... */
+
+  const b = bubbleFraction(4, 8);
+  const g = gantt1F1B_(4, 8);
+  const mem = peakInFlight(g.g, 4);   /* should equal K=4 */
+  const iv = bubbleInterleaved(4, 8, 2);
+
+  const okBubble = Math.abs(b - GOLD_BUBBLE_48) < 1e-9;
+  const okMem    = (mem === GOLD_MEM_K4);
+  const okIv     = Math.abs(iv - GOLD_INTERLEAVED_482) < 1e-9;
+  const ok = okBubble && okMem && okIv;
+
+  const chk = document.getElementById('check');
+  chk.textContent = ok
+    ? 'check: OK - JS bubble_fraction(4,8)=' + b.toFixed(6) + ' (=3/11), 1F1B peak_in_flight=' + mem + ' (=K=4), interleaved(4,8,2)=' + iv.toFixed(6) + ' (=3/19)'
+    : 'check: FAIL - got bubble=' + b.toFixed(6) + ' mem=' + mem + ' iv=' + iv.toFixed(6);
+  chk.style.borderColor = ok ? '#27ae60' : '#c0392b';
+  chk.style.color       = ok ? '#27ae60' : '#c0392b';
+  chk.style.background  = ok ? '#1c3a25' : '#3a1414';
+}
+
+/* ===== events ===== */
+function render(){ drawGantt(); drawBars(); renderInterleaved(); renderGoldTable(); goldCheck(); }
+['K', 'M'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+  document.getElementById(id + 'Val').textContent = document.getElementById(id).value;
+  render();
+}));
+document.getElementById('V').addEventListener('input', () => {
+  document.getElementById('VVal').textContent = document.getElementById('V').value;
+  renderInterleaved(); goldCheck();
+});
+document.getElementById('btnGPipe').addEventListener('click', () => {
+  MODE = 'gpipe';
+  document.getElementById('btnGPipe').classList.add('active');
+  document.getElementById('btn1F1B').classList.remove('active');
+  drawGantt();
+});
+document.getElementById('btn1F1B').addEventListener('click', () => {
+  MODE = '1f1b';
+  document.getElementById('btn1F1B').classList.add('active');
+  document.getElementById('btnGPipe').classList.remove('active');
+  drawGantt();
+});
+window.addEventListener('resize', drawGantt);
+
+render();
+</script>
+</body>
+</html>

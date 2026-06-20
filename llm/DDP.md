@@ -11,7 +11,7 @@
 > simplified so every number is printable on a laptop.
 >
 > **Sibling guides:** 🔗 [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md)
-> (the AllReduce primitive DDP is built on), `ZERO.md` (coming; shards the
+> (the AllReduce primitive DDP is built on), 🔗 [`ZERO.md`](./ZERO.md) (shards the
 > 16N optimizer redundancy DDP replicates), 🔗 [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md)
 > (shards weights instead of data).
 >
@@ -49,7 +49,7 @@ graph LR
     style Prob fill:#fef9e7,stroke:#f1c40f
 ```
 
-| | Single GPU | **DDP** (this guide) | ZeRO (coming) | 🔗 Tensor Parallel |
+| | Single GPU | **DDP** (this guide) | 🔗 [ZeRO](./ZERO.md) | 🔗 Tensor Parallel |
 |---|---|---|---|---|
 | **What's split** | nothing | the **data** (batches) | optimizer **state** | the **weights** (matrices) |
 | **What's replicated** | — | full model + full optimizer | full model | full data |
@@ -81,7 +81,7 @@ graph LR
 > 🔗 **If you only read one cross-reference:** DDP replicates everything; ZeRO
 > **partitions** the same states. ZeRO-1/2/3 are literally "DDP communication
 > pattern, but shard the optimizer / gradients / parameters to kill the 16N
-> redundancy." See `ZERO.md` (coming).
+> redundancy." See 🔗 [`ZERO.md`](./ZERO.md).
 
 ---
 
@@ -438,7 +438,7 @@ The `nanoGPT` schedule (verbatim logic, readable scale `peak=1.0, min_lr=0.1`):
 > **The 20N rule.** DDP mixed-precision training with Adam stores **20 bytes
 > per parameter**, and DDP **replicates all 20N on every GPU**. That redundancy
 > — not the model itself — is what makes pure DDP memory-hungry for big models,
-> and is exactly what ZeRO (coming) will eliminate.
+> and is exactly what 🔗 [`ZERO.md`](./ZERO.md) will eliminate.
 
 > From `ddp.py` **Section F**:
 >
@@ -465,7 +465,7 @@ The `nanoGPT` schedule (verbatim logic, readable scale `peak=1.0, min_lr=0.1`):
 > pure redundancy under DDP — identical on every GPU.
 
 > 🔗 [`QUANTIZATION.md`](./QUANTIZATION.md) attacks the 2-byte **fp16 weight**
-> (inference). `ZERO.md` (coming) attacks the **16-byte** optimizer/grad/master
+> (inference). 🔗 [`ZERO.md`](./ZERO.md) attacks the **16-byte** optimizer/grad/master
 > redundancy (training) by sharding it across ranks. They are orthogonal axes:
 > you can do both. DDP does neither — it replicates all 20N.
 
@@ -574,7 +574,7 @@ graph LR
 
 > 🔗 DDP replicates everything. The next ideas all **shard** what DDP duplicates:
 > 🔗 [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) (how AllReduce is built from
-> ReduceScatter+AllGather), `ZERO.md` (coming; shard the 16N optimizer state),
+> ReduceScatter+AllGather), 🔗 [`ZERO.md`](./ZERO.md) (shard the 16N optimizer state),
 > 🔗 [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md) (shard the weights). DDP is the
 > **data-parallel** baseline they all reduce to or extend.
 

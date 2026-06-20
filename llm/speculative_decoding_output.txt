@@ -1,0 +1,321 @@
+speculative_decoding.py - reference impl.
+All numbers below feed SPECULATIVE_DECODING.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: the memory wall (arithmetic intensity)
+========================================================================
+Model: P = 70B params, FP16 (2 bytes each)
+
+DECODE (generate 1 token - load ALL weights for 1 token of math):
+  FLOPs  = 2 * P * 1     = 1.40e+11
+  Bytes  = P * 2          = 1.40e+11
+  Arithmetic intensity = FLOPs / Bytes = 1.0 FLOP/byte
+
+SPECULATIVE VERIFY (verify K tokens in 1 forward - load weights ONCE):
+| K  | FLOPs (2*P*K) | Bytes (P*2, ONCE) | Intensity | GPU peak % |
+|----|---------------|-------------------|-----------|------------|
+| 1  | 1.40e+11     | 1.40e+11         | 1         | 0.5%      |
+| 2  | 2.80e+11     | 1.40e+11         | 2         | 1.0%      |
+| 4  | 5.60e+11     | 1.40e+11         | 4         | 1.9%      |
+| 8  | 1.12e+12     | 1.40e+11         | 8         | 3.8%      |
+| 16 | 2.24e+12     | 1.40e+11         | 16        | 7.7%      |
+
+GPU peak (A100 FP16): ~208 FLOP/byte (312 TFLOPS / 1.5 TB/s)
+Decode runs at 0.5% of peak -> MEMORY-BOUND (the math units
+starve waiting for weights). Spec K=4 runs at 1.9% -> Kx better utilization.
+
+Published (labelled, not measured here):
+  Leviathan et al. 2023: 2x-3x on T5-XXL with identical outputs.
+  Chen et al. 2023: 2x-2.5x on Chinchilla 70B.
+
+  [check] decode arithmetic intensity == 1 FLOP/byte: OK
+  [check] spec K=4 arithmetic intensity == 4 FLOP/byte: OK
+
+========================================================================
+  SECTION B: draft+verify pipeline (1 parallel target forward)
+========================================================================
+K = 4 draft tokens. Vocab V = 8.
+
+STEP 1 - DRAFT (K serial forwards, but CHEAP - small model weights):
+  draft(t_0)  -> t_0 ~ q(.)            1 cheap forward
+  draft(t_1)  -> t_1 ~ q(.|t_0)        1 cheap forward
+  draft(t_2)  -> t_2 ~ q(.|t_0,t_1)    1 cheap forward
+  draft(t_3)  -> t_3 ~ q(.|t_0,t_1,t_2) 1 cheap forward
+
+STEP 2 - VERIFY (1 EXPENSIVE forward - big model, but K tokens in parallel):
+  target([t_0, t_1, t_2, t_3]) -> [p_0, p_1, p_2, p_3]
+
+The causal mask (CAUSAL_MASK.md) makes position i attend only to 0..i:
+
+         t_0    t_1    t_2    t_3
+  t_0:  att     .      .      . 
+  t_1:  att    att     .      . 
+  t_2:  att    att    att     . 
+  t_3:  att    att    att    att
+
+  att = can attend,  .  = masked by causal mask
+  Position i gets p_i(x | t_0..t_{i-1}) - the target's TRUE conditional.
+  This is the SAME lower-triangular causal mask from CAUSAL_MASK.md,
+  applied to the K-length verification sequence.
+
+CONTRAST (why spec wins):
+  sequential decode : 4 serial target fwds  = 4x weight loads (4x memory-bound)
+  speculative verify: 1 parallel target fwd = 1x weight load  (Kx amortized)
+
+[check] parallel verify uses the SAME causal mask as CAUSAL_MASK.md: OK
+
+========================================================================
+  SECTION C: rejection sampling verifier (accept + adjusted resample)
+========================================================================
+For each candidate t_i (draft prob q(t_i), target prob p(t_i)):
+  1. Draw u ~ U(0,1)
+  2. ACCEPT iff u <= min(1, p(t_i) / q(t_i))
+  3. On REJECT at index R: discard t_R..t_K;
+     resample t'_R from P_adj(x) = max(0, p(x) - q(x)) / Z
+
+Per-token acceptance ratio min(1, p(x)/q(x)) for every vocab token:
+
+| idx | token |  q(x)  |  p(x)  |  p/q   | min(1,p/q) | always accept? |
+|-----|-------|--------|--------|--------|------------|----------------|
+| 0   | the   | 0.0938 | 0.2377 | 2.534  | 1.0000     | YES (p>=q)     |
+| 1   | cat   | 0.2550 | 0.1761 | 0.690  | 0.6905     | no (accept w.p. 0.690) |
+| 2   | xyz   | 0.0569 | 0.0356 | 0.625  | 0.6248     | no (accept w.p. 0.625) |
+| 3   | sat   | 0.1547 | 0.1068 | 0.690  | 0.6905     | no (accept w.p. 0.690) |
+| 4   | qqq   | 0.0466 | 0.0263 | 0.565  | 0.5653     | no (accept w.p. 0.565) |
+| 5   | on    | 0.2088 | 0.2903 | 1.390  | 1.0000     | YES (p>=q)     |
+| 6   | a     | 0.0695 | 0.0480 | 0.690  | 0.6905     | no (accept w.p. 0.690) |
+| 7   | mat   | 0.1146 | 0.0791 | 0.690  | 0.6905     | no (accept w.p. 0.690) |
+
+Key: if the TARGET likes a token MORE than the draft (p>=q), always accept.
+     if the TARGET likes it LESS (p<q), accept with probability p/q.
+
+ADJUSTED distribution P_adj(x) = max(0, p(x)-q(x)) / Z  (resample source):
+
+| idx | token |  p(x)  |  q(x)  | p-q     | max(0,p-q) | P_adj(x) |
+|-----|-------|--------|--------|---------|------------|----------|
+| 0   | the   | 0.2377 | 0.0938 | +0.1439  | 0.1439     | 0.6383   |
+| 1   | cat   | 0.1761 | 0.2550 | -0.0789  | 0.0000     | 0.0000   |
+| 2   | xyz   | 0.0356 | 0.0569 | -0.0214  | 0.0000     | 0.0000   |
+| 3   | sat   | 0.1068 | 0.1547 | -0.0479  | 0.0000     | 0.0000   |
+| 4   | qqq   | 0.0263 | 0.0466 | -0.0203  | 0.0000     | 0.0000   |
+| 5   | on    | 0.2903 | 0.2088 | +0.0815  | 0.0815     | 0.3617   |
+| 6   | a     | 0.0480 | 0.0695 | -0.0215  | 0.0000     | 0.0000   |
+| 7   | mat   | 0.0791 | 0.1146 | -0.0355  | 0.0000     | 0.0000   |
+
+  Z = sum max(0, p-q) = 0.2254
+  sum(P_adj) = 1.000000
+
+  [check] sum(P_adj) == 1.0: OK
+  [check] P_adj mass only where p>q: OK  (indices [0, 5])
+
+========================================================================
+  SECTION D: PROOF - output EXACTLY matches target distribution
+========================================================================
+THEOREM (Leviathan et al. 2023, Chen et al. 2023):
+  Speculative decoding's output distribution is MATHEMATICALLY IDENTICAL
+  to sampling directly from the target model p. Zero quality loss.
+
+PROOF SKETCH (why P_adj makes it exact):
+  P(output=x) = P(accept x) + P(reject) * P_adj(x)
+             = q(x)*min(1,p(x)/q(x)) + Z * max(0,p(x)-q(x))/Z
+             = min(q(x), p(x)) + max(0, p(x)-q(x))
+             = p(x)   <-- EXACT
+
+Algebraic verification per token (min(q,p) + max(0,p-q) == p):
+
+| idx | token | min(q,p) | max(0,p-q) | sum    | p(x)    | match? |
+|-----|-------|----------|------------|--------|---------|--------|
+| 0   | the   | 0.0938   | 0.1439      | 0.2377 | 0.2377  | OK     |
+| 1   | cat   | 0.1761   | 0.0000      | 0.1761 | 0.1761  | OK     |
+| 2   | xyz   | 0.0356   | 0.0000      | 0.0356 | 0.0356  | OK     |
+| 3   | sat   | 0.1068   | 0.0000      | 0.1068 | 0.1068  | OK     |
+| 4   | qqq   | 0.0263   | 0.0000      | 0.0263 | 0.0263  | OK     |
+| 5   | on    | 0.2088   | 0.0815      | 0.2903 | 0.2903  | OK     |
+| 6   | a     | 0.0480   | 0.0000      | 0.0480 | 0.0480  | OK     |
+| 7   | mat   | 0.0791   | 0.0000      | 0.0791 | 0.0791  | OK     |
+
+  [check] min(q,p) + max(0,p-q) == p(x) for ALL 8 tokens: OK
+
+EMPIRICAL PROOF: run 5000 rounds of speculative decoding (K=4),
+take the FIRST output token from each, compare histogram to target p.
+
+| idx | token | target p(x) | empirical  | abs diff  |
+|-----|-------|-------------|------------|-----------|
+| 0   | the   | 0.2377      | 0.2442     | 0.0065    |
+| 1   | cat   | 0.1761      | 0.1752     | 0.0009    |
+| 2   | xyz   | 0.0356      | 0.0328     | 0.0028    |
+| 3   | sat   | 0.1068      | 0.1086     | 0.0018    |
+| 4   | qqq   | 0.0263      | 0.0272     | 0.0009    |
+| 5   | on    | 0.2903      | 0.2818     | 0.0085    |
+| 6   | a     | 0.0480      | 0.0490     | 0.0010    |
+| 7   | mat   | 0.0791      | 0.0812     | 0.0021    |
+
+  max |empirical - target| = 0.0085  (tol = 0.025)
+
+  [check] max abs diff < 0.025 with N=5000: OK
+  -> output distribution EXACTLY matches target (within sampling error)
+
+========================================================================
+  SECTION E: speedup bound  S = (1-a^(K+1)) / ((1-a)(1+K*gamma))
+========================================================================
+  S = (1 - alpha^(K+1)) / ((1 - alpha) * (1 + K * gamma))
+
+  alpha = acceptance rate (fraction of draft tokens the target accepts)
+  K     = number of draft tokens per round
+  gamma = draft_latency / target_latency  (how cheap the draft model is)
+
+  Numerator   (1-a^(K+1))/(1-a) = 1+a+...+a^K = expected tokens committed/round
+  Denominator 1+K*gamma           = relative cost: 1 target fwd + K draft fwds
+
+Speedup S(alpha, K=4, gamma) - how draft cost gamma affects speedup:
+
+| alpha | gamma=0.05 | gamma=0.1 | gamma=0.2 | gamma=0.5 | S>1 @0.1? |
+|-------|------------|-----------|-----------|-----------|-----------|
+| 0.3   | 1.19       | 1.02     | 0.79     | 0.48     | yes       |
+| 0.5   | 1.61       | 1.38     | 1.08     | 0.65     | yes       |
+| 0.7   | 2.31       | 1.98     | 1.54     | 0.92     | yes       |
+| 0.8   | 2.80       | 2.40     | 1.87     | 1.12     | yes       |
+| 0.9   | 3.41       | 2.93     | 2.28     | 1.37     | yes       |
+
+Speedup S(alpha, K, gamma=0.1) - how draft length K affects speedup:
+
+| alpha | K=2  | K=4  | K=8  | best K |
+|-------|------|------|------|--------|
+| 0.3   | 1.16 | 1.02 | 0.79 | K=1     |
+| 0.5   | 1.46 | 1.38 | 1.11 | K=2     |
+| 0.7   | 1.82 | 1.98 | 1.78 | K=4     |
+| 0.9   | 2.26 | 2.93 | 3.40 | K=10    |
+
+RULES OF THUMB (learning_guide/05 §9.1):
+  - Need gamma << 1/K  (draft overhead negligible vs target).
+  - Need alpha >= ~50%  (otherwise too many wasted drafts).
+  - Published: Leviathan 2-3x, Chen 2-2.5x, EAGLE 2.7-3.5x (alpha ~70-85%).
+
+  [check] S(alpha=0.8, K=4, gamma=0.1) = 2.40: OK
+  [check] S(0.85, 4, 0.15) = 2.32 > 1: OK
+  [check] S(0.2, 4, 0.5) = 0.42 < 1 (slower!): OK
+
+========================================================================
+  SECTION F: KV cache rollback on reject (KV_CACHE.md rewind)
+========================================================================
+During verification, the target model appends K draft tokens' K,V to the
+cache. If rejection occurs at index R, tokens t_R..t_K are INVALID - their
+K,V must be torn out. The KV cache rewind(n) does exactly this.
+
+Dense cache demo (list-based, conceptually identical to TinyKvFullCache.rewind):
+
+  Before spec round : cache_len = 3  (prefill tokens)
+  After target verify: cache_len = 7  (prefill + K=4 draft tokens)
+  Rejection at R=2  : rewind(2)  -> cache_len = 5
+    (t_R=t_2..t_3 are INVALID; their K,V entries are discarded)
+
+  -> The resampled token t'_R will be appended on the NEXT decode step,
+     at its correct position via RoPE offset (ROPE.md §10).
+
+Paged cache (vLLM/PagedAttention): rewind(n) returns physical pages to the
+free list. The ceil-division off-by-one trap at exact page boundaries is
+covered in KV_CACHE.md §F.
+
+  [check] cache_len after rewind == prefill + accepted count (5): OK
+  [check] rejected count = K - R = 4 - 2 = 2: OK
+  [check] rewind(K-R) conceptually matches DenseKVCache.rewind(2): OK
+
+========================================================================
+  SECTION G: variants - Medusa, EAGLE, Prompt-Lookup
+========================================================================
+All four use the SAME rejection-sampling verifier (Section C).
+They differ only in HOW the draft tokens are generated:
+
+| Method        | Drafting Mechanism                    | Verify Pattern       | Published |
+|---------------|---------------------------------------|----------------------|-----------|
+| Standard Spec | Small auxiliary autoregressive model   | Sequential chain     | 2-3x      |
+| Medusa        | K independent heads on target's hidden | Tree attention       | ~2x       |
+| EAGLE         | 1 autoregressive head on features      | Tree-structured      | 2.7-3.5x  |
+| Prompt-Lookup | Heuristic n-gram match in input prompt | Standard chain       | varies    |
+
+Standard : separate small model (e.g. Qwen-0.5B drafting for Qwen-72B).
+           Pro: no target modification. Con: draft model sync/KV-cache overhead.
+
+Medusa   : adds K extra linear heads to the target's last hidden state.
+           Head i predicts token at position +i. No separate model, but heads
+           are independent (weaker correlation -> lower alpha).
+           Uses tree attention: verifies multiple candidate branches in parallel
+           with a tree-structured causal mask.
+
+EAGLE    : ONE lightweight autoregressive head operating on the FEATURE level
+           (second-to-top-layer hidden state), fed the current token shifted by
+           one step. Captures semantic context better -> higher alpha.
+           Tree-structured verification with high-probability draft paths.
+
+Prompt-  : zero-parameter heuristic. Matches the current context against the
+Lookup     input prompt to find repeating n-grams. Excellent for summarization,
+           QA, editing (where the output often copies/repeats the input).
+
+Published figures (labelled, not measured here):
+  Leviathan et al. 2023 (arXiv:2211.17192): 2x-3x on T5-XXL, identical outputs.
+  Chen et al. 2023 (arXiv:2302.01318): 2x-2.5x on Chinchilla 70B.
+  Medusa (arXiv:2401.10774): tree attention, multiple candidate branches.
+  EAGLE (arXiv:2401.15077): 2.7x-3.5x on LLaMA2-Chat 70B, 2x throughput.
+
+========================================================================
+  SECTION H: WORKED TRACE - K=4 draft+verify with seeded rejection sampling
+========================================================================
+Distributions (V=8, K=4):
+  q = softmax(DRAFT_LOGITS)  = [0.0938, 0.255, 0.0569, 0.1547, 0.0466, 0.2088, 0.0695, 0.1146]
+  p = softmax(TARGET_LOGITS) = [0.2377, 0.1761, 0.0356, 0.1068, 0.0263, 0.2903, 0.048, 0.0791]
+  Seeds: draft_gen=0, verify_gen=0
+
+Draft tokens (sampled from q with seed=0): [6, 3, 1, 5]
+  tokens: ['a', 'sat', 'cat', 'on']
+
+Verification trace (rejection sampling per token, u drawn with seed=0):
+
+| step | draft t_i | token | q(t_i) | p(t_i) | min(1,p/q) | u~U(0,1) | decision       |
+|------|-----------|-------|--------|--------|------------|----------|----------------|
+| 0    | t_0=6      | a     | 0.0695 | 0.0480 | 0.6905     | 0.4963   | ACCEPT (0.4963<=0.6905) |
+| 1    | t_1=3      | sat   | 0.1547 | 0.1068 | 0.6905     | 0.7682   | REJECT (0.7682>0.6905) ->resample |
+
+RESAMPLE at index R=1:
+  P_adj(x) = max(0, p(x)-q(x)) / Z
+  P_adj    = [0.6383, 0.0, 0.0, 0.0, 0.0, 0.3617, 0.0, 0.0]
+  resampled token (seed=0) = 5 ("on")
+
+FINAL OUTPUT: accepted_tokens = [6, 5]
+  tokens: ['a', 'on']
+  accepted from draft: 1 of 4
+  committed this round: 2 (accepted + 1 resampled)
+
+GOLD VALUES (pinned for .html gold-check):
+  draft_tokens       = [6, 3, 1, 5]
+  accepted_tokens    = [6, 5]
+  n_accepted_draft   = 1
+  n_committed        = 2
+  reject_index_R     = 1
+  resampled_token    = 5
+  P_adj normalizer Z = 0.2254
+  sum(P_adj)         = 1.000000
+
+  [check] sum(P_adj) == 1.0: OK
+  [check] committed == accepted + (1 if rejected): OK
+  [check] all committed tokens in [0, V): OK
+
+========================================================================
+  GOLD SUMMARY (pin these - .html must reproduce them)
+========================================================================
+  DRAFT_LOGITS  = [1.0, 2.0, 0.5, 1.5, 0.3, 1.8, 0.7, 1.2]
+  TARGET_LOGITS = [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2]
+  q = softmax(DRAFT)  = [0.0938, 0.255, 0.0569, 0.1547, 0.0466, 0.2088, 0.0695, 0.1146]
+  p = softmax(TARGET) = [0.2377, 0.1761, 0.0356, 0.1068, 0.0263, 0.2903, 0.048, 0.0791]
+  draft_tokens (K=4, seed=0)       = [6, 3, 1, 5]
+  accepted_tokens                   = [6, 5]
+  n_accepted_draft / n_committed    = 1 / 2
+  reject_index_R / resampled_token  = 1 / 5
+  P_adj normalizer Z                = 0.2254
+  empirical max|empirical-p|        = 0.0085  (N=5000, tol=0.025)
+
+  These are the gold the .html recomputes and gold-checks against.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

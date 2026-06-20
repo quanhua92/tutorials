@@ -10,6 +10,9 @@
 > **✅ WAVE 1 SHIPPED** — all 10 bundles built + independently verified GREEN
 > (Batch 1: 3/3, Batch 2: 3/3, Batch 3: 4/4) through generator → verifier →
 > editor. `research/` now holds **21 bundles** (Phases 1–4). W2/W3 below are NEXT.
+>
+> **✅ WAVE 2 SHIPPED — 4 more bundles built + verified GREEN (4/4).** `research/`
+> now holds **25 bundles** (Phases 1–4 nearly complete + Phase 5 started). W3 below is NEXT.
 
 ---
 
@@ -48,10 +51,10 @@ graph LR
 
 ## TL;DR
 
-- **21 done & green** (Phases 1–4; Wave 1 shipped — 10 bundles, 3 batches).
-  **~8 to go** (W2/W3, Phases 3 remainder + 4 remainder + 5).
-- **Next = Wave 2:** `pipeline_parallel`, `zero`, `moe_routing`,
-  `speculative_decoding` (then W3: `gradient_checkpointing` + Phase 5 trio).
+- **25 done & green** (Phases 1–4; Wave 1 shipped — 10 bundles, 3 batches;
+  Wave 2 shipped — 4 bundles). **~4 to go** (W3, gradient checkpointing + Phase 5 trio).
+- **Next = Wave 3:** `gradient_checkpointing` + Phase 5 trio
+  (`disaggregated_serving`, `ktransformers_offload`, `jax_xla_tpu`).
 - Executed in batches: Stage 1 generators → Stage 2 verifier → Stage 3 editor
   (see MANDATORY above), then promote.
 - **Env:** `research/.venv` was fixed once by Stage 0 (torch 2.12.1, py 3.13.5) —
@@ -65,20 +68,20 @@ graph LR
 graph LR
     P1["Phase 1 — Math pipe<br/>(8 bundles) ✅"] --> P2["Phase 2 — Acceleration<br/>(3 bundles) ✅"]
     P2 --> P3["Phase 3 — Serving<br/>(7 bundles) ✅ Wave 1"]
-    P3 --> P4["Phase 4 — Distributed<br/>(3/6 done) 🔜 W2"]
-    P4 --> P5["Phase 5 — Next-gen<br/>(0/5) 🔜 W2/W3"]
+    P3 --> P4["Phase 4 — Distributed<br/>(5/6 done) 🔜 W3"]
+    P4 --> P5["Phase 5 — Next-gen<br/>(2/5) 🔜 W3"]
     style P1 fill:#eafaf1,stroke:#27ae60
     style P2 fill:#eafaf1,stroke:#27ae60
     style P3 fill:#eafaf1,stroke:#27ae60
     style P4 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
-    style P5 fill:#fdecea,stroke:#c0392b
+    style P5 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```
 
 ---
 
 ## 2. The full build queue
 
-`✅ DONE (Wave 1)` = shipped & green · `NEXT (W2)` = Wave 2 · `NEXT (W3)` = Wave 3.
+`✅ DONE (Wave 1/2)` = shipped & green · `NEXT (W3)` = Wave 3.
 Source = `learning_guide/` section + primary reference repo.
 
 ### Phase 3 — Scale & Serving (`03_Scale_Serving.md` · ref: `nano-vllm/`)
@@ -100,16 +103,16 @@ Source = `learning_guide/` section + primary reference repo.
 | 8 | `nccl_collectives` | P2P comms → **NCCL 5 primitives** + ring-AllReduce (2N bytes regardless of K) | §2 | ring topology, ReduceScatter+AllGather = AllReduce | ✅ DONE (Wave 1) |
 | 9 | `ddp` | Single-GPU training → **DDP**: full replica + grad AllReduce + AMP + grad accumulation + cosine LR | §3 · `nanoGPT/train.py` | per-GPU replica, gradient sync, micro-batch accumulation | ✅ DONE (Wave 1) |
 | 10 | `tensor_parallel` | Matrices too big for 1 GPU → **Megatron** column/row parallel (AllReduce cancels across MLP/attn) | §4 · `nano-vllm/layers/linear.py` | column/row shard, the "AllReduce cancels" trick | ✅ DONE (Wave 1) |
-| 11 | `pipeline_parallel` | TP not enough → **GPipe** micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | §5 | pipeline timeline, bubble shrinking with M microbatches | NEXT (W2) |
-| 12 | `zero` | DDP redundancy (20N bytes) → **ZeRO 1/2/3** partition opt-state/grad/params | §6 | per-stage memory bars, 20N → 16/K bytes | NEXT (W2) |
+| 11 | `pipeline_parallel` | TP not enough → **GPipe** micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | §5 | pipeline timeline, bubble shrinking with M microbatches | ✅ DONE (Wave 2) |
+| 12 | `zero` | DDP redundancy (20N bytes) → **ZeRO 1/2/3** partition opt-state/grad/params | §6 | per-stage memory bars, 20N → 16/K bytes | ✅ DONE (Wave 2) |
 | 13 | `gradient_checkpointing` | O(L) activation memory → **selective recompute** (√L trick) | §8 | checkpoint grid, recompute spans | NEXT (W3) |
 
 ### Phase 5 — Next-Gen (`05_Next_Gen_Architecture.md` · ref: `tiny-llm/moe.py`)
 
 | # | Bundle | Lineage (old → new, with WHY) | Key source | Visual hook (the `.html`) | Wave |
 |---|---|---|---|---|---|
-| 14 | `moe_routing` | Dense FFN (all params active) → **top-k sparse MoE** + load-balance/z-loss + DeepSeek aux-free | §2 · `tiny-llm/moe.py` | router gate, top-k selection, expert routing | NEXT (W2) |
-| 15 | `speculative_decoding` | 1 token/step (memory-bound) → **draft+verify** parallel (rejection sampling, exact dist) | §3 | draft chain, parallel verify, accept/reject | NEXT (W2) |
+| 14 | `moe_routing` | Dense FFN (all params active) → **top-k sparse MoE** + load-balance/z-loss + DeepSeek aux-free | §2 · `tiny-llm/moe.py` | router gate, top-k selection, expert routing | ✅ DONE (Wave 2) |
+| 15 | `speculative_decoding` | 1 token/step (memory-bound) → **draft+verify** parallel (rejection sampling, exact dist) | §3 | draft chain, parallel verify, accept/reject | ✅ DONE (Wave 2) |
 | 16 | `disaggregated_serving` | Co-located prefill+decode contention → **DistServe/Mooncake** split + KV RDMA transfer | §4 | prefill vs decode clusters, KV transfer latency budget | NEXT (W3) |
 | 17 | `ktransformers_offload` | GPU-only (671B won't fit) → **CPU DRAM expert offload** + AMX/AVX (activation-only transfer) | §5 | GPU attn + CPU experts, 14 KB activation vs 350 GB weight | NEXT (W3) |
 | 18 | `jax_xla_tpu` | PyTorch/CUDA eager → **JAX trace → XLA → Pallas** TPU kernels (Splash Attention) | §6 | jaxpr trace, systolic MXU, VMEM tiling | NEXT (W3) |
@@ -155,6 +158,29 @@ baseline every ZeRO/TP/PP bundle contrasts against.
 `gradient_checkpointing`, and all of Phase 5 (MoE/spec decode cite shipped
 `KV_CACHE` + Wave-1 `scheduler`; disaggregation/KTransformers/JAX are the
 weakest "tiny `.py`" fits — defer until the engine story is solid).
+
+---
+
+## 3b. WAVE 2 — SHIPPED ✅
+
+> **All 4 GREEN** — every bundle passed the full 25-bundle independent verifier
+> re-run (`uv run python`, `node --check`, gold value vs `.py`). Wave 2 adds the
+> Phase 4 PP + ZeRO pair and opens Phase 5 (MoE + speculative decoding).
+
+| # | Bundle | Covers (1-line) |
+|---|---|---|
+| 11 | `pipeline_parallel` | GPipe micro-batching → 1F1B → interleaved; bubble shrinks to `(K-1)/(K+M-1)` as microbatch count `M` grows |
+| 12 | `zero` | ZeRO 1/2/3 progressively partition optimizer state / gradients / params, cutting memory from `20N` → `16/K` bytes |
+| 14 | `moe_routing` | top-k sparse MoE router + load-balance + z-loss + DeepSeek aux-loss-free balancing (sparse FFN vs dense) |
+| 15 | `speculative_decoding` | draft model proposes γ tokens, target verifies in one forward pass; rejection sampling preserves the exact distribution |
+
+**Build order rationale:** `pipeline_parallel` and `zero` are the Phase 4 pair
+(cite Wave-1 `ddp`/`tensor_parallel` as the contrast baseline); `moe_routing`
+and `speculative_decoding` open Phase 5 (both cite the shipped `KV_CACHE` and
+`mlp_activation`/`sampling` siblings).
+
+**Remaining NEXT = Wave 3:** `gradient_checkpointing` (Phase 4 close-out) +
+the Phase 5 trio `disaggregated_serving`, `ktransformers_offload`, `jax_xla_tpu`.
 
 ---
 

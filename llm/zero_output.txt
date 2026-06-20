@@ -1,0 +1,271 @@
+zero.py - reference impl (faithful single-process K-rank simulation).
+Numbers below feed ZERO.md.  torch = 2.12.1
+
+NOTE: no torch.distributed / NCCL is used. K ranks are a list of torch
+tensors; ReduceScatter/AllGather are explicit Python loops. The
+memory-bytes and communication-volume arithmetic is REAL and EXACT;
+only the multi-rank execution is simulated.
+
+========================================================================
+  SECTION A: the DDP 20N baseline -- the redundancy ZeRO kills (🔗 DDP)
+========================================================================
+Per parameter, DDP mixed-precision Adam stores (on EVERY GPU):
+
+| component           | bytes/param | why                                   |
+|---------------------|-------------|---------------------------------------|
+| fp16 parameters     |           2 | model weights used in the fp16 forward |
+| fp16 gradients      |           2 | computed in the fp16 backward         |
+| fp32 master params  |           4 | optimizer master copy (Micikevicius 2017) |
+| fp32 grad copy      |           4 | upcast fp16 grad for the optimizer    |
+| fp32 Adam momentum  |           4 | first moment (beta1 running avg)      |
+| fp32 Adam variance  |           4 | second moment (beta2 running avg)     |
+| TOTAL               |          20 | replicated xK = pure redundancy       |
+
+  of the 20N:  4N is the live model (params+grads, needed full),
+               16N is optimizer/grad bookkeeping -- IDENTICAL on all
+               K GPUs. That 16N x K redundancy is exactly what ZeRO
+               partitions away, stage by stage.
+
+  [check] total == 20 and optimizer bookkeeping == 16? True
+
+========================================================================
+  SECTION B: ZeRO-1 -- shard OPTIMIZER STATES  ->  4 + 16/K   (K=8)
+========================================================================
+Per GPU after ZeRO-1 (each rank owns 1/K of the optimizer states):
+
+| component           | bytes/param | status                                |
+|---------------------|-------------|---------------------------------------|
+| fp16 parameters     |           2 | FULL                                  |
+| fp16 gradients      |           2 | FULL                                  |
+| fp32 master params  |         0.5 | sharded 1/8                           |
+| fp32 grad copy      |         0.5 | sharded 1/8                           |
+| fp32 Adam momentum  |         0.5 | sharded 1/8                           |
+| fp32 Adam variance  |         0.5 | sharded 1/8                           |
+| TOTAL               |           6 | = 4 + 16/8 = 6                        |
+
+  formula: 2 + 2 + (4+4+4+4)/8 = 4 + 16/8 = 6 bytes/param
+  vs DDP 20N -> 3.33x less memory
+  [check] total == 4 + 16/8? True
+
+========================================================================
+  SECTION B (sim): a faithful ZeRO-1 step on N=8, K=4
+========================================================================
+N=8 params, K=4 ranks, chunk=2. Identical fp16 init on all ranks:
+
+  params (all ranks) = [+0.7705, -0.1467, -1.0894, +0.2842, -0.5423, -0.6993, +0.2017, +0.4190]
+
+local fp16 grads (one per rank, from different mini-batches):
+  rank 0: [-0.2158, -0.1210, -0.1790, +0.0546, -0.2570, +0.3302, -0.3214, +0.0368]
+  rank 1: [-0.1699, +0.1119, -0.2676, -0.4527, +0.1111, +0.4370, +0.2819, +0.2325]
+  rank 2: [+0.0576, +0.3791, -0.3871, -0.2373, -0.0063, -0.2155, +0.1556, -0.3938]
+  rank 3: [+0.0576, +0.1628, -0.6656, +0.0777, -0.3089, -0.1502, +0.0820, -0.2754]
+
+--- STEP 1: ncclReduceScatter(grads)  -> rank r owns the AVERAGED grad chunk r ---
+  rank 0 grad shard [0:2] = [-0.0676, +0.1332]
+  rank 1 grad shard [2:4] = [-0.3748, -0.1394]
+  rank 2 grad shard [4:6] = [-0.1153, +0.1003]
+  rank 3 grad shard [6:8] = [+0.0495, -0.1000]
+  (rank r only ever needs grads for ITS param shard; the rest are gone)
+
+--- STEP 2: each rank updates its param shard via the fp32 master ---
+  rank 0: master[0:2] - 0.1*grad = [+0.7773, -0.1600]
+  rank 1: master[2:4] - 0.1*grad = [-1.0519, +0.2982]
+  rank 2: master[4:6] - 0.1*grad = [-0.5307, -0.7093]
+  rank 3: master[6:8] - 0.1*grad = [+0.1967, +0.4290]
+
+--- STEP 3: ncclAllGather(updated shards) -> all ranks have full params ---
+  params after ZeRO-1 step (every rank) = [+0.7773, -0.1600, -1.0519, +0.2982, -0.5307, -0.7093, +0.1967, +0.4290]
+
+  [check] all 4 ranks hold IDENTICAL params after the step? True
+  [check] ZeRO-1 params == single-GPU on averaged grad? True
+
+  ==> ZeRO-1 is mathematically identical to DDP here; it only SHARDS the
+      optimizer state. The ReduceScatter+AllGather is the SAME data-flow as
+      DDP's AllReduce (🔗 NCCL_COLLECTIVES identity), just split to partition.
+
+========================================================================
+  SECTION C: ZeRO-2 -- ALSO shard GRADIENTS  ->  2 + 14/K   (K=8)
+========================================================================
+Per GPU after ZeRO-2 (gradients are now partitioned too):
+
+| component           | bytes/param | status                                |
+|---------------------|-------------|---------------------------------------|
+| fp16 parameters     |           2 | FULL                                  |
+| fp16 gradients      |        0.25 | sharded 1/8                           |
+| fp32 master params  |         0.5 | sharded 1/8                           |
+| fp32 Adam momentum  |         0.5 | sharded 1/8                           |
+| fp32 Adam variance  |         0.5 | sharded 1/8                           |
+| TOTAL               |        3.75 | = 2 + 14/8 = 3.75                     |
+
+  the fp32 grad copy (4N under DDP) is ELIMINATED: the fp16 grad shard is
+  upcast transiently and consumed by the optimizer, then freed.
+  formula: 2 + (2+4+4+4)/8 = 2 + 14/8 = 3.75 bytes/param
+  vs DDP 20N -> 5.33x less memory
+  [check] total == 2 + 14/8? True
+
+========================================================================
+  SECTION C (sim): ZeRO-2 grad flow -- reduce-then-delete the non-owned shards
+========================================================================
+N=8, K=4. During backward, the moment a param's grad is ready it is
+ReduceScattered to the OWNING rank and immediately DELETED on the others.
+
+| rank | full fp16 grad (transient) | kept shard after RS+delete |
+|------|----------------------------|----------------------------|
+| 0    | [+0.1984, +0.0801, +0.0185, +0.1864, -0.1356, -0.0498, -0.4568, +0.1145] | [-0.0346, -0.0964] (owns chunk 0:2)
+| 1    | [-0.3083, -0.1689, -0.2677, -0.0175, -0.0587, -0.2897, +0.1267, +0.0802] | [-0.0768, +0.2226] (owns chunk 2:4)
+| 2    | [-0.1264, -0.1532, -0.4718, -0.0370, +1.0761, -0.5494, +0.4796, -0.3831] | [+0.2513, -0.2963] (owns chunk 4:6)
+| 3    | [+0.0977, -0.1437, +0.4137, +0.7586, +0.1232, -0.2964, -0.2724, +0.1627] | [-0.0307, -0.0064] (owns chunk 6:8)
+
+  After the pass, rank r holds ONLY its N/K grad shard -- the other
+  3/4 of every gradient is gone. That is the ZeRO-2 memory win.
+
+========================================================================
+  SECTION D: ZeRO-3 -- ALSO shard PARAMETERS  ->  16/K   (K=8)
+========================================================================
+Per GPU after ZeRO-3 (EVERYTHING is partitioned, incl. the weights):
+
+| component           | bytes/param | status                                |
+|---------------------|-------------|---------------------------------------|
+| fp16 parameters     |        0.25 | sharded 1/8                           |
+| fp16 gradients      |        0.25 | sharded 1/8                           |
+| fp32 master params  |         0.5 | sharded 1/8                           |
+| fp32 Adam momentum  |         0.5 | sharded 1/8                           |
+| fp32 Adam variance  |         0.5 | sharded 1/8                           |
+| TOTAL               |           2 | = 16/8 = 2                        |
+
+  formula: (2+2+4+4+4)/8 = 16/8 = 2 bytes/param
+  vs DDP 20N -> 10.00x less memory  (== K = 8x at large N)
+  [check] total == 16/8? True
+
+========================================================================
+  SECTION D (sim): ZeRO-3 param flow -- AllGather a layer, compute, discard
+========================================================================
+N=8, K=4. Each rank stores only its 2-param shard:
+
+  rank 0 persistent shard = [+0.1961, -0.1118]
+  rank 1 persistent shard = [-0.1598, -0.6025]
+  rank 2 persistent shard = [+0.5222, -0.3166]
+  rank 3 persistent shard = [+0.2866, +0.2705]
+
+Before a layer's forward, every rank AllGathers to rebuild the FULL layer:
+
+  AllGather -> full layer (every rank, transient) = [+0.1961, -0.1118, -0.1598, -0.6025, +0.5222, -0.3166, +0.2866, +0.2705]
+  compute forward on the full layer ... then DISCARD the non-owned params.
+
+  [check] AllGather(rebuilt) == original full layer? True
+  [check] persistent memory per rank stays N/K? True  (rank holds 2 of 8 params)
+
+========================================================================
+  SECTION E: the GOLD memory table -- the centerpiece (pinned for zero.html)
+========================================================================
+TINY GOLD: N = 1,000,000 params, K = 4  (bytes == MB, decimal /1e6):
+
+| stage | bytes/param | per-GPU bytes  | = MB | vs DDP |
+|-------|-------------|----------------|------|--------|
+| DDP   |          20 |     20,000,000 | 20.00 |   1.00x |
+| ZeRO-1 |           8 |    8,000,000.0 | 8.00 |   2.50x |
+| ZeRO-2 |         5.5 |    5,500,000.0 | 5.50 |   3.64x |
+| ZeRO-3 |           4 |    4,000,000.0 | 4.00 |   5.00x |
+
+  GOLD PINS (zero.html recomputes these, K=4):
+    DDP   = 20.00 MB
+    ZeRO-1 = 8.00 MB
+    ZeRO-2 = 5.50 MB
+    ZeRO-3 = 4.00 MB
+  [check] DDP=20.00, Z1=8.00, Z2=5.50, Z3=4.00 MB? True
+
+HEADLINE: N = 7B params, K = 8  (GB, decimal /1e9):
+
+| stage | bytes/param | per-GPU GB | vs DDP |
+|-------|-------------|------------|--------|
+| DDP   |          20 |     140.00 |   1.00x |
+| ZeRO-1 |           6 |      42.00 |   3.33x |
+| ZeRO-2 |        3.75 |      26.25 |   5.33x |
+| ZeRO-3 |           2 |      14.00 |  10.00x |
+
+  SANITY ROW: DDP 140 GB/GPU  ->  ZeRO-3 14 GB/GPU   (fits on one 80 GB A100)
+  [check] DDP==140.00 GB and ZeRO-3==14.00 GB (K=8)? True
+
+========================================================================
+  SECTION F: communication cost -- the per-device volume, in units of Psi
+========================================================================
+Psi = number of params. Ring ReduceScatter and AllGather each move
+(K-1)/K * Psi ~= Psi per device; an AllReduce = RS + AG ~= 2*Psi.
+
+| strategy | collectives / step                  | volume/device | vs DDP |
+|----------|--------------------------------------|---------------|--------|
+| DDP      | AllReduce(grad)  [= RS(grad)+AG(grad)] |           2.0*Psi |   1.00x |
+| ZeRO-1   | ReduceScatter(grad) + AllGather(param) |           2.0*Psi |   1.00x |
+| ZeRO-2   | ReduceScatter(grad) + AllGather(param) |           2.0*Psi |   1.00x |
+| ZeRO-3   | AllGather(param fwd)+AllGather(param bwd)+ReduceScatter(grad) |           3.0*Psi |   1.50x |
+
+  * ZeRO-1/2 REPLACE DDP's single gradient AllReduce with
+    ReduceScatter(grad)+AllGather(param) -> SAME 2*Psi total volume,
+    but it lets the optimizer state be partitioned in between.
+    (DeepSpeed team: 'same communication volume as data parallelism'.)
+  * ZeRO-3 adds one more AllGather (params gathered for BOTH fwd and bwd)
+    -> 3*Psi = 1.5x DDP. (DeepSpeed team: 'modest 50% increase'.)
+
+  NOTE on the loose '3x': some notes count ZeRO-3's THREE collectives
+  (2 AllGather + 1 ReduceScatter) vs DDP's ONE fused AllReduce and call
+  it '3x'. By actual BYTE VOLUME it is 3*Psi vs 2*Psi = 1.5x, per the
+  ZeRO authors. The memory win is the point; the comm tax is small.
+
+Concrete: 7B params, fp16 grads/params (2 bytes each), per-device GB:
+| strategy | volume/device (GB) |
+|----------|--------------------|
+| DDP      |              28.00 |
+| ZeRO-1   |              28.00 |
+| ZeRO-2   |              28.00 |
+| ZeRO-3   |              42.00 |
+
+  [check] ZeRO-3/DPP volume ratio == 3.0/2.0 == 1.50? True
+
+========================================================================
+  SECTION G: why ZeRO comms work -- AllReduce == ReduceScatter ; AllGather (🔗)
+========================================================================
+K=4 ranks, N=8. Each rank holds a full local gradient.
+
+DDP path : AllReduce-average(grads) ->
+          every rank = [-0.0073, +0.1590, -0.0058, +0.0746, -0.2211, -0.2068, +0.1244, +0.0692]
+ZeRO path: ReduceScatter-avg -> each rank owns ONE averaged chunk:
+            rank 0 shard = [-0.0073, +0.1590]
+            rank 1 shard = [-0.0058, +0.0746]
+            rank 2 shard = [-0.2211, -0.2068]
+            rank 3 shard = [+0.1244, +0.0692]
+          AllGather -> every rank = [-0.0073, +0.1590, -0.0058, +0.0746, -0.2211, -0.2068, +0.1244, +0.0692]
+
+  max|AllReduce - (ReduceScatter+AllGather)| = 0.000e+00
+  [check] identity holds? True  (so ZeRO's RS+AG == DDP's AllReduce)
+
+  ==> ZeRO-1/2 use the SAME total bytes as DDP: they just split the
+      AllReduce at the seam (RS) so each rank can own 1/K of the state.
+      ZeRO-3 does the AllGather of PARAMETERS twice (fwd + bwd) -> +50%.
+
+========================================================================
+  SECTION H: lineage recap + the per-stage memory ladder (K=8)
+========================================================================
+DDP replicates everything; ZeRO partitions ONE MORE category each stage:
+
+| stage  | what it shards              | bytes/param | comms                    |
+|--------|------------------------------|-------------|--------------------------|
+| DDP    | replicate ALL                |          20 | AllReduce (2*Psi)        |
+| ZeRO-1 | + shard optimizer states     |           6 | ReduceScatter+AllGather (2*Psi) |
+| ZeRO-2 | + shard gradients            |        3.75 | ReduceScatter+AllGather (2*Psi) |
+| ZeRO-3 | + shard parameters           |           2 | AG(fwd)+AG(bwd)+RS (3*Psi, 1.5x) |
+
+Read each row left-to-right: at every step we shard ONE more category,
+memory drops, and the comms cost stays ~the same until ZeRO-3 (+50%).
+
+GOLD pinned for zero.html (K=8):
+    DDP     bytes/param = 20
+    ZeRO-1  bytes/param = 6
+    ZeRO-2  bytes/param = 3.75
+    ZeRO-3  bytes/param = 2
+
+  [check] memory strictly decreases DDP > Z1 > Z2 > Z3? True
+  [check] comms: Z1==Z2==DDP (2*Psi), Z3==1.5x? True
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

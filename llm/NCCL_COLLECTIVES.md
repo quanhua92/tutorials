@@ -7,7 +7,7 @@
 > **Sibling guides (these primitives are the vocabulary they all speak):**
 > 🔗 [`DDP.md`](./DDP.md) (AllReduce averages the per-rank gradients),
 > [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md) (one AllReduce per sub-block),
-> `ZERO.md` (coming; swaps the AllReduce for ReduceScatter + AllGather).
+> 🔗 [`ZERO.md`](./ZERO.md) (swaps the AllReduce for ReduceScatter + AllGather).
 > Cross-references marked 🔗 throughout.
 >
 > **Live animation:** [`nccl_collectives.html`](./nccl_collectives.html) — open
@@ -316,7 +316,7 @@ graph LR
 > **Why this matters:** the two halves move the **same `~2N` bytes** total, but
 > splitting them lets ZeRO **partition** the intermediate state (each rank only
 > stores/updates its own `1/K` shard between the two halves). That is the entire
-> memory trick of `ZERO.md` (coming). Same identity, different exploit.
+> memory trick of 🔗 [`ZERO.md`](./ZERO.md). Same identity, different exploit.
 
 ---
 
@@ -527,7 +527,7 @@ graph TD
 > 🔗 The §4 identity (`AllReduce == ReduceScatter + AllGather`) is **exactly** why
 > ZeRO-1/2 can replace DDP's single AllReduce with the two halves: same `~2N`
 > bytes, but ZeRO stores/updates only its own `1/K` shard *between* the halves —
-> that is its whole memory win. See `ZERO.md` (coming). DDP
+> that is its whole memory win. See 🔗 [`ZERO.md`](./ZERO.md). DDP
 > ([`DDP.md`](./DDP.md)) is the pure AllReduce baseline; TP
 > ([`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md)) adds one AllReduce per layer.
 
@@ -615,7 +615,7 @@ graph LR
 
 > 🔗 These 5 primitives are the substrate for the entire Phase-4 distributed
 > stack: [`DDP.md`](./DDP.md) (pure AllReduce), [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md)
-> (one AllReduce per layer within an NVLink node), and `ZERO.md` (coming; lives
+> (one AllReduce per layer within an NVLink node), and 🔗 [`ZERO.md`](./ZERO.md) (lives
 > on the ReduceScatter+AllGather identity to partition optimizer state).
 
 ---

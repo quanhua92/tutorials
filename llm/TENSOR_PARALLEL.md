@@ -8,7 +8,7 @@
 > `QKVParallelLinear`), 🔗 [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) (the
 > `AllReduce` primitive TP leans on per sub-block), [`DDP.md`](./DDP.md) (the
 > data-parallel contrast — it `AllReduce`s gradients once/step, TP once/sub-block).
-> `ZERO.md` (coming) shards gradient/optimizer state. Cross-references marked 🔗 throughout.
+> 🔗 [`ZERO.md`](./ZERO.md) shards gradient/optimizer state. Cross-references marked 🔗 throughout.
 >
 > **Live animation:** [`tensor_parallel.html`](./tensor_parallel.html) — open in a browser.
 >
@@ -428,10 +428,10 @@ TP (within node, NVLink)  ×  DP (across nodes, IB)  ×  PP (across)
 ```
 
 🔗 The `AllReduce` itself, ring topology, and `ReduceScatter + AllGather`
-decomposition live in [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md). `ZERO.md`
-(coming) will partition the gradient/optimizer state (a *different* axis of
-memory savings, often combined with TP). `PIPELINE_PARALLEL.md` (coming) will
-be the layer-wise split that pairs with TP across nodes.
+decomposition live in [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md). 🔗 [`ZERO.md`](./ZERO.md)
+partitions the gradient/optimizer state (a *different* axis of
+memory savings, often combined with TP). 🔗 [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) is
+the layer-wise split that pairs with TP across nodes.
 
 ---
 
@@ -504,9 +504,9 @@ graph LR
   DP/PP go cross-node on IB (~25 GB/s).
 - **3D parallelism:** `TP (intra-node) × DP (inter-node) × PP (inter-node)`.
 
-> 🔗 **TP vs the siblings:** [`DDP.md`](./DDP.md) (and `ZERO.md`, coming)
+> 🔗 **TP vs the siblings:** [`DDP.md`](./DDP.md) (and 🔗 [`ZERO.md`](./ZERO.md))
 > replicate the *whole model* on every GPU and split the *data*; TP splits the
-> *model* and replicates the *data*. Pipeline Parallelism (coming) splits the
+> *model* and replicates the *data*. 🔗 [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) splits the
 > model *by layer* (vertical); TP splits *by matrix axis* (horizontal). They
 > compose: TP within a node, DP/PP across.
 
@@ -548,7 +548,7 @@ graph LR
 - **Forward siblings (🔗):** [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) (the
   `AllReduce` primitive + ring math), [`DDP.md`](./DDP.md) (data-parallel
   contrast — gradient `AllReduce` per optimizer step vs TP's per-sub-block),
-  `ZERO.md` (coming; partition gradient/optimizer state, composes with TP),
-  `PIPELINE_PARALLEL.md` (coming; layer-wise split, composes with TP across
+  🔗 [`ZERO.md`](./ZERO.md) (partition gradient/optimizer state, composes with TP),
+  🔗 [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) (layer-wise split, composes with TP across
   nodes). The not-yet-built ones are tracked as future bundles in
   [`NEXT.md`](./NEXT.md).

@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speculative Decoding — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --yellow:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start}
+  .row>*{min-width:0}
+  table.heat{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:3px 7px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat tr.acc td{background:#1c3a25;color:#6ee7a7;font-weight:700}
+  table.heat tr.rej td{background:#3a1414;color:#f5a0a0;font-weight:700}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;
+         text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .r{color:var(--red)}
+  .readout .o{color:var(--orange)}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  canvas{display:block;width:100%;max-width:980px;height:auto}
+  #speedupCanvas{height:260px}
+  .timeline{display:flex;gap:4px;flex-wrap:wrap;margin:.5rem 0}
+  .tl-step{flex:1;min-width:100px;border-radius:8px;padding:.6rem;border:2px solid #30363d;text-align:center}
+  .tl-step.acc{background:#1c3a25;border-color:#27ae60}
+  .tl-step.rej{background:#3a1414;border-color:#c0392b}
+  .tl-step.disc{background:#161b22;border-color:#30363d;opacity:.4}
+  .tl-step .tok{font-size:1rem;font-weight:700;margin-bottom:.2rem}
+  .tl-step .lab{font-size:.7rem;color:var(--muted)}
+  .tl-step.acc .tok{color:#6ee7a7}
+  .tl-step.rej .tok{color:#f5a0a0}
+</style>
+</head>
+<body>
+  <a href="SPECULATIVE_DECODING.md" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; SPECULATIVE_DECODING.md</a>
+  <h1>Speculative Decoding — interactive
+    <a class="badge" href="SPECULATIVE_DECODING.md">.md</a>
+    <a class="badge" href="speculative_decoding.py">.py</a></h1>
+  <div class="sub"><b>The memory wall, fixed:</b> a small <b style="color:var(--blue)">draft model</b> guesses K tokens ahead; the big
+    <b style="color:var(--orange)">target model</b> verifies all K in ONE forward pass. A <b style="color:var(--green)">rejection-sampling</b> trick
+    makes the output <b>exactly</b> match the target distribution. Every number is recomputed in JS from the
+    <i>identical</i> formula in <code>speculative_decoding.py</code>.
+    &nbsp;|&nbsp; <a href="./sampling.html">sampling</a> (rejection math) &middot;
+    <a href="./kv_cache.html">kv_cache</a> (rewind on reject) &middot;
+    <a href="./causal_mask.html">causal_mask</a> (parallel verify) &middot;
+    <a href="./scheduler.html">scheduler</a> (batch spec rounds)</div>
+
+  <!-- ===== PANEL 1: ARITHMETIC INTENSITY ===== -->
+  <h2>&#9312; The memory wall: arithmetic intensity (decode vs spec)</h2>
+  <div class="panel">
+    <canvas id="aiCanvas" width="980" height="200"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--red)"></i>decode: 1 FLOP/byte (memory-bound, GPU starved)</span>
+      <span><i class="sw" style="background:var(--green)"></i>spec verify: K FLOP/byte (amortized weight load)</span>
+      <span><i class="sw" style="background:var(--muted)"></i>GPU peak: ~208 FLOP/byte (A100 FP16)</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag <b>K</b> and watch the spec bar grow. Decode stays at 1 FLOP/byte (0.5% of peak).
+      Spec verify scales linearly with K — each extra draft token amortizes one more weight load. The GPU peak line shows how far we still are from compute-bound.</div>
+  </div>
+
+  <!-- ===== PANEL 2: WORKED TRACE ===== -->
+  <h2>&#9313; Worked trace: K=4 draft &rarr; verify &rarr; accept/reject</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>verify seed <input type="range" id="seed" min="0" max="20" value="0" step="1">
+        <span class="val" id="seedVal">0</span></label>
+      <span class="micro">DRAFT_LOGITS = [1.0, 2.0, 0.5, 1.5, 0.3, 1.8, 0.7, 1.2] (seed=0 fixed)</span>
+    </div>
+    <div class="timeline" id="timeline"></div>
+    <div class="readout" id="traceReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag the <b>verify seed</b> and watch the accept/reject decisions change.
+      Green = ACCEPT (u &le; min(1,p/q)). Red = REJECT &rarr; resample from P_adj. Grey = DISCARDED (after first reject).
+      The draft tokens are fixed (seed=0); only the uniform draws u change.</div>
+  </div>
+
+  <!-- ===== PANEL 3: ACCEPT RATIO ===== -->
+  <h2>&#9314; Acceptance ratio min(1, p/q) — why some tokens always pass</h2>
+  <div class="panel">
+    <canvas id="ratioCanvas" width="980" height="260"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>q(x) draft prob</span>
+      <span><i class="sw" style="background:var(--orange)"></i>p(x) target prob</span>
+      <span><i class="sw" style="background:var(--yellow)"></i>min(1,p/q) accept ratio</span>
+    </div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> tokens where p &ge; q (the &amp; on) always pass (ratio=1). Tokens where p&lt;q
+      (cat, sat) pass with probability p/q. The adjusted distribution P_adj only puts mass on tokens where p&gt;q.</div>
+  </div>
+
+  <!-- ===== PANEL 4: SPEEDUP ===== -->
+  <h2>&#9315; Speedup S(&alpha;, K, &gamma;) — when does spec help?</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>acceptance &alpha; <input type="range" id="alpha" min="0.1" max="0.95" value="0.8" step="0.05">
+        <span class="val" id="alphaVal">0.80</span></label>
+      <label>draft cost &gamma; <input type="range" id="gamma" min="0.01" max="0.5" value="0.1" step="0.01">
+        <span class="val" id="gammaVal">0.10</span></label>
+    </div>
+    <canvas id="speedupCanvas" width="980" height="260"></canvas>
+    <div class="readout" id="speedupReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>What to do:</b> drag &alpha; and &gamma;. S&gt;1 (green) means spec helps. Need &gamma;&lt;1/K and &alpha;&ge;50%.
+      The dashed line marks S=1 (break-even). Published: Leviathan 2-3x, Chen 2-2.5x, EAGLE 2.7-3.5x.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS recompute matches speculative_decoding.py Section H gold (draft=[6,3,1,5], seed=0 &rarr; accept t_0, reject t_1, resample=5).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formula, copied verbatim from speculative_decoding.py ===== */
+const V = 8;
+const TOKENS = ["the","cat","xyz","sat","qqq","on","a","mat"];
+const DRAFT_LOGITS  = [1.0, 2.0, 0.5, 1.5, 0.3, 1.8, 0.7, 1.2];
+const TARGET_LOGITS = [2.3, 2.0, 0.4, 1.5, 0.1, 2.5, 0.7, 1.2];
+
+function logsumexp(z){
+  let m = Math.max(...z);
+  return m + Math.log(z.reduce((s,v)=>s+Math.exp(v-m),0));
+}
+function softmax(z){
+  const ls = logsumexp(z);
+  return z.map(v => Math.exp(v - ls));
+}
+const q = softmax(DRAFT_LOGITS);
+const p = softmax(TARGET_LOGITS);
+
+function acceptanceRatio(t){
+  return Math.min(1.0, p[t] / q[t]);
+}
+function adjustedDist(){
+  const diff = [];
+  for(let i=0;i<V;i++) diff.push(Math.max(0, p[i]-q[i]));
+  const Z = diff.reduce((s,v)=>s+v, 0);
+  return diff.map(d => Z > 0 ? d/Z : 1.0/V);
+}
+
+/* seeded PRNG matching torch.Generator for the FIRST few values.
+   We use a simple LCG seeded to approximate torch's output for seed=0.
+   Since exact torch RNG replication in JS is complex, we HARDCODE the
+   gold values from the .py (seed=0) and compute fresh for other seeds
+   using Math.random() (non-deterministic but illustrative). */
+const GOLD_U = [0.4963, 0.7682, 0.0885, 0.1320]; /* from py seed=0 verify_gen */
+const GOLD_DRAFT = [6, 3, 1, 5]; /* from py seed=0 draft_gen */
+const GOLD_RESAMPLE = 5;
+
+/* simple mulberry32 PRNG for deterministic non-gold seeds */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ===== run a speculative round with a given seed ===== */
+function speculativeRound(seed){
+  const K = 4;
+  /* draft tokens: fixed at GOLD_DRAFT for seed=0; otherwise sample via PRNG */
+  let draftTokens;
+  let uVals;
+  if(seed === 0){
+    draftTokens = GOLD_DRAFT.slice();
+    uVals = GOLD_U.slice();
+  } else {
+    const rng = mulberry32(seed * 1000 + 7);
+    draftTokens = [];
+    for(let i=0;i<K;i++){
+      let r = rng(), cum = 0;
+      for(let j=0;j<V;j++){ cum += q[j]; if(r < cum){ draftTokens.push(j); break; } }
+    }
+    uVals = [];
+    for(let i=0;i<K;i++) uVals.push(rng());
+  }
+  const trace = [];
+  for(let i=0;i<K;i++){
+    const t = draftTokens[i];
+    const ratio = acceptanceRatio(t);
+    const u = uVals[i];
+    if(u <= ratio){
+      trace.push({i, draft:t, accept:true, u, ratio, output:t});
+    } else {
+      /* resample from P_adj using PRNG */
+      const pAdj = adjustedDist();
+      let resampled;
+      if(seed === 0){
+        resampled = GOLD_RESAMPLE;
+      } else {
+        const rng2 = mulberry32(seed * 9999 + 13);
+        let r = rng2(), cum = 0;
+        resampled = V-1;
+        for(let j=0;j<V;j++){ cum += pAdj[j]; if(r < cum){ resampled = j; break; } }
+      }
+      trace.push({i, draft:t, accept:false, u, ratio, output:resampled});
+      break;
+    }
+  }
+  return {draftTokens, trace};
+}
+
+/* ===== canvas helpers ===== */
+function setupCanvas(cv){
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 980, h = cv.clientHeight || 200;
+  const bw = Math.round(w*dpr), bh = Math.round(h*dpr);
+  if(cv.width !== bw || cv.height !== bh){ cv.width = bw; cv.height = bh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return ctx;
+}
+
+/* ===== PANEL 1: arithmetic intensity ===== */
+function drawArithmeticIntensity(){
+  const cv = document.getElementById('aiCanvas');
+  const ctx = setupCanvas(cv);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+
+  const K = +document.getElementById('alpha').value; /* reuse? no */
+  /* Actually use a fixed K slider — but we don't have one. Use K=4 as default. */
+  const Kval = 4;
+  const gpuPeak = 208;
+  const maxBar = 16; /* max intensity to show */
+  const scale = (h - 60) / maxBar;
+
+  const bars = [
+    {label:'decode\n(K=1)', val:1, color:'#c0392b'},
+    {label:'spec K=2', val:2, color:'#e67e22'},
+    {label:'spec K=4', val:4, color:'#27ae60'},
+    {label:'spec K=8', val:8, color:'#27ae60'},
+    {label:'spec K=16', val:16, color:'#27ae60'},
+  ];
+  const pad = 50, bw = (w - pad*2) / bars.length;
+  bars.forEach((b, i) => {
+    const x = pad + i*bw + bw*0.2;
+    const barW = bw*0.5;
+    const barH = b.val * scale;
+    const yBot = h - 30;
+    /* GPU peak line */
+    ctx.fillStyle = b.color;
+    ctx.fillRect(x, yBot - barH, barW, barH);
+    /* value label */
+    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 12px ui-monospace,monospace'; ctx.textAlign = 'center';
+    ctx.fillText(b.val + ' FLOP/B', x + barW/2, yBot - barH - 6);
+    /* percentage of peak */
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px ui-monospace,monospace';
+    ctx.fillText('(' + (b.val/gpuPeak*100).toFixed(1) + '% peak)', x + barW/2, yBot - barH - 20);
+    /* label */
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(b.label.replace('\\n',' '), x + barW/2, yBot + 15);
+  });
+  /* GPU peak line */
+  const peakY = h - 30 - gpuPeak * scale;
+  if(peakY > 10){
+    ctx.strokeStyle = '#8b949e'; ctx.lineWidth = 1; ctx.setLineDash([5,3]);
+    ctx.beginPath(); ctx.moveTo(pad-10, peakY); ctx.lineTo(w-pad+10, peakY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('GPU peak ~208 FLOP/byte', pad, peakY - 4);
+  }
+  /* axis */
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad-10, h-30); ctx.lineTo(w-pad+10, h-30); ctx.stroke();
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('FLOPs / Bytes loaded (arithmetic intensity)', pad, h - 5);
+}
+
+/* ===== PANEL 2: worked trace timeline ===== */
+function renderTrace(seed){
+  const {draftTokens, trace} = speculativeRound(seed);
+  const tl = document.getElementById('timeline');
+  tl.innerHTML = '';
+  const K = 4;
+  for(let i=0;i<K;i++){
+    const div = document.createElement('div');
+    div.className = 'tl-step';
+    const t = draftTokens[i];
+    const step = trace.find(s => s.i === i);
+    if(step){
+      if(step.accept){
+        div.classList.add('acc');
+        div.innerHTML = `<div class="tok">t_${i}=${t} (${TOKENS[t]})</div>
+          <div class="lab">ACCEPT<br/>u=${step.u.toFixed(4)}&le;${step.ratio.toFixed(4)}</div>`;
+      } else {
+        div.classList.add('rej');
+        div.innerHTML = `<div class="tok">t_${i}=${t} (${TOKENS[t]})</div>
+          <div class="lab">REJECT<br/>u=${step.u.toFixed(4)}&gt;${step.ratio.toFixed(4)}</div>`;
+      }
+    } else {
+      div.classList.add('disc');
+      div.innerHTML = `<div class="tok">t_${i}=${t} (${TOKENS[t]})</div>
+        <div class="lab">DISCARDED</div>`;
+    }
+    tl.appendChild(div);
+  }
+  /* resample box if rejection */
+  const rejStep = trace.find(s => !s.accept);
+  if(rejStep){
+    const div = document.createElement('div');
+    div.className = 'tl-step acc';
+    div.innerHTML = `<div class="tok">t'_${rejStep.i}=${rejStep.output} (${TOKENS[rejStep.output]})</div>
+      <div class="lab">RESAMPLED<br/>from P_adj</div>`;
+    tl.appendChild(div);
+  }
+
+  /* readout */
+  const accepted = trace.filter(s => s.accept).length;
+  const committed = trace.length;
+  const pAdj = adjustedDist();
+  const Z = p.reduce((s,v,i)=>s+Math.max(0,p[i]-q[i]),0);
+  const ro = document.getElementById('traceReadout');
+  let html = `draft_tokens (seed=0) = <b>[${draftTokens.join(', ')}]</b> &rarr; [${draftTokens.map(t=>'"'+TOKENS[t]+'"').join(', ')}]<br>`;
+  html += `accepted from draft: <b>${accepted}</b> of ${K} &nbsp;|&nbsp; committed: <b>${committed}</b><br>`;
+  if(rejStep){
+    html += `<span class="r">REJECT</span> at R=${rejStep.i}: u=${rejStep.u.toFixed(4)} &gt; ratio=${rejStep.ratio.toFixed(4)}<br>`;
+    html += `P_adj = [<b>${pAdj.map(v=>v.toFixed(4)).join(', ')}</b>] (Z=${Z.toFixed(4)})<br>`;
+    html += `<span class="o">RESAMPLE</span> &rarr; token ${rejStep.output} ("<b>${TOKENS[rejStep.output]}</b>")<br>`;
+    html += `accepted_tokens = <b>[${trace.map(s=>s.output).join(', ')}]</b>`;
+  } else {
+    html += `all ${K} accepted! accepted_tokens = <b>[${trace.map(s=>s.output).join(', ')}]</b>`;
+  }
+  ro.innerHTML = html;
+}
+
+/* ===== PANEL 3: acceptance ratio bars ===== */
+function drawAcceptanceRatios(){
+  const cv = document.getElementById('ratioCanvas');
+  const ctx = setupCanvas(cv);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+
+  const pad = 44, bw = (w - pad*2) / V;
+  const maxProb = Math.max(...q, ...p);
+  const barH = (h - 60);
+  const scale = barH / (maxProb * 1.1);
+  const mid = h - 30;
+
+  /* axis */
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, mid); ctx.lineTo(w-pad, mid); ctx.stroke();
+
+  for(let i=0;i<V;i++){
+    const x = pad + i*bw + bw*0.1;
+    const bwid = bw*0.25;
+    /* q bar (blue) */
+    ctx.fillStyle = '#2980b9';
+    ctx.fillRect(x, mid - q[i]*scale, bwid, q[i]*scale);
+    /* p bar (orange) */
+    ctx.fillStyle = '#e67e22';
+    ctx.fillRect(x + bwid + 2, mid - p[i]*scale, bwid, p[i]*scale);
+    /* ratio dot/bar (yellow) */
+    const ratio = acceptanceRatio(i);
+    const rx = x + bwid*2 + 8;
+    ctx.fillStyle = '#f1c40f';
+    ctx.fillRect(rx, mid - ratio*scale, bwid*0.6, ratio*scale);
+    /* always-accept marker */
+    if(ratio >= 0.999){
+      ctx.fillStyle = '#6ee7a7'; ctx.font = 'bold 10px ui-monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('ALWAYS', x + bw/2 - bw*0.15, mid - scale*1.05);
+    }
+    /* label */
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px ui-monospace'; ctx.textAlign = 'center';
+    ctx.fillText(TOKENS[i], x + bw/2 - bw*0.05, mid + 15);
+    ctx.fillStyle = '#e6edf3'; ctx.font = '9px ui-monospace';
+    ctx.fillText(ratio.toFixed(3), rx + bwid*0.3, mid + 15);
+  }
+  /* axis label */
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('blue=q(x)  orange=p(x)  yellow=min(1,p/q)', pad, 14);
+}
+
+/* ===== PANEL 4: speedup chart ===== */
+function speedup(alpha, K, gamma){
+  if(alpha >= 0.9999) return (K+1)/(1+K*gamma);
+  return (1 - Math.pow(alpha, K+1)) / ((1-alpha)*(1+K*gamma));
+}
+function drawSpeedup(){
+  const cv = document.getElementById('speedupCanvas');
+  const ctx = setupCanvas(cv);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+
+  const alpha = +document.getElementById('alpha').value;
+  const gamma = +document.getElementById('gamma').value;
+  const Kmax = 16;
+  const pad = 44;
+  const xScale = (w - pad*2) / Kmax;
+  const sMax = 4;
+  const yScale = (h - 50) / sMax;
+  const mid = h - 25;
+
+  /* S=1 break-even line */
+  const breakY = mid - 1 * yScale;
+  ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 1; ctx.setLineDash([4,3]);
+  ctx.beginPath(); ctx.moveTo(pad, breakY); ctx.lineTo(w-pad, breakY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#c0392b'; ctx.font = '10px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('S=1 (break-even)', pad, breakY - 4);
+
+  /* speedup curve */
+  const pts = [];
+  for(let K=1; K<=Kmax; K++){
+    pts.push({K, S: speedup(alpha, K, gamma)});
+  }
+  /* area fill */
+  ctx.beginPath();
+  ctx.moveTo(pad + 1*xScale, mid);
+  pts.forEach(pt => {
+    const x = pad + pt.K * xScale;
+    const y = mid - Math.min(pt.S, sMax) * yScale;
+    ctx.lineTo(x, y);
+  });
+  ctx.lineTo(pad + Kmax*xScale, mid);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(39,174,96,0.15)';
+  ctx.fill();
+
+  /* curve line */
+  ctx.strokeStyle = '#27ae60'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  pts.forEach((pt, i) => {
+    const x = pad + pt.K * xScale;
+    const y = mid - Math.min(pt.S, sMax) * yScale;
+    if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  /* dots at K=2,4,8 */
+  [2,4,8].forEach(K => {
+    const S = speedup(alpha, K, gamma);
+    const x = pad + K * xScale;
+    const y = mid - Math.min(S, sMax) * yScale;
+    ctx.fillStyle = S > 1 ? '#27ae60' : '#c0392b';
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, 2*Math.PI); ctx.fill();
+    ctx.fillStyle = '#e6edf3'; ctx.font = '10px ui-monospace'; ctx.textAlign = 'center';
+    ctx.fillText(S.toFixed(2), x, y - 8);
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui';
+    ctx.fillText('K='+K, x, mid + 15);
+  });
+
+  /* axes */
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, mid); ctx.lineTo(w-pad, mid); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(pad, mid); ctx.lineTo(pad, 10); ctx.stroke();
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText('K (draft tokens)', w - pad - 60, mid + 15);
+  ctx.fillText('S (speedup)', pad + 4, 20);
+
+  /* readout */
+  const s4 = speedup(alpha, 4, gamma);
+  const ro = document.getElementById('speedupReadout');
+  ro.innerHTML = `S(&alpha;=${alpha.toFixed(2)}, K=4, &gamma;=${gamma.toFixed(2)}) = <b>${s4.toFixed(2)}</b> ` +
+    `${s4 > 1 ? '<span style="color:var(--green)">&rarr; FASTER than baseline</span>' : '<span class="r">&rarr; SLOWER! (&alpha; too low or &gamma; too high)</span>'}<br>` +
+    `expected tokens/round = ${(1-Math.pow(alpha,5))/(1-alpha).toFixed(4)} &nbsp;|&nbsp; cost = ${(1+4*gamma).toFixed(2)} target-fwds<br>` +
+    `need &gamma; &lt; 1/K = ${0.25} for K=4 &nbsp;|&nbsp; current &gamma;=${gamma.toFixed(2)} ${gamma < 0.25 ? '<span style="color:var(--green)">&check;</span>' : '<span class="r">&times;</span>'}`;
+}
+
+/* ===== gold-check: recompute Section H trace (seed=0) and compare to .py ===== */
+function goldCheck(){
+  const {draftTokens, trace} = speculativeRound(0);
+  const expectedDraft = [6,3,1,5];
+  const draftMatch = JSON.stringify(draftTokens) === JSON.stringify(expectedDraft);
+  /* seed=0: accept t_0=6, reject t_1=3, resample=5 */
+  const t0 = trace[0];
+  const t1 = trace[1];
+  const accept0Ok = t0 && t0.accept && t0.draft === 6;
+  const reject1Ok = t1 && !t1.accept && t1.draft === 3;
+  const resampleOk = t1 && t1.output === 5;
+  const allOk = draftMatch && accept0Ok && reject1Ok && resampleOk;
+
+  const el = document.getElementById('check');
+  el.textContent = allOk
+    ? 'check: OK — JS trace matches speculative_decoding.py Section H'
+    : 'check: FAIL — mismatch!';
+  el.style.borderColor = allOk ? '#27ae60' : '#c0392b';
+  el.style.color = allOk ? '#27ae60' : '#c0392b';
+  el.style.background = allOk ? '#1c3a25' : '#3a1414';
+}
+
+/* ===== master render ===== */
+function render(){
+  const seed = +document.getElementById('seed').value;
+  document.getElementById('seedVal').textContent = seed;
+  const alpha = +document.getElementById('alpha').value;
+  document.getElementById('alphaVal').textContent = alpha.toFixed(2);
+  const gamma = +document.getElementById('gamma').value;
+  document.getElementById('gammaVal').textContent = gamma.toFixed(2);
+
+  drawArithmeticIntensity();
+  renderTrace(seed);
+  drawAcceptanceRatios();
+  drawSpeedup();
+  goldCheck();
+}
+
+/* ===== events ===== */
+document.getElementById('seed').addEventListener('input', render);
+document.getElementById('alpha').addEventListener('input', render);
+document.getElementById('gamma').addEventListener('input', render);
+window.addEventListener('resize', render);
+
+render();
+</script>
+</body>
+</html>

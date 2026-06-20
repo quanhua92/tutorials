@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeRO — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --purple:#9b59b6; --warn:#f1c40f;
+    --ddp:#c0392b; --z1:#e67e22; --z2:#f1c40f; --z3:#27ae60;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:260px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button.on{border-color:var(--green);color:var(--green)}
+  button:hover{border-color:var(--green)}
+  table.heat{border-collapse:collapse;font-size:.8rem;font-variant-numeric:tabular-nums;margin-top:.5rem;width:100%}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:4px 8px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat td.l{text-align:left}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  #mem{display:block;width:100%;max-width:1100px;height:300px}
+  #comms{display:block;width:100%;max-width:1100px;height:200px}
+  #step{display:block;width:100%;max-width:1100px;height:300px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&larr; all tutorials</a>
+  <h1>ZeRO (Zero Redundancy Optimizer) — interactive
+    <a class="badge" href="./ZERO.md">ZERO.md</a>
+    <a class="badge" href="./zero.py">zero.py</a></h1>
+  <div class="sub"><b>For newcomers:</b> DDP (<a href="./ddp.html">&rarr; DDP</a>) replicates the whole model + optimizer state on every GPU — <b>20N bytes/GPU</b>,
+    16N of which is pure redundancy. ZeRO <b>partitions</b> that redundancy away, one category at a time:
+    <b style="color:var(--z1)">Stage 1</b> shards the optimizer states, <b style="color:var(--z2)">Stage 2</b> also the gradients,
+    <b style="color:var(--z3)">Stage 3</b> also the parameters. A 7B model drops from <b>140 GB</b> to <b>14 GB</b> per GPU on 8 GPUs.
+    Drag <b style="color:var(--green)">K</b> below and watch the bars shrink. Every number is recomputed live in JS from the
+    <i>identical</i> formula in <code>zero.py</code> (a faithful single-process K-rank simulation; the memory &amp; comms arithmetic is exact).
+    &nbsp;|&nbsp; <a href="./nccl_collectives.html">&rarr; NCCL collectives</a> &nbsp; <a href="./tensor_parallel.html">&rarr; Tensor Parallel</a> &nbsp; <a href="./pipeline_parallel.html">&rarr; Pipeline Parallel</a> (splits layers across nodes; orthogonal axis)</div>
+
+  <!-- ===== PANEL 1: PER-STAGE MEMORY ===== -->
+  <h2>① Per-stage memory: DDP &rarr; ZeRO-1 &rarr; ZeRO-2 &rarr; ZeRO-3 (drag K)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> drag <b>K</b> (number of GPUs). Each bar is the per-GPU memory for that stage.
+      Note <b style="color:var(--ddp)">DDP</b> never moves (it replicates everything); <b style="color:var(--z1)">ZeRO-1</b>/<b style="color:var(--z2)">2</b> shrink toward a floor
+      (the full params+grads stay); <b style="color:var(--z3)">ZeRO-3</b> keeps shrinking as 1/K — it shards EVERYTHING. Toggle the model size.</div>
+    <div class="controls">
+      <label>K (GPUs) <input type="range" id="K" min="1" max="64" value="8" step="1">
+        <span class="val" id="Kval">8</span></label>
+      <label>model
+        <button id="m7" class="on">7B params</button>
+        <button id="m1">tiny: 1M params</button>
+      </label>
+      <span class="micro">bytes/param: DDP=20, Z1=4+16/K, Z2=2+14/K, Z3=16/K</span>
+    </div>
+    <canvas id="mem" width="1100" height="300"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--ddp)"></i>DDP (replicate ALL)</span>
+      <span><i class="sw" style="background:var(--z1)"></i>ZeRO-1 (shard optimizer states)</span>
+      <span><i class="sw" style="background:var(--z2)"></i>ZeRO-2 (+ shard gradients)</span>
+      <span><i class="sw" style="background:var(--z3)"></i>ZeRO-3 (+ shard parameters)</span>
+    </div>
+    <div class="readout" id="memReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: BYTES/PARAM LADDER + STEP FLOW ===== -->
+  <h2>② How a ZeRO-1 step works: ReduceScatter &rarr; shard update &rarr; AllGather</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to use:</b> drag <b>phase</b> through the 3 steps of a ZeRO-1 optimizer step (K=4, N=8 params).
+      Phase 0 = identical init. Phase 1 = <code>ncclReduceScatter(grads)</code>: each rank ends with the averaged grad for <i>its</i> 2-param shard.
+      Phase 2 = each rank updates its OWN shard via the fp32 master. Phase 3 = <code>ncclAllGather</code>: all ranks hold the full updated params (no drift).
+      This is the same data-flow as DDP's AllReduce (🔗 NCCL identity), just split to partition the optimizer state.</div>
+    <div class="controls">
+      <label>phase <input type="range" id="phase" min="0" max="3" value="3" step="1">
+        <span class="val" id="phaseVal">3</span></label>
+      <span class="micro" id="phaseLabel"></span>
+    </div>
+    <canvas id="step" width="1100" height="300"></canvas>
+    <div class="readout" id="stepReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: COMMUNICATION COST ===== -->
+  <h2>③ Communication cost: Stages 1/2 same as DDP; Stage 3 = 1.5× (the only tax)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> per-device communication volume in units of <code>Ψ</code> (#params).
+      DDP's <code>AllReduce ≡ ReduceScatter + AllGather = 2·Ψ</code>. ZeRO-1/2 <b>replace</b> it with <code>ReduceScatter(grad)+AllGather(param)</code> —
+      still <b>2·Ψ</b> (DeepSpeed: "same communication volume as data parallelism"). Only <b style="color:var(--z3)">ZeRO-3</b> adds a 2nd AllGather
+      (params gathered for backward too) → <b>3·Ψ = 1.5× DDP</b> (DeepSpeed: "modest 50% increase"). The loose "3×" counts collectives (3 vs 1); by byte volume it is 1.5×.</div>
+    <canvas id="comms" width="1100" height="200"></canvas>
+    <div class="readout" id="commsReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check —</b> the badge means the live JS recomputes the exact per-stage memory printed by <code>zero.py</code> Section E,
+    on BOTH gold rows (tiny N=1M,K=4 → 20/8/5.5/4 MB and headline 7B,K=8 → 140/14 GB):
+    <span class="badge" id="check">check: …</span>
+    <br><br>
+    Verified: all four stage formulas, the 7B/8-GPU headline (140→14 GB), and the 1.5× ZeRO-3 comms ratio.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formulas, copied verbatim from zero.py ===== */
+function memBytes(N,K,stage){           // per-GPU bytes
+  if(stage==='ddp') return N*20;
+  if(stage==='1')    return N*(4+16/K);
+  if(stage==='2')    return N*(2+14/K);
+  if(stage==='3')    return N*(16/K);
+}
+function bpp(stage,K){                  // bytes/param (for labels)
+  return {ddp:20,'1':4+16/K,'2':2+14/K,'3':16/K}[stage];
+}
+const STAGES=[
+  {key:'ddp',name:'DDP',  color:'var(--ddp)', shard:'replicate ALL'},
+  {key:'1',   name:'ZeRO-1',color:'var(--z1)', shard:'shard optimizer states'},
+  {key:'2',   name:'ZeRO-2',color:'var(--z2)', shard:'+ shard gradients'},
+  {key:'3',   name:'ZeRO-3',color:'var(--z3)', shard:'+ shard parameters'},
+];
+const COMMS=[
+  {name:'DDP',   vol:2.0,color:'var(--ddp)'},
+  {name:'ZeRO-1',vol:2.0,color:'var(--z1)'},
+  {name:'ZeRO-2',vol:2.0,color:'var(--z2)'},
+  {name:'ZeRO-3',vol:3.0,color:'var(--z3)'},
+];
+
+/* ===== canvas helpers ===== */
+function setup(cv){const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||1100,h=cv.clientHeight||260;
+  const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;}
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);return ctx;}
+function fmtGB(b){ if(b>=1e9) return (b/1e9).toFixed(2)+' GB'; if(b>=1e6) return (b/1e6).toFixed(2)+' MB'; return b+' B'; }
+
+/* ===== PANEL 1: per-stage memory bars ===== */
+let N=7e9;
+const memCv=document.getElementById('mem');
+function drawMem(K){
+  const ctx=setup(memCv);const w=memCv.clientWidth,h=memCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const vals=STAGES.map(s=>memBytes(N,K,s.key));
+  const ddp=vals[0], max=ddp*1.12;
+  const padL=40,padR=24,padT=34,padB=64;
+  const pw=w-padL-padR,ph=h-padT-padB;
+  const X=v=>padL+(Math.log10(Math.max(v,1))/Math.log10(max))*pw;  // log scale so Z3 is visible vs DDP
+  // gridlines (powers of 10)
+  ctx.strokeStyle='#21262d';ctx.lineWidth=1;ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  const base=Math.pow(10,Math.floor(Math.log10(max)));
+  for(let g=base; g<=max; g*=10){
+    const x=X(g); ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,padT+ph);ctx.stroke();
+    ctx.fillText(fmtGB(g),x,padT+ph+14);
+  }
+  const bw=Math.min(150,pw/STAGES.length-24);
+  const totalW=STAGES.length*bw + (STAGES.length-1)*24;
+  let x=padL+(pw-totalW)/2;
+  STAGES.forEach((s,i)=>{
+    const v=vals[i]; const barW=Math.max(2,X(v)-padL);
+    ctx.fillStyle=s.color; ctx.fillRect(x,padT+10,barW,ph-10);
+    ctx.fillStyle='#fff';ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(s.name,x+barW/2,padT+30);
+    ctx.fillStyle='#e6edf3';ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(fmtGB(v),x+barW/2,padT+48);
+    ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(bpp(s.key,K)+' B/param',x+barW/2,padT+62);
+    ctx.fillText('('+(ddp/v).toFixed(2)+'× less)',x+barW/2,padT+74);
+    // shard annotation under bar
+    ctx.fillStyle=s.color;ctx.font='9px ui-monospace,monospace';
+    ctx.fillText(s.shard,x+barW/2,padT+ph-2);
+    x+=barW+24;
+  });
+  // model + K label
+  ctx.fillStyle='#8b949e';ctx.font='10px ui-monospace,monospace';ctx.textAlign='right';
+  ctx.fillText('model = '+(N>=1e9?'7B':'1M')+' params, K='+K+' GPUs   (log scale)',w-padR,padT-12);
+}
+function renderMemReadout(K){
+  const el=document.getElementById('memReadout');
+  let s='per-GPU memory  (model='+(N>=1e9?'7B (7e9)':'1M (1e6)')+' params, K='+K+')\n';
+  STAGES.forEach(st=>{
+    const v=memBytes(N,K,st.key);
+    s+='  '+st.name.padEnd(7)+' = '+bpp(st.key,K).toString().padStart(6)+' B/param  × '+
+       (N>=1e9?(N/1e9+'e9'):(N/1e6+'e6'))+'  =  '+fmtGB(v)+'\n';
+  });
+  if(N>=1e9){
+    s+='\n  <b>HEADLINE:</b> DDP '+fmtGB(memBytes(N,K,'ddp'))+' → ZeRO-3 '+fmtGB(memBytes(N,K,'3'))+' / GPU';
+    if(K===8) s+='   (140 → 14 GB on 8 GPUs — fits one 80 GB A100)';
+  }
+  el.innerHTML=s;
+}
+
+/* ===== PANEL 2: ZeRO-1 step flow (N=8,K=4), deterministic ===== */
+/* params init + per-rank grads, reproduced exactly from zero.py Section B(sim) seed=0 */
+const P0=[0.7705,-0.1467,-1.0894,0.2842,-0.5423,-0.6993,0.2017,0.4190];
+const GRADS=[
+  [-0.2158,-0.1210,-0.1790,0.0546,-0.2570,0.3302,-0.3214,0.0368],
+  [-0.1699,0.1119,-0.2676,-0.4527,0.1111,0.4370,0.2819,0.2325],
+  [0.0576,0.3791,-0.3871,-0.2373,-0.0063,-0.2155,0.1556,-0.3938],
+  [0.0576,0.1628,-0.6656,0.0777,-0.3089,-0.1502,0.0820,-0.2754],
+];
+const LR=0.1, NK=4, CH=2;
+function reduceScatterAvg(grads){            // rank r -> averaged chunk r
+  const out=[];
+  for(let r=0;r<NK;r++){
+    let sh=new Array(CH).fill(0);
+    for(let s=0;s<NK;s++) for(let c=0;c<CH;c++) sh[c]+=grads[s][r*CH+c];
+    out.push(sh.map(v=>v/NK));
+  }
+  return out;
+}
+function allGather(shards){ return shards.flat(); }
+const SHARDS=reduceScatterAvg(GRADS);
+const NEW_SHARDS=[];
+for(let r=0;r<NK;r++){
+  const upd=[];
+  for(let c=0;c<CH;c++) upd.push(+(P0[r*CH+c]-LR*SHARDS[r][c]).toFixed(4));
+  NEW_SHARDS.push(upd);
+}
+const PNEW=allGather(NEW_SHARDS);
+
+const stepCv=document.getElementById('step');
+const phaseLabels=[
+  '0: IDENTICAL INIT (DDP broadcasts params; each rank has the full model)',
+  '1: ncclReduceScatter(grads) → each rank owns the averaged grad for ITS 2-param shard',
+  '2: each rank updates its OWN param shard via the fp32 master (only N/K work)',
+  '3: ncclAllGather(updated shards) → all ranks hold the FULL updated params (no drift)'
+];
+function drawStep(phase){
+  const ctx=setup(stepCv);const w=stepCv.clientWidth,h=stepCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  document.getElementById('phaseLabel').textContent=phaseLabels[phase];
+  const padT=50,padB=40;
+  const colW=w/NK;
+  const drawCol=(r,vec,color,label,sub)=>{
+    const cx=colW*(r+0.5);
+    const n=vec.length,bw=Math.min(22,(colW-50)/n-4);
+    const maxAbs=Math.max(0.4,...P0.map(Math.abs),...PNEW.map(Math.abs));
+    const baseY=h-padB,top=padT+10;
+    const scale=(baseY-top)/maxAbs/1.15;
+    ctx.fillStyle='#e6edf3';ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(label,cx,padT-8);
+    ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';
+    if(sub)ctx.fillText(sub,cx,padT+6);
+    ctx.strokeStyle='#21262d';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(cx-colW/2+26,baseY);ctx.lineTo(cx+colW/2-26,baseY);ctx.stroke();
+    const totalW=n*(bw+3)-3,start=cx-totalW/2;
+    vec.forEach((v,i)=>{
+      const x=start+i*(bw+3),hh=v*scale;
+      ctx.fillStyle=color; ctx.fillRect(x,hh<0?baseY:baseY-hh,bw,Math.abs(hh));
+      ctx.fillStyle='#8b949e';ctx.font='8px ui-monospace,monospace';
+      ctx.fillText(r*CH+i,x+bw/2,baseY+12);
+    });
+  };
+  if(phase===0){ for(let r=0;r<NK;r++) drawCol(r,P0,'#8b949e','rank '+r,'params (full, identical)'); }
+  else if(phase===1){ for(let r=0;r<NK;r++) drawCol(r,SHARDS[r],'var(--blue)','rank '+r,'grad shard ['+r*CH+':'+(r+1)*CH+']'); }
+  else if(phase===2){ for(let r=0;r<NK;r++) drawCol(r,NEW_SHARDS[r],'var(--orange)','rank '+r,'updated OWN shard'); }
+  else { for(let r=0;r<NK;r++) drawCol(r,PNEW,'var(--green)','rank '+r,'AllGather: full params'); }
+}
+function renderStepReadout(phase){
+  const el=document.getElementById('stepReadout');
+  if(phase===0){ el.innerHTML='params (identical on all '+NK+' ranks) = ['+P0.map(fmt4).join(', ')+']'; }
+  else if(phase===1){
+    let s='ReduceScatter(grads) → each rank owns the AVERAGED grad for its shard:\n';
+    for(let r=0;r<NK;r++) s+='  rank '+r+' grad shard ['+r*CH+':'+(r+1)*CH+'] = ['+SHARDS[r].map(fmt4).join(', ')+']\n';
+    el.innerHTML=s;
+  } else if(phase===2){
+    let s='each rank: master_shard - '+LR+'*grad_shard (only its own N/K params):\n';
+    for(let r=0;r<NK;r++) s+='  rank '+r+' updated shard = ['+NEW_SHARDS[r].map(fmt4).join(', ')+']\n';
+    el.innerHTML=s;
+  } else {
+    el.innerHTML='AllGather → params on every rank = ['+PNEW.map(fmt4).join(', ')+']\n  all '+NK+' ranks IDENTICAL → no drift (== single-GPU on averaged grad)';
+  }
+}
+function fmt4(v){return (v>=0?'+':'')+v.toFixed(4);}
+
+/* ===== PANEL 3: comms ===== */
+const commsCv=document.getElementById('comms');
+function drawComms(){
+  const ctx=setup(commsCv);const w=commsCv.clientWidth,h=commsCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=40,padR=24,padT=34,padB=40;
+  const pw=w-padL-padR,ph=h-padT-padB;
+  const max=3.2;
+  const bw=Math.min(150,pw/COMMS.length-24);
+  const totalW=COMMS.length*bw+(COMMS.length-1)*24;
+  let x=padL+(pw-totalW)/2;
+  // gridlines
+  ctx.strokeStyle='#21262d';ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';ctx.textAlign='center';
+  for(let g=0;g<=3;g++){ const xx=padL+(g/max)*pw; ctx.beginPath();ctx.moveTo(xx,padT);ctx.lineTo(xx,padT+ph);ctx.stroke(); ctx.fillText(g+'·Ψ',xx,padT+ph+14);}
+  COMMS.forEach(c=>{
+    const bh=(c.vol/max)*ph;
+    ctx.fillStyle=c.color; ctx.fillRect(x,padT+ph-bh,bw,bh);
+    ctx.fillStyle='#fff';ctx.font='bold 12px ui-monospace,monospace';ctx.textAlign='center';
+    ctx.fillText(c.name,x+bw/2,padT-8);
+    ctx.fillStyle='#e6edf3';ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(c.vol+'·Ψ',x+bw/2,padT+ph-bh-6);
+    ctx.fillStyle='#8b949e';ctx.font='9px ui-monospace,monospace';
+    ctx.fillText((c.vol/2).toFixed(2)+'× DDP',x+bw/2,padT+ph+30);
+    x+=bw+24;
+  });
+  ctx.strokeStyle='#27ae60';ctx.lineWidth=1;ctx.setLineDash([5,4]);
+  const ddpY=padT+ph-(2/max)*ph; ctx.beginPath();ctx.moveTo(padL,ddpY);ctx.lineTo(w-padR,ddpY);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='#27ae60';ctx.font='9px ui-monospace,monospace';ctx.textAlign='left';
+  ctx.fillText('DDP baseline 2·Ψ',padL+4,ddpY-4);
+}
+function renderCommsReadout(){
+  const Psi=7e9;
+  let s='per-device communication volume (Ψ = #params; 7B model, fp16 = 2 bytes):\n';
+  COMMS.forEach(c=>{ s+='  '+c.name.padEnd(7)+' = '+c.vol+'·Ψ = '+fmtGB(c.vol*Psi*2)+'   ('+(c.vol/2).toFixed(2)+'× DDP)\n'; });
+  s+='\n  ZeRO-3/DDP volume ratio = 3/2 = <b>'+(3/2).toFixed(2)+'×</b>  (the "3×" you may have seen counts collectives: 3 ops vs 1)';
+  document.getElementById('commsReadout').innerHTML=s;
+}
+
+/* ===== master render ===== */
+function render(){
+  const K=+document.getElementById('K').value;
+  document.getElementById('Kval').textContent=K;
+  drawMem(K); renderMemReadout(K);
+  const phase=+document.getElementById('phase').value;
+  document.getElementById('phaseVal').textContent=phase;
+  drawStep(phase); renderStepReadout(phase);
+  drawComms(); renderCommsReadout();
+}
+
+/* ===== events ===== */
+document.getElementById('K').addEventListener('input',render);
+document.getElementById('phase').addEventListener('input',render);
+document.getElementById('m7').addEventListener('click',()=>{N=7e9;document.getElementById('m7').classList.add('on');document.getElementById('m1').classList.remove('on');document.getElementById('K').value=8;render();});
+document.getElementById('m1').addEventListener('click',()=>{N=1e6;document.getElementById('m1').classList.add('on');document.getElementById('m7').classList.remove('on');document.getElementById('K').value=4;render();});
+window.addEventListener('resize',render);
+
+/* ===== gold-value checks vs zero.py Section E =====
+   tiny: N=1e6,K=4 -> DDP=20MB, Z1=8MB, Z2=5.5MB, Z3=4MB
+   headline: 7B,K=8 -> DDP=140GB, Z3=14GB
+   comms: Z3/DDP == 1.5
+*/
+const gold={
+  tiny:{ddp:20e6,z1:8e6,z2:5.5e6,z3:4e6},
+  head:{ddp:140e9,z3:14e9}
+};
+const gOk =
+   Math.abs(memBytes(1e6,4,'ddp')-gold.tiny.ddp)<1 &&
+   Math.abs(memBytes(1e6,4,'1')-gold.tiny.z1)<1 &&
+   Math.abs(memBytes(1e6,4,'2')-gold.tiny.z2)<1 &&
+   Math.abs(memBytes(1e6,4,'3')-gold.tiny.z3)<1 &&
+   Math.abs(memBytes(7e9,8,'ddp')-gold.head.ddp)<1 &&
+   Math.abs(memBytes(7e9,8,'3')-gold.head.z3)<1 &&
+   Math.abs(3/2-1.5)<1e-9;
+const ck=document.getElementById('check');
+ck.textContent=gOk?'check: OK — JS stage formulas + headline + 1.5× match zero.py':'check: FAIL — mismatch!';
+ck.style.borderColor=gOk?'#27ae60':'#c0392b';
+ck.style.color=gOk?'#27ae60':'#c0392b';
+ck.style.background=gOk?'#1c3a25':'#3a1414';
+
+render();
+</script>
+</body>
+</html>

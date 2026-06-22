@@ -1,0 +1,194 @@
+classes_basics.py — Phase 2 bundle #9.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Class creation: a class is an object, an instance of `type`
+======================================================================
+A `class` statement, when it executes, builds a CLASS OBJECT. That
+object is itself an instance of `type` (the metaclass). So Point is
+a value like any other: it has a type, an id, attributes, and a
+__dict__. The class __dict__ is a read-only mappingproxy that holds
+the methods and class-level attributes.
+
+expression                                result
+------------------------------------------------------------------
+Point                                     <class '__main__.Point'>
+type(Point)                               <class 'type'>
+type(Point) is type                       True
+isinstance(Point, type)                   True
+Point.__name__                            'Point'
+Point.__mro__                             (<class '__main__.Point'>, <class 'object'>)
+type(Point.__dict__).__name__             'mappingproxy'
+'move' in Point.__dict__                  True
+'species' in Point.__dict__               True
+
+[check] type(Point) is type (the class-of-the-class): OK
+[check] Point is an instance of type: OK
+[check] Point.__name__ == 'Point': OK
+[check] methods live in the CLASS __dict__ ('move' in Point.__dict__): OK
+[check] the class __dict__ is a read-only mappingproxy: OK
+
+======================================================================
+SECTION B — __init__ writes the INSTANCE __dict__; instances are independent
+======================================================================
+Calling Point(1, 2) runs two steps: (1) Point.__new__ creates a fresh
+empty instance, (2) Point.__init__(that_instance, 1, 2) runs and writes
+self.x / self.y into the instance's OWN __dict__. Each instance gets a
+distinct, writable dict, so mutating one never touches another.
+
+p1 = Point(1, 2);  p2 = Point(3, 4)       
+p1.x                  1       p2.x      3
+p1.__dict__                     {'x': 1, 'y': 2}
+p2.__dict__                     {'x': 3, 'y': 4}
+type(p1.__dict__).__name__      'dict'
+p1.__dict__ is not p2.__dict__  True
+
+[check] p1.__dict__ == {'x': 1, 'y': 2}: OK
+[check] p2.__dict__ == {'x': 3, 'y': 4}: OK
+[check] each instance owns a distinct dict object: OK
+p1.x = 10   # writes p1's INSTANCE dict; p2 is unaffected
+
+p1.x                  10
+p2.x                  3
+x in p1.__dict__      True
+
+[check] mutating p1.x leaves p2.x unchanged: OK
+
+======================================================================
+SECTION C — Class attr vs instance attr: lookup order & shadowing
+======================================================================
+Attribute lookup walks a fixed chain: INSTANCE __dict__ first, then
+the CLASS __dict__, then base classes. A class attr (e.g. `species`)
+is NOT copied into each instance — it lives once on the class and is
+found on the second step. Assigning p.species = ... creates an INSTANCE
+attr that SHADOWS the class attr for that one instance only.
+
+Point.species                 'point'
+p1.species (read from class)  'point'
+p2.species (read from class)  'point'
+species in p1.__dict__        False
+species in Point.__dict__     True
+
+[check] species is NOT stored on the instance: OK
+[check] species IS stored on the class: OK
+[check] both instances see the same class value: OK
+p1.species = "rogue"   # creates an INSTANCE attr, shadows the class
+
+p1.species (now the instance attr)        'rogue'
+Point.species (class attr untouched)      'point'
+p2.species (other instance untouched)     'point'
+species in p1.__dict__                    True
+
+[check] assignment created an instance attr (shadow): OK
+[check] the class attr itself is unchanged: OK
+[check] other instances are unaffected: OK
+[check] instance lookup wins over class lookup (shadow): OK
+
+======================================================================
+SECTION D — Methods & self: bound vs unbound (descriptor binding)
+======================================================================
+A `def` inside a class is a plain FUNCTION object stored in the class
+__dict__. Reading Point.move returns that raw function; reading p.move
+INVOKES the function's __get__ (it is a descriptor), which packs the
+instance into a bound method object. Calling p.move(2, 3) is exactly
+Point.move(p, 2, 3): the instance is passed as the first arg (self).
+
+type(Point.move).__name__     'function'
+type(p.move).__name__         'method'
+p.move.__self__ is p          True
+p.move.__func__ is Point.move True
+
+[check] Point.move is a plain function object: OK
+[check] p.move is a bound method object: OK
+[check] the bound method remembers its instance: OK
+[check] the bound method wraps the original function: OK
+p = Point(0, 0);  p.move(2, 3)        -> Point(x=4, y=6)  (after=(2, 3))
+Point.move(p, 2, 3)  (same thing)     -> Point(x=4, y=6)  (after=(4, 6))
+
+[check] p.move(2,3) moved p by (2,3): OK
+[check] Point.move(p,2,3) is the equivalent call (moves p again): OK
+
+======================================================================
+SECTION E — The mutable-class-attribute trap: a shared list
+======================================================================
+A mutable CLASS attribute (list/dict/set) is created ONCE, on the
+class. self.tags.append(...) does NOT create an instance attr — it
+looks up `tags` (found on the class) and mutates THAT shared object.
+Result: every instance shares one list. The fix is to build a fresh
+list per instance inside __init__.
+
+class Buggy:  tags = []   # class-level, shared
+b1 = Buggy(); b2 = Buggy();  b1.add('x');  b2.add('y')
+
+b1.tags               ['x', 'y']
+b2.tags               ['x', 'y']
+b1.tags is b2.tags    True
+b1.tags is Buggy.tags True
+
+[check] the class-level list is shared across instances: OK
+[check] b2 leaked b1's append (cross-contamination): OK
+class Fixed:  def __init__(self): self.tags = []  # per-instance
+f1 = Fixed(); f2 = Fixed();  f1.add('x');  f2.add('y')
+
+f1.tags                   ['x']
+f2.tags                   ['y']
+f1.tags is not f2.tags    True
+
+[check] instance-level lists are independent: OK
+[check] no leakage: f1.tags == ['x'] and f2.tags == ['y']: OK
+
+======================================================================
+SECTION F — @dataclass: auto __init__/__repr__/__eq__, frozen, default_factory
+======================================================================
+@dataclass reads the annotated class attributes and GENERATES the
+dunder methods for you: __init__ (from the fields in order), __repr__
+(Name(f1=..., f2=...)), and __eq__ (field-by-field tuple comparison).
+frozen=True makes instances immutable; field(default_factory=list) is
+the dataclass fix for the shared-mutable-default trap.
+
+@dataclass
+class Pt:
+    x: int
+    y: int
+
+Pt(1, 2)                Pt(x=1, y=2)
+repr(Pt(1, 2))          'Pt(x=1, y=2)'
+Pt(1, 2) == Pt(1, 2)    True
+Pt(1, 2) is Pt(1, 2)    False
+
+[check] dataclass auto-generates __repr__: OK
+[check] dataclass auto-generates __eq__ (value equality): OK
+[check] equal values are still distinct objects (is is False): OK
+
+@dataclass(frozen=True)
+class FPt:
+    x: int
+    y: int
+
+FPt(1, 2) == FPt(1, 2)              True
+hash(FPt(1, 2)) == hash(FPt(1, 2))  True
+fp.x = 99  -> raises                'FrozenInstanceError'
+isinstance(exc, AttributeError)     True
+
+[check] frozen=True blocks setattr (FrozenInstanceError): OK
+[check] frozen instances are hashable (hash does not raise): OK
+
+@dataclass
+class WithTags:
+    name: str
+    tags: list = field(default_factory=list)
+w1 = WithTags('a'); w2 = WithTags('b')
+w1.tags.append(1); w2.tags.append(2)
+
+w1.tags                   [1]
+w2.tags                   [2]
+w1.tags is not w2.tags    True
+
+[check] default_factory builds an independent list per instance: OK
+[check] no shared-default leakage: w1.tags == [1] and w2.tags == [2]: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

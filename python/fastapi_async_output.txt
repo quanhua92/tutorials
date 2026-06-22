@@ -1,0 +1,94 @@
+fastapi_async.py — Phase 7 bundle #46.
+Every value below is computed by driving the app with TestClient;
+the .md guide pastes it verbatim. Nothing is hand-computed.
+Python 3.13.5, FastAPI 0.138.0.
+
+======================================================================
+SECTION A — async def handler: await yields, the loop stays free
+======================================================================
+GET /a -> 200 {'handler': 'async', 'awaited': True, 'watcher_ticks': 3}
+asyncio.iscoroutinefunction(a) -> True
+(the watcher ticked DURING the awaited sleep -> loop was free)
+
+[check] GET /a returned 200: OK
+[check] a is a coroutine function (async def): OK
+[check] watcher ticked fully during the awaited sleep (loop was free): OK
+
+======================================================================
+SECTION B — plain def handler: runs in a threadpool worker (no loop)
+======================================================================
+GET /s -> 200 {'handler': 'sync', 'thread': 'AnyIO worker thread', 'has_running_loop': False}
+asyncio.iscoroutinefunction(s) -> False
+(worker thread has no running loop -> blocking call is safe here)
+
+[check] GET /s returned 200: OK
+[check] s is NOT a coroutine function (plain def): OK
+[check] sync handler ran OFF the event loop (threadpool worker thread): OK
+
+======================================================================
+SECTION C — THE TRAP: time.sleep inside async def freezes the loop
+======================================================================
+GET /bad -> 200 {'before': 2, 'after_block': 2, 'after_yield': 9}
+  before time.sleep       : 2
+  AFTER  time.sleep(0.03) : 2   <- NO progress
+  AFTER  asyncio.sleep    : 9   <- resumes
+(under a real server this freezes EVERY in-flight request, not
+ just this one — the loop is shared across all of them)
+
+[check] GET /bad returned 200: OK
+[check] watcher made NO progress during time.sleep (loop frozen): OK
+[check] watcher RESUMED after the cooperative asyncio.sleep: OK
+
+======================================================================
+SECTION D — When to use async def vs plain def
+======================================================================
+Rule (FastAPI concurrency docs): a `def` path operation is run in
+an external threadpool that is then awaited; an `async def` path
+operation is called DIRECTLY on the event loop. So match the
+declaration to the work the body does:
+
+handler body calls...                           declare as  why
+------------------------------------------------------------------------------------
+await conn.fetch(...)  (asyncpg / async DB)     async def   await yields; loop free for other requests
+await client.get(...)  (httpx.AsyncClient)      async def   non-blocking HTTP; overlaps other I/O
+requests.get(...)  (sync HTTP lib)              def         threadpooled -> blocks a worker, not the loop
+time.sleep(x) / psycopg2 query (sync)           def         FastAPI threadpools it -> safe
+pure CPU, no I/O (e.g. json.dumps)              async def   no threadpool hop; stays on the loop
+
+[check] await-able async lib -> declare the handler async def: OK
+[check] blocking sync lib -> declare the handler plain def (threadpooled): OK
+
+======================================================================
+SECTION E — BackgroundTasks: the response is sent BEFORE the task runs
+======================================================================
+POST /x -> 200 {'returned': True, 'at_response': []}
+BG_LOG right after client.post() returns -> ['ran-after-response']
+(response body's 'at_response' was snapshotted BEFORE the task;
+ BG_LOG is populated only AFTER the response was sent)
+
+[check] POST /x returned 200: OK
+[check] response body built BEFORE the task ran (at_response is empty): OK
+[check] background task ran AFTER the response (BG_LOG now populated): OK
+
+======================================================================
+SECTION F — Concurrency vs parallelism: async overlaps I/O, not CPU
+======================================================================
+A FastAPI app runs ONE event loop per worker. `await` overlaps I/O
+WAITS across many requests on that one thread — that is concurrency,
+NOT parallelism. CPU-bound work (hashing, ML inference) must go to
+separate processes: a tight CPU loop never yields, so it blocks the
+loop exactly like time.sleep does.
+
+workload                        runs where              scale via
+----------------------------------------------------------------------------
+many slow I/O requests          the event loop          async handlers + async libs
+quick blocking I/O              threadpool workers      def handlers (auto-pooled)
+CPU-bound (hash, ML)            separate processes      gunicorn workers / ProcessPool
+fire-and-forget cleanup         BackgroundTasks         same loop, after the response
+
+[check] async overlaps I/O on one loop (concurrency, not parallelism): OK
+[check] CPU parallelism needs separate processes (the loop is one thread): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

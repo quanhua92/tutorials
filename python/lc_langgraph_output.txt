@@ -1,0 +1,151 @@
+lc_langgraph.py — Phase 6 bundle #42.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed. OFFLINE: the chat model is
+a FakeMessagesListChatModel (no network, no API key).
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — State schema: TypedDict + the add_messages reducer
+======================================================================
+A graph is parameterized by ONE State schema. Each key may carry a
+REDUCER (a binary (old, new) -> merged). With no reducer, updates
+OVERWRITE; with `add_messages`, list updates APPEND (and replace by
+id). A node never returns the whole state — only a PATCH.
+
+State (TypedDict) fields:
+  messages: Annotated[list, add_messages]  (id='_add_messages')
+  count   : int   (no reducer -> overwrites)
+
+[check] StateGraph(State) constructs (schema compiles): OK
+[check] messages annotation carries the add_messages reducer: OK
+[check] count has no reducer (default = overwrite): OK
+
+======================================================================
+SECTION B — A node is a function: State -> PATCH (partial state)
+======================================================================
+A node is a plain function. Its signature is State -> Partial[State].
+It does NOT return the whole state — only the keys it changes. The
+graph's REDUCERS merge the patch into the shared state.
+
+greet({messages:[HumanMessage('hello')], count:0})
+  -> {'messages': [AIMessage(content='hi', additional_kwargs={}, response_metadata={}, tool_calls=[], invalid_tool_calls=[])], 'count': 1}
+     (a PARTIAL dict — only 'messages' and 'count', no schema)
+
+[check] greet() returns a dict (the patch): OK
+[check] patch contains the 'messages' key: OK
+[check] patch['count'] is 1 (incremented): OK
+[check] the patch is NOT the whole state (no 'foo', no extras): OK
+
+======================================================================
+SECTION C — Edges START -> node -> END; compile() + invoke()
+======================================================================
+START and END are special virtual nodes. add_edge(START, x) marks x
+as the entry; add_edge(x, END) marks x as a finish. compile() turns
+the builder into a runnable; invoke(input) runs once and returns the
+final state.
+
+app.invoke({messages:[HumanMessage('hello')], count:0})
+  -> type=dict
+     messages = [HumanMessage('hello'), AIMessage('hi')]
+     count    = 1
+
+[check] invoke returns a dict: OK
+[check] the node ran (count incremented to 1): OK
+[check] the final state has the node's AIMessage: OK
+
+======================================================================
+SECTION D — The add_messages reducer APPENDS (final messages grow)
+======================================================================
+Because `messages: Annotated[list, add_messages]`, each node's
+returned messages are APPENDED to the running list (not overwriting
+it). Input of 1 Human -> node returns 1 AIMessage -> final list has
+BOTH, len == 2.
+
+input  messages len = 1  ([HumanMessage])
+output messages len = 2  (['HumanMessage', 'AIMessage'])
+the input HumanMessage is PRESERVED and the node's AIMessage is
+APPENDED — that is what the reducer buys you.
+
+[check] output messages len grew from 1 to 2: OK
+[check] first message is the input HumanMessage: OK
+[check] second message is the node's AIMessage: OK
+
+======================================================================
+SECTION E — Conditional routing: the router function picks a branch
+======================================================================
+add_conditional_edges(node, router, mapping) calls router(state)
+after `node` runs; its return value (a node NAME) selects the next
+node. The mapping {key: nodeName} translates the router's output.
+
+go="a" -> ran = ['A']
+go="b" -> ran = ['B']
+
+[check] go="a" routed to nodeA (ran == ["A"]): OK
+[check] go="b" routed to nodeB (ran == ["B"]): OK
+
+======================================================================
+SECTION F — A loop agent (offline): call_model -> tools -> call_model
+======================================================================
+This is the bridge from chains to agents. A conditional edge lets
+the graph LOOP: call_model -> should_continue -> tools -> back to
+call_model. should_continue inspects the latest AIMessage; if it
+has tool_calls, route to 'tools'; else route to END. The cycle is
+what no linear LCEL chain can express.
+
+Trace (final state messages):
+  - HumanMessage('weather in Paris?')
+  - AIMessage('' tool_calls=[{'name': 'get_weather', 'args': {'city': 'Paris'}, 'id': 'c1', 'type': 'tool_call'}])
+  - ToolMessage('Paris: 22C')
+  - AIMessage('Paris is 22C')
+
+[check] the loop terminated (did not recurse forever): OK
+[check] the final AIMessage has the tool's answer: OK
+[check] a full tool round-trip happened (4 messages: H, AI(tool), Tool, AI): OK
+[check] message #3 is the ToolMessage produced by call_tools: OK
+
+======================================================================
+SECTION G — compile() -> a runnable; invoke / stream; checkpointing
+======================================================================
+compile() returns a runnable. invoke() returns the FINAL state;
+stream() yields one chunk per super-step (one per node). Compiling
+with a checkpointer (InMemorySaver / Sqlite / Postgres) persists
+state across invocations on the same thread_id -> enables memory,
+human-in-the-loop, and resumable runs.
+
+app.stream(...) yielded 3 super-steps: ['call_model', 'call_tools', 'call_model']
+
+[check] stream yielded more than one super-step (>1 node ran): OK
+[check] stream order is call_model, call_tools, call_model: OK
+With checkpointer + thread_id='t1':
+  invoke 1 -> turns=1, messages len=2
+  invoke 2 -> turns=2, messages len=4
+state ACCUMULATED across invocations on the same thread — the basis
+of memory and human-in-the-loop.
+
+[check] turn 1: turns==1, 2 messages: OK
+[check] turn 2: turns==2 (accumulated via checkpointer): OK
+[check] turn 2: 4 messages (Human,AI,Human,AI): OK
+
+======================================================================
+SECTION H — Why LangGraph over plain LCEL
+======================================================================
+LCEL chains are LINEAR DAGs (a | b | c). Real agents need: cycles
+(call_model <-> tools), shared STATE, MEMORY across turns, and
+HUMAN-IN-THE-LOOP pauses. LangGraph is the explicit state machine
+that gives you all four. 🔗 LC_TOOLS_AGENTS (#41) shows the agent
+loop; this bundle turns that loop into a graph.
+
+LCEL chain                      LangGraph
+------------------------------------------------------------
+linear a|b|c                    state machine (cycles, branches)
+Runnable.output passes data     shared State + per-key reducers
+one-shot invoke                 invoke + stream + checkpoint
+no memory                       InMemorySaver / Sqlite / Postgres
+no pause                        interrupt() + Command(resume=...) for HITL
+recursion: N/A                  recursion_limit (default 1000)
+
+[check] LangGraph supports CYCLES (call_model visited twice): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

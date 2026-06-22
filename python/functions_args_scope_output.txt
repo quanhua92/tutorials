@@ -1,0 +1,153 @@
+functions_args_scope.py — Phase 1 bundle #6.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Argument kinds: positional, *args, **kwargs, /, and *
+======================================================================
+A parameter list has up to five slots in a fixed order:
+    def f(pos_only, /, normal, *args, kw_only, **kwargs)
+*args packs the leftover POSITIONAL args into a TUPLE; **kwargs
+packs the leftover KEYWORD args into a DICT. A bare '*' forces the
+params after it to be keyword-only; a bare '/' forces the params
+before it to be positional-only.
+
+call                              value
+--------------------------------------------------------------
+kinds(1,2,3,4,x=5,y=6)            1, 2
+  args (leftover positional)      (3, 4)
+  isinstance(args, tuple)         True
+  kwargs (leftover keyword)       {'x': 5, 'y': 6}
+  isinstance(kwargs, dict)        True
+
+signature                   call                  result
+----------------------------------------------------------------
+def kw_only(a, *, k)        kw_only(1, k=2)       (1, 2)
+def pos_only(a, /, b)       pos_only(1, 2)        (1, 2)
+
+add3(*[1, 2], **{'c': 3}) = 6
+
+[check] args is a tuple: OK
+[check] kwargs is a dict: OK
+[check] bare '*' makes following params keyword-only: OK
+[check] bare '/' makes preceding params positional-only: OK
+[check] call-site * and ** unpack into positional and keyword args: OK
+
+======================================================================
+SECTION B — The mutable-default trap: the default is built ONCE
+======================================================================
+Default values are evaluated exactly ONCE — when the 'def' runs —
+and the SAME object is reused on every call that omits that arg.
+For an immutable default (int/str/None) you never notice; for a
+MUTABLE default (list/dict/set) every call mutates the one shared
+object. The fix is `acc=None` + rebuild inside the body.
+
+expression                              result
+--------------------------------------------------------------
+append_trap(1)  -> snapshot             [1]
+append_trap(2)  -> snapshot             [1, 2]
+r1 is r2 (same shared list)             True
+id(default) before == after             True
+append_trap.__defaults__[0]             [1, 2]
+
+append_safe(1)  [None sentinel]         [1]
+append_safe(2)  [None sentinel]         [2]
+s1 is s2 (fresh list each call)         False
+
+[check] trap accumulates: append_trap(1) == [1]: OK
+[check] trap accumulates: append_trap(2) == [1, 2]: OK
+[check] both calls returned the SAME list object: OK
+[check] the default object's id() is stable across calls: OK
+[check] the None-sentinel fix gives a fresh list each call: OK
+
+======================================================================
+SECTION C — Defaults are evaluated at def-time, not call-time
+======================================================================
+Because the default expression runs once when 'def' executes (not
+each call), a default of `time.time()` captures a single timestamp
+frozen at definition time. Two calls separated by a sleep return
+the SAME value — proving call-time evaluation does NOT happen.
+
+expression                                    result
+--------------------------------------------------------------
+t1 - stamped.__defaults__[0]                  0.0
+t2 - t1  (despite a 0.05s sleep)              0.0
+t1 is t2  (literally the same float object)   True
+time.time() - t1 > 0.04  (real clock moved)   True
+
+[check] the returned value equals the frozen default exactly: OK
+[check] t2 == t1 despite the sleep (no call-time evaluation): OK
+[check] the default is literally the same float object: OK
+[check] the real wall clock HAS advanced past the frozen default: OK
+
+======================================================================
+SECTION D — LEGB resolution: Local, Enclosing, Global, Built-in
+======================================================================
+Name lookup walks four scopes in fixed order — Local -> Enclosing
+-> Global -> Built-in — and stops at the FIRST hit. Reading a name
+needs no declaration. WRITING (assignment) defaults to Local; to
+rebind an Enclosing name use 'nonlocal', to rebind a Global name
+use 'global'.
+
+expression                          result
+--------------------------------------------------------------
+inner() reads [L, E, G, B]          ['L (local)', 'E (enclosing)', 'G (global)', 'len']
+counter() x3  (nonlocal rebind)     (1, 2, 3)
+bump_global() x2  (global rebind)   (1, 2)
+
+[check] LEGB: local read wins over enclosing/global: OK
+[check] LEGB: enclosing read resolves before global: OK
+[check] LEGB: global read resolves before built-in: OK
+[check] LEGB: built-in (len) is the last fallback: OK
+[check] nonlocal lets inner rebind the enclosing counter: OK
+[check] global lets a function rebind a module-level name: OK
+
+======================================================================
+SECTION E — Assignment makes a name local for the WHOLE body
+======================================================================
+If a name is assigned ANYWHERE in a function body, the compiler
+treats it as local for the ENTIRE body — even lines BEFORE the
+assignment. So `print(x); x = 1` raises UnboundLocalError on the
+print(), although a global x exists. Reads-only stay global.
+
+expression                              result
+--------------------------------------------------------------
+reads_only()  (no assignment -> global) 99
+reads_then_writes() raises              UnboundLocalError
+  message                               "cannot access local variable 'unbound_x' where it is not associated with a value"
+
+[check] a read-only function sees the global: OK
+[check] print(x) before x=1 raises UnboundLocalError: OK
+[check] the error names the shadowed variable: OK
+
+======================================================================
+SECTION F — Closures: an inner function captures enclosing bindings
+======================================================================
+A closure is an inner function that remembers the variables of its
+ENCLOSING scope — even after the outer function has returned. The
+captured ('free') variables live in __closure__ cells; each call to
+the outer builds a NEW set of cells, so two closures are
+independent.
+
+expression                              result
+--------------------------------------------------------------
+add10(5)                                15
+add20(5)                                25
+add10.__code__.co_freevars              ('n',)
+add10.__closure__[0].cell_contents      10
+add20.__closure__[0].cell_contents      20
+
+late[0]() / late[1]() / late[2]()       (2, 2, 2)
+fixed[0]() / fixed[1]() / fixed[2]()    (0, 1, 2)
+
+[check] add10(5) == 15 (captured n == 10): OK
+[check] add20(5) == 25 (captured n == 20): OK
+[check] each adder has its OWN captured n: OK
+[check] 'n' is a free variable of adder: OK
+[check] late-binding closures all see the loop's final value (2): OK
+[check] default-arg binding freezes each value at def-time: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

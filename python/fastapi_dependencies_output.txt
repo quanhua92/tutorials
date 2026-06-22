@@ -1,0 +1,117 @@
+fastapi_dependencies.py — Phase 7 bundle #45.
+Every value below is computed by this file via TestClient; the .md
+guide pastes it verbatim. Nothing is hand-computed.
+FastAPI 0.138.0 on this machine.
+
+======================================================================
+SECTION A — Depends(fn): framework calls fn, injects its return
+======================================================================
+A 'dependable' is just a function with path-op-style params.
+FastAPI calls it for you and passes what it RETURNS to the handler.
+
+GET /items/?q=foo&skip=5  -> 200
+handler received (injected): {'q': 'foo', 'skip': 5, 'limit': 100}
+
+[check] Depends(common) injects common()'s return dict: OK
+[check] defaults fill in (limit=100): OK
+
+======================================================================
+SECTION B — Sub-dependencies: a→b→handler resolves in order
+======================================================================
+A dependency may declare its OWN Depends(). FastAPI builds the
+graph and resolves leaves-first, so each dep gets its inputs.
+
+GET /chain/  -> 200
+body: {'value_b': 'A->B', 'order': ['a', 'b', 'handler']}
+
+[check] chain resolved leaves-first: a, then b, then handler: OK
+[check] dep_a's value flowed THROUGH dep_b to the handler: OK
+
+======================================================================
+SECTION C — yield-dependency: setup before, teardown after the handler
+======================================================================
+Use `yield` (not `return`): code BEFORE+INCLUDING yield is setup
+(the yielded value is injected); code AFTER yield is teardown that
+runs after the response. This is the DB-session / resource pattern.
+
+GET /db/  -> 200
+body: {'open_at_handler': True}
+event log: ['open', 'handler', 'close']
+
+[check] setup ran BEFORE the handler: OK
+[check] handler ran after setup: OK
+[check] teardown ran AFTER the handler: OK
+[check] the yielded value (open=True) was what the handler saw: OK
+
+======================================================================
+SECTION D — Class as a dependency: FastAPI inspects __init__
+======================================================================
+A dependency only needs to be CALLABLE. A class is callable (it
+builds an instance), so FastAPI inspects its __init__ params exactly
+like a path-op's, then injects the constructed INSTANCE.
+
+GET /page/?skip=2&limit=3  -> 200
+body: {'type': 'Paginator', 'skip': 2, 'limit': 3}
+
+[check] an INSTANCE of the class was injected (not the class itself): OK
+[check] __init__ params were parsed from the query string: OK
+
+======================================================================
+SECTION E — Header() guard dependency: bad/missing token -> 401
+======================================================================
+A dependency that reads Header() and raises HTTPException is the
+guard / auth pattern: it short-circuits the request before the
+handler ever runs.
+
+GET /secure/                       -> 401
+GET /secure/  x-token=wrong        -> 401
+GET /secure/  x-token=secret       -> 200 {'token': 'secret'}
+
+[check] missing header -> 401 (dep raised): OK
+[check] bad header    -> 401 (dep raised): OK
+[check] good header   -> 200 and the dep's return was injected: OK
+
+======================================================================
+SECTION F — per-request cache: a dep used twice in one request runs once
+======================================================================
+If two params (or a sub-dep chain) ask for the SAME dependable in a
+single request, FastAPI calls it ONCE and reuses the cached value.
+
+GET /twin/  -> 200
+body: {'first': 1, 'second': 1, 'dep_calls': 1}
+
+[check] both params received the SAME cached value: OK
+[check] dep called exactly ONCE even though injected twice: OK
+
+======================================================================
+SECTION G — App-level deps: dependencies=[...] runs for every route
+======================================================================
+FastAPI(app, dependencies=[...]) (or the same kwarg on an APIRouter)
+runs those deps for every path op, even handlers that ignore them.
+
+GET /r1/ -> 200 {'route': 'r1'}
+GET /r2/ -> 200 {'route': 'r2'}
+audit dep ran 2 time(s) across 2 requests
+
+[check] /r1/ still returns its own body: OK
+[check] /r2/ still returns its own body: OK
+[check] app-level dep ran for EVERY route (2 requests -> 2 runs): OK
+
+======================================================================
+SECTION H — dependency_overrides: swap a dep for tests (preview)
+======================================================================
+app.dependency_overrides[real] = fake makes FastAPI call `fake`
+instead of `real` everywhere. Reset with = {} . This is the testing
+lever (full treatment in FASTAPI_TESTING).
+
+no override   : {'env': 'production', 'debug': False}
+override set  : {'env': 'test', 'debug': True}
+override reset: {'env': 'production', 'debug': False}
+
+[check] without override the REAL dep ran: OK
+[check] app.dependency_overrides swapped real -> fake: OK
+[check] resetting overrides restored the real dep: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

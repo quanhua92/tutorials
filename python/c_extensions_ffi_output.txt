@@ -1,0 +1,216 @@
+c_extensions_ffi.py — Phase 4 bundle #26.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Only stdlib is used (ctypes loads libc). Cython, cffi, and
+PyO3 are EXPLAINED in the .md; their snippets appear here as text,
+never executed. Timing digits are ILLUSTRATIVE (vary per run); we
+assert only structural / relative facts.
+Python 3.13.5 on darwin on this machine.
+
+======================================================================
+SECTION A — Load a shared library: ctypes.CDLL(find_library('c'))
+======================================================================
+ctypes (stdlib) is the gateway to native code: it dlopen()s a shared
+library (.so on Linux, .dylib on macOS, .dll on Windows) and binds
+each exported C symbol to a callable Python object. No compiler, no
+build step — just find_library() + CDLL().
+
+sys.platform = 'darwin'
+ctypes.util.find_library('c') = '/usr/lib/libc.dylib'
+libc = ctypes.CDLL('/usr/lib/libc.dylib')
+libc._handle = 0x310646728 (the dlopen handle)
+libc.atof    = <_FuncPtr object at 0x100dbaf90>
+libc.strlen  = <_FuncPtr object at 0x100dbaed0>
+
+[check] find_library('c') returns a non-empty path/name: OK
+[check] CDLL loads (libc._handle is set): OK
+[check] libc.atof is a callable _FuncPtr: OK
+
+======================================================================
+SECTION B — Declare argtypes/restype, then call real C functions
+======================================================================
+If you skip argtypes/restype ctypes guesses (often wrong): it assumes
+c_int return and C-int arguments. The docs REQUIRE setting them for
+any function returning non-int (e.g. c_double) or taking pointers.
+
+call                            result      type
+----------------------------------------------------------
+libc.atof(b'3.14')              3.14        float
+libc.atof(b'-2.5')              -2.5        float
+libc.strlen(b'hello')           5           int
+libc.strlen(b'')                0           int
+libc.abs(-42)                   42          int
+libc.abs(7)                     7           int
+
+[check] libc.atof(b'3.14') == 3.14 (exact double): OK
+[check] libc.strlen(b'hello') == 5: OK
+[check] libc.strlen(b'') == 0: OK
+[check] libc.abs(-42) == 42: OK
+[check] libc.atof returns a Python float (c_double marshalled): OK
+[check] libc.abs returns a Python int (c_int marshalled): OK
+
+======================================================================
+SECTION C — ctypes.Structure: a C-shaped record; byref/pointer/memset
+======================================================================
+A ctypes.Structure with _fields_ is byte-identical to a C struct: it
+occupies sizeof(fields) bytes, fields sit at documented offsets, and
+you can hand its address to any C function that takes a pointer.
+
+p = CPoint(7, 9)
+  p.x, p.y          = 7, 9
+  ctypes.sizeof(p)  = 8  (== sizeof(int)*2)
+  CPoint.x.offset   = 0  (byte offset of field x)
+  CPoint.y.offset   = 4  (byte offset of field y)
+  ctypes.addressof(p) = 4313290264
+
+after p.x=100, p.y=-5:  p.x, p.y = 100, -5
+[check] Structure fields read back what was written: OK
+after memset(byref(p), 0, sizeof(p)): p.x, p.y = 0, 0  (C zeroed the struct's bytes in place)
+
+[check] memset via byref zeroed the struct in place: OK
+[check] sizeof(CPoint) == 8 (two 4-byte c_ints, no padding): OK
+[check] field offsets are 0 and 4 (packed back-to-back): OK
+
+======================================================================
+SECTION D — The cost model: every ctypes call marshals across a boundary
+======================================================================
+ctypes is NOT magic free speed. Each call: (1) acquires the GIL (it
+is always held), (2) boxes each Python arg into its C type, (3) calls
+the C function, (4) boxes the C result back to a PyObject. For ONE
+call that does a lot of C work (strlen on 1 MB) C wins; for a call in
+a tight Python loop doing trivial work, the marshalling dominates and
+the builtin beats libc. This is why cffi/Cython exist: they amortize
+the boundary by compiling the loop itself into C.
+
+per-op (tight loop, trivial work):
+  builtin abs(-1) :    12.9 ns  (varies per run)
+  libc.abs(-1)    :   163.2 ns  (varies per run)
+  ctypes/builtin  :    12.7x SLOWER per op (marshalling tax)
+
+strlen(1 MB buffer), ONE call into the lib:
+  libc.strlen :  15.996 us  (varies per run)
+  len(bytes)  :   0.019 us  (varies per run)
+
+[check] in a tight loop, ctypes abs is SLOWER than builtin abs: OK
+[check] the per-op marshalling tax is meaningful (ratio > 2x): OK
+[check] strlen(1MB) returns 1_000_000 from libc: OK
+
+======================================================================
+SECTION E — cffi overview: ABI vs API mode (conceptual; not run here)
+======================================================================
+cffi is the next rung up. You write plain C declarations; cffi parses
+them and either talks to the lib directly (ABI mode, like ctypes) or
+compiles a dedicated C-extension shim (API mode, faster). The four
+modes (per the cffi overview doc):
+
+mode                  preparation               speed     notes
+--------------------------------------------------------------------------------------------
+ABI, in-line          ffi.dlopen()              slowest   no compiler; accesses the binary ABI like ctypes
+ABI, out-of-line      ffi.set_source()          slow      precompiles the cdef; still ABI-level calls
+API, in-line          ffi.verify()              fast      compiles a shim at import time; C-source level
+API, out-of-line      ffi.set_source()+build    fastest   the recommended mode; ships a prebuilt extension
+
+The cffi overview doc's recommendation: prefer 'API, out-of-line' for
+production — it compiles once at install time and gives ctypes-like
+ergonomics with C-like call speed.
+
+Conceptual snippet (NOT executed — cffi is not a stdlib module):
+    from cffi import FFI
+    ffi = FFI()
+    ffi.cdef("double atof(const char *s);")
+    lib = ffi.dlopen(ctypes.util.find_library("c"))
+    lib.atof(b"3.14")   # -> 3.14  (same call, parsed-from-C types)
+
+[check] cffi has exactly two levels (ABI, API) crossed with two prep modes: OK
+
+======================================================================
+SECTION F — Cython: compile a typed Python superset to C (conceptual)
+======================================================================
+Cython is a language + compiler: a superset of Python where you add C
+type declarations (cdef/cpdef). The Cython compiler translates a .pyx
+file into C, then your C compiler turns that into a Python extension
+module (.so/.pyd). The build needs a setup.py + a C toolchain.
+
+Conceptual fib .pyx (NOT executed here — needs the build step):
+
+    # fastfib.pyx
+    cdef long _fib(long n):             # cdef: C-only, not seen by Python
+        if n < 2:
+            return n
+        return _fib(n - 1) + _fib(n - 2)
+
+    cpdef long fib(long n):             # cpdef: callable from Python
+        return _fib(n)
+
+    # setup.py
+    from setuptools import setup
+    from Cython.Build import cythonize
+    setup(ext_modules=cythonize("fastfib.pyx"))
+
+    # build & import:
+    $ python setup.py build_ext --inplace
+    >>> import fastfib; fastfib.fib(30)   # runs as compiled C
+
+Because the recursion happens in C with C longs, fib(30) is ~10-100x
+faster than the pure-Python version — no per-call marshalling.
+
+[check] the Cython build chain is .pyx -> C source -> extension module: OK
+
+======================================================================
+SECTION G — PyO3: expose Rust to Python via maturin (conceptual)
+======================================================================
+PyO3 is the inverse direction: write a Rust crate, decorate fns with
+#[pyfunction], and the maturin build tool produces an importable
+Python extension module. You get Rust's memory safety + speed with no
+manual refcounting beyond what PyO3's wrappers already encode.
+
+Conceptual Rust src/lib.rs (NOT executed here — needs cargo + maturin):
+
+    use pyo3::prelude::*;
+
+    #[pyfunction]
+    fn fib(n: u64) -> u64 {                 // plain Rust fn
+        if n < 2 { n }
+        else { fib(n - 1) + fib(n - 2) }
+    }
+
+    #[pymodule]
+    fn fastfib(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add_function(wrap_pyfunction!(fib, m)?)?;
+        Ok(())
+    }
+
+    # build & import:
+    $ maturin develop --release
+    >>> import fastfib; fastfib.fib(30)    # Rust, called from Python
+
+PyO3 + maturin is now the standard path for Rust<->Python; libraries
+like polars, pydantic-core, and cryptography are built this way.
+
+[check] the PyO3 build chain is Rust crate -> maturin -> extension module: OK
+
+======================================================================
+SECTION H — When to drop out of pure Python: the speed-vs-complexity ladder
+======================================================================
+Drop to native ONLY after profiling proves a hot loop. Every rung up
+the ladder adds BUILD COMPLEXITY (a compiler toolchain, a build step,
+harder debugging, cross-platform packaging). Pay it only when the
+profile says the win is real.
+
+rung                speed           build cost                        best for
+----------------------------------------------------------------------------------------------------
+pure Python         1x (baseline)   none (interpreter only)           the 97% case; algorithms + builtins first
+array/numpy         5-50x           pip install numpy                 vectorized numeric; no per-element Python
+ctypes (stdlib)     ~1x per op*     none (stdlib)                     call a small C fn, or wrap a vendor .so
+cffi API mode       5-50x bulk      C compiler at build time          ergonomic C wrappers; CFFI from cdef
+Cython .pyx         10-100x         Cython + C compiler + setup.py    typed numeric loops, wrapping C/C++
+PyO3 + maturin      10-100x         Rust + cargo + maturin            safe rewrite, parallel threads, no GIL opt.
+
+* ctypes per-op is SLOWER than the builtin (Section D); it wins only
+when ONE call does a lot of C work (strlen, a vendor DSP call, ...).
+
+[check] the ladder has six rungs from pure Python to PyO3: OK
+[check] pure Python is rung 0 (always try this first): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

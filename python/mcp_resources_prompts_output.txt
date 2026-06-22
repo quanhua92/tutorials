@@ -1,0 +1,150 @@
+mcp_resources_prompts.py — Phase 8 bundle #52.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5, FastMCP 3.4.2.
+
+======================================================================
+SECTION A — @mcp.resource: list_resources + read_resource
+======================================================================
+A resource is DATA the server exposes, addressed by a URI. The host
+discovers it via list_resources and reads it via read_resource. It is
+read-only CONTEXT the host attaches to the conversation.
+
+uri                 name          mimeType
+--------------------------------------------
+config://app        get_config    text/plain
+logs://tail         tail_log      text/plain
+metrics://q1        q1_metrics    application/json
+
+read_resource('config://app') -> '{"theme": "dark", "version": "1.0"}'
+
+[check] config://app appears in list_resources: OK
+[check] read_resource returns the JSON config blob: OK
+
+======================================================================
+SECTION B — URI addressing: resource=DATA by URI vs tool=ACTION by name
+======================================================================
+Resources are DATA keyed by URI (read-only, host-attached). Tools are
+ACTIONS keyed by NAME (model-invoked, may have side effects). The two
+live in SEPARATE namespaces: list_resources != list_tools.
+
+list_tools()      -> ['send_email']
+list_resources()  -> ['config://app', 'logs://tail', 'metrics://q1']
+
+call_tool('send_email', ...) -> 'sent to bob'
+side-effect log `sent`       -> ['bob: hi']
+
+[check] send_email is a TOOL (in list_tools): OK
+[check] send_email is NOT a resource (not in list_resources): OK
+[check] config://app is a RESOURCE (in list_resources): OK
+[check] calling the tool produced a side effect (sent grew): OK
+
+======================================================================
+SECTION C — Resource templates: a URI with {variables}
+======================================================================
+A resource TEMPLATE has {var} placeholders in the URI. It does NOT
+appear in list_resources — it appears in list_resource_templates, and
+the client reads a CONCRETE instance by filling in the variable.
+
+uriTemplate='users://{uid}/profile'  name='user_profile'
+
+template uri 'users://{uid}/profile' in list_resources? False
+
+read_resource('users://42/profile') -> {"uid": "42", "name": "user-42", "active": true}
+read_resource('users://7/profile') -> {"uid": "7", "name": "user-7", "active": true}
+
+[check] the template appears in list_resource_templates: OK
+[check] the template does NOT appear in list_resources (it is a factory): OK
+[check] uid=42 instance carries uid 42: OK
+[check] uid=7 instance carries uid 7 (the URI variable parameterized it): OK
+
+======================================================================
+SECTION D — @mcp.prompt: list_prompts + get_prompt
+======================================================================
+A prompt is a reusable, server-authored instruction TEMPLATE the host
+surfaces. list_prompts publishes them; get_prompt renders one with
+arguments. Parameters with defaults are optional.
+
+published prompts (sorted): ['code_review', 'summarize']
+
+code_review
+  description: Review source code for bugs and style.
+  arguments:   language (required), code (required)
+summarize
+  description: Summarize text in a given tone (multi-message template).
+  arguments:   text (required), tone (optional)
+
+get_prompt('code_review', ...) -> 1 message(s)
+
+[check] code_review appears in list_prompts: OK
+[check] summarize appears in list_prompts: OK
+[check] code_review args: language & code both required: OK
+
+======================================================================
+SECTION E — Rendered prompt: a prompt returns a list of messages
+======================================================================
+A prompt function may return a str (auto-wrapped as ONE user message)
+or a list[Message] (a multi-message conversation). get_prompt returns
+a GetPromptResult whose .messages carry role + content.
+
+code_review (returned a str):
+  role='user'  text='Review this python for bugs and style:\nx = 1'
+
+summarize (returned a list[Message]):
+  role='user'  text='Summarize the following in a wry tone.'
+  role='user'  text='MCP has three primitives.'
+
+[check] str-returning prompt -> exactly one message: OK
+[check] that message has role 'user': OK
+[check] that message text embeds both args: OK
+[check] list-returning prompt -> two messages: OK
+[check] summarize second message carries the source text: OK
+
+======================================================================
+SECTION F — When a prompt beats a tool (the expert move)
+======================================================================
+TOOL   = a CAPABILITY the model drives for side-effects/data-fetch
+         (send_email, query_db). The model decides when to call it.
+PROMPT = a RECIPE the server authors and the host surfaces to the
+         user/model ("code review", "summarize"). It injects
+         STRUCTURE/instructions, not a capability.
+
+get_prompt('code_review') -> 'Review this python for bugs and style:\nx = 1'
+  side-effect log `sent` unchanged? True
+
+call_tool('send_email')   -> 'sent to carol'
+  side-effect log `sent` grew?     True
+
+[check] getting a prompt has NO side effect: OK
+[check] calling a tool HAS a side effect (sent now has carol): OK
+[check] the prompt injected an instruction (not a capability): OK
+
+======================================================================
+SECTION G — The three primitives: tools vs resources vs prompts
+======================================================================
+primitive  what it is            keyed by    triggered by        side fx    MCP methods                 decorator
+---------  --------------------  ----------  ------------------  ---------  --------------------------  --------------------
+tools      ACTION / capability   name        model (LLM)         yes (may)  tools/list, tools/call      @mcp.tool
+resources  read-only DATA        URI         host/app attaches   no         resources/list, resources/read  @mcp.resource("uri")
+prompts    instruction TEMPLATE  name        user/host surfaces  no         prompts/list, prompts/get   @mcp.prompt
+
+
+======================================================================
+SECTION H — MIME types & structured resource contents
+======================================================================
+A resource may declare a mime_type and return structured data. A str
+defaults to text/plain; a dict/list is JSON-encoded and can be tagged
+application/json so the host knows how to render it.
+
+uri               mimeType              text
+------------------------------------------------------------------
+config://app      text/plain            {"theme": "dark", "version": "1.0"}
+metrics://q1      application/json      {"quarter": "Q1", "revenue": 1000, "users": 42}
+
+[check] str resource defaults to text/plain: OK
+[check] metrics resource is tagged application/json: OK
+[check] metrics text parses back to the structured dict: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

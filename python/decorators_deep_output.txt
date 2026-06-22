@@ -1,0 +1,180 @@
+decorators_deep.py — Phase 2 bundle #14.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Desugaring: @deco is sugar for f = deco(f)
+======================================================================
+A decorator is a HIGHER-ORDER function: it takes a function and
+returns a (usually wrapped) function. The '@' syntax is PURE sugar.
+These two are identical:
+    @log_calls                  def _mul(a, b): ...
+    def add(a, b): ...          mul = log_calls(_mul)
+(PEP 318; language reference 8.7: 'the result must be a callable
+invoked with the function object as the only argument; the returned
+value is bound to the function name'.)
+
+calling add(2, 3):
+    log: add(*(2, 3), **{}) -> 5
+calling mul(2, 4):
+    log: _mul_core(*(2, 4), **{}) -> 8
+
+expression                  result
+--------------------------------------------
+add(2, 3)                   5
+mul(2, 4)                   8
+
+[check] @log_calls add(2,3) returns the original result 5: OK
+[check] manual desugar mul=log_calls(_mul_core) returns 8: OK
+[check] both forms produce the SAME kind of wrapper object: OK
+
+======================================================================
+SECTION B — Closures recap (wrapper remembers func) + functools.wraps
+======================================================================
+A decorator's wrapper is an inner function that CLOSES OVER 'func'.
+After the outer returns, the wrapper still holds func alive in a
+__closure__ cell. WITHOUT @wraps the wrapper steals the original's
+identity (__name__ becomes 'wrapper'); WITH @wraps the name, doc,
+and __wrapped__ are preserved.
+
+expression                                  result
+--------------------------------------------------------------
+original_plain.__code__.co_freevars         ('func',)
+WRAPPER_ASSIGNMENTS (what @wraps copies)    ('__module__', '__name__', '__qualname__', '__doc__', '__annotations__', '__type_params__')
+original_plain.__name__  (NO wraps)         'wrapper'
+original_nice.__name__   (WITH wraps)       'original_nice'
+original_nice.__doc__    (WITH wraps)       'the nice docstring.'
+original_nice.__wrapped__ is the original   True
+
+[check] the wrapper closes over 'func' (a free variable): OK
+[check] WITHOUT @wraps the name is stolen -> 'wrapper': OK
+[check] WITH @wraps __name__ is preserved -> 'original_nice': OK
+[check] WITH @wraps __doc__ is preserved: OK
+[check] WITH @wraps __wrapped__ points back at the original: OK
+
+======================================================================
+SECTION C — A timing decorator: measuring wall time per call
+======================================================================
+The wrapper records time.perf_counter() before/after the call.
+The RESULT is fully deterministic; the elapsed value is a measured
+float (we assert its TYPE and sign, never a hardcoded number).
+
+expression                                  result
+------------------------------------------------------------------
+slow_sum(10)                                45
+slow_sum.last_elapsed is a float            True
+slow_sum.last_elapsed > 0.0                 True
+slow_sum(1_000_000)                         499999500000
+bigger loop measured a LARGER elapsed       True
+
+[check] slow_sum(10) == 45 (sum 0..9): OK
+[check] slow_sum(1_000_000) == 499999500000 (sum 0..999999): OK
+[check] last_elapsed is a float: OK
+[check] the decorator measured a non-negative elapsed: OK
+[check] 1M-iteration loop took longer than a 10-iteration loop: OK
+
+======================================================================
+SECTION D — Parametrized decorator: @repeat(n=3), THREE nesting levels
+======================================================================
+@repeat(n=3) is NOT repeat applied to the function — it is repeat
+CALLED with n=3, which RETURNS the real decorator. That needs three
+nested scopes (factory -> decorator -> wrapper). Note the ambiguity:
+@deco      => f = deco(f)           (deco receives the function)
+@deco()    => f = deco()(f)          (deco receives nothing; returns
+                                     a decorator that receives f)
+
+expression                                    result
+----------------------------------------------------------------------
+repeat.__code__.co_varnames (factory params)  ('n', 'decorator')
+announce("hi") return value               'hi'
+body actually ran (len(calls))            3
+calls list                                ['hi', 'hi', 'hi']
+
+[check] @repeat(n=3) ran the body exactly 3 times: OK
+[check] @repeat(n=3) returns the LAST call's result: OK
+[check] repeat is a factory taking parameter n: OK
+
+======================================================================
+SECTION E — Class decorators: modifying the class object itself
+======================================================================
+A decorator on a 'class' statement receives the CLASS object (not an
+instance) and returns the class — usually with extra attributes added.
+Desugar is identical to functions: @add_helpers class C: ... means
+C = add_helpers(C) (language reference 8.8).
+
+expression                              result
+----------------------------------------------------------------
+hasattr(Point, "describe")              True
+"describe" in Point.__dict__            True
+p.describe()                            Point instance with {'x': 1, 'y': 2}
+
+[check] the class decorator ADDED 'describe' to the class: OK
+[check] the added method is callable on an instance: OK
+[check] the original __init__ still runs (p.x == 1): OK
+
+======================================================================
+SECTION F — Stacking: @a / @b applies BOTTOM-UP (f = a(b(f)))
+======================================================================
+The decorator NEAREST the function is applied first. So
+    @a
+    @b
+    def f(): ...
+desugars to f = a(b(f)). At CALL time the wrappers nest: a enters,
+calls b, b enters, calls the body, then they unwind inside-out.
+
+expression                        result
+----------------------------------------------------------
+greet() return value              'hi'
+call order (a wraps b wraps body) ['a-in', 'b-in', 'body', 'b-out', 'a-out']
+
+[check] at call time the outer wrapper (a) enters FIRST: OK
+[check] call order is a-in, b-in, body, b-out, a-out: OK
+[check] the wrapped function still returns 'hi': OK
+
+======================================================================
+SECTION G — The late-binding-closure trap (closures bind VARIABLES)
+======================================================================
+Closures capture the VARIABLE (a cell pointing at the name), not a
+frozen VALUE. A list comprehension's loop variable keeps changing, so
+every lambda built in the loop sees the loop's FINAL value when
+called later. Fix: bind each value eagerly via a default arg
+(lambda i=i: i) or functools.partial.
+
+expression                              result
+----------------------------------------------------------------
+late[0](), late[1](), late[2]()         (2, 2, 2)
+fixed[0](), fixed[1](), fixed[2]()      (0, 1, 2)
+via_partial[0](), [1](), [2]()          (0, 1, 2)
+
+[check] TRAP: all late lambdas return the loop's FINAL value (2): OK
+[check] FIX (default arg): each lambda returns its own value 0,1,2: OK
+[check] FIX (functools.partial): same correct values 0,1,2: OK
+
+======================================================================
+SECTION H — functools.lru_cache: memoization via a cached decorator
+======================================================================
+lru_cache(maxsize=None) (a.k.a. functools.cache) memoizes: the FIRST
+call with given args runs the body; later calls with the SAME args
+return the cached result (a 'hit') without re-running the body.
+cache_info() reports (hits, misses, maxsize, currsize).
+
+expression                                result
+------------------------------------------------------------------
+fib(10)                                   55
+body_runs after first fib(10)             11
+cache_info() after first fib(10)          CacheInfo(hits=8, misses=11, maxsize=None, currsize=11)
+fib(10) again (== 55)                     55
+body_runs after second fib(10)            11
+cache_info() after second fib(10)         CacheInfo(hits=9, misses=11, maxsize=None, currsize=11)
+fib([1,2]) raises                         TypeError
+
+[check] fib(10) == 55: OK
+[check] with cache, fib(10) runs the body only 11 times (fib 0..10): OK
+[check] the second fib(10) is a cache HIT (body did not run again): OK
+[check] currsize == 11 (one entry per distinct arg): OK
+[check] unhashable args (a list) raise TypeError: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

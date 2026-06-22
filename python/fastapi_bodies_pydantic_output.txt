@@ -1,0 +1,161 @@
+fastapi_bodies_pydantic.py — Phase 7 bundle #44.
+Every status code and JSON body below is produced in-process by
+fastapi.testclient.TestClient; NO real HTTP server is started.
+Python 3.13.5  FastAPI 0.138.0  Pydantic 2.13.4.
+
+
+======================================================================
+SECTION A — A Pydantic model in the signature IS the JSON body
+======================================================================
+Posting JSON to /items; FastAPI parses it into a validated `Item`
+instance and hands that to the handler. The handler echoes 3 fields.
+
+POST /items {'name': 'widget', 'price': 9.99, 'sku': 'ABC123', 'quantity': 5}
+  status: 200
+  body:   {'name': 'widget', 'price': 9.99, 'tag': None}
+
+[check] status == 200 for valid body: OK
+[check] handler received typed Item (name echoed): OK
+[check] price preserved as float: OK
+[check] optional `tag` defaults to None: OK
+
+======================================================================
+SECTION B — Missing required field -> 422 with loc=[body,<field>]
+======================================================================
+Posting {name:'ok'} with price/sku/quantity MISSING. Pydantic raises
+ValidationError; FastAPI maps it to HTTP 422 with a `detail` list.
+
+POST /items {'name':'ok'}
+  status: 422
+  detail (3 errors):
+    type=missing    loc=['body', 'price']  msg='Field required'
+    type=missing    loc=['body', 'sku']  msg='Field required'
+    type=missing    loc=['body', 'quantity']  msg='Field required'
+
+[check] status == 422 for invalid body: OK
+[check] loc points at body.price: OK
+[check] loc points at body.sku: OK
+[check] loc points at body.quantity: OK
+[check] every reported error is type 'missing': OK
+
+======================================================================
+SECTION C — Field(gt/lt/ge/le/min_length/max_length/pattern) -> 422 gates
+======================================================================
+Each Field(...) constraint becomes a validation gate; violating any
+one yields 422 with a distinct `type` tag. Probing each gate:
+
+probe                           status   type                      loc
+------------------------------------------------------------------------------
+price <= 0   (gt=0)             422      greater_than              ['body', 'price']
+[check] price <= 0   (gt=0) -> 422 with greater_than at ['body', 'price']: OK
+price > 100  (le=100)           422      less_than_equal           ['body', 'price']
+[check] price > 100  (le=100) -> 422 with less_than_equal at ['body', 'price']: OK
+name 'a'     (min_length=2)     422      string_too_short          ['body', 'name']
+[check] name 'a'     (min_length=2) -> 422 with string_too_short at ['body', 'name']: OK
+name too long(max_length=8)     422      string_too_long           ['body', 'name']
+[check] name too long(max_length=8) -> 422 with string_too_long at ['body', 'name']: OK
+sku 'abc123' (pattern)          422      string_pattern_mismatch   ['body', 'sku']
+[check] sku 'abc123' (pattern) -> 422 with string_pattern_mismatch at ['body', 'sku']: OK
+quantity 0   (ge=1)             422      greater_than_equal        ['body', 'quantity']
+[check] quantity 0   (ge=1) -> 422 with greater_than_equal at ['body', 'quantity']: OK
+quantity 9999(lt=1000)          422      less_than                 ['body', 'quantity']
+[check] quantity 9999(lt=1000) -> 422 with less_than at ['body', 'quantity']: OK
+
+
+======================================================================
+SECTION D — Nested BaseModels validate recursively (loc has 3 segments)
+======================================================================
+User.address is an Address sub-model; errors inside it produce a
+`loc` with THREE segments: body -> address -> <field>.
+
+POST /users {'name': 'ann', 'address': {'city': 'NYC', 'zip_code': '10001'}, 'tags': ['a', 'b']}
+  status: 200  body: {'name': 'ann', 'city': 'NYC', 'tags': 2}
+
+POST /users {'name': 'ann', 'address': {'city': 'NYC', 'zip_code': 'bad'}}
+  status: 422
+    loc=['body', 'address', 'zip_code']  msg="String should match pattern '^\\d{5}$'"
+
+[check] valid nested body -> 200: OK
+[check] nested ok: name == 'ann': OK
+[check] nested ok: city parsed from sub-model: OK
+[check] invalid nested -> 422: OK
+[check] loc has 3 segments (body,address,zip_code): OK
+
+======================================================================
+SECTION E — Optional `tag: str | None = None` + extra='forbid'/'ignore'
+======================================================================
+Default extra policy is 'ignore' (unknown fields silently dropped).
+extra='forbid' REJECTS unknown fields with a 422 (loc=[body,<field>]).
+
+omit optional `tag` -> tag=None
+[check] optional field omitted -> None: OK
+
+POST /loose {'name':'x','bogus':1}  (extra='ignore')
+  status: 200  body: {'name': 'x'}
+[check] extra='ignore' drops unknown field (200): OK
+[check] extra='ignore' returned only `name`: OK
+
+POST /strict {'name':'x','bogus':1}  (extra='forbid')
+  status: 422
+    type=extra_forbidden    loc=['body', 'bogus']  msg='Extra inputs are not permitted'
+
+[check] extra='forbid' rejects unknown field (422): OK
+[check] extra='forbid' loc points at body.bogus: OK
+[check] extra='forbid' error type is 'extra_forbidden': OK
+
+======================================================================
+SECTION F — response_model filters the output (drops undeclared fields)
+======================================================================
+Handler returns a dict with a `secret` key; response_model=ItemOut
+(name, price only) strips `secret` from the serialized response.
+
+GET /filtered  (handler returns name+price+secret)
+  status: 200
+  body:   {'name': 'widget', 'price': 9.99}
+  keys:   ['name', 'price']
+
+[check] response_model route -> 200: OK
+[check] response_model keeps `name`: OK
+[check] response_model keeps `price`: OK
+[check] response_model DROPS `secret`: OK
+[check] only declared fields survive: OK
+
+======================================================================
+SECTION G — Body + path + query: FastAPI disambiguates by parameter TYPE
+======================================================================
+Rule: param matching {item_id} -> path; Pydantic model -> body;
+singular scalar (int/str/...) with a default -> query.
+
+PUT /items/42?q=hello  json={'name': 'ok', 'price': 1.0, 'sku': 'ABC123', 'quantity': 1}
+  status: 200  body: {'item_id': 42, 'name': 'ok', 'q': 'hello'}
+
+[check] mixed signature -> 200: OK
+[check] item_id parsed from PATH (int 42): OK
+[check] item.name parsed from BODY: OK
+[check] q parsed from QUERY ('hello'): OK
+PUT /items/7  (no ?q=)  -> q=None
+[check] q defaults to None when query absent: OK
+
+======================================================================
+SECTION H — Enum & datetime serialize cleanly to JSON (round-trip)
+======================================================================
+Pydantic v2's serializer knows how to JSON-encode Enum (its value),
+datetime (ISO 8601), date, UUID, etc. The handler doesn't do it.
+
+POST /events {'color': 'red', 'at': '2024-01-15T10:30:00'}
+  status: 200
+  body:   {'color': 'red', 'value': 'red', 'at_iso': '2024-01-15T10:30:00'}
+
+POST /events {'color':'purple',...}
+  status: 422
+    type=enum     loc=['body', 'color']  msg="Input should be 'red' or 'green'"
+
+[check] valid enum + datetime -> 200: OK
+[check] enum serializes to its value: OK
+[check] datetime round-trips as ISO 8601: OK
+[check] invalid enum value -> 422: OK
+[check] invalid enum loc is body.color: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

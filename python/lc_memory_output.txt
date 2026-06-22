@@ -1,0 +1,157 @@
+lc_memory.py — Phase 6 bundle #39.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: the model is a
+FakeMessagesListChatModel subclass (no network, no API key).
+langchain-core 1.4.8 on this machine.
+
+======================================================================
+SECTION A — Chat history is a list of messages, keyed by session
+======================================================================
+A chat model is stateless: each .invoke is independent. Memory = YOU
+keep a list of HumanMessage / AIMessage per conversation. A plain dict
+keyed by session_id is the simplest store.
+
+sessions["a"] after 3 appends:
+  human  : hi
+  ai     : hello
+  human  : my name is Sam
+
+sessions.get('b') = <missing>  ('b' was never touched)
+
+[check] history grows: sessions['a'] has 3 messages: OK
+[check] sessions are isolated: 'b' was never created: OK
+[check] first turn is a HumanMessage: OK
+[check] second turn is an AIMessage: OK
+
+======================================================================
+SECTION B — MessagesPlaceholder renders the history list into the prompt
+======================================================================
+MessagesPlaceholder('history') reserves a slot in a ChatPromptTemplate
+for an arbitrary list of BaseMessage. At invoke time the history list is
+spliced inline — system + history + new question render together.
+
+PROMPT.input_variables = ['history', 'question']
+rendered message count: 5  (system + 3 history + 1 question)
+  system : You are a concise assistant.
+  human  : hi
+  ai     : hello
+  human  : my name is Sam
+  human  : What is my name?
+
+[check] input_variables are history + question: OK
+[check] rendered 5 messages (system + 3 history + 1 question): OK
+[check] history[0] ('hi') spliced into the rendered prompt: OK
+[check] history AIMessage ('hello') preserved verbatim: OK
+[check] {question} substituted into the final human turn: OK
+
+======================================================================
+SECTION C — Manual history loop: append human -> run -> append ai
+======================================================================
+The explicit, modern pattern in six lines: take (session_id, question),
+append the HumanMessage, run prompt | model with history=prior turns,
+append the AIMessage back. No hidden state, fully testable.
+
+chat('alice', "I'm Sam.")   -> 'Hi Sam, nice to meet you.'
+chat('alice', "Who am I?")  -> 'Your name is Sam.'
+
+sessions['alice'] (4 messages):
+  human  : I'm Sam.
+  ai     : Hi Sam, nice to meet you.
+  human  : Who am I?
+  ai     : Your name is Sam.
+
+model saw on turn 2: [('SystemMessage', 'You are a concise assistant.'), ('HumanMessage', "I'm Sam."), ('AIMessage', 'Hi Sam, nice to meet you.'), ('HumanMessage', 'Who am I?')]
+(system + turn-1 human + turn-1 ai + new human question)
+
+[check] store holds 4 messages after 2 turns (2 human + 2 ai): OK
+[check] turn 2 sent 4 msgs to the model (sys + H1 + AI1 + H2): OK
+[check] turn 1's HumanMessage reached the model on turn 2: OK
+[check] turn 1's AIMessage reached the model on turn 2: OK
+
+======================================================================
+SECTION D — RunnableWithMessageHistory: auto load -> run -> save by session_id
+======================================================================
+RunnableWithMessageHistory wraps a runnable + a get_session_history
+factory. On each invoke it: loads history from the store keyed by
+'session_id' in config['configurable'], injects it at history_messages_key,
+runs, then saves the new human+ai turn. Same session_id sees prior turns;
+a different id starts fresh.
+
+alice turn 1 -> 'Hi Sam, nice to meet you.'
+alice turn 2 -> 'Your name is Sam.'   (model saw turn 1)
+bob   turn 1 -> "I don't know your name yet."   (fresh session, never saw 'Sam')
+
+session_store['alice'].messages (4):
+  human  : I'm Sam.
+  ai     : Hi Sam, nice to meet you.
+  human  : Who am I?
+  ai     : Your name is Sam.
+session_store['bob'].messages (2):
+  human  : Who am I?
+  ai     : I don't know your name yet.
+
+model saw on alice turn 2: [('SystemMessage', 'You are a concise assistant.'), ('HumanMessage', "I'm Sam."), ('AIMessage', 'Hi Sam, nice to meet you.'), ('HumanMessage', 'Who am I?')]
+model saw on bob turn 1:    [('SystemMessage', 'You are a concise assistant.'), ('HumanMessage', 'Who am I?')]
+
+[check] same session_id persists: alice store has 4 messages after 2 turns: OK
+[check] different session_id is isolated: bob store has 2 messages: OK
+[check] alice turn 2 saw turn 1's human turn: OK
+[check] alice turn 2 saw turn 1's ai turn: OK
+[check] bob turn 1 did NOT see alice's history: OK
+
+======================================================================
+SECTION E — Legacy 'memory classes' vs modern explicit history / LangGraph
+======================================================================
+LangChain 0.0.x shipped ConversationBufferMemory, ConversationSummary-
+Memory, ConversationBufferWindowMemory, ... These are LEGACY: deprecated
+in 0.3.x. They were hidden global state bolted onto a Chain, lacked
+multi-user/multi-session support, and broke with tool-calling chat
+models. Constructing a RunnableWithMessageHistory TODAY literally emits a
+LangChainDeprecationWarning that points you to LangGraph persistence.
+
+deprecation warnings caught on construction: 1
+  category: LangChainDeprecationWarning
+  message : "RunnableWithMessageHistory is deprecated. Use LangGraph's built-in persistence instead."
+
+Modern path (pick one):
+  1. Explicit history — a dict/DB keyed by session_id + MessagesPlaceholder
+     (Sections A-C). The store is just a list you inspect: testable.
+  2. LangGraph checkpointed state for multi-turn agents — persists ANY
+     state, native multi-user/threads, tool-call compatible. (LC_LANGGRAPH.)
+
+[check] RunnableWithMessageHistory emits LangChainDeprecationWarning: OK
+[check] warning category is LangChainDeprecationWarning: OK
+[check] warning text points to LangGraph persistence: OK
+
+======================================================================
+SECTION F — Bounded history: keep the last N messages to cap token cost
+======================================================================
+Every saved turn is re-sent on the next invoke, so history grows without
+bound and eventually blows the context window. The fix is a WINDOW: keep
+only the last N messages (a transparent slice), or use langchain's
+trim_messages helper for a token-budget cut.
+
+full history (6 messages, 3 turns):
+  human  : q1
+  ai     : a1
+  human  : q2
+  ai     : a2
+  human  : q3
+  ai     : a3
+
+history[-2:] (keep last 2 messages):
+  human  : q3
+  ai     : a3
+
+[check] window trims 6 messages down to 2: OK
+[check] window keeps the most recent turn (q3 + a3): OK
+[check] window discards the oldest turn (q1, a1): OK
+prompt.invoke(history=windowed, question='q4') -> 4 messages
+(system + 2 windowed + 1 new question = 4)
+
+[check] windowed history renders 4 messages (system + 2 + 1): OK
+[check] oldest turns never reach the prompt: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

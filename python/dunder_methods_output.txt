@@ -1,0 +1,149 @@
+dunder_methods.py — Phase 2 bundle #10.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — The model: every operator is a dunder lookup on the TYPE
+======================================================================
+Operators and built-ins are syntactic sugar. The interpreter does
+NOT call x.__add__(y) directly; it calls type(x).__add__(x, y) — a
+lookup on the TYPE, then an ordinary function call with x as the
+first argument. This is why you cannot overload an operator by
+stashing a function in the instance dict.
+
+syntax          becomes (CPython dispatch)
+----------------------------------------------------------------
+x + y           type(x).__add__(x, y)
+y + x           type(x).__add__ first; if NotImplemented, type(y).__radd__
+x += y          type(x).__iadd__(x, y); else x = x + y
+len(x)          type(x).__len__(x)
+bool(x)         type(x).__bool__(x), else type(x).__len__(x)
+repr(x)         type(x).__repr__(x)
+str(x)          type(x).__str__(x), else type(x).__repr__(x)
+x[i]            type(x).__getitem__(x, i)
+v in x          type(x).__contains__(x, v), else __iter__/__getitem__
+for v in x      type(x).__iter__(x), else __getitem__ from 0
+x == y          type(x).__eq__(x, y)
+hash(x)         type(x).__hash__(x)
+with x:         type(x).__enter__(x) / type(x).__exit__(x, ...)
+
+v + 'z'                   -> V.__add__('z')
+v.__add__('z')            -> V.__add__('z')  (found via type)
+type(v).__add__(v, 'z')   -> V.__add__('z')  (operator path)
+
+[check] 'v + z' dispatches to type(v).__add__: OK
+
+======================================================================
+SECTION B — __repr__ (official, for devs) vs __str__ (informal, for users)
+======================================================================
+repr(x) computes the 'official' string — unambiguous, and ideally a
+valid Python expression that recreates an equal object. str(x) is the
+'informal' pretty string. If __str__ is absent, str() falls back to
+__repr__. The !r flag in f-strings forces repr.
+
+repr(p)       = Point(1, 2)
+str(p)        = (1, 2)
+f'{p}'   = (1, 2)     (plain interpolation uses __str__)
+f'{p!r}' = Point(1, 2)   (!r conversion forces __repr__)
+eval(repr(p)) == p  -> True   (the __repr__ round-trip ideal)
+
+[check] repr(p) == 'Point(1, 2)': OK
+[check] str(p) == '(1, 2)': OK
+[check] eval(repr(p)) recreates an equal Point: OK
+
+======================================================================
+SECTION C — __eq__ + __hash__ contract: the unhashable trap
+======================================================================
+object.__eq__ defaults to IDENTITY (is). object.__hash__ defaults to
+id(). BUT: if you define __eq__ and do NOT define __hash__, Python
+silently sets __hash__ = None — your object becomes UNHASHABLE, so
+set(), dict keys, and functools.lru_cache all raise TypeError.
+
+Plain() == Plain() -> False   (default __eq__ is identity)
+a == a             -> True
+Plain is hashable  -> True  (default __hash__ derives from id)
+
+[check] default __eq__ is identity: OK
+EqOnly.__hash__ = None   (silently set to None!)
+hash(EqOnly(1))    -> TypeError: unhashable type: 'EqOnly'
+{EqOnly(1), EqOnly(2)} -> TypeError: unhashable type: 'EqOnly'
+
+hash(EqHash(1)) = 1  (== hash(1))
+{EqHash(1), EqHash(1), EqHash(2)} -> len=2  (dedup works)
+
+[check] defining __eq__ without __hash__ makes __hash__ None: OK
+[check] EqOnly is unhashable (hash() raises TypeError): OK
+[check] equal EqHash objects have equal hash: OK
+[check] set dedupes EqHash by __eq__/__hash__: OK
+
+======================================================================
+SECTION D — bool(x): __bool__ wins over __len__
+======================================================================
+When Python needs a truth value it calls PyObject_IsTrue: try
+__bool__ first; if absent, fall back to __len__ (0 -> False); if
+neither is defined, the object is truthy. A class with BOTH
+methods uses __bool__ and ignores __len__.
+
+class                 __bool__  __len__   bool(obj)
+----------------------------------------------------
+LenOnly               -         0         False
+BoolTrueLenZero       True      0         True
+BoolFalseLenBig       False     99        False
+
+[check] only __len__->0 makes an object falsy: OK
+[check] __bool__(True) beats __len__(0): OK
+[check] __bool__(False) beats __len__(99): OK
+
+======================================================================
+SECTION E — Emulating a container: Grid (sparse 2D) + __getitem__ fallback
+======================================================================
+Implement __getitem__/__setitem__/__delitem__/__contains__/__len__/
+__iter__ and your object behaves like a built-in collection. `in`
+tries __contains__ first; `for` tries __iter__ first, then falls back
+to __getitem__ starting at index 0 until IndexError.
+
+g[1,1] = 10   g[3,3] = 0   (unset -> 0)
+len(g) = 3
+(1,1) in g -> True   (9,9) in g -> False
+list(g) = [(0, 0), (1, 1), (2, 2)]   (iteration via __iter__)
+del g[0,0] -> len=2, (0,0) in g -> False
+
+SeqByIndex has __iter__? False  __getitem__? True
+list(s) = [0, 10, 20]   (for-loop: __getitem__(0,1,2) then IndexError)
+
+[check] Grid supports indexing, len, in, iter, del: OK
+[check] __contains__ drives the `in` operator: OK
+[check] __getitem__ fallback drives iteration: OK
+
+======================================================================
+SECTION F — Arithmetic: __add__, __radd__ (reflected), __iadd__ (in-place)
+======================================================================
+x + y calls type(x).__add__(x, y). If that returns NotImplemented
+(left operand doesn't understand the right), Python tries the
+REFLECTED method: type(y).__radd__(y, x). += tries __iadd__ first;
+if absent, it falls back to __add__ and rebinds the name.
+
+Vector(1,2) + Vector(3,4) = Vector(4, 6)
+10 + Vector(1,2)          = Vector(11, 12)   (int.__add__ -> NotImplemented -> Vector.__radd__)
+v1 += Vector(0,1)         -> v1 = Vector(1, 3), same object? True (__iadd__ mutates in place)
+
+[check] Vector(1,2) + Vector(3,4) == Vector(4,6): OK
+[check] 10 + Vector(1,2) == Vector(11,12) via __radd__: OK
+[check] __iadd__ mutates in place (same id): OK
+
+======================================================================
+SECTION G — Context-manager preview: __enter__ / __exit__
+======================================================================
+`with x:` calls type(x).__enter__(x) on entry (the return value is
+bound to the as-variable), and type(x).__exit__(x, exc_type, exc_val,
+exc_tb) on exit — even if the body raises. Return True from __exit__
+to suppress the exception. Full treatment in CONTEXT_MANAGERS (P3).
+
+with Tracer() as t: ... -> t.calls = ['enter', 'body', ('exit', None)]
+
+[check] with calls __enter__ -> body -> __exit__(None): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

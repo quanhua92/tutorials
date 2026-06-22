@@ -1,0 +1,180 @@
+nn_module.py — Phase 5 bundle #31.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+torch 2.12.1 on CPU.
+
+======================================================================
+SECTION A — nn.Module subclass: Linear layers + a forward() pass
+======================================================================
+An nn.Module subclass holds its layers as attributes and defines
+forward(). Instantiating the subclass builds the object; calling it
+runs forward(). The base class is nn.Module itself.
+
+isinstance(mlp, nn.Module)        True
+type(mlp).__name__                'MLP'
+type(mlp).__mro__                 (<class '__main__.MLP'>, <class 'torch.nn.modules.module.Module'>, <class 'object'>)
+isinstance(mlp.fc1, nn.Linear)    True
+repr(mlp):
+MLP(
+  (fc1): Linear(in_features=4, out_features=8, bias=True)
+  (fc2): Linear(in_features=8, out_features=1, bias=True)
+)
+
+x = torch.arange(4)               [0.0, 1.0, 2.0, 3.0]
+out = mlp(x)                      [-0.46061691641807556]
+tuple(out.shape)                  (1,)
+
+[check] mlp is an nn.Module: OK
+[check] mlp's MRO is MLP -> Module -> object: OK
+[check] fc1 is an nn.Linear (a Module subclass): OK
+[check] mlp(x) output shape is (1,) for a (4,) input: OK
+
+======================================================================
+SECTION B — Parameters auto-register: requires_grad=True
+======================================================================
+nn.Linear's .weight and .bias are nn.Parameter objects (a Tensor
+subclass). Assigning a Parameter as a Module attribute automatically
+adds it to parameters(); assigning a plain Tensor does NOT.
+
+type(mlp.fc1.weight).__name__           'Parameter'
+isinstance(mlp.fc1.weight, nn.Parameter)True
+mlp.fc1.weight.requires_grad            True
+mlp.fc1.bias.requires_grad              True
+tuple(mlp.fc1.weight.shape)             (8, 4)
+tuple(mlp.fc1.bias.shape)               (8,)
+
+len(list(mlp.parameters()))             4
+named_parameters() keys                 ['fc1.weight', 'fc1.bias', 'fc2.weight', 'fc2.bias']
+
+mlp.tmp = torch.zeros(3)   # plain Tensor, not a Parameter
+
+len(list(mlp.parameters())) after       4
+"tmp" in named_parameters()             False
+
+[check] fc1.weight is an nn.Parameter: OK
+[check] fc1.weight.requires_grad is True: OK
+[check] fc1.bias.requires_grad is True: OK
+[check] fc1.weight has shape (8, 4) [out, in]: OK
+[check] parameters() has 4 tensors (2 layers x weight+bias): OK
+[check] a plain Tensor attribute is NOT registered: OK
+
+======================================================================
+SECTION C — The sub-module tree: children / modules / named_modules
+======================================================================
+Assigning self.fc1 = nn.Linear(...) auto-registers fc1 as a CHILD
+module. .children() yields direct children; .modules() yields self
+plus all descendants; .named_modules() adds the dotted-path name.
+
+named_children() names          ['fc1', 'fc2']
+children() types                ['Linear', 'Linear']
+len(list(children()))           2
+named_modules() names           ['', 'fc1', 'fc2']
+len(list(modules()))            3
+
+[check] MLP has 2 direct children (fc1, fc2): OK
+[check] named_children() == ['fc1', 'fc2']: OK
+[check] modules() includes self + 2 children = 3: OK
+[check] named_modules() root key is '' (self): OK
+
+======================================================================
+SECTION D — state_dict(): params + persistent buffers keyed by path
+======================================================================
+state_dict() returns a dict of all PARAMETERS + persistent BUFFERS,
+keyed by dotted path. This is exactly what torch.save /
+load_state_dict serialize. Values are detached (requires_grad off).
+
+type(sd).__name__                 'OrderedDict'
+isinstance(sd, dict)              True
+list(sd.keys())                   ['fc1.weight', 'fc1.bias', 'fc2.weight', 'fc2.bias']
+len(sd)                           4
+tuple(sd["fc1.weight"].shape)     (8, 4)
+sd["fc1.weight"].requires_grad    False
+
+[check] state_dict is a dict: OK
+[check] 'fc1.weight' is a key: OK
+[check] state_dict has 4 entries: OK
+[check] keys == ['fc1.weight','fc1.bias','fc2.weight','fc2.bias']: OK
+[check] state_dict values are detached (requires_grad False): OK
+
+======================================================================
+SECTION E — forward() runs via __call__: hooks fire only through __call__
+======================================================================
+mlp(x) invokes Module.__call__, which runs forward hooks then
+forward(). mlp.forward(x) calls forward() DIRECTLY and skips the
+module's own hooks. Always use mlp(x), never mlp.forward(x).
+
+len(records) after mlp(x)                 1
+tuple(records[0].shape)                   (1,)
+len(records) after mlp.forward(x)         1
+torch.equal(out_call, out_direct)         True
+
+[check] hook fired once on mlp(x) via __call__: OK
+[check] hook recorded the (1,) output: OK
+[check] mlp.forward(x) did NOT fire the hook again (still 1): OK
+[check] both call forms give identical output: OK
+
+======================================================================
+SECTION F — register_buffer: non-trainable tensors in the module state
+======================================================================
+register_buffer() stores a tensor that is part of the module's state
+(so it is saved/moved with .to()) but is NOT a parameter (no grad).
+BatchNorm's running_mean/running_var are the canonical example.
+
+type(m.mu).__name__               'Tensor'
+isinstance(m.mu, nn.Parameter)    False
+m.mu.requires_grad                False
+len(list(m.parameters()))         2
+named_buffers() names             ['mu']
+"mu" in m.state_dict()            True
+
+[check] the buffer is a Tensor, not a Parameter: OK
+[check] buffer.requires_grad is False: OK
+[check] buffer is NOT in parameters() (only fc.weight, fc.bias = 2): OK
+[check] buffer IS in state_dict(): OK
+
+======================================================================
+SECTION G — train()/eval(): toggling self.training changes Dropout
+======================================================================
+Every Module carries a `training` flag (True by default). train()/
+eval() flip it recursively across the tree. Dropout multiplies/
+zeroes in train mode but is the identity in eval mode — same
+weights, different behavior.
+
+mlp.training (default)                True
+mlp.training after .eval()            False
+mlp.training after .train()           True
+
+nn.Dropout(p=0.5) applied to ones(2, 8):
+  train-mode output (some zeroed)     [[0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0], [0.0, 2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 2.0]]
+  eval-mode output (identity)         [[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]]
+(out_train == 0).any()                True
+torch.equal(out_eval, ones)           True
+
+[check] default mlp.training is True: OK
+[check] eval() flips training to False: OK
+[check] train() flips training back to True: OK
+[check] Dropout zeroes some entries in train mode: OK
+[check] Dropout is the identity in eval mode: OK
+
+======================================================================
+SECTION H — .to(dtype) / .to(device): cast & move the whole tree
+======================================================================
+.to() moves/casts ALL parameters and buffers recursively, in place
+(it returns self). .to(torch.float64) casts dtype; .to('cuda')/'mps'
+moves device. Below: dtype cast (CPU, deterministic) + device report.
+
+fc1.weight.dtype before .to(float64)        torch.float32
+fc1.weight.dtype after  .to(float64)        torch.float64
+fc2.bias.dtype after                        torch.float64
+str(fc1.weight.device)                      cpu
+torch.cuda.is_available()                   False
+torch.backends.mps.is_available()           True
+
+[check] default dtype is float32: OK
+[check] .to(float64) cast fc1.weight: OK
+[check] fc2.bias also cast to float64 (whole tree): OK
+[check] params live on CPU by default: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

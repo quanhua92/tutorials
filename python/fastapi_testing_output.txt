@@ -1,0 +1,136 @@
+fastapi_testing.py — Phase 7 bundle #49.
+Every value below is computed by this file via TestClient +
+httpx.AsyncClient + pytest.main (on a /tmp scratch test file); the
+.md guide pastes it verbatim. Nothing is hand-computed.
+FastAPI 0.138.0, httpx 0.28.1, pytest 9.1.1 on this machine.
+Scratch: /var/folders/hd/20zqmjkj7cd0wm4rv2230bm00000gn/T/bundle49_mswo1lie
+
+======================================================================
+SECTION A — TestClient basics: GET in-process, no socket, no uvicorn
+======================================================================
+fastapi.testclient.TestClient (re-exported from Starlette, backed by
+httpx) calls the ASGI app DIRECTLY in-process. No socket, no port, no
+uvicorn. client.get('/...') returns an httpx.Response; .status_code
+and .json() are the two assertions you write.
+
+GET /            -> 200 {'msg': 'Hello World'}
+GET /items/42    -> 200 {'item_id': 42}
+type(r1)         -> Response (httpx.Response)
+
+[check] GET / returns 200: OK
+[check] GET / body is the handler's dict: OK
+[check] path param parsed (item_id=42): OK
+[check] TestClient returns an httpx.Response: OK
+
+======================================================================
+SECTION B — POST/PUT/DELETE + JSON body + status codes
+======================================================================
+TestClient mirrors the httpx verbs: .post/.put/.delete accept a
+`json=` kwarg that serializes the body. Set status_code=201 on the
+route for create endpoints (the HTTP convention for 'created').
+
+POST   /items/    -> 201 {'created': {'name': 'wrench', 'qty': 7}}
+PUT    /items/7   -> 200 {'replaced': {'name': 'wrench', 'qty': 7}}
+DELETE /items/7   -> 200 {'deleted': 7}
+
+[check] POST returns 201 (status_code=201 on the route): OK
+[check] POST body echoes the created item: OK
+[check] PUT returns 200 and replaces: OK
+[check] DELETE returns 200 with the deleted key: OK
+
+======================================================================
+SECTION C — Validation 422: bad body returns error loc, not 500
+======================================================================
+A pydantic-model body that fails validation makes FastAPI return 422
+(Unprocessable Entity) with detail=[{loc, msg, type, ...}]. The `loc`
+pinpoints the failing field — assert on it in tests rather than
+string-matching the message.
+
+POST /items/ missing 'qty' -> 422
+detail: [{'type': 'missing', 'loc': ['body', 'qty'], 'msg': 'Field required', 'input': {'name': 'wrench'}}]
+
+[check] missing required field -> 422 (not 500): OK
+[check] error loc points at ('body', 'qty'): OK
+
+======================================================================
+SECTION D — dependency_overrides: swap get_db for a fake (no real DB)
+======================================================================
+app.dependency_overrides[real] = fake makes FastAPI call `fake`
+instead of `real` everywhere. Below: a route Depends(get_db); we
+override get_db with a fake returning canned data, then RESET with
+= {}. This is the hermetic-test lever (full DI theory in #45).
+
+real dep      : {'env': 'production', 'rows': []}
+override set  : {'env': 'test', 'rows': [{'id': 1}, {'id': 2}]}
+override drop : {'env': 'production', 'rows': []}
+
+[check] real dep ran (env=production): OK
+[check] handler saw the FAKE rows (no real DB hit): OK
+[check] reset restores the real dep: OK
+
+======================================================================
+SECTION E — Auth override: fake get_current_user skips real JWT/OAuth
+======================================================================
+The standard 'don't hit real auth in unit tests' pattern: a route
+Depends(get_current_user); tests override it to return a fake user,
+skipping JWT/OAuth entirely. The protected route returns 200.
+
+real dep          -> 401 {'detail': 'not authenticated'}
+override to alice -> 200 {'user': {'id': 99, 'name': 'alice'}}
+
+[check] real auth dep raises 401: OK
+[check] overriding auth makes the protected route return 200: OK
+[check] the fake user was injected into the handler: OK
+
+======================================================================
+SECTION F — pytest fixtures: an app fixture + a client fixture
+======================================================================
+The boilerplate: one @pytest.fixture builds the app, another wraps it
+in a TestClient. Tests list `client` as a param — pytest injects it.
+Below: a tiny test file written to /tmp, run via pytest.main.
+
+--- pytest on test_fixtures.py (client/app fixtures) ---
+.
+1 passed in <duration>s
+
+[check] fixture-based test -> exit code 0 (ExitCode.OK): OK
+[check] output reports '1 passed': OK
+
+======================================================================
+SECTION G — Async testing: httpx.AsyncClient + ASGITransport
+======================================================================
+TestClient runs async handlers via an internal portal — convenient
+but SYNCHRONOUS. To exercise the REAL async path (and to `await`
+other async code in the same test), use httpx.AsyncClient with
+transport=httpx.ASGITransport(app=app); drive it with asyncio.run.
+
+async GET /  -> 200 {'msg': 'async'}
+type(r)      -> Response (httpx.Response)
+
+[check] async client GET returns 200: OK
+[check] async client GET returns the body: OK
+[check] AsyncClient also returns an httpx.Response: OK
+
+======================================================================
+SECTION H — The API test pyramid: many unit, fewer integration, smoke e2e
+======================================================================
+Tests form a PYRAMID. Bottom (most): UNIT tests — handlers with
+dependency_overrides swapping DB/auth for fakes (hermetic, fast).
+Middle: INTEGRATION — real deps / a real (often in-memory) DB. Top
+(fewest): end-to-end SMOKE against a deployed/staged URL.
+
+layer         strategy                  cost
+----------------------------------------------------------------------
+unit          handlers + dep overrides  fast, hermetic, ~ms each
+integration   real deps / in-memory DB  slower, ~10-100ms each
+e2e           deployed URL over HTTP    slow, flaky, ~seconds
+
+example counts: unit=120, integration=25, e2e=3 (total 148)
+
+[check] unit tests are the MAJORITY: OK
+[check] unit tests > integration tests: OK
+[check] e2e is the thinnest layer (slowest, flakiest): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

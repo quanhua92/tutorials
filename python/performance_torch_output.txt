@@ -1,0 +1,171 @@
+performance_torch.py — Phase 5 bundle #35.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Timing digits are ILLUSTRATIVE (vary per run); we assert
+only structural facts. CPU is used for determinism.
+Python 3.13.5, torch 2.12.1.
+
+======================================================================
+SECTION A — Mixed precision autocast: fp32 weights -> bfloat16 op
+======================================================================
+torch.autocast(device_type=...) wraps the forward pass. Inside it,
+ops on the autocast list (mm, linear, matmul, conv2d, ...) run in a
+lower-precision dtype. On CUDA the default is float16; on CPU it is
+bfloat16 (same 8-bit exponent as fp32 -> no dynamic-range loss).
+Weights STAY fp32 ('master weights') — only the math drops precision.
+
+input a.dtype            = torch.float32
+layer.weight.dtype before = torch.float32 ; after autocast = torch.float32
+torch.mm OUTSIDE autocast -> torch.float32
+torch.mm INSIDE  autocast -> torch.bfloat16   <-- dtype changed mid-op
+nn.Linear INSIDE autocast -> torch.bfloat16
+fp32 bytes/elem = 4 ; bf16 bytes/elem = 2 (activations halved)
+On tensor-core GPUs this yields ~2x speed + half memory; on CPU the
+win is smaller (bf16 is a precision/memory cut, not a tensor-core path).
+
+[check] autocast changes mm output dtype fp32 -> bfloat16: OK
+[check] autocast changes Linear output dtype to bfloat16: OK
+[check] master weights stay fp32 under autocast: OK
+[check] bfloat16 activation is half the bytes of fp32: OK
+
+======================================================================
+SECTION B — GradScaler: scale the loss up so fp16 grads don't underflow
+======================================================================
+fp16's finite max is 65504 and small grads flush to zero ('under-
+flow'), silently losing the parameter update. GradScaler multiplies
+the loss by a large scale (default init_scale=65536.0 per the docs),
+runs backward on the scaled loss, then UNSCALES the grads before the
+optimizer step. Canonical CUDA AMP loop:
+    scaler = torch.amp.GradScaler('cuda')   # init_scale=65536.0
+    with torch.autocast('cuda'):
+        loss = model(x)
+    scaler.scale(loss).backward()           # grads scaled up
+    scaler.unscale_(optimizer)              # divide grads back
+    scaler.step(optimizer); scaler.update() # step + grow/shrink
+
+On CPU / bfloat16 NO scaler is needed: bf16 shares fp32's 8-bit
+exponent range, so grads don't underflow. Below we demo the API with
+enabled=False (a no-op scaler that runs anywhere).
+
+scaler.is_enabled()         = False  (CPU: no-op)
+scaler.get_scale()          = 1.0  (1.0 when disabled)
+scaler.scale(loss) is loss  = True  (identity when disabled)
+  scaler.scale      exists: True
+  scaler.unscale_   exists: True
+  scaler.step       exists: True
+  scaler.update     exists: True
+torch.finfo(float16).max   = 65504.0        <- underflow/overflow ceiling
+torch.finfo(bfloat16).max  = 3.390e+38
+torch.finfo(float32).max   = 3.403e+38
+-> bf16 and fp32 share the 8-bit exponent (similar max);
+   fp16's ~[6e-8 .. 6.5e4] range is tiny, hence the underflow risk.
+
+[check] disabled scaler.scale(loss) is the identity (no-op): OK
+[check] scaler exposes scale/unscale_/step/update: OK
+[check] fp16 finite max is 65504.0 (the narrow-range ceiling): OK
+[check] bf16 max >> fp16 max (bf16 keeps fp32's exponent range): OK
+
+======================================================================
+SECTION C — torch.compile: TorchDynamo + Inductor trace & fuse ops
+======================================================================
+torch.compile(fn) returns a NEW callable. On the first call Torch-
+Dynamo traces the Python frame into a graph; the Inductor backend
+fuses pointwise ops into fewer kernels. There is a ONE-TIME compile
+cost; later calls reuse the cached artifact. Mode 'reduce-overhead'
+additionally captures a CUDA graph (🔗 ../llm/CUDA_GRAPHS.md).
+
+torch.compile(eager_fn) -> callable : True
+compiled forward on this CPU env: InductorError (Inductor JIT unavailable here — API is still valid)
+On a CUDA/tensor-core GPU, the compiled callable would fuse the
+sin/cos/mul/relu ops into one kernel and skip Python overhead.
+
+[check] torch.compile returns a callable: OK
+[check] compiled output matches eager within fp32 tolerance (or JIT unavailable in this env): OK
+
+======================================================================
+SECTION D — inference_mode vs no_grad: faster AND stricter
+======================================================================
+Both disable autograd recording. inference_mode is the EXTREME
+version: it ALSO skips the extra autograd bookkeeping (version
+counters, saved-tensor tracking), so it is faster. The trade-off: 
+tensors created under inference_mode CANNOT be saved for backward
+later — using them in a grad-requiring computation raises.
+
+no_grad tensor        requires_grad = False
+inference_mode tensor requires_grad = False
+backward using inference tensor raised RuntimeError: True
+eager          best/call:   1.498 ms  (varies per run)
+no_grad        best/call:   1.525 ms  (varies per run)
+inference_mode best/call:   1.529 ms  (varies per run)
+(ordering is illustrative; the structural fact is the strictness)
+
+[check] no_grad and inference_mode both set requires_grad=False: OK
+[check] inference_mode tensor CANNOT be saved for backward: OK
+
+======================================================================
+SECTION E — torch.profiler: find the hot op BEFORE optimizing
+======================================================================
+Profile BEFORE optimizing — the 'measure don't guess' law
+(🔗 PROFILING_OPTIMIZATION). torch.profiler records every op with
+its self time; record_function labels a region for attribution.
+
+--- recorded regions present in the profile ---
+  matmul_block         recorded: True
+  elementwise_block    recorded: True
+op/key                       self_cpu_us
+------------------------------------------
+aten::mm                          1216.2
+aten::sin                          662.1
+aten::clamp_min                    447.2
+aten::add                          239.9
+elementwise_block                   96.5
+matmul_block                        79.9
+  (self_cpu_us is illustrative; the RANKING is the actionable signal)
+
+[check] both record_function labels appear in the profile: OK
+[check] profile captured at least one op (non-empty): OK
+[check] the hottest op has positive self-time: OK
+
+======================================================================
+SECTION F — The sync-point trap: .item() forces a CPU<->GPU wait
+======================================================================
+On GPU, ops queue asynchronously. .item(), .cpu(), or printing a
+tensor FORCES the CPU to wait for the GPU (a 'sync point'). Calling
+.item() every loop iteration serializes the pipeline — the classic
+invisible slowdown. Demonstration of the API + the right pattern.
+
+.item() returns a float (the device->host scalar pull = the GPU sync)
+tensor accumulator stays a Tensor (no per-iter pull)
+'with_sync'    calls .item(): 200 times -> 200 sync points
+'without_sync' calls .item(): 1 time   -> 1 sync point
+On GPU each .item() blocks the whole stream, so n sync points cost
+~200x more stalls than 1. On CPU there is no real stall, so
+timing is uninformative; the sync-point COUNT is the structural cost.
+
+[check] .item() extracts a Python float (the sync mechanism): OK
+[check] the tensor accumulator stays a torch.Tensor (no per-iter sync): OK
+[check] both reductions agree on the numeric result: OK
+[check] per-iter .item() makes n sync points vs 1 for the batched version: OK
+
+======================================================================
+SECTION G — Memory: fp16/bf16 halve activations; checkpointing trades compute
+======================================================================
+Lower precision halves activation memory: fp16/bf16 = 2 bytes vs
+fp32's 4. Gradient checkpointing (🔗 ../llm/GRADIENT_CHECKPOINTING.md)
+trades compute for memory by RE-RUNNING parts of the forward during
+backward instead of saving all activations (~1.33x recompute cost).
+
+tensor           bytes   vs fp32
+----------------------------------
+fp32                 4     100%
+fp16                 2      50%
+bf16                 2      50%
+
+torch.utils.checkpoint.checkpoint available: True
+
+[check] fp16 tensor is half the bytes of fp32: OK
+[check] bf16 tensor is half the bytes of fp32: OK
+[check] torch.utils.checkpoint.checkpoint exists: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

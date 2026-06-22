@@ -1,0 +1,159 @@
+fastapi_middleware_lifespan.py — Phase 7 bundle #47.
+Every value below is computed by driving apps with TestClient;
+the .md guide pastes it verbatim. Nothing is hand-computed.
+Python 3.13.5, FastAPI 0.138.0.
+
+======================================================================
+SECTION A — Custom middleware adds a response header
+======================================================================
+@app.middleware('http') wraps EVERY request. The function takes
+(request, call_next), awaits call_next(request) to get the response,
+then mutates the response before returning it. Below: stamp every
+response with a constant X-Served-By header.
+
+GET / -> 200
+  X-Served-By  header -> 'fastapi-mw-demo'
+  content-type header -> 'application/json'
+
+[check] GET / returned 200: OK
+[check] middleware stamped the X-Served-By header: OK
+[check] middleware ran AFTER the route built the JSON response: OK
+
+======================================================================
+SECTION B — Middleware order: the onion (LAST added = OUTERMOST)
+======================================================================
+FastAPI docs: 'each new middleware wraps the application, forming
+a stack. The LAST middleware added is the OUTERMOST, and the first
+is the INNERMOST.' So adding A then B gives request B->A->route and
+response route->A->B. The recording below proves it.
+
+GET / -> 200; recorded order:
+  B-in
+  A-in
+  handler
+  A-out
+  B-out
+(B was added AFTER A -> B is outermost -> request: B->A->handler,
+ response: handler->A->B)
+
+[check] GET / returned 200: OK
+[check] request path is B-in -> A-in -> handler (B outermost): OK
+[check] response path is handler -> A-out -> B-out (unwound LIFO): OK
+[check] full onion: B-in, A-in, handler, A-out, B-out: OK
+
+======================================================================
+SECTION C — CORSMiddleware: preflight OPTIONS gets CORS headers
+======================================================================
+CORS is just another middleware. A browser preflight is an OPTIONS
+request with Origin + Access-Control-Request-Method; CORSMiddleware
+intercepts it, answers 200 with Access-Control-Allow-* headers, and
+never calls the route.
+
+preflight OPTIONS / -> 200
+  access-control-allow-origin: https://example.com
+  access-control-allow-methods: GET, POST
+  access-control-allow-headers: Accept, Accept-Language, Content-Language, Content-Type, X-Custom
+  access-control-allow-credentials: true
+  access-control-max-age: 600
+  vary: Origin
+
+simple GET / (allowed origin)    -> ACAO: 'https://example.com'
+simple GET / (disallowed origin) -> ACAO: None
+
+[check] preflight returned 200: OK
+[check] allow-origin echoes the allowed origin: OK
+[check] allow-methods lists the configured methods: OK
+[check] allow-credentials is true: OK
+[check] max-age is 600 (configured cache seconds): OK
+[check] simple request from allowed origin still gets ACAO: OK
+[check] simple request from disallowed origin gets NO ACAO: OK
+
+======================================================================
+SECTION D — Custom exception handler -> JSON response
+======================================================================
+@app.exception_handler(SomeException) installs a global mapper: when
+any handler raises SomeException, FastAPI calls your function with
+(request, exc) and your returned JSONResponse goes to the client.
+
+GET /charge (raises BusinessError) -> 418 {'error': 'insufficient-funds', 'code': 7}
+(the handler mapped the domain exception to a 418 JSON body)
+
+[check] GET /charge returned 418 (mapped by custom handler): OK
+[check] response body carries the exception's msg and code: OK
+
+======================================================================
+SECTION E — HTTPException default handling + generic status-code handler
+======================================================================
+raise HTTPException(status_code=404, detail=...) -> FastAPI's default
+handler returns 404 with body {'detail': ...}. You can also register
+a handler keyed on a STATUS CODE (int): anything that surfaces as
+that status is routed through your function. Below, an unhandled
+RuntimeError becomes a 500 with our custom body.
+
+GET /missing (raises HTTPException(404)) -> 404 {'detail': 'no such thing'}
+GET /boom   (raises RuntimeError)      -> 500 {'caught': 'generic-500'}
+(HTTPException used the default handler; the 500 status handler
+ intercepted the unhandled RuntimeError)
+
+[check] HTTPException(404) -> 404 via the default handler: OK
+[check] HTTPException default body is {'detail': ...}: OK
+[check] generic 500 handler caught the RuntimeError: OK
+
+======================================================================
+SECTION F — Lifespan: startup runs on `with` enter, shutdown on exit
+======================================================================
+FastAPI(lifespan=...) takes an ASYNC CONTEXT MANAGER. Code BEFORE
+yield runs once at startup; code AFTER yield runs once at shutdown.
+Using TestClient(app) as a context manager triggers BOTH — entering
+the with runs startup, exiting it runs shutdown. This REPLACES the
+deprecated on_event('startup'/'shutdown').
+
+events before `with TestClient(app)`     : []
+events inside `with`, before any request : ['startup']
+GET / inside the with-block              : 200 {'events_at_request': ['startup']}
+events inside `with`, after the request  : ['startup']
+events AFTER the with-block exited       : ['startup', 'shutdown']
+(startup ran once on enter; shutdown ran once on exit)
+
+[check] nothing ran before the with-block: OK
+[check] startup ran exactly once on `with` enter (before any request): OK
+[check] serving a request did not add startup/shutdown events: OK
+[check] shutdown ran once on `with` exit: OK
+
+======================================================================
+SECTION G — app.state: a shared namespace populated at startup
+======================================================================
+The lifespan receives the app; whatever you set on app.state there
+is visible in every handler via request.app.state. Below: lifespan
+'opens the DB' (a string) and seeds a counter; the handler reads
+and mutates it across requests.
+
+1st GET /info -> 200 {'db': 'postgres://demo', 'counter': 1}
+2nd GET /info -> 200 {'db': 'postgres://demo', 'counter': 2}
+(handler saw the db string the lifespan set; counter persisted
+ ACROSS requests — state outlives any single request)
+
+[check] handler saw the startup-set db string: OK
+[check] counter was seeded at 0 and incremented to 1 on first request: OK
+[check] state persisted across requests (2nd request saw counter 2): OK
+
+======================================================================
+SECTION H — Request-logging middleware (the production pattern)
+======================================================================
+The cross-cutting pattern: a middleware that logs (method, path,
+status, duration_ms) for every request. We capture into a list so
+the output is deterministic (duration varies -> assert >= 0).
+
+method  path        status  ms>=0
+--------------------------------------
+GET     /           200     True
+GET     /           200     True
+GET     /missing    404     True
+
+[check] middleware recorded exactly 3 requests: OK
+[check] recorded methods/paths/statuses match the calls: OK
+[check] every duration is non-negative: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,171 @@
+threading_gil.py — Phase 3 bundle #19.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. Threading timing is
+nondeterministic, so [check] asserts are on STRUCTURAL invariants;
+wall-clock figures are illustrative and vary by machine/run.
+Python 3.13.5 on this machine. GIL enabled = True.
+
+======================================================================
+SECTION A — Thread basics: start(), join(), and a shared result
+======================================================================
+A thread is a separate flow of control sharing the SAME memory as
+its creator. threading.Thread(target=fn) wraps a callable; .start()
+schedules it on a new OS thread; .join() blocks the caller until it
+finishes. The worker writes into a dict the main thread reads AFTER
+join() — that is how results flow back through SHARED memory.
+
+main thread: creating worker thread ...
+  thread object: name='worker-alpha', daemon=False, alive(before start)=False
+  after start(): alive=True, ident=6140112896
+  after join():  alive=False, ident=6140112896
+  shared['worker'] = 'hello from alpha'
+
+[check] worker ran and wrote into shared memory ('worker' in shared): OK
+[check] the worker's result is visible to main after join(): OK
+[check] a joined thread is no longer alive (not t.is_alive()): OK
+[check] main thread is threading.main_thread(): OK
+
+======================================================================
+SECTION B — The GIL: CPU-bound threads do NOT parallelize; I/O-bound do
+======================================================================
+The Global Interpreter Lock (GIL) is a mutex guaranteeing that only
+ONE thread executes Python bytecode at a time. Pure-Python CPU work
+holds the GIL continuously (released only every few ms for a switch)
+so splitting it across threads cannot use extra cores. I/O calls
+(time.sleep, socket, file) RELEASE the GIL while waiting, so I/O
+threads DO overlap.
+
+This interpreter: GIL enabled = True
+(On a free-threaded / PEP 703 build, GIL enabled = False.)
+
+CPU-bound work (pure-Python loop), total iterations = 2,000,000:
+  1 thread  : sum=254991808, elapsed=0.0336s
+  4 threads : sum=254985664, elapsed=0.0334s (each thread = 500,000 iters)
+  -> under the GIL, 4 threads take about the SAME wall time as
+     1 thread (work is serialized, not parallelized).
+     (Wall times are illustrative; they vary by machine/load.)
+
+[check] CPU work produced the correct sum (1 thread): OK
+[check] CPU work produced the correct sum (4 threads, separate slots): OK
+[check] GIL on: 4 CPU threads are NOT 2x faster (t_multi >= t_single/2): OK
+I/O-bound work: 4 threads each time.sleep(0.1):
+  serial would be ~0.40s; actual elapsed = 0.1085s
+  -> sleep RELEASES the GIL while waiting, so the 4 waits overlap
+     and finish in ~one sleep, not four. (Illustrative timing.)
+
+[check] all 4 I/O threads completed (all flags set): OK
+[check] I/O threads overlapped (elapsed < serial*0.75 = 0.30s): OK
+
+======================================================================
+SECTION C — The race: a shared counter WITHOUT a lock loses updates
+======================================================================
+4 threads x 50,000 read-modify-writes each; expected total = 200,000.
+
+A read-modify-write is NOT atomic: it is READ the value, compute
+value+1, WRITE it back. If the GIL switches threads between the
+READ and the WRITE, two threads read the SAME value and one WRITE
+clobbers the other -> a LOST update.
+
+Expert gotcha: on modern CPython a bare `counter += 1` rarely loses
+updates in practice — the GIL hands off at clean bytecode boundaries,
+so the bug is *latent* (real but hard to trigger). We insert
+time.sleep(0) between the read and the write: it RELEASES the GIL,
+modeling any real code path that yields mid-update (I/O, a C call),
+and makes the lost update reliably observable.
+
+  expected = 200,000
+  actual   = 50,032
+  lost     = 149,968 updates
+  (exact loss VARIES per run — illustrative; the FACT that count <
+   expected is the deterministic, structural point.)
+
+[check] race lost updates (counter < expected): OK
+[check] the counter is non-negative: OK
+
+======================================================================
+SECTION D — A Lock fixes the race: the count is exactly correct
+======================================================================
+threading.Lock is a mutex. `with lock:` makes the read-modify-write
+ATOMIC with respect to other threads holding the SAME lock: only one
+thread can be inside the critical section at a time, so no update is
+lost. The code below is IDENTICAL to Section C (same read, same
+time.sleep(0), same write) — the ONLY addition is `with lock:`.
+
+  expected = 200,000
+  actual   = 200,000
+
+[check] Lock gives the exact expected count (counter == expected): OK
+
+======================================================================
+SECTION E — RLock (reentrant): a thread may acquire the same lock twice
+======================================================================
+A plain Lock DEADLOCKS if the owning thread calls acquire() again
+(it blocks forever waiting for itself). threading.RLock tracks an
+'owning thread' + a recursion level: the SAME thread can acquire
+it N times and must release it N times. This lets a function that
+already holds the lock call another function that acquires it too
+— recursion and re-entrancy without self-deadlock.
+
+plain Lock:  acquire() -> True;  2nd acquire(blocking=False) -> False  (would DEADLOCK if blocking)
+
+[check] a plain Lock CANNOT be re-acquired by its owner (2nd -> False): OK
+RLock:       acquire() -> True;  2nd acquire() -> True (same thread);
+             after 1 release, acquire(blocking=False) -> True (still owner);
+             after full release, acquire(blocking=False) -> True (free to take again)
+
+[check] RLock first acquire returns True: OK
+[check] RLock re-acquire by the SAME thread returns True (no deadlock): OK
+[check] RLock still owned after one release of two: OK
+[check] RLock re-acquirable after full release: OK
+recursive factorial(5) under an RLock = 120  (acquired 5 nested times, no self-deadlock)
+
+[check] recursive function under RLock returns the right value (factorial(5)==120): OK
+
+======================================================================
+SECTION F — Queue: a thread-safe channel (no explicit lock needed)
+======================================================================
+queue.Queue implements ALL the locking internally, so producer and
+consumer threads can put()/get() freely without a single Lock in
+your code. put() blocks when full; get() blocks when empty; join()
+blocks until every item is task_done()'d. This is the idiomatic
+way to hand work between threads.
+
+produced 20 items; consumed 20.
+first 5 consumed: [0, 10, 20, 30, 40]
+consumed == [i*10 for i in range(20)]: True
+
+[check] Queue transferred all 20 items: OK
+[check] Queue preserved content (consumed == [i*10 for i in range(20)]): OK
+[check] queue is empty after the pipeline drained: OK
+
+======================================================================
+SECTION G — Where the GIL is released; PEP 703 (free-threaded future)
+======================================================================
+The GIL is released around BLOCKING operations so other threads can
+run Python bytecode while one thread waits:
+  - I/O:  time.sleep, socket.recv, file.read, select, ...
+  - some C extensions doing heavy CPU work (numpy, zlib, hashing)
+    explicitly drop the GIL for the duration of the C call.
+This is WHY I/O-bound threading works (Section B) and why CPU-bound
+pure-Python threading does not (the GIL returns between bytecodes).
+
+The GIL exists because CPython manages memory with reference
+COUNTING (see MEMORY_MODEL): every PyObject has a refcount, and
+making every refcount bump atomic was historically too slow, so a
+single interpreter lock serializes bytecode and keeps refcounts
+safe. (Free-threaded builds make those refcount ops atomic instead.)
+
+sysconfig Py_GIL_DISABLED = 0  (0/None = standard GIL build; 1 = free-threaded)
+runtime GIL enabled        = True
+PEP 703 (Python 3.13+) makes a free-threaded / no-GIL build an
+option (--disable-gil); on it, threads CAN run bytecode in parallel.
+Until free-threading is the default, use multiprocessing for real
+CPU parallelism (see MULTIPROCESSING) and asyncio for massive I/O
+concurrency on one thread (see ASYNCIO).
+
+[check] GIL-status probe returns a bool: OK
+[check] a standard (non-free-threaded) build has the GIL on: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

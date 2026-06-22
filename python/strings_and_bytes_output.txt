@@ -1,0 +1,195 @@
+strings_and_bytes.py — Phase 1 bundle #2.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+Default encoding: utf-8; filesystem encoding: utf-8.
+
+======================================================================
+SECTION A — str is a sequence of Unicode code points
+======================================================================
+A Python 3 str is NOT bytes. It is an immutable sequence of
+Unicode CODE POINTS — abstract integers that name characters.
+ord(c) returns the code point; chr(n) is its inverse. len(str)
+counts code points, NOT display columns and NOT encoded bytes.
+
+expression                      result
+----------------------------------------------------
+ord('A')                        65
+chr(65)                         'A'
+ord('Z')                        90
+ord('0')                        48
+ord('é')                        233
+hex(ord('é'))                   '0xe9'
+ord('🐍')                        128013
+hex(ord('🐍'))                   '0x1f40d'
+len('AB')                       2
+len('é')                        1
+len('🐍')                        1
+list('Aé')                      ['A', 'é']
+
+[check] ord('A') == 65 (ASCII capital A is code point 65): OK
+[check] chr(65) == 'A' (chr is the inverse of ord): OK
+[check] len('🐍') == 1 (one code point, regardless of byte width): OK
+[check] ord('🐍') == 0x1F40D (snake is past the BMP, in the SMP): OK
+'man + ZWJ + woman + ZWJ + girl' as ONE grapheme cluster:
+  len(...) = 5  (5 code points, 1 grapheme cluster)
+  code points = ['0x1f468', '0x200d', '0x1f469', '0x200d', '0x1f467']
+  -> len counts CODE POINTS, not glyphs. For glyph counting you
+     need a grapheme-segmentation library (e.g. thirdparty/regex).
+
+[check] ZWJ-joined 'family' has len 5 (5 code points), not 1: OK
+
+======================================================================
+SECTION B — bytes / bytearray: raw 8-bit data (immutable / mutable)
+======================================================================
+A bytes object is an immutable sequence of ints in [0, 255].
+Indexing yields an INT (not a 1-char str like in Python 2).
+bytearray is the mutable cousin. b'...' literals give bytes.
+
+expression                          result        type
+----------------------------------------------------------------
+b'AB'                               b'AB'         bytes
+b'AB'[0]                            65            int
+b'AB'[1]                            66            int
+chr(b'AB'[0])                       A             str
+b'\x41\x42'                         b'AB'         bytes
+b'\x41\x42' == b'AB'                True          bool
+b'AB'[0] == 65                      True          bool
+b'AB'[0] == 'A'                     False         bool
+list(b'\x41\x42')                   [65, 66]      list
+bytearray(b'AB')                    bytearray(b'AB')bytearray
+type(bytearray(b'AB')).__name__     bytearray     str
+
+[check] b'AB'[0] == 65 (indexing bytes yields an int): OK
+[check] b'\x41\x42' == b'AB' (hex escapes are just byte values): OK
+[check] b'AB'[0] != 'A' (bytes indexing is NOT str indexing): OK
+ba = bytearray(b'AB'); ba[0] = 67  # 'C' as int
+  -> ba is now bytearray(b'CB')  (mutated in place)
+  bytes has NO such operator -> immutable (TypeError on item set)
+
+[check] bytearray is mutable (ba[0]=67 succeeds): OK
+[check] bytearray is NOT bytes (it is its own type): OK
+[check] bytes IS bytes: OK
+
+======================================================================
+SECTION C — encode/decode: the str<->bytes bridge + error modes
+======================================================================
+Text (code points) and bytes are DIFFERENT types. encode() goes
+str -> bytes; decode() goes bytes -> str. The ENCODING names the
+rule (UTF-8, UTF-16, ASCII, Latin-1, ...). UTF-8 uses 1-4 bytes
+per code point; ASCII is a 7-bit subset of UTF-8.
+
+UTF-8 byte width by code-point range (the actual layout):
+  range                 bytes  example   octets
+  --------------------------------------------------------
+  U+0000..U+007F        1      'A'       41
+  U+0080..U+07FF        2      'é'       c3 a9
+  U+0800..U+FFFF        3      '€'       e2 82 ac
+  U+10000..U+10FFFF     4      '🐍'       f0 9f 90 8d
+
+'🐍'.encode('utf-8') = b'\xf0\x9f\x90\x8d'
+len('🐍'.encode('utf-8')) = 4  (4 bytes, not 1)
+'🐍'.encode('utf-8').decode('utf-8') == '🐍':  True
+
+[check] '🐍'.encode('utf-8') == b'\xf0\x9f\x90\x8d' (4 octets): OK
+[check] len('🐍'.encode('utf-8')) == 4 (code-point len != byte len): OK
+[check] 'é'.encode('utf-8') has length 2 (U+00E9 is in U+0080..U+07FF): OK
+[check] encode then decode round-trips losslessly (UTF-8 is bijective): OK
+src = 'a🐍b'  (contains a non-ASCII code point)
+  strict   -> raises UnicodeEncodeError (shown below)
+    UnicodeEncodeError: 'ascii' codec can't encode character '\U0001f40d' in position 1: ordinal not in range(128)
+  ignore   -> b'ab'  (drops the un-encodable code point)
+  replace  -> b'a?b'  (each bad code point becomes b'?')
+  backslashreplace -> b'a\\U0001f40db'  (literal escapes)
+  xmlcharrefreplace -> b'a&#128013;b'  (HTML entity)
+
+[check] ASCII encode strict raises UnicodeEncodeError for '🐍': OK
+[check] errors='ignore' drops the non-ASCII code point: OK
+[check] errors='replace' substitutes b'?' per bad code point: OK
+Mojibake demo (café encoded UTF-8, decoded as Latin-1):
+  'café'.encode('utf-8')       = b'caf\xc3\xa9'
+  .decode('latin-1')           = 'cafÃ©'  (the é -> two Latin-1 chars)
+  This is the classic 'cafÃ©' you see on mis-labeled web pages.
+
+[check] mojibake: 'café' UTF-8 bytes mis-decoded as Latin-1 != 'café': OK
+[check] re-encoding the mojibake back to latin-1 round-trips the bytes: OK
+
+======================================================================
+SECTION D — The normalization trap: 'é' can be 1 OR 2 code points
+======================================================================
+The SAME glyph can have TWO different str representations:
+  NFC: 'é' = U+00E9 (1 precomposed code point, len 1)
+  NFD: 'é' = U+0065 + U+0301 ('e' + combining acute, len 2)
+They render identically but are NOT equal as str. Normalize before
+comparing, hashing, or storing user-provided text.
+
+precomposed = 'é'                       = 'é'
+  code points = ['0xe9']
+  len         = 1
+decomposed  = 'e' + '\u0301'           = 'é'
+  code points = ['0x65', '0x301']
+  len         = 2
+precomposed == decomposed : False  (visually identical, structurally different!)
+unicodedata.name on each code point:
+  U+00E9  LATIN SMALL LETTER E WITH ACUTE
+  U+0065  LATIN SMALL LETTER E
+  U+0301  COMBINING ACUTE ACCENT
+
+unicodedata.normalize('NFC', precomposed) = 'é'  (len 1)
+unicodedata.normalize('NFC', decomposed)  = 'é'  (len 1)
+After NFC, both are equal: True
+
+[check] precomposed 'é' has len 1 (single code point U+00E9): OK
+[check] decomposed 'e'+U+0301 has len 2 (two code points): OK
+[check] precomposed != decomposed (same glyph, different str): OK
+[check] NFC normalization makes both forms equal: OK
+
+======================================================================
+SECTION E — f-strings & format specs (PEP 498, Python 3.6+)
+======================================================================
+f-strings embed expressions directly in str literals. The part
+after the optional ':' is a FORMAT SPEC (mini-language). !r / !s
+/ !a pick the conversion. The = suffix (3.8+) logs name=value.
+
+expression                              result
+----------------------------------------------------------------
+f'{{pi}}' doubled-braces -> literal     '{pi}'
+f'{pi}'                                 '3.14159'
+f'{pi:.2f}'  (2 decimals)               '3.14'
+f'{pi:>8.2f}'  (width 8, right align)   '    3.14'
+f'{pi:08.2f}'  (zero-pad)               '00003.14'
+f'{big:,}'  (thousands separator)       '12,345'
+f'{big:_}'  (underscore separator)      '12_345'
+f'{big:b}'  (binary)                    '11000000111001'
+f'{big:x}'  (hex)                       '3039'
+f'{big:#x}'  (hex with prefix)          '0x3039'
+f'{255:o}'  (octal)                     '377'
+f'{65:c}'  (char from code point)       'A'
+f'{name!r}'  (repr conversion)          "'zoe'"
+f'{name!s}'  (str conversion)           'zoe'
+f'{name!a}'  (ascii conversion)         "'zoe'"
+f'{name:>6}'  (right align width 6)     '   zoe'
+f'{name:^6}'  (center align)            ' zoe  '
+f'{name:<6}|' (left align)              'zoe   |'
+
+The '=' self-documenting suffix (Python 3.8+):
+  f'{x=}'      -> x=42
+  f'{x = :>5}' -> x =    42
+  f'{y=}'      -> y='hi'
+
+Nested: width=8, prec=3
+  You CAN nest fields inside the format spec (no concatenation):
+  f'{int(pi):{width}d}'  -> '       3'  (width applied at runtime)
+  f'{pi:.{prec}f}'        -> '3.142'  (precision applied at runtime)
+
+[check] f'{pi:.2f}' == '3.14': OK
+[check] f'{big:,}' == '12,345': OK
+[check] f'{name!r}' == "'zoe'" (repr adds quotes): OK
+[check] f'{65:c}' == 'A' (format a code point as a char): OK
+[check] f-string with doubled braces is a literal brace: OK
+[check] nested format spec: f'{int(pi):{width}d}' honors width=8: OK
+[check] nested precision: f'{pi:.{prec}f}' == '3.142': OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

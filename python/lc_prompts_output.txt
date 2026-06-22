@@ -1,0 +1,191 @@
+lc_prompts.py — Phase 6 bundle #37.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. Runs offline (FakeMessagesListChatModel;
+no network, no API key).
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — ChatPromptTemplate.from_messages + variable substitution
+======================================================================
+from_messages takes (role, template) tuples. {topic} is a VARIABLE:
+at .invoke time it is substituted into the human message. The return
+is a ChatPromptValue (NOT a string) — a typed message list ready to
+feed a chat model.
+
+prompt.input_variables = ['topic']
+
+type(value)               = ChatPromptValue
+value.to_string()         = 'System: You are a helpful assistant.\nHuman: Tell me a joke about cats.'
+value.to_messages():
+  system : You are a helpful assistant.
+  human  : Tell me a joke about cats.
+
+[check] invoke returns a ChatPromptValue: OK
+[check] two messages rendered (system + human): OK
+[check] {topic} substituted to 'cats': OK
+[check] first message is the system message: OK
+[check] second message is a HumanMessage: OK
+
+======================================================================
+SECTION B — Missing variable: template raises instead of silently passing {x}
+======================================================================
+A plain f-string would leave '{topic}' in the output if you forgot it.
+A ChatPromptTemplate raises a clear KeyError naming the missing var,
+so the bug is caught at the template boundary, not downstream.
+
+prompt.invoke({}) raised: KeyError
+  message: "Input to ChatPromptTemplate is missing variables {'topic'}.  Expected: ['topic'] Received: []\nNote: if you intended {topic} to be part of the string and not a variable, please escape it with double curly braces like: '{{topic}}'.\nFor troubleshooting, visit: https://docs.langchain.com/oss/python/langchain/errors/INVALID_PROMPT_INPUT "
+
+[check] missing var raises KeyError: OK
+[check] error names the missing variable 'topic': OK
+[check] error lists Expected: ['topic']: OK
+
+======================================================================
+SECTION C — partial(): pre-fill some vars -> a template with fewer remaining
+======================================================================
+.partial(**prefilled) returns a NEW ChatPromptTemplate with those vars
+baked in. The returned template has a SHORTER input_variables list, so
+you can hand it to a sub-pipeline that only knows the rest of the vars.
+
+original.input_variables = ['role', 'topic']
+partial.input_variables  = ['topic']
+(role is gone — only topic remains)
+
+teacher.invoke({'topic':'fractions'}) ->
+  system : You are a teacher.
+  human  : Explain fractions to me.
+
+[check] original has both vars: OK
+[check] partial removed 'role' from input_variables: OK
+[check] partial kept 'topic' in input_variables: OK
+[check] {role} substituted to 'teacher': OK
+[check] {topic} substituted at invoke time: OK
+
+======================================================================
+SECTION D — PromptTemplate (string) vs ChatPromptTemplate (message list)
+======================================================================
+PromptTemplate is a SINGLE-STRING template. .invoke returns a
+StringPromptValue (one string). Use it for plain-text LLMs (the legacy
+string-in/string-out LLM API) or when you only need one rendered string.
+
+ChatPromptTemplate is a MESSAGE-LIST template. .invoke returns a
+ChatPromptValue (a list of typed messages). Use it for every chat model
+(system/human/ai roles) and for any prompt | model | parser pipeline.
+
+PromptTemplate.invoke   -> StringPromptValue: 'Translate: hola'
+ChatPromptTemplate.invoke -> ChatPromptValue
+  system : You are a translator.
+  human  : Translate: hola
+
+[check] PromptTemplate.invoke returns StringPromptValue: OK
+[check] StringPromptValue.to_string() is a plain string: OK
+[check] ChatPromptTemplate.invoke returns ChatPromptValue: OK
+[check] ChatPromptValue yields 2 messages (system + human): OK
+[check] both share the same {sentence} variable substitution: OK
+
+======================================================================
+SECTION E — Few-shot: example (human, ai) pairs inside the template
+======================================================================
+Few-shot prompting = include worked input/output examples IN the
+template so the model sees the pattern before answering. In LangChain
+this is just interleaving literal ('human', ...) / ('ai', ...) tuples
+ahead of the real ('human', '{input}') slot. Variables in the example
+tuples are NOT counted as input_variables — they are fixed text.
+
+prompt.input_variables = ['input']
+(only {input} is a real variable; the example texts are fixed)
+
+rendered message count: 6  (system + 2 example pairs + 1 real query)
+  system : Classify the sentiment as 'positive' or 'negative'.
+  human  : I love this product!
+  ai     : positive
+  human  : This broke on day one.
+  ai     : negative
+  human  : It works as advertised.
+
+[check] only 'input' is an input variable (examples are not): OK
+[check] rendered 6 messages: 1 system + 4 example + 1 query: OK
+[check] example AIMessage 'positive' is preserved verbatim: OK
+[check] example AIMessage 'negative' is preserved verbatim: OK
+[check] {input} substituted into the final human message: OK
+
+======================================================================
+SECTION F — with_structured_output(Schema): bind a Pydantic schema to a model
+======================================================================
+model.with_structured_output(Schema) returns a NEW runnable that
+returns a *parsed* object (Pydantic instance / TypedDict / dict) instead
+of an AIMessage string. Internally (for OpenAI/Anthropic/etc.) it binds
+the schema as a tool the model is FORCED to call, then parses the tool
+call args into the schema. Below: the schema, the bound tool, and the
+fake-model caveat.
+
+FactOut.model_fields = ['fact', 'confidence']
+JSON Schema 'required' = ['fact', 'confidence']
+JSON Schema 'properties.fact.type' = string
+
+convert_to_openai_tool(FactOut) — what a real model would be bound to:
+{
+  "type": "function",
+  "function": {
+    "name": "FactOut",
+    "description": "Schema for a fact + a confidence score. With a real chat model,\nwith_structured_output(FactOut) binds this as a tool the model must call,\nand the runnable returns a *parsed* FactOut instance (not free text).",
+    "parameters": {
+      "properties": {
+        "fact": {
+          "description": "A factual statement.",
+          "type": "string"
+        },
+        "confidence": {
+          "description": "Confidence score in [0.0, 1.0].",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fact",
+        "confidence"
+      ],
+      "type": "object"
+    }
+  }
+}
+
+[check] model exposes with_structured_output: OK
+fake.with_structured_output(FactOut) raised: NotImplementedError
+  msg: with_structured_output is not implemented for this model.
+  -> the FakeMessagesListChatModel inherits the base stub; a real
+     chat model (e.g. ChatOpenAI) binds the tool, parses the call,
+     and returns FactOut(fact=..., confidence=...). Demonstrated by
+     the schema + the tool above; the parsing path needs a real model.
+
+[check] FactOut has fields fact, confidence: OK
+[check] JSON schema marks both fields required: OK
+[check] confidence has type 'number' in JSON schema: OK
+[check] convert_to_openai_tool emits a 'function' tool wrapper: OK
+
+======================================================================
+SECTION G — MessagesPlaceholder: inject a dynamic list of messages (history)
+======================================================================
+MessagesPlaceholder('name') reserves a slot into which you pass an
+ARBITRARY list of BaseMessage at invoke time. The classic use is chat
+history: the system message + injected history + the new user question
+all render into one message list. (History usually lives in memory ->
+see LC_MEMORY.)
+
+prompt.input_variables = ['history', 'question']
+history passed = ['HumanMessage', 'AIMessage']
+
+rendered message count: 4  (system + 2 history + 1 question)
+  system : You are a helpful assistant.
+  human  : What is 2+2?
+  ai     : 4.
+  human  : And 3+3?
+
+[check] input_variables includes 'history' and 'question': OK
+[check] rendered 4 messages (system + 2 history + 1 question): OK
+[check] history HumanMessage preserved verbatim: OK
+[check] history AIMessage preserved verbatim: OK
+[check] {question} substituted into the final human message: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

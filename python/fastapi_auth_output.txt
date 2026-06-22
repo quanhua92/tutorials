@@ -1,0 +1,148 @@
+fastapi_auth.py — Phase 7 bundle #48.
+Every value below is computed by this file via TestClient; the .md
+guide pastes it verbatim. Nothing is hand-computed.
+FastAPI 0.138.0 on this machine. stdlib crypto only (no passlib/bcrypt/PyJWT).
+NOW pinned to 1700000000 (2023-11-14T22:13:20Z) for byte-reproducible output.
+
+======================================================================
+SECTION A — Password hashing: pbkdf2_hmac (salted, slow KDF)
+======================================================================
+A password hash must be (1) DETERMINISTIC, (2) ONE-WAY, and (3) SLOW
+so brute-force is expensive. pbkdf2_hmac hashes `iters` times with
+HMAC-SHA256 over the password + a per-user salt. Real systems use
+bcrypt/argon2; we use stdlib pbkdf2 to stay dependency-free.
+
+password             : 'wonderland'
+hash_pw(good).hex()  : 4501f0be939205d771b4a5d85ffc09fc29c33eaa1c8579892ae10466edf20c61
+len(hash) (bytes)    : 32
+hash_pw(good) again  : 4501f0be939205d771b4a5d85ffc09fc29c33eaa1c8579892ae10466edf20c61  (identical -> deterministic)
+verify_pw('wonderland', h) : True
+verify_pw('WONDERLAND', h) : False  (case-sensitive!)
+verify_pw('wrong',      h) : False
+
+[check] hash_pw is deterministic (same input -> same bytes): OK
+[check] verify_pw accepts the correct password: OK
+[check] verify_pw rejects a wrong password: OK
+[check] verify_pw rejects a case-mismatched password: OK
+[check] the hash is exactly 32 bytes (sha256 dklen), independent of pw length: OK
+
+======================================================================
+SECTION B — The user DB: {username: {salted_hash, scopes, ...}}
+======================================================================
+The 'DB' is a dict. It stores ONLY the salted hash — never plaintext.
+Iterating it leaks nothing usable; a stolen DB still forces brute-force.
+
+users in DB          : ['alice', 'bob']
+  alice  scopes=['read'] stored_hash[:16]=4501f0be939205d771b4a5d85ffc09fc…
+  bob    scopes=['read', 'admin'] stored_hash[:16]=5e1b12fbada17f0d413e1ababa52318b…
+
+[check] both demo users are present: OK
+[check] no DB row stores the plaintext password: OK
+[check] authenticate_user accepts (alice, wonderland): OK
+[check] authenticate_user rejects (alice, wrong): OK
+[check] authenticate_user rejects an unknown user: OK
+
+======================================================================
+SECTION C — Hand-rolled HS256 JWT: b64url(header).b64url(payload).b64url(sig)
+======================================================================
+A JWT is THREE base64url strings joined by '.'. The signature is
+HMAC-SHA256(secret, b64(header) + '.' + b64(payload)). Editing ANY
+part invalidates the signature. We NEVER trust the header's `alg`.
+
+header  (b64url)  : eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+payload (b64url)  : eyJleHAiOjE3MDAwMDAwNjAsImlhdCI6MTcwMDAwMDAwMCwic2NvcGUiOiJyZWFkIiwic3ViIjoiYWxpY2UifQ
+signature(b64url) : T1TGFeNqQs0QvOorqLy6C9ZHd91259dce-94t-t6wHI
+full token        : eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3MDAwMDAwNjAsImlhdCI6MTcwMDAwMDAwMCwic2NvcGUiOiJyZWFkIiwic3ViIjoiYWxpY2UifQ.T1TGFeNqQs0QvOorqLy6C9ZHd91259dce-94t-t6wHI
+jwt_decode(token) : {'exp': 1700000060, 'iat': 1700000000, 'scope': 'read', 'sub': 'alice'}
+
+tampered token    : eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.QUFBQQ.T1TGFeNqQs0QvOorqLy6C9ZHd91259dce-94t-t6wHI
+jwt_decode(tamp.) : None  (signature mismatch -> None)
+alg:none token    : eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjE3MDAwMDAwNjAsImlhdCI6MTcwMDAwMDAwMCwic2NvcGUiOiJyZWFkIiwic3ViIjoiYWxpY2UifQ.
+jwt_decode(none)  : None  (we ignore alg -> None)
+
+[check] jwt_decode round-trips a well-formed token: OK
+[check] jwt_decode rejects a tampered payload (signature no longer matches): OK
+[check] jwt_decode rejects an alg:none forgery (we always HS256): OK
+[check] jwt_decode rejects malformed input (no two dots): OK
+
+======================================================================
+SECTION D — The /token endpoint: OAuth2PasswordRequestForm -> JWT
+======================================================================
+POST /token with form fields username+password. On success it returns
+{"access_token": <jwt>, "token_type": "bearer"}. On failure, 401.
+
+POST /token (alice/wonderland) -> 200
+  access_token[:32] : eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX…
+  token_type        : bearer
+POST /token (alice/WRONG)      -> 401  Incorrect username or password
+
+[check] /token returns 200 on good credentials: OK
+[check] /token returns token_type 'bearer': OK
+[check] /token's access_token is a 3-part JWT (two dots): OK
+[check] /token returns 401 on a bad password: OK
+
+======================================================================
+SECTION E — OAuth2PasswordBearer dependency: missing/bad token -> 401
+======================================================================
+OAuth2PasswordBearer(tokenUrl='token') is a callable dependency: it
+looks for 'Authorization: Bearer <token>' and returns the token str.
+Missing header -> 401 (raised by the scheme itself, before our code).
+
+GET /me/ (no Authorization)        -> 401
+GET /me/ (Bearer <valid alice>)    -> 200 {'username': 'alice', 'full_name': 'Alice Liddell'}
+
+[check] no Authorization header -> 401 (scheme short-circuits): OK
+[check] missing-token 401 carries WWW-Authenticate: Bearer: OK
+[check] valid Bearer token -> 200 and the dep injected the user: OK
+
+======================================================================
+SECTION F — Full flow: POST /token -> Bearer -> GET /me/
+======================================================================
+The end-to-end OAuth2 password flow in two HTTP calls.
+
+step 1: POST /token (bob) -> 200, got JWT of 172 chars
+step 2: GET /me/ Authorization: Bearer <token> -> 200
+        body: {'username': 'bob', 'full_name': 'Bob Builder'}
+
+[check] step 1 returned a bearer token: OK
+[check] step 2 reached the handler (200): OK
+[check] step 2 body is the authenticated user: OK
+
+======================================================================
+SECTION G — Token expiry (exp): a token whose exp < now is rejected
+======================================================================
+The `exp` registered claim (RFC 7519 §4.1.4) is a unix timestamp.
+jwt_decode returns None when exp < now, so get_current_user raises 401.
+
+minted token with exp = NOW - 1  (1699999999)
+jwt_decode(expired_token)        : None  (rejected by exp check)
+GET /me/ with the expired token  -> 401
+
+[check] an expired token fails jwt_decode (returns None): OK
+[check] an expired token is rejected at /me/ (401): OK
+
+======================================================================
+SECTION H — Scopes preview: Security(get_current_user, scopes=[...])
+======================================================================
+Security() is Depends() + an OAuth2 scopes list. The dependency reads
+SecurityScopes and 403-rejects tokens missing a required scope.
+
+alice's token scopes : ['read']
+bob's token scopes   : ['read', 'admin']
+GET /admin/ as alice  -> 403  Missing required scope: admin
+GET /admin/ as bob    -> 200  {'admin': True, 'user': 'bob'}
+
+[check] alice (no admin scope) is forbidden from /admin/ (403): OK
+[check] bob (admin scope) reaches /admin/ (200): OK
+Security pitfalls (see .md for the full table):
+  - storing plaintext passwords (or 'encrypted' reversible passwords)
+  - using a fast hash (MD5/SHA-256) WITHOUT a KDF/salt -> brute-forceable
+  - hard-coding the JWT secret in source (we do it here ONLY for teaching)
+  - tokens with no `exp` (or very long TTL) -> stolen tokens valid forever
+  - serving login/JWTs over plain HTTP -> token interception
+  - trusting the JWT `alg` header -> alg:none / alg-confusion attack
+[check] the pitfall list above is non-empty: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

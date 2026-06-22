@@ -1,0 +1,158 @@
+autograd.py — Phase 5 bundle #30.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. torch 2.12.1 on CPU.
+
+======================================================================
+SECTION A — requires_grad and the leaf/non-leaf rule
+======================================================================
+requires_grad=True tells autograd to track ops on this tensor. A
+tensor is a LEAF if it was created directly by the user (no grad_fn)
+or has requires_grad=False. Leaves are where .grad accumulates.
+
+expression                                value
+----------------------------------------------------------------------
+x = torch.tensor([1,2,3], requires_grad=True)
+  x.requires_grad                         True
+  x.is_leaf                               True
+  x.grad_fn                               None
+  x.grad (before backward)                None
+c = torch.tensor([4,5]) (default)         
+  c.requires_grad                         False
+  c.is_leaf                               True
+
+[check] x.requires_grad is True: OK
+[check] x.is_leaf is True (created directly, requires grad): OK
+[check] x.grad_fn is None (leaves have no creator): OK
+[check] x.grad is None before any backward(): OK
+[check] c.requires_grad is False by default: OK
+[check] c.is_leaf is True (requires_grad=False -> always leaf): OK
+
+======================================================================
+SECTION B — forward pass builds the dynamic graph (grad_fn nodes)
+======================================================================
+Each op on a tensor that requires grad attaches a grad_fn: the
+backward node that knows how to differentiate that op. The graph is
+DYNAMIC — rebuilt every iteration, so Python control flow is fair
+game (unlike static TF1 graphs).
+
+expression                  grad_fn         is_leaf   requires_grad
+--------------------------------------------------------------------
+x                           None            True      True
+y = x**2 + 3                AddBackward0    False     True
+z = y.sum()                 SumBackward0    False     True
+
+[check] z.grad_fn is not None (graph node exists): OK
+[check] y.grad_fn is not None (AddBackward0 names the op): OK
+[check] y.is_leaf is False (y was produced by an op): OK
+[check] y.requires_grad is True (propagated from x): OK
+
+======================================================================
+SECTION C — backward() computes grads (reverse-mode autodiff)
+======================================================================
+.backward() walks the graph from the root (z) back to the leaves,
+applying the chain rule. For y = x**2 the analytical derivative is
+dy/dx = 2x; summing leaves dz/dx = 2x elementwise.
+
+z        = 23   (1+3)+(4+3)+(9+3) = 4+7+12 = 23
+x.grad   = [2.0, 4.0, 6.0]
+2 * x    = [2.0, 4.0, 6.0]   (the analytical derivative)
+
+[check] x.grad equals the analytical derivative 2*x (y=x^2 -> dy/dx=2x): OK
+[check] z.item() == 23: OK
+
+======================================================================
+SECTION D — gradient accumulation: backward() ADDS to .grad
+======================================================================
+.grad is ACCUMULATED, not overwritten. Calling backward() twice on
+the same graph (retain_graph=True) doubles .grad. This is exactly
+why optimizers call zero_grad() every step.  (TRAINING_LOOP)
+
+call            x.grad
+--------------------------------
+1st backward    [2.0, 4.0, 6.0]
+2nd backward    [4.0, 8.0, 12.0]
+
+2 * first == second ?  True
+
+[check] after 2nd backward x.grad == [4, 8, 12] (doubled): OK
+[check] 2*first == second (accumulation ADDS, not overwrites): OK
+
+======================================================================
+SECTION E — torch.no_grad() / inference_mode() for inference
+======================================================================
+Inside these contexts no backward graph is recorded, so new tensors
+have requires_grad=False and grad_fn=None. Use them for inference to
+save memory and time. (infer_mode is faster but its tensors cannot
+re-enter a grad-required graph.)
+
+context                    requires_grad   grad_fn
+----------------------------------------------------
+with torch.no_grad():      False           None
+with torch.infer_mode():   False           None
+
+[check] no_grad: y.requires_grad is False: OK
+[check] no_grad: y.grad_fn is None (no graph node): OK
+[check] inference_mode: yi.requires_grad is False: OK
+[check] inference_mode: yi.grad_fn is None: OK
+
+======================================================================
+SECTION F — .detach() and the leaf-in-place RuntimeError
+======================================================================
+.detach() returns a tensor with the same values but disconnected
+from the graph (no grad_fn, is a leaf). Mutating a leaf that
+requires grad IN-PLACE raises RuntimeError — autograd forbids it so
+the history needed for the backward pass stays valid.
+
+expression            requires_grad   grad_fn         is_leaf
+----------------------------------------------------------------
+y = x**2              True            PowBackward0    False
+yd = y.detach()       False           None            True
+
+values match: y=[1.0, 4.0, 9.0]  yd=[1.0, 4.0, 9.0]
+
+[check] detach: same values as y: OK
+[check] detach: requires_grad is False: OK
+[check] detach: grad_fn is None: OK
+[check] detach: result is a leaf: OK
+
+leaf.add_(1.0) -> RuntimeError raised? True
+message: "a leaf Variable that requires grad is being used in an in-place operation."
+
+[check] in-place op on a grad leaf raises RuntimeError: OK
+
+======================================================================
+SECTION G — manual gradient check: relu(x*w + b)
+======================================================================
+A small graph y = relu(x*w + b); L = y.sum(). We hand-derive the
+expected grads, assert backward() matches, and confirm with a
+finite-difference numerical check (float64, the gold standard).
+
+pre       = [3.0, -3.0, 1.5]
+y=relu(p) = [3.0, 0.0, 1.5]
+L = sum(y) = 4.5
+w.grad    = [1.0, 0.0, 0.5]   (hand-derived: [1.0, 0.0, 0.5])
+b.grad    = [1.0, 0.0, 1.0]   (hand-derived: [1.0, 0.0, 1.0])
+numerical = [1.000000000139778, 0.0, 0.5000000005139782]  (finite-diff, eps=1e-06)
+
+[check] w.grad == hand-derived [1, 0, 0.5]: OK
+[check] b.grad == hand-derived [1, 0, 1]: OK
+[check] numerical grad matches analytical (atol=1e-5): OK
+
+======================================================================
+SECTION H — non-leaf tensors: no .grad unless retain_grad()
+======================================================================
+Only LEAF tensors get .grad populated by default. A non-leaf (any
+tensor with a grad_fn) is an intermediate; its .grad stays None
+unless you call .retain_grad() on it before backward().
+
+tensor  is_leaf   .grad
+----------------------------------
+x       True      [2.0, 4.0, 6.0]
+y       False     [1.0, 1.0, 1.0]
+
+[check] x.grad is [2, 4, 6] (leaf accumulates by default): OK
+[check] y.grad is [1, 1, 1] (dL/dy via retain_grad): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

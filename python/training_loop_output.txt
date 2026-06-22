@@ -1,0 +1,164 @@
+training_loop.py — Phase 5 bundle #33.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+torch 2.12.1 on CPU.
+
+======================================================================
+SECTION A — The canonical step: zero_grad() -> backward() -> step()
+======================================================================
+Toy regression y=3x-1; nn.Linear(1,1); SGD lr=0.1; 300 full-batch
+steps. The canonical ritual per PyTorch docs (optim.html):
+
+  for ...:
+      optimizer.zero_grad()   # 1. clear accumulated grads
+      loss = loss_fn(model(x), y)
+      loss.backward()         # 2. autograd fills .grad  (AUTOGRAD)
+      optimizer.step()        # 3. update params using .grad
+
+initial loss                0.855317
+final loss (300 steps)      0.000106
+true weight / bias          3.0  -1.0
+learned weight              2.966839
+learned bias                -0.982088
+
+[check] final loss < initial loss (the ritual works): OK
+[check] loss dropped below 0.001: OK
+
+======================================================================
+SECTION B — zero_grad() is MANDATORY: grads accumulate without it
+======================================================================
+backward() ADDS to .grad (does NOT overwrite). So skipping
+zero_grad makes grads from every previous step pile up.
+
+step    |grad| WITHOUT zero_grad      |grad| WITH zero_grad
+----------------------------------------------------------------
+1       0.535381                      0.535381
+2       1.070761                      0.535381
+3       1.606142                      0.535381
+
+[check] WITHOUT zero_grad: 2nd grad > 1st (accumulated): OK
+[check] WITHOUT zero_grad: 3rd grad ~ 3x 1st (linear accumulation): OK
+[check] WITH zero_grad: grads stay constant across steps: OK
+
+======================================================================
+SECTION C — Optimizers: SGD vs Adam (Adam converges faster)
+======================================================================
+Same init, same data, 50 steps, lr=0.1 for both.
+
+optimizer             final loss      learned w     learned b
+----------------------------------------------------------------
+SGD (vanilla)         0.189450        1.595633      -0.241407
+Adam (b=0.9,0.999)    0.002677        3.168345      -1.084678
+
+true weight / bias                    3.000000      -1.000000
+
+[check] Adam loss <= SGD loss at same step count: OK
+
+======================================================================
+SECTION D — MSELoss (regression) + CrossEntropyLoss (logits, not softmax)
+======================================================================
+MSELoss: mean((pred - target)^2)
+  pred   = [1.0, 2.0, 3.0]
+  target = [1.5, 2.0, 2.5]
+  MSELoss = 0.166667   hand = 0.166667
+
+CrossEntropyLoss expects RAW LOGITS + INTEGER class indices.
+  logits = [[0.5, -0.5, 1.0], [0.1, 2.0, -0.3]]
+  labels = [2, 1]  (dtype=torch.int64)
+  CE(logits, labels)              = 0.413568
+  LogSoftmax+NLLLoss               = 0.413568  (identical)
+  CE(softmax(logits), labels)      = 0.795060  (PITFALL: double-softmax)
+
+[check] MSELoss == hand-computed mean squared error: OK
+[check] CrossEntropyLoss == LogSoftmax + NLLLoss: OK
+[check] softmax(logits) gives a DIFFERENT (wrong) loss: OK
+
+======================================================================
+SECTION E — train()/eval(): toggling self.training (Dropout)
+======================================================================
+model.train() sets self.training=True (recursive). Dropout zeros
+and scales active units. model.eval() sets it False -> Dropout is
+the identity. Always eval() before validation/inference. (NN_MODULE)
+
+model.training after train()              True
+model.training after eval()               False
+train: out(seed=0) == out(seed=1)?        False
+eval:  out == out (deterministic)?        True
+
+[check] train() sets training=True: OK
+[check] eval() sets training=False: OK
+[check] train mode: different RNG seeds give different outputs: OK
+[check] eval mode: output is deterministic (no dropout): OK
+
+======================================================================
+SECTION F — lr scheduler: StepLR / CosineAnnealingLR (lr changes per epoch)
+======================================================================
+scheduler.step() is called ONCE PER EPOCH, AFTER optimizer.step().
+
+epoch   StepLR lr         CosineAnnealingLR lr
+--------------------------------------------
+0       0.100000          0.100000
+1       0.100000          0.093301
+2       0.010000          0.075000
+3       0.010000          0.050000
+4       0.001000          0.025000
+5       0.001000          0.006699
+
+[check] StepLR: lr at epoch 0 == 0.1: OK
+[check] StepLR: lr decays to 0.01 at epoch 2 (step_size=2, gamma=0.1): OK
+[check] StepLR: lr decays to 0.001 at epoch 4: OK
+[check] CosineAnnealingLR: lr changes across epochs: OK
+[check] CosineAnnealingLR: starts at initial lr (0.1): OK
+[check] CosineAnnealingLR: ends near eta_min=0: OK
+
+======================================================================
+SECTION G — clip_grad_norm_: caps the total gradient L2 norm
+======================================================================
+clip_grad_norm_ computes the total L2 norm over all param grads,
+and if it exceeds max_norm, scales ALL grads by max_norm/total_norm
+(in-place). Call it AFTER backward(), BEFORE optimizer.step().
+
+grad before clip            [3.0, 4.0]  norm=5.0
+total_norm (returned)       5.000000
+max_norm                    1.0
+grad after clip             [0.6, 0.8]  norm=1.000000
+scale factor                0.200000
+
+[check] total_norm returned == original norm (5.0): OK
+[check] clipped grad norm <= max_norm: OK
+[check] grad was scaled to [0.6, 0.8] (3*0.2, 4*0.2): OK
+
+======================================================================
+SECTION H — Checkpointing: torch.save(model.state_dict(), path)
+======================================================================
+torch.save serializes the state_dict (params + persistent buffers)
+to disk; torch.load + load_state_dict restores them into a fresh
+model.  (NN_MODULE state_dict)
+
+saved keys                      ['weight', 'bias']
+keys match after round-trip     True
+all tensors equal               True
+
+[check] saved and loaded state_dict keys match: OK
+[check] all params equal after save/load round-trip: OK
+
+======================================================================
+SECTION I — Full epoch loop over a DataLoader (forward->loss->step)
+======================================================================
+TensorDataset(16 pts) -> DataLoader(batch_size=4) -> 4 batches/epoch x 50 epochs. Mini-batch SGD lr=0.1.
+
+epoch   avg loss (over 4 batches)
+--------------------------------
+0       0.954088
+10      0.271290
+20      0.070669
+30      0.018409
+40      0.004795
+49      0.001429
+
+[check] loss decreases across epochs (final < first): OK
+[check] final epoch loss < 0.05: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

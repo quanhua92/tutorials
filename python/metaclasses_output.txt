@@ -1,0 +1,178 @@
+metaclasses.py — Phase 2 bundle #13.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — type is the metaclass; type(name, bases, dict) builds a class
+======================================================================
+Every class is an INSTANCE of its metaclass. The default metaclass
+is `type`, so `type(Foo) is type`. The 3-arg form type(name, bases,
+dict) is the dynamic form of the `class` statement — it builds a new
+class object at runtime from a name, a bases tuple, and a namespace.
+
+expression                        result
+----------------------------------------------------
+type(Foo)                         <class 'type'>
+type(Foo) is type                 True
+isinstance(Foo, type)             True
+type(int) is type                 True
+type(type) is type                True
+
+Bar = type('Bar', (), {'a': 1})   # 3-arg type() builds a class
+
+expression                    result
+------------------------------------------------
+type(Bar) is type             True
+Bar.__name__                  'Bar'
+Bar.__bases__                 (<class 'object'>,)
+Bar.a                         1
+Bar().a                       1
+isinstance(Bar(), object)     True
+
+[check] type(Foo) is type (the default metaclass): OK
+[check] type(type) is type (type is its own metaclass): OK
+[check] type('Bar', (), {'a': 1})().a == 1: OK
+[check] the 3-arg type() returns a class (instance of type): OK
+
+======================================================================
+SECTION B — __init_subclass__: the 90% solution (plugin registry)
+======================================================================
+__init_subclass__ runs in the PARENT whenever a SUBCLASS is defined.
+It receives the new subclass as `cls`. This is the common, simple way
+to react to subclassing — and it replaces most metaclass use cases.
+
+class Plugin:
+    registry = {}
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        Plugin.registry[cls.__name__] = cls
+
+Defining subclasses now — the parent hook fires at definition time:
+
+class CSVLoader(Plugin):  pass   # __init_subclass__ fires
+class JSONLoader(Plugin): pass   # __init_subclass__ fires
+
+expression                                    result
+----------------------------------------------------------------
+list(Plugin.registry)                         ['CSVLoader', 'JSONLoader']
+Plugin.registry['CSVLoader'] is CSVLoader     True
+Plugin.registry['JSONLoader'] is JSONLoader   True
+type(CSVLoader) is type                       True
+
+[check] registry contains both subclasses after class defs: OK
+[check] registry maps names to the actual class objects: OK
+[check] no custom metaclass involved (type(CSVLoader) is type): OK
+
+======================================================================
+SECTION C — A custom metaclass rewrites the namespace at definition time
+======================================================================
+A metaclass is a subclass of `type`. Its __new__ runs when a `class`
+statement executes (NOT at instantiation) and may rewrite the class
+namespace before the class object is created. Here: auto-uppercase
+every non-dunder method name.
+
+class UpperMeta(type):
+    def __new__(mcs, name, bases, ns):
+        # uppercase every non-dunder callable name
+
+  UpperMeta.__new__ running for 'Greeter'; rewriting namespace
+
+expression                        result
+----------------------------------------------------
+type(Greeter).__name__            'UpperMeta'
+type(Greeter) is UpperMeta        True
+'GREET' in Greeter.__dict__       True
+'WAVE' in Greeter.__dict__        True
+'greet' in Greeter.__dict__       False
+Greeter().GREET()                 'hi'
+
+[check] Greeter's metaclass is UpperMeta: OK
+[check] method names were uppercased at definition time: OK
+[check] original lowercase names are gone: OK
+[check] the uppercased method still works: OK
+
+======================================================================
+SECTION D — __new__ creates, __init__ initializes (singleton + skip rule)
+======================================================================
+__new__ creates and returns the instance; __init__ initializes it.
+RULE: if __new__ returns an instance of a DIFFERENT class, __init__
+is NOT called. This enables the singleton/cache trick — but beware:
+a same-class singleton still re-runs __init__ on every call.
+
+s1 = Singleton(); s2 = Singleton()   # same-class singleton
+
+expression                result
+--------------------------------------------
+s1 is s2                  True
+Singleton.init_calls      2
+
+[check] singleton returns the SAME object (s1 is s2): OK
+[check] BUT __init__ ran twice (init_calls == 2) — the gotcha: OK
+class Factory:
+    def __new__(cls): return Other()   # different class
+obj = Factory()
+
+expression                    result
+------------------------------------------------
+isinstance(obj, Factory)      False
+isinstance(obj, Other)        True
+Factory.init_calls            0
+
+[check] Factory() returns an Other (not a Factory): OK
+[check] __init__ was SKIPPED (init_calls == 0): OK
+
+======================================================================
+SECTION E — __class_getitem__: class-level parametrization (Vec[int])
+======================================================================
+Writing `SomeClass[arg]` calls the CLASSMETHOD __class_getitem__,
+NOT __getitem__ (which is for instances). This is how list[int] works
+without instantiating list. It returns whatever you choose — the
+builtins return a GenericAlias; your class can return anything.
+
+class Vec:
+    def __class_getitem__(cls, item):
+        return ('Vec', item)
+
+expression                  result
+----------------------------------------------
+Vec[int]                    ('Vec', <class 'int'>)
+Vec[str]                    ('Vec', <class 'str'>)
+type(Vec[int]).__name__     'tuple'
+
+list[int]                              list[int]
+type(list[int]).__name__               'GenericAlias'
+isinstance(list[int], types.GenericAlias) True
+
+[check] Vec[int] returns our custom tuple: OK
+[check] Vec[int] does NOT instantiate Vec: OK
+[check] list[int] is a GenericAlias (no instantiation): OK
+[check] __class_getitem__ is stored on the class (auto classmethod): OK
+
+======================================================================
+SECTION F — When do you ACTUALLY need a metaclass?
+======================================================================
+Rule of thumb: reach for __init_subclass__ first. A real metaclass
+is only needed when you must customize class creation BEFORE or
+AROUND type.__new__ — __prepare__, __instancecheck__, or modifying
+ALL classes in a hierarchy at the namespace level.
+
+task                                  use                         note
+------------------------------------------------------------------------------------------
+auto-register subclasses              __init_subclass__           simple hook in parent
+validate subclass kwargs              __init_subclass__           raise in the parent hook
+inject/rewrite methods at def time    metaclass __new__           UpperMeta (Section C)
+custom namespace (ordered, etc.)      metaclass __prepare__       PEP 3115; rare
+customize isinstance/issubclass       metaclass __instancecheck__ abc.ABCMeta
+enforce rules on EVERY class in a lib metaclass                   EnumMeta, ABCMeta
+
+type(abc.ABC).__name__             'ABCMeta'
+type(enum.Enum).__name__           'EnumType'
+issubclass(type(abc.ABC), type)    True
+
+[check] abc.ABC's metaclass is a subclass of type: OK
+[check] enum.Enum's metaclass is a subclass of type: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

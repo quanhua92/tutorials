@@ -1,0 +1,187 @@
+mcp_integration.py — Phase 8 bundle #54 (the capstone).
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: the Streamable-HTTP
+section builds the ASGI app OBJECT (no port bind); the LangChain
+section uses the in-memory Client (no socket, no key).
+fastmcp 3.4.2, langchain-core 1.4.8, starlette 1.3.1.
+
+======================================================================
+SECTION A — Transport decision: stdio | Streamable HTTP | (legacy) SSE
+======================================================================
+The MCP spec defines exactly TWO standard transports — stdio and
+Streamable HTTP (HTTP+SSE from 2024-11-05 is DEPRECATED). FastMCP
+exposes all three. The choice is a deployment decision, not a
+protocol decision: the SAME server, the SAME tools, different wire.
+
+transport         process model                 use when
+------------------------------------------------------------------------------
+stdio             client spawns a subprocess    local CLI tools, files, Claude Desktop (1:1)
+Streamable HTTP   server is a web service (ASGI app)remote, multi-client, web, mount behind FastAPI
+HTTP+SSE (legacy) two-endpoint SSE+POST         ONLY for old clients — deprecated, do not start new work
+
+[check] spec defines exactly two standard transports (stdio, Streamable HTTP): OK
+[check] HTTP+SSE (2024-11-05) is deprecated: OK
+[check] the SAME @mcp.tool runs unchanged across every transport: OK
+
+======================================================================
+SECTION B — stdio: the host spawns the server as a subprocess (sketch)
+======================================================================
+Per spec Transports/stdio: the CLIENT launches the server as a
+subprocess; the server reads newline-delimited JSON-RPC from stdin
+and writes responses to stdout (stderr is for logs only). We do NOT
+spawn here (keep it offline) — we show the two entry points.
+
+mcp.run(transport: 'Transport | None' = None, show_banner: 'bool | None' = None, **transport_kwargs: 'Any') -> 'None'
+  transport=None -> stdio (default); **transport_kwargs carry host/port
+if __name__ == '__main__': mcp.run()                  # stdio default
+  $ fastmcp run server.py                            # CLI, stdio
+  $ python server.py                                 # mcp.run() stdio
+
+Wire (host side): Client('server.py') spawns the subprocess and owns
+its lifecycle; close stdin -> terminate. No socket, no port.
+
+[check] run() signature takes 'transport' + '**transport_kwargs': OK
+[check] run() is blocking (returns None): OK
+[check] stdio needs NO host/port (subprocess, no socket): OK
+
+======================================================================
+SECTION C — Streamable HTTP: mcp.http_app() -> an ASGI-callable Starlette app
+======================================================================
+mcp.http_app(transport='http') builds the Streamable-HTTP server as a
+Starlette ASGI app OBJECT — we do NOT call uvicorn here (no port bind).
+The object can be served standalone OR mounted behind a FastAPI app.
+
+type(app)               = StarletteWithLifespan
+isinstance(app, Starlette) = True
+callable(app) (__call__)   = True
+app.routes (paths)      = ['/mcp']
+default MCP endpoint     = '/mcp'
+
+Standalone:   uvicorn app:app            # app = mcp.http_app()
+Behind FastAPI (next): api.mount('/mcp', mcp.http_app())
+
+[check] http_app() returns a Starlette (ASGI) app: OK
+[check] the ASGI app is callable (__call__ defined): OK
+[check] the default Streamable-HTTP endpoint is /mcp: OK
+[check] no port was bound (object only, never served): OK
+
+======================================================================
+SECTION C2 — Mounting the MCP server behind FastAPI (no port bind)
+======================================================================
+FastAPI/Starlette apps can MOUNT another ASGI app at a sub-path. So a
+FastAPI app can serve REST routes AND an MCP server on the same origin
+(🔗 FASTAPI_MIDDLEWARE_LIFESPAN: middleware wraps BOTH).
+
+FastAPI routes after mount = ['/docs', '/docs/oauth2-redirect', '/health', '/mcp', '/openapi.json', '/redoc']
+(REST '/health' + MCP '/mcp' live behind ONE origin; FastAPI's
+ middleware onion — CORS, auth, logging — covers the MCP path too.)
+
+[check] FastAPI route '/health' present: OK
+[check] MCP server mounted at '/mcp' behind FastAPI: OK
+[check] no port was bound (built objects only): OK
+
+======================================================================
+SECTION D — A LangChain agent consumes an MCP server's tools (in-memory)
+======================================================================
+The host-consumes-server pattern: connect a Client, list the server's
+tools, and expose each as a LangChain tool whose coroutine does an MCP
+call_tool. Now the agent's tool-call (name + args) reaches the server's
+code — Phase 6 (LangChain) meets Phase 8 (MCP).
+(langchain-mcp-adapters would do this for you; here we show the bridge.)
+
+connected, is_connected() = True
+mcp tool names            = ['add']
+langchain tool names      = ['add']
+type(add_lc).__name__     = StructuredTool
+isinstance(add_lc, BaseTool) = True
+isinstance(add_lc, Runnable) = True
+add_lc.description        = 'Add two integers (the shared tool across every transport demo).'
+add_lc.args fields        = ['a', 'b']
+add_lc.ainvoke({'a':40,'b':2}) -> 42  (type=int)
+
+[check] client connected to the MCP server: OK
+[check] exactly one MCP tool ('add') was discovered: OK
+[check] the adapter wrapped it into a LangChain BaseTool: OK
+[check] the LangChain tool kept name 'add': OK
+[check] args schema was rebuilt from the MCP JSON-Schema (a, b as int): OK
+[check] calling the LC tool reached the MCP server and returned 42: OK
+[check] the returned value has type int (matches the tool's -> int): OK
+
+======================================================================
+SECTION E — End-to-end shape: LangChain agent -> client -> MCP tool -> result
+======================================================================
+The whole stack in one line of dataflow. The host (a LangChain agent,
+P6) decides to call a tool; the MCP client (P8) carries the call over
+a transport; the server's tool (P8) runs and returns. The FastAPI layer
+(P7) is ONE transport option for the client->server hop.
+
+hop             what happens
+----------------------------------------------------------------------
+1 host/agent    LangChain create_react_agent decides 'call add(40,2)'
+2 tool-call     AIMessage.tool_calls -> {name:'add', args:{a:40,b:2}}
+3 MCP client    Client.call_tool('add', {a:40,b:2})  (JSON-RPC)
+4 transport     stdio | Streamable HTTP | in-memory
+5 MCP server    the @mcp.tool fn runs server-side: 40 + 2
+6 result        CallToolResult.data -> 42 -> fed back as ToolMessage
+7 agent         next model turn sees the 42, emits final answer
+
+[check] the host is a LangChain agent (P6): OK
+[check] the transport is the ONLY thing P7 contributes (FastAPI mounts it): OK
+[check] the server's tool is the P8 primitive that actually runs: OK
+[check] result feeds back as a ToolMessage so the agent can loop: OK
+
+======================================================================
+SECTION F — Production checklist: the stdio-vs-HTTP security boundary
+======================================================================
+stdio runs the server in-process-equivalent (subprocess) on the USER's
+machine -> the user IS the trust boundary; no network auth needed but
+you MUST vet server code. Streamable HTTP exposes the server on the
+network -> every web-app hardening rule applies (🔗 FASTAPI).
+
+item                      what
+----------------------------------------------------------------------
+auth on HTTP transport    require a token / OAuth on the MCP endpoint
+rate limiting             cap calls per session / per IP (slowth)
+logging / observability   structured logs + request id + lifespan
+secrets not in source     env vars / a vault; never hardcode keys
+resource limits           timeouts, max tool duration, max payload
+localhost binding         bind 127.0.0.1 for local-only HTTP servers
+Origin header validation  spec: MUST validate Origin (DNS rebinding)
+stdio server vetting      stdio runs ARBITRARY code -> audit the server
+
+[check] checklist covers: auth on HTTP transport: OK
+[check] checklist covers: rate limiting: OK
+[check] checklist covers: logging / observability: OK
+[check] checklist covers: secrets not in source: OK
+[check] checklist covers: resource limits: OK
+[check] checklist covers: localhost binding: OK
+[check] checklist covers: Origin header validation: OK
+[check] checklist covers: stdio server vetting: OK
+
+======================================================================
+SECTION G — The curriculum stack: P1 -> P8 (Python mastery -> agent protocol)
+======================================================================
+This bundle is the capstone because it composes every prior phase.
+Mastery is a stack: language fundamentals at the bottom, the agent
+protocol at the top, each layer built on the one below.
+
+phase                   the idea
+----------------------------------------------------------------------
+P1 object model         types/numeric tower/truthiness == vs is
+P2 data model           dunder protocols, descriptors, metaclasses
+P3 memory/concurrency   refcounting/GIL/asyncio
+P4 toolchain            ruff/mypy/pytest/packaging
+P5 numerical/AI         NumPy/PyTorch tensors + autograd
+P6 LLM orchestration    LangChain @tool + bind_tools + agent loop
+P7 API serving          FastAPI routes + middleware + lifespan
+P8 agent protocol       FastMCP tools/resources/prompts + transports
+
+THIS bundle = P6 agent (host) -> P7 FastAPI (a transport) -> P8 MCP
+(the server + its tools). The three AI phases compose end-to-end.
+
+[check] eight phases from P1 (language) to P8 (agent protocol): OK
+[check] the capstone ties together P6, P7, and P8: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

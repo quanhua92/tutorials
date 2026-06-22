@@ -1,0 +1,260 @@
+bytecode_internals.py — Phase 4 bundle #23.
+Every instruction stream below is printed by this file; the .md
+guide pastes it verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Source -> code object -> eval loop
+======================================================================
+compile('x + 1', '<demo>', 'eval') produces a CODE OBJECT:
+  type(co)     = code
+  co.co_consts = (1,)
+  co.co_names  = ('x',)
+  eval(co, dict(x=41)) = 42
+
+'eval' mode compiles a single EXPRESSION; 'exec' mode compiles
+STATEMENTS (def/class/import/assignment). A .py file is compiled
+to a MODULE code object, then that code object is executed by
+CPython's stack-based eval loop — there is no runtime source
+re-reading.
+
+  compile('y = 2', '<demo>', 'exec'); exec(co_exec, {})
+  ns['y'] = 2
+
+[check] compile('eval') returns a code object: OK
+[check] eval runs the compiled code object: OK
+[check] 'eval' co_consts contains literal 1: OK
+[check] 'eval' co_names contains 'x': OK
+
+======================================================================
+SECTION B — fn.__code__: the bytecode + constant pool of a function
+======================================================================
+def add_one(x): return x + 1
+  type(add_one.__code__)       = code
+  add_one.__code__.co_consts   = (None, 1)
+  add_one.__code__.co_varnames = ('x',)
+  add_one.__code__.co_names    = ()
+  add_one.__code__.co_code     = b'\x95\x00U\x00S\x01-\x00\x00\x00$\x00'
+  len(co_code)                 = 12 bytes
+
+co_consts  = tuple of literal constants used in the body.
+co_varnames = tuple of local variable names (indexed by LOAD_FAST).
+co_names   = tuple of global/attribute names (LOAD_GLOBAL/LOAD_ATTR).
+co_code    = raw bytes of the instruction stream (2 bytes/instr).
+
+[check] fn.__code__ is a code object: OK
+[check] co_consts contains None and 1: OK
+[check] co_varnames lists local 'x': OK
+[check] co_names is empty (no global/attr in add_one): OK
+[check] co_code is bytes (raw instruction stream): OK
+
+======================================================================
+SECTION C — dis.dis(add_one): reading the instruction stream
+======================================================================
+Each row = ONE bytecode instruction. Columns: source-line, opcode,
+arg (numeric), arg-resolved (human). The eval loop executes these in
+order, pushing/popping an operand stack.
+
+>>> dis.dis(add_one)
+ 82           RESUME                   0
+
+ 83           LOAD_FAST                0 (x)
+              LOAD_CONST               1 (1)
+              BINARY_OP                0 (+)
+              RETURN_VALUE
+
+opnames: ['RESUME', 'LOAD_FAST', 'LOAD_CONST', 'BINARY_OP', 'RETURN_VALUE']
+
+[check] LOAD_FAST present (push local 'x'): OK
+[check] LOAD_CONST present (push literal 1): OK
+[check] BINARY_OP present (pop two, push result): OK
+[check] RETURN_VALUE present (pop and return top): OK
+
+======================================================================
+SECTION D — LOAD_FAST vs LOAD_GLOBAL vs LOAD_ATTR (lookup costs)
+======================================================================
+Three different lookups map to three different opcodes:
+
+  LOAD_FAST   — local var; fast-indexed array slot   (cheapest)
+  LOAD_GLOBAL — module global OR builtin; dict lookup (slower)
+  LOAD_ATTR   — object.attribute; type MRO + dict walk (slowest)
+
+>>> dis.dis(use_local)   # x is a local
+ 86           RESUME                   0
+
+ 87           LOAD_CONST               1 (1)
+              STORE_FAST               0 (x)
+
+ 88           LOAD_FAST                0 (x)
+              LOAD_CONST               1 (1)
+              BINARY_OP                0 (+)
+              RETURN_VALUE
+
+>>> dis.dis(use_global)  # G is a module global
+ 91           RESUME                   0
+
+ 92           LOAD_GLOBAL              0 (G)
+              LOAD_CONST               1 (1)
+              BINARY_OP                0 (+)
+              RETURN_VALUE
+
+>>> dis.dis(use_builtin) # len is a builtin (LOAD_GLOBAL + NULL)
+ 95           RESUME                   0
+
+ 96           LOAD_GLOBAL              1 (len + NULL)
+              BUILD_LIST               0
+              LOAD_CONST               1 ((1, 2, 3))
+              LIST_EXTEND              1
+              CALL                     1
+              RETURN_VALUE
+
+>>> dis.dis(use_attr)    # WIDGET.add is an attribute
+ 99           RESUME                   0
+
+100           LOAD_GLOBAL              0 (WIDGET)
+              LOAD_ATTR                2 (add)
+              RETURN_VALUE
+
+[check] use_local uses LOAD_FAST (indexed array access): OK
+[check] use_global uses LOAD_GLOBAL (dict lookup): OK
+[check] use_builtin uses LOAD_GLOBAL too (3.12+ merged builtins into it): OK
+[check] use_attr uses LOAD_ATTR (type + dict walk): OK
+[check] no LOAD_NAME in any of the four (3.13 uses LOAD_FAST/GLOBAL/ATTR): OK
+
+======================================================================
+SECTION E — obj.method per iteration: cost + cache-the-method fix
+======================================================================
+hot_loop calls WIDGET.add() INSIDE the loop — each iteration emits
+LOAD_GLOBAL(WIDGET) + LOAD_ATTR(add) + CALL. hot_loop_cached hoists
+the attribute lookup OUT: 'add = WIDGET.add' runs ONCE, then the
+loop body is just CALL on a local.
+
+>>> dis.dis(hot_loop)
+103           RESUME                   0
+
+104           LOAD_CONST               1 (0)
+              STORE_FAST               1 (total)
+
+105           LOAD_GLOBAL              1 (range + NULL)
+              LOAD_FAST                0 (n)
+              CALL                     1
+              GET_ITER
+      L1:     FOR_ITER                26 (to L2)
+              STORE_FAST               2 (_)
+
+106           LOAD_FAST                1 (total)
+              LOAD_GLOBAL              2 (WIDGET)
+              LOAD_ATTR                5 (add + NULL|self)
+              CALL                     0
+              BINARY_OP               13 (+=)
+              STORE_FAST               1 (total)
+              JUMP_BACKWARD           28 (to L1)
+
+105   L2:     END_FOR
+              POP_TOP
+
+107           LOAD_FAST                1 (total)
+              RETURN_VALUE
+
+>>> dis.dis(hot_loop_cached)
+110           RESUME                   0
+
+111           LOAD_CONST               1 (0)
+              STORE_FAST               1 (total)
+
+112           LOAD_GLOBAL              0 (WIDGET)
+              LOAD_ATTR                2 (add)
+              STORE_FAST               2 (add)
+
+113           LOAD_GLOBAL              5 (range + NULL)
+              LOAD_FAST                0 (n)
+              CALL                     1
+              GET_ITER
+      L1:     FOR_ITER                12 (to L2)
+              STORE_FAST               3 (_)
+
+114           LOAD_FAST_LOAD_FAST     18 (total, add)
+              PUSH_NULL
+              CALL                     0
+              BINARY_OP               13 (+=)
+              STORE_FAST               1 (total)
+              JUMP_BACKWARD           14 (to L1)
+
+113   L2:     END_FOR
+              POP_TOP
+
+115           LOAD_FAST                1 (total)
+              RETURN_VALUE
+
+hot_loop       loop-body ops: ['STORE_FAST', 'LOAD_FAST', 'LOAD_GLOBAL', 'LOAD_ATTR', 'CALL', 'BINARY_OP', 'STORE_FAST']
+hot_loop_cached loop-body ops: ['STORE_FAST', 'LOAD_FAST_LOAD_FAST', 'PUSH_NULL', 'CALL', 'BINARY_OP', 'STORE_FAST']
+
+[check] hot_loop body contains LOAD_ATTR (attr lookup per iteration): OK
+[check] hot_loop_cached body has NO LOAD_ATTR (hoisted out): OK
+[check] both loops return the same result: OK
+
+======================================================================
+SECTION F — Code objects are immutable; replace __code__, don't mutate
+======================================================================
+co_consts is READONLY — you cannot mutate bytecode in place:
+  c.co_consts = (None, 2)  ->  AttributeError: readonly attribute
+
+But you CAN swap a function's entire __code__ object:
+  original_fn() before swap: 1
+  original_fn() after swap:  999
+
+Two functions with identical source get DISTINCT code objects
+(CPython does not deduplicate code objects):
+  f1.__code__ is f2.__code__  ->  False
+  f1.__code__ is f1.__code__  ->  True
+
+[check] co_consts is readonly (cannot mutate in place): OK
+[check] replacing __code__ changes the function's behavior: OK
+[check] two distinct functions have distinct code objects: OK
+[check] a code object identity is stable across accesses: OK
+
+======================================================================
+SECTION G — The 3.11+ specializing adaptive interpreter (PEP 659)
+======================================================================
+Since CPython 3.11 (PEP 659), the interpreter QUICKENS bytecode at
+runtime: after an instruction executes enough times, it is replaced
+in-place by a SPECIALIZED variant tuned to the actual types/values.
+
+  LOAD_ATTR   -> LOAD_ATTR_SLOT / LOAD_ATTR_MODULE / ...
+  LOAD_GLOBAL -> LOAD_GLOBAL_MODULE / LOAD_GLOBAL_BUILTIN
+
+Specialization lives in the interpreter's QUICKENED bytecode buffer,
+NOT in the code object's co_code (which stays unspecialized).
+dis.dis() shows the UNSPECIALIZED form; show_caches=True reveals the
+inline-cache slots that the specializing interpreter writes to.
+
+>>> dis.dis(use_attr, show_caches=True)
+ 99           RESUME                   0
+
+100           LOAD_GLOBAL              0 (WIDGET)
+              CACHE                    0 (counter: 0)
+              CACHE                    0 (index: 0)
+              CACHE                    0 (module_keys_version: 0)
+              CACHE                    0 (builtin_keys_version: 0)
+              LOAD_ATTR                2 (add)
+              CACHE                    0 (counter: 0)
+              CACHE                    0 (version: 0)
+              CACHE                    0
+              CACHE                    0 (keys_version: 0)
+              CACHE                    0
+              CACHE                    0 (descr: 0)
+              CACHE                    0
+              CACHE                    0
+              CACHE                    0
+              RETURN_VALUE
+(13 CACHE entries follow LOAD_ATTR — specialization data)
+
+Python 3.13 — adaptive interpreter present.
+
+[check] running on CPython >= 3.11 (PEP 659 adaptive interpreter): OK
+[check] LOAD_ATTR is followed by CACHE entries (specialization slots): OK
+[check] dis.Bytecode accepts adaptive=True (3.11+): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

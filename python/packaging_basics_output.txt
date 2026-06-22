@@ -1,0 +1,238 @@
+packaging_basics.py — Phase 4 bundle #27 (Modern Python Packaging).
+Every value below is parsed/printed by this file; the .md guide pastes
+it verbatim. The SAMPLE pyproject.toml is embedded — we never touch the
+repo's real pyproject.toml, never run pip, never build a package.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — pyproject.toml structure: tomllib.loads(SAMPLE)
+======================================================================
+pyproject.toml is the single source of truth for a modern Python
+project. PEP 518 (2016) introduced the FILE and [build-system];
+PEP 621 (2020) added [project] for tool-agnostic metadata. Python
+3.11+ ships tomllib to parse it. Below: load the SAMPLE and list
+the top-level tables.
+
+top-level tables: ['build-system', 'dependency-groups', 'project', 'tool']
+
+table                         kind
+--------------------------------------------------
+'build-system'                dict
+'dependency-groups'           dict
+'project'                     dict
+'tool'                        dict
+
+[check] pyproject.toml has a [build-system] table: OK
+[check] pyproject.toml has a [project] table: OK
+[check] [project] is a dict (a TOML table): OK
+[check] [build-system] is a dict (a TOML table): OK
+
+======================================================================
+SECTION B — [build-system] (PEP 517/518): pick a backend
+======================================================================
+PEP 518 defined [build-system] with two keys: `requires` (the list
+of packages pip must install into an ISOLATED build env) and
+`build-backend` (the dotted path to a PEP 517 backend object). The
+backend then exposes hooks: build_wheel, build_sdist, get_requires_for_build_wheel, prepare_metadata_for_build_wheel.
+
+Common backends (each builds a wheel from the same [project]):
+  build-backend                   family      note
+  ------------------------------------------------------------
+  hatchling                       Hatch       default for new projects; fast, configurable
+  setuptools.build_meta           setuptools  the legacy default; still huge
+  flit_core.buildapi              Flit        tiny, for single-module pure-Python
+  poetry.core.masonry.api         Poetry      ships with the Poetry workflow
+
+[build-system].requires      = ['hatchling']
+[build-system].build-backend = 'hatchling.build'
+
+[check] [build-system] has 'requires' as a list of str: OK
+[check] [build-system] has 'build-backend' as a str: OK
+[check] our SAMPLE uses the hatchling backend: OK
+
+======================================================================
+SECTION C — [project] metadata (PEP 621) + PEP 440 versions
+======================================================================
+PEP 621 standardizes the [project] table. `name` is REQUIRED; `version`
+MUST follow PEP 440. Other keys: description, readme, requires-python,
+license, authors, keywords, classifiers, urls, scripts, dependencies,
+optional-dependencies, dynamic. Below: our SAMPLE's [project].
+
+  name             = 'mwe-thing'
+  version          = '1.2.3'
+  description      = 'A minimal worked-example package.'
+  requires-python  = '>=3.11'
+  license          = {'text': 'MIT'}
+  authors          = [{'name': 'Ada Lovelace', 'email': 'ada@example.com'}]
+  keywords         = ['example', 'packaging']
+  dependencies     = ['httpx>=0.27', 'rich>=13.0']
+
+[check] [project].name is 'mwe-thing': OK
+[check] [project].version is '1.2.3': OK
+[check] [project].requires-python is '>=3.11': OK
+[check] [project].authors is a list of inline tables: OK
+PEP 440 version scheme:  [N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]
+Below: each version parsed into (epoch, release, pre, post, dev, local).
+
+  version       release   pre       post    dev     epoch
+  ----------------------------------------------------------
+  1.2.3         1.2.3     -         -       -       0
+  1.0a1         1.0       a         -       -       0
+  1.0b2         1.0       b         -       -       0
+  1.0rc1        1.0       rc        -       -       0
+  1.0           1.0       -         -       -       0
+  1.0.post1     1.0       -         1       -       0
+  1.0.dev1      1.0       -         -       1       0
+  2!1.0         1.0       -         -       -       2
+  1.0+local     1.0       -         -       -       0
+  1.0.0         1.0.0     -         -       -       0
+
+sorted by PEP 440 order: ['1.0.dev1', '1.0a1', '1.0b1', '1.0rc1', '1.0', '1.0.post1']
+
+[check] 1.0.dev1 sorts first (dev < everything): OK
+[check] 1.0.post1 sorts last (post > release): OK
+[check] the full chain is strictly ascending: OK
+[check] 1.0 == 1.0.0 (trailing zeros are insignificant): OK
+[check] 2!1.0 > 1!9.9 (epoch dominates release): OK
+[check] 1.0+local > 1.0 (local version beats no local): OK
+
+======================================================================
+SECTION D — dependencies vs optional-dependencies (extras)
+======================================================================
+[project].dependencies always install. [project.optional-dependencies]
+are EXTRAS: named groups the user opts into at install time with
+square brackets. Extras ARE shipped to users in the wheel.
+
+  dependencies            = ['httpx>=0.27', 'rich>=13.0']
+  optional-dependencies   = {'docs': ['sphinx>=7.0', 'furo'], 'test': ['pytest>=8.0', 'pytest-cov']}
+
+  # install just the core:
+  pip install mwe-thing
+  # install core + two extras (docs + test):
+  pip install 'mwe-thing[docs,test]'
+
+[check] core dependencies are a list of PEP 508 strings: OK
+[check] 'docs' extra is a list: OK
+[check] 'docs' extra contains sphinx: OK
+[check] two extras defined (docs, test): OK
+
+======================================================================
+SECTION E — dependency-groups (PEP 735): NOT shipped
+======================================================================
+PEP 735 (2024) added [dependency-groups] for DEV/TOOL dependencies
+that must NEVER end up in a built wheel. Unlike extras, they are
+purely for local development and CI. uv/pip support installing them
+into dev environments but the backend omits them from the sdist/wheel.
+
+  [dependency-groups] = {'dev': ['ruff>=0.6', 'mypy>=1.11'], 'test': ['pytest>=8.0']}
+
+  aspect                [project.optional-dependencies]         [dependency-groups]
+  ------------------------------------------------------------------------------------------
+  shipped to users?     yes (in the wheel)                      no (dev only)
+  install syntax        pip install pkg[dev]                    uv sync --group dev
+  PEP                   PEP 621 (2020)                          PEP 735 (2024)
+  use case              opt-in FEATURES (docs, gpu)             dev TOOLS (ruff, mypy)
+
+[check] SAMPLE defines a [dependency-groups] table: OK
+[check] 'dev' group has ruff + mypy: OK
+
+======================================================================
+SECTION F — src-layout vs flat-layout
+======================================================================
+The trap: with the FLAT layout, the project root is on sys.path, so
+`import mwe_thing` picks up the LOCAL source tree even when the package
+is NOT installed. Tests pass against your dev copy, hiding packaging
+bugs (missing __init__.py, wrong file inclusion). The SRC layout puts
+the package under src/, so you can only import the INSTALLED copy —
+tests then catch packaging mistakes before release.
+
+flat-layout:
+mwe-thing/
+├── pyproject.toml
+├── README.md
+├── mwe_thing/          ← the import package sits AT THE PROJECT ROOT
+│   ├── __init__.py
+│   └── cli.py
+└── tests/
+    └── test_cli.py
+
+src-layout (recommended):
+mwe-thing/
+├── pyproject.toml
+├── README.md
+├── src/                ← the import package is NESTED under src/
+│   └── mwe_thing/
+│       ├── __init__.py
+│       └── cli.py
+└── tests/
+    └── test_cli.py
+
+[check] src-layout nests the package under src/: OK
+[check] flat-layout puts the package at the root: OK
+
+======================================================================
+SECTION G — the build flow: wheel + sdist (explained, NOT run)
+======================================================================
+`python -m build` (or `uv build`) is the build FRONTEND. It reads
+[build-system], installs `requires` into an ISOLATED env, then calls
+the backend's PEP 517 hooks. Output lands in dist/:
+
+  source tree ──▶ build_wheel ──▶ mwe_thing-1.2.3-py3-none-any.whl
+             └──▶ build_sdist  ──▶ mwe_thing-1.2.3.tar.gz
+
+A WHEEL (.whl) is a ZIP archive. Its filename encodes compatibility:
+  {distribution}-{version}-{python}-{abi}-{platform}.whl
+  mwe_thing-1.2.3-py3-none-any.whl
+    py3      : pure-Python, any Python 3
+    none     : no C-ABI constraint (no compiled extension)
+    any      : any OS / CPU
+
+Inside the wheel ZIP:
+  mwe_thing/             ← the import package
+    __init__.py
+    cli.py
+  mwe_thing-1.2.3.dist-info/
+    METADATA             ← name, version, Requires-Dist, Summary...
+    WHEEL                ← 'Wheel-Version: 1.0', 'Root-Is-Purelib: true'
+    RECORD               ← every file + its hash (for integrity audits)
+    entry_points.txt     ← from [project.scripts]
+
+An SDIST (.tar.gz) is the raw SOURCE — also produced by the backend,
+so a downstream user can rebuild a wheel from source if no binary
+matches their platform.
+
+[check] wheel filename pattern is dist-version-pytag-abi-platform: OK
+[check] dist-info dir name is '{name}-{version}.dist-info': OK
+[check] METADATA + WHEEL + RECORD are the three required dist-info files: OK
+
+======================================================================
+SECTION H — uv: a fast Rust-based pip/venv/build replacement
+======================================================================
+uv (Astral, Rust) is one binary that replaces pip, pip-tools, pipx,
+virtualenv, pyenv, poetry, and twine for the common workflows. It
+reads the SAME pyproject.toml — uv is a faster FRONTEND, not a new
+format. Commands you reach for daily:
+
+  command                     what it does
+  ----------------------------------------------------------------
+  uv init                     scaffold a new project (pyproject.toml + src/ layout)
+  uv add httpx                add a dependency to [project].dependencies + install it
+  uv add --group dev ruff     add to a [dependency-groups] (PEP 735) group
+  uv sync                     create/update the venv from pyproject.toml + uv.lock
+  uv lock                     write a deterministic uv.lock (reproducible installs)
+  uv run python pkg.py        run a command in the project env (no activation)
+  uv build                    build wheel + sdist into dist/ (calls the PEP 517 backend)
+  uv pip install pkg          the pip-compatible interface (drop-in)
+  uv venv                     create a .venv (replaces `python -m venv`)
+  uv publish                  upload dist/* to PyPI (replaces twine)
+
+uv vs pip, in one line: uv reads the same standards (PEP 517/518/621/
+735), ships wheels/sdists to the same PyPI, but resolves + installs
+10–100x faster thanks to a Rust resolver and a global package cache.
+
+[check] uv uses the SAME pyproject.toml standard (not a new format): OK
+[check] 'uv build' produces a wheel + sdist (PEP 517 backend): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

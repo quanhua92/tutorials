@@ -1,0 +1,162 @@
+properties_descriptors.py — Phase 2 bundle #12.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — @property: getter, setter, deleter, and validation
+======================================================================
+@property is sugar over the property() builtin. It builds a DATA
+descriptor: reading `obj.fahrenheit` calls the getter; assigning
+calls the setter; `del` calls the deleter. The setter is where you
+put validation that runs on EVERY assignment.
+
+Celsius(0).fahrenheit         = 32.0   (32°F, getter)
+t.fahrenheit = 212; ._celsius  = 100.0   (100°C, via setter)
+  (deleter fired: zeroing _celsius)
+after `del t.fahrenheit`        ._celsius = 0.0
+
+t.fahrenheit = -500  ->  ValueError: -500°F is below absolute zero (-459.67°F)
+
+[check] Celsius(0).fahrenheit == 32 (getter computes on read): OK
+[check] setter validation rejects -500°F (below absolute zero): OK
+[check] boiling point round-trips to 100°C: OK
+[check] the @property object has __get__: OK
+[check] the @property object has __set__  (so it is a DATA descriptor): OK
+
+======================================================================
+SECTION B — The descriptor protocol: __set_name__ / __get__ / __set__
+======================================================================
+A descriptor is any object defining __get__ (and optionally
+__set__ / __delete__). Descriptors ONLY work as CLASS attributes:
+they live in type(instance).__dict__, never in instance.__dict__.
+__set_name__ is called automatically by type.__new__ at class
+creation time, passing (owner_class, attribute_name).
+
+  __set_name__('Person', 'age') -> private_name='_logged_age'
+  __set_name__('Person', 'name') -> private_name='_logged_name'
+
+type(p).__dict__['age'] is a Logged
+  (the descriptor lives on the CLASS, not on p)
+'age' in p.__dict__           -> False   (public name is NOT in instance dict)
+'_logged_age' in p.__dict__   -> True   (value is stored under the mangled private key)
+p.age                         -> 30   (re-reads via __get__)
+
+[check] descriptor is stored on type(p), not on p: OK
+[check] descriptor stores value under the private (mangled) key: OK
+[check] __get__ reads back the value set by __set__: OK
+[check] accessing the descriptor on the class returns the descriptor itself: OK
+
+======================================================================
+SECTION C — Data vs non-data: data OVERRIDES instance __dict__
+======================================================================
+DATA descriptor   (defines __set__ or __delete__): WINS over the
+                                   instance __dict__ entry.
+NON-DATA descriptor (defines only __get__): is SHADOWED by an
+                                   instance __dict__ entry.
+Lookup precedence: data-descr > instance __dict__ > non-data-descr
+                                                         > class var
+
+Class C has: d = DataDescr() [has __set__], nd = NonDataDescr() [only __get__]
+c.d   (BEFORE assign) -> 'data-descriptor value (always wins)'
+c.nd  (BEFORE assign) -> 'non-data-descriptor value (shadowable)'
+c.nd = 99  -> c.__dict__['nd'] = 99
+c.nd  (AFTER  assign) -> 99   (instance __dict__ SHADOWS the non-data descriptor)
+c.d = 99   -> AttributeError: DataDescr cannot be shadowed by instance assignment
+
+[check] non-data descriptor speaks BEFORE any instance assignment: OK
+[check] instance __dict__ shadows a NON-DATA descriptor: OK
+[check] the shadow value landed in the instance __dict__: OK
+[check] DATA descriptor blocks instance assignment via __set__: OK
+[check] DataDescr has __set__ (so it is data): OK
+[check] NonDataDescr has __get__ but NOT __set__: OK
+
+======================================================================
+SECTION D — Hand-rolled MyProperty: a DATA descriptor, like @property
+======================================================================
+Here is the descriptor protocol doing exactly what @property does:
+__set_name__ records the public name; __get__ runs the getter;
+__set__ runs the setter and stores the value under a mangled key
+in the instance __dict__. Because it has __set__, it is a DATA
+descriptor — instance assignment can NEVER shadow it.
+
+Temp(25).celsius             = 25
+'celsius' in t.__dict__      -> False   (public name never lands in instance dict)
+'_myproperty_celsius' in t.__dict__ -> True   (value is here)
+type(t).__dict__['celsius']  is a MyProperty  (our hand-rolled descriptor, sitting on the class)
+
+t.celsius = -300  ->  ValueError raised: True
+
+[check] MyProperty stores the value under the mangled storage key: OK
+[check] MyProperty is a DATA descriptor (has __set__): OK
+[check] public attribute name is NOT in the instance __dict__: OK
+[check] MyProperty setter validation matches @property semantics: OK
+
+======================================================================
+SECTION E — Functions are non-data descriptors: Foo.bar vs foo.bar
+======================================================================
+A function defines __get__ (but not __set__), so it is a NON-DATA
+descriptor. Accessed on the CLASS, __get__ returns the bare
+function; accessed on an INSTANCE, __get__ returns a BOUND method
+(the function wrapped together with its instance as `self`).
+
+expression            type        detail
+----------------------------------------------------------------
+Foo.bar               function    __qualname__='section_e_functions_are_descriptors.<locals>.Foo.bar'
+foo.bar               method      bound to Foo instance
+foo.bar.__func__      function    qualname='section_e_functions_are_descriptors.<locals>.Foo.bar'
+foo.bar.__self__      Foo         is foo? True
+foo.bar(10)            -> 11   (== Foo.bar(foo, 10))
+
+[check] Foo.bar is the bare function (a function, not a method): OK
+[check] foo.bar is a bound method (NOT a function): OK
+[check] foo.bar.__func__ is Foo.bar: OK
+[check] foo.bar.__self__ is foo: OK
+[check] foo.bar(10) == Foo.bar(foo, 10): OK
+[check] function defines __get__ (so it is a descriptor): OK
+[check] function does NOT define __set__ (so it is a NON-DATA descriptor): OK
+
+======================================================================
+SECTION F — staticmethod & classmethod are descriptors too
+======================================================================
+staticmethod.__get__ returns the bare function (no self, no cls).
+classmethod.__get__ binds the CLASS as the first argument (cls).
+Both are descriptors sitting in the class __dict__, just like
+ordinary functions — only their __get__ policy differs.
+
+C.__dict__['add']      is a staticmethod
+C.__dict__['cls_name'] is a classmethod
+C.add(2, 3)     -> 5   (no self, no cls — bare call)
+c.add(2, 3)     -> 5   (same: staticmethod strips self)
+C.cls_name()    -> 'C'   (cls bound to C)
+c.cls_name()    -> 'C'   (cls STILL bound to type(c))
+
+[check] C.add(2,3) == 5 (staticmethod ignores self/cls): OK
+[check] staticmethod is identical via class or instance: OK
+[check] classmethod binds the class as cls: OK
+[check] classmethod binds cls == type(c) even from an instance: OK
+[check] staticmethod object has __get__ (it is a descriptor): OK
+[check] classmethod object has __get__ (it is a descriptor): OK
+
+======================================================================
+SECTION G — __slots__: removes the instance __dict__
+======================================================================
+A class with __slots__ trades the per-instance __dict__ for a
+fixed-size array of member descriptors (one per slot name). The
+payoff: instant AttributeError on unknown attributes, and a much
+smaller per-instance memory footprint. The cost: no __dict__, so
+no ad-hoc attributes and no functools.cached_property.
+
+Point2D(1, 2).x, .y  -> 1, 2
+hasattr(p, '__dict__')  -> False   (slots class has NO instance dict)
+hasattr(Point2DDict(), '__dict__') -> True
+p.z = 99  ->  AttributeError: 'Point2D' object has no attribute 'z' and no __dict__ for setting new attributes
+
+[check] __slots__ class has NO __dict__: OK
+[check] non-slots class DOES have a __dict__: OK
+[check] assigning an unknown slot name raises AttributeError: OK
+[check] each slot name is itself a member descriptor on the class: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

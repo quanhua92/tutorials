@@ -1,0 +1,185 @@
+functional_toolkit.py — Phase 2 bundle #15.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — map/filter return ITERATORS (lazy, single-use) in Py3
+======================================================================
+In Python 3, map() and filter() do NOT build a list. They return
+single-use ITERATOR objects (map/filter) that compute each value
+on demand. list() materializes them; a second pass is EMPTY. In
+Python 2 both returned lists; reduce() was removed from builtins
+entirely in 3.0 (PEP 3100) and now lives in functools.
+
+expression                      value                     type
+--------------------------------------------------------------------
+map(str, [1,2,3])               <map object>              map
+list(map(str, [1,2,3]))         ['1', '2', '3']           list
+filter(None, [0,2,0,4])         <filter object>           filter
+list(filter(None, [0,2,0,4]))   [2, 4]                    list
+
+m2 = map(str, [1,2,3])
+list(m2) (1st pass) = ['1', '2', '3']
+list(m2) (2nd pass) = []   <- EMPTY: iterator consumed
+
+Pythonic equivalents:
+  [str(x) for x in [1,2,3]]   -> eager list  ['1', '2', '3']
+  (str(x) for x in [1,2,3])   -> lazy genexpr (same laziness as map)
+
+[check] map object is not a list (it is a lazy iterator): OK
+[check] list(map(str,[1,2,3])) == ['1','2','3']: OK
+[check] filter(None, ...) drops the falsy zeros: OK
+[check] map object is single-use: list() twice -> 2nd is []: OK
+[check] the listcomp equivalent produces the same values eagerly: OK
+
+======================================================================
+SECTION B — functools.reduce: the fold-left (and why sum() usually wins)
+======================================================================
+reduce(f, [a,b,c,d], init) folds LEFT: it accumulates f(init,a),
+then f(_,b), f(_,c), f(_,d). The accumulator is always the LEFT
+argument. An optional initializer seeds the accumulator and is
+the only safe choice for an empty iterable.
+
+expression                                    result
+------------------------------------------------------------
+reduce(lambda a,b: a+b, [1,2,3,4])            10
+reduce(lambda a,b: a+b, [1,2,3,4], 100)       110
+reduce(operator.mul, [1,2,3,4])               24
+reduce(lambda a,b: a+b, [], 0)                0
+
+Step-by-step fold trace of reduce(add, [1,2,3,4]):
+  initial acc         = 0
+  add(acc, 1) -> acc = 1
+  add(acc, 2) -> acc = 3
+  add(acc, 3) -> acc = 6
+  add(acc, 4) -> acc = 10
+
+sum() is the builtin you'd usually use instead of reduce(add, ...).
+  sum([1,2,3,4])      = 10   <- faster, clearer
+  sum([1,2,3,4], 100) = 110   <- start arg == reduce init
+
+[check] reduce(add, [1,2,3,4]) == 10: OK
+[check] reduce(add, [1,2,3,4], 100) == 110: OK
+[check] reduce(mul, [1,2,3,4]) == 24 (factorial-like): OK
+[check] reduce(add, [], 0) == 0 (initializer protects empty iter): OK
+[check] sum() matches reduce(add, ...) for [1,2,3,4]: OK
+
+======================================================================
+SECTION C — functools.partial: freeze args, pre-configure callbacks
+======================================================================
+partial(func, *args, **kwargs) returns a new callable with those
+args/kwargs 'frozen in'. Extra args at call time are appended.
+The classic use: pre-configuring a callback so the call site is
+just `callback()`.
+
+expression                    result
+--------------------------------------------
+add5 = partial(add, 5)        
+add5(1, 1)                    7
+add53 = partial(add, 5, 3)    
+add53(1)                      9
+basetwo = partial(int, base=2)
+basetwo("10010")              18
+
+add5.func is add        = True
+add5.args               = (5,)
+basetwo.keywords        = {'base': 2}
+
+[check] partial(add,5)(1,1) == 7: OK
+[check] partial(add,5,3)(1) == 9: OK
+[check] partial(int, base=2)('10010') == 18: OK
+[check] partial exposes .func/.args/.keywords: OK
+
+======================================================================
+SECTION D — functools.singledispatch: dispatch on the FIRST arg's type
+======================================================================
+@singledispatch turns a function into a GENERIC function: the impl
+that runs is chosen by the RUNTIME TYPE of the FIRST argument. You
+register one impl per type. This is the open/closed alternative to
+a big if/elif isinstance chain: adding a type does NOT mean editing
+the dispatch function. NOTE: dispatch is on the FIRST arg ONLY; for
+methods use @singledispatchmethod.
+
+call                    dispatched impl runs
+----------------------------------------------------------------
+describe(5)             int 5: hex 0x5, is_positive=True
+describe('x')           str of length 1: 'x'
+describe([10,20])       list of 2 items: first=10
+describe(3.14)          object: 3.14
+describe(None)          object: None
+
+Under the hood there is a type->impl registry:
+  describe.registry keys = ['int', 'list', 'object', 'str']
+  describe.dispatch(int) = _
+  describe.dispatch(float) = describe  (falls back to the base @object impl)
+
+[check] int impl runs for 5 (mentions hex): OK
+[check] str impl runs for 'x' (mentions length): OK
+[check] list impl runs for [10,20]: OK
+[check] unregistered float falls back to base object impl: OK
+[check] dispatch(int) is the int-specific function, not the base: OK
+
+======================================================================
+SECTION E — operator module: itemgetter/attrgetter as fast key funcs
+======================================================================
+operator exposes the intrinsic operators AS FUNCTIONS:
+operator.add(x, y) == x+y, operator.mul == x*y, etc. The big win is
+itemgetter/attrgetter: they build tiny C-fast callables perfect as
+the `key=` argument to sorted/max/itertools.groupby.
+
+expression                                result
+--------------------------------------------------------
+operator.add(2, 3)                        5
+operator.mul(2, 3)                        6
+operator.itemgetter(1)([10,20,30])        20
+operator.itemgetter(0,2)([10,20,30])      (10, 30)
+
+add_lambda vs operator.add (same result, operator is C-fast):
+  ( 1,  2) -> lambda 3, operator 3
+  (10,  5) -> lambda 15, operator 15
+  ( 0,  0) -> lambda 0, operator 0
+
+people = [Person('Cleo',7), Person('Ada',12), Person('Bo',3)]
+sorted(people, key=attrgetter('age'))  = [Person('Bo', 3), Person('Cleo', 7), Person('Ada', 12)]
+sorted(people, key=attrgetter('name')) = [Person('Ada', 12), Person('Bo', 3), Person('Cleo', 7)]
+
+[check] operator.add(2,3) == 5: OK
+[check] operator.mul(2,3) == 6: OK
+[check] itemgetter(1)([10,20,30]) == 20: OK
+[check] itemgetter(0,2)([10,20,30]) == (10, 30): OK
+[check] sorted by attrgetter('age') is ascending by age: OK
+[check] operator.add behaves identically to lambda a,b: a+b: OK
+
+======================================================================
+SECTION F — composing functions + when functional wins vs a loop
+======================================================================
+Higher-order functions take/return functions. compose(f,g)(x) is
+f(g(x)); a pipeline of partials chains small steps into one call.
+When does functional beat a loop? When it stays READABLE: a clean
+map/filter pipeline, a one-line reduce fold. When it HURTS: a
+nested reduce over a multi-step transform — the loop is clearer.
+
+compose(double, add1)(3) = double(add1(3)) = 8
+compose(add1, compose(double, square))(3) = add1(double(square(3))) = 19
+
+Pipeline of partials on [1, 2, 3, 4, 5]:
+  stage0 src                  [1, 2, 3, 4, 5]
+  stage1 map(square)          [1, 4, 9, 16, 25]
+  stage2 filter(>10)          [16, 25]
+  stage3 sum                  41
+
+data = [1,2,3,4]   # want squares of the evens
+DON'T (reduce that maps+filters):
+  obscure = [4, 16]
+DO (comprehension reads at a glance):
+  clear   = [4, 16]
+
+[check] compose(double, add1)(3) == 8: OK
+[check] compose(add1, compose(double, square))(3) == 19: OK
+[check] partial-pipeline sum(map->filter->sum) of [1..5] == 16+25 = 41: OK
+[check] obscure reduce == clear comprehension: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

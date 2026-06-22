@@ -1,0 +1,170 @@
+memory_model.py — Phase 3 bundle #16.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Names are labels on objects, not boxes
+======================================================================
+A Python variable is NOT a box that holds a value. It is a NAME (a
+label) tied to a PyObject. Assignment `b = a` makes b a SECOND label
+on the SAME object a points at — so mutating through b is visible via
+a. This is aliasing, and it is the root of most surprise.
+
+a = [1,2,3]
+b = a              # second label on the same object
+b.append(4)        # mutates the ONE object both names see
+a is now: [1, 2, 3, 4]
+b is now: [1, 2, 3, 4]
+a is b: True
+
+[check] a is b after `b = a` (two labels, one object): OK
+[check] a == [1,2,3,4] after b.append(4) (same object mutated): OK
+[check] b == [1,2,3,4] (alias sees the mutation too): OK
+
+======================================================================
+SECTION B — id() and is: identity vs equality
+======================================================================
+id(obj) is the object's identity (its address in CPython). `is` asks
+'do two names point at the SAME object?' — it is exactly id(x) ==
+id(y), and it NEVER calls __eq__. `==` asks 'same VALUE?' and calls
+__eq__. Two equal lists are == but NOT is.
+
+a = [1,2];  b = [1,2];  c = a
+id(a) = 4330313664  (varies per run)
+id(b) = 4331302464  (varies per run)
+id(c) = 4330313664  (== id(a): same object)
+expression      result
+----------------------------------
+a == b          True   (equal contents)
+a is b          False   (distinct objects)
+a is c          True   (c is an alias of a)
+
+[check] a == b is True (equal values): OK
+[check] a is b is False (two equal lists are distinct objects): OK
+[check] a is c is True (c is an alias of a, same id): OK
+
+======================================================================
+SECTION C — Reference counting: sys.getrefcount
+======================================================================
+Every PyObject has a refcount = the number of names/containers
+pointing at it. When the refcount hits 0 the object is freed at once.
+sys.getrefcount(x) returns the count + 1: the +1 is the temporary
+reference created by passing x as the argument. We assert the DELTA
+(alias -> +1, del -> back to base), which is deterministic.
+
+x = ['only-via-x']
+base  getrefcount(x) = 2   (= 1 name 'x' + 1 arg artifact)
+y = x  -> getrefcount(x) = 3   (delta 1)
+z = x  -> getrefcount(x) = 4   (delta 2)
+del y, z -> getrefcount(x) = 2   (back to base)
+
+[check] base refcount is 2 (the name + the getrefcount arg artifact): OK
+[check] one alias adds exactly 1 (after_alias - base == 1): OK
+[check] a second alias adds another 1 (after_z - base == 2): OK
+[check] deleting both aliases restores base (after_del == base): OK
+
+======================================================================
+SECTION D — Mutability + aliasing: the function-call trap
+======================================================================
+Passing a mutable object to a function passes a LABEL on it. The
+function's parameter is an ALIAS: mutating it mutates the caller's
+object. The same aliasing rule creates the mutable-default trap: the
+default `[]` is evaluated ONCE at def-time and shared by every call.
+
+a = [1,2,3];  b = append_42(a)
+a after call: [1, 2, 3, 42]   (caller's object was mutated)
+b is a: True    (function returned the same object)
+
+[check] append_42 mutated the caller's list (a == [1,2,3,42]): OK
+[check] return value is the same object (b is a): OK
+with_default(items=[]) called 3x with NO argument:
+  r1 = [1, 1, 1]
+  r2 = [1, 1, 1]
+  r3 = [1, 1, 1]
+  r1 is r2: True  (default [] is ONE object, eval'd once)
+  with_default.__defaults__ = ([1, 1, 1],)
+
+[check] mutable default is shared across calls (r1 is r2): OK
+[check] after 3 calls the shared default == [1,1,1]: OK
+
+======================================================================
+SECTION E — Immutable container, mutable contents
+======================================================================
+A tuple is immutable: you cannot REASSIGN its slots. But immutability
+is SHALLOW — if a slot HOLDS a mutable object, you can mutate that
+object through the tuple. The tuple's id() and length never change;
+only the pointed-at object's contents do.
+
+t = (1, [2,3]);  id(t[1]) = 4331302464  (varies per run)
+t[0] = 99  ->  TypeError: 'tuple' object does not support item assignment
+t[1].append(4)  ->  t = (1, [2, 3, 4])
+id(t[1]) after append = 4331302464  (== before: True, same object)
+
+[check] tuple slot reassignment raises TypeError: OK
+[check] inner list mutation works (t == (1, [2,3,4])): OK
+[check] the inner object is the SAME object (id unchanged): OK
+[check] the tuple length is unchanged (len(t) == 2): OK
+
+======================================================================
+SECTION F — copy.copy (shallow) vs copy.deepcopy (recursive)
+======================================================================
+copy.copy(obj) makes a NEW outer object whose SLOTS still point at the
+SAME inner objects as the original (shared). copy.deepcopy(obj) makes
+a fully independent clone — it recurses, copying every mutable inside.
+Shallow shares inner mutables; deep shares nothing.
+
+orig    = [[1, 2], [3, 4]]
+shallow = copy.copy(orig)      (new outer; SHARED inner lists)
+deep    = copy.deepcopy(orig)  (new outer; NEW inner lists)
+
+relationship                  result
+----------------------------------------------
+orig is shallow               False   (new outer object)
+orig is deep                  False   (new outer object)
+orig[0] is shallow[0]         True   (SHARED inner)
+orig[0] is deep[0]            False   (independent inner)
+
+shallow[0].append(99) -> orig[0] = [1, 2, 99]   (shared: LEAKED)
+                      -> deep[0]  = [1, 2]   (independent)
+deep[1].append(77)    -> orig[1] = [3, 4]   (independent)
+
+[check] shallow copy is a distinct OUTER object (orig is not shallow): OK
+[check] deepcopy is a distinct OUTER object (orig is not deep): OK
+[check] shallow copy SHARES inner lists (orig[0] is shallow[0]): OK
+[check] deepcopy makes independent inner lists (orig[0] is not deep[0]): OK
+[check] shallow mutation leaked into orig (orig[0] == [1,2,99]): OK
+[check] deepcopy mutation did NOT leak (orig[1] == [3,4]): OK
+
+======================================================================
+SECTION G — Interning: the small-int cache and string literals
+======================================================================
+CPython pre-allocates ONE int object for every value in [-5, 256]; any
+occurrence of such a value is a reference to that shared singleton, so
+`256 is 256` is True. Past the cache, identity is NOT guaranteed — we
+build 257 via int('257') at runtime so it is reliably distinct. CPython
+also interns identifier-like string literals; sys.intern() does it
+explicitly. (Full small-int demo: types_and_truthiness Section E.)
+
+a = -5; b = -5;          a is b: True   (lower cache bound)
+a = 256; b = 256;        a is b: True   (upper cache bound)
+int('257') is int('257'): False   (OUT of cache -> distinct)
+
+[check] int('-5') is int('-5') (lower small-int cache bound shared): OK
+[check] int('256') is int('256') (upper small-int cache bound shared): OK
+[check] int('257') is NOT int('257') (out of cache): OK
+lit1 = "interned";  lit2 = "interned"
+built = "".join(["inter","ned"])   (runtime-built)
+lit1 == lit2            : True
+lit1 is lit2            : True   (identifier-like literal)
+built == lit1           : True
+built is lit1           : False   (runtime-built, distinct)
+sys.intern(built) is lit1: True   (explicit intern)
+
+[check] equal string literals compare equal (lit1 == lit2): OK
+[check] runtime-built string equals the literal (built == lit1): OK
+[check] sys.intern() makes them identical (sys.intern(built) is lit1): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

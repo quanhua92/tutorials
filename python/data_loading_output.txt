@@ -1,0 +1,170 @@
+data_loading.py — Phase 5 bundle #32.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+torch 2.12.1 on CPU.
+
+======================================================================
+SECTION A — Map-style Dataset: __len__ + __getitem__
+======================================================================
+A map-style Dataset subclasses torch.utils.data.Dataset and implements
+__len__() and __getitem__(idx). dataset[idx] returns ONE sample
+(here a (feature_vector, label) tuple). The DataLoader will later
+batch many such samples together.
+
+isinstance(ds, Dataset)             True
+len(ds)                             8
+ds[0]                               (tensor([0., 1., 2.]), tensor(0.))
+type(ds[0]).__name__                tuple
+ds[0][0].tolist() (features)        [0.0, 1.0, 2.0]
+ds[0][1].item() (label)             0.0
+
+[check] ToyDS is a Dataset subclass: OK
+[check] len(ds) == 8: OK
+[check] ds[0] is a tuple of two tensors: OK
+[check] ds[0][0] has shape (3,) (3 features): OK
+[check] ds[0][1] is a scalar tensor: OK
+
+======================================================================
+SECTION B — DataLoader batching + default collate (stacked tensors)
+======================================================================
+DataLoader(ds, batch_size=4, shuffle=False) iterates the dataset 4
+samples at a time. The default collate_fn STACKS each field across
+the batch into a new leading dimension: (3,) -> (4,3), () -> (4,).
+
+type(dl).__name__                       'DataLoader'
+len(dl) (num batches)                   2
+dl.batch_size                           4
+dl.num_workers                          0
+
+#batches                                2
+batch[0] x shape                        (4, 3)
+batch[0] y shape                        (4,)
+batch[0] x                              [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0], [9.0, 10.0, 11.0]]
+batch[0] y                              [0.0, 1.0, 2.0, 3.0]
+batch[1] x shape                        (4, 3)
+
+[check] DataLoader is iterable: OK
+[check] len(dl) == 2 (8 samples / batch 4): OK
+[check] batch[0] x shape is (4, 3) (batch dim first): OK
+[check] batch[0] y shape is (4,) (scalar stacked): OK
+[check] batch[0] x == first 4 rows of the dataset: OK
+[check] default collate stacked along a NEW leading dim: OK
+
+======================================================================
+SECTION C — Custom collate_fn: padding variable-length sequences
+======================================================================
+When samples have different shapes, default_collate cannot stack
+them (torch.stack needs matching sizes). A custom collate_fn takes
+the list of samples and returns one batch tensor — here we pad each
+sequence to the batch's max length with zeros, then stack.
+
+raw sample lengths              [1, 2, 3, 2]
+raw sample[2]                   [4, 5, 6]
+
+type(batch).__name__            Tensor
+batch shape                     (4, 3)
+batch                           [[1, 0, 0], [2, 3, 0], [4, 5, 6], [7, 8, 0]]
+
+[check] custom collate produced a single tensor: OK
+[check] batch shape is (4, 3) (4 seqs, max len 3): OK
+[check] seq[2] preserved in row 2: OK
+[check] seq[0] padded with zeros to length 3: OK
+
+======================================================================
+SECTION D — Deterministic shuffle: generator=seeded Generator
+======================================================================
+shuffle=True reshuffles at EVERY epoch. To make the order
+REPRODUCIBLE, pass generator=torch.Generator().manual_seed(seed):
+RandomSampler draws indices from THAT generator, so two loaders
+with the same seed see the identical permutation.
+
+order with seed=0 (run 1)         [5, 3, 1, 7, 2, 6, 4, 0]
+order with seed=0 (run 2)         [5, 3, 1, 7, 2, 6, 4, 0]
+orders identical?                 True
+order with seed=1 (differs)       [4, 0, 3, 6, 7, 1, 5, 2]
+seed=0 vs seed=1 identical?       False
+
+[check] same seed -> identical shuffle order: OK
+[check] different seed -> different order: OK
+[check] shuffle still covers every index once: OK
+
+======================================================================
+SECTION E — Sampler: SequentialSampler vs RandomSampler
+======================================================================
+A Sampler yields the index ORDER the loader fetches samples in.
+shuffle=False -> SequentialSampler (0,1,2,...); shuffle=True ->
+RandomSampler. You can also pass a Sampler explicitly, or a
+batch_sampler that yields LISTS of indices per batch.
+
+list(SequentialSampler(ds))             [0, 1, 2, 3, 4, 5, 6, 7]
+list(RandomSampler(ds, seed=0))         [4, 0, 7, 3, 2, 5, 1, 6]
+
+batch_sampler index lists               [[0, 1, 2], [3, 4, 5], [6, 7]]
+
+[check] SequentialSampler yields 0..7 in order: OK
+[check] RandomSampler is a permutation of all indices: OK
+[check] batch_sampler chunks indices by batch_size: OK
+
+======================================================================
+SECTION F — IterableDataset: __iter__ for streams (no __len__/__getitem__)
+======================================================================
+An IterableDataset implements __iter__ instead of __getitem__/
+__len__. It yields samples one at a time from a stream. There is no
+random access (no idx), so shuffling/sampling are NOT supported —
+order is whatever __iter__ produces.
+
+isinstance(ds, IterableDataset)       True
+hasattr(ds, "__getitem__")            True
+hasattr(ds, "__len__")                False
+
+batches from DataLoader(batch_size=2) [[[0.0], [1.0]], [[2.0], [3.0]], [[4.0]]]
+
+[check] StreamingDS is an IterableDataset: OK
+[check] IterableDataset has no __len__: OK
+[check] DataLoader batches the stream into pairs: OK
+
+======================================================================
+SECTION G — num_workers + pin_memory (num_workers=0 kept for determinism)
+======================================================================
+num_workers>0 spawns N worker SUBPROCESSES that fetch samples in
+parallel, overlapping I/O with compute. On macOS/Windows workers use
+the 'spawn' start method -> the Dataset + collate_fn are PICKLED to
+each child (they must be top-level, importable, not lambdas). We
+keep num_workers=0 here so output is byte-reproducible.
+
+get_worker_info() in main process       None
+dl.num_workers                          0
+
+dl with pin_memory=True                 (set)
+xb.is_pinned() (no-op on CPU)           False
+str(xb.device)                          cpu
+
+[check] get_worker_info() is None in the main process: OK
+[check] num_workers=0 means single-process loading: OK
+[check] pin_memory is a no-op on CPU (tensor not pinned): OK
+
+======================================================================
+SECTION H — A transform callable applied inside __getitem__
+======================================================================
+A transform is any callable applied to a sample. Applying it inside
+__getitem__ means it runs per-sample (and, with num_workers>0, in a
+worker process — for free). torchvision.transforms.Compose chains
+several; the principle is identical.
+
+raw x                               [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+mean                                2.500000
+std                                 1.870829
+
+ds[0] (normalized)                  [-1.3363062143325806]
+ds[1] (normalized)                  [-0.8017836809158325]
+
+batch shape                         (3, 1)
+batch                               [[-1.3363062143325806], [-0.8017836809158325], [-0.26726123690605164]]
+
+[check] ds[0] == (raw[0] - mean) / std: OK
+[check] whole normalized dataset has mean ~0: OK
+[check] transform preserved shape: batch (3,1): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

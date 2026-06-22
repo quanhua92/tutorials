@@ -1,0 +1,148 @@
+mcp_architecture.py — Phase 8 bundle #50 (MCP intro).
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. In-memory Client: no network.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — The three roles: HOST ↔ CLIENT ↔ SERVER
+======================================================================
+MCP (spec 2025-11-25, Architecture) is a client-host-server protocol.
+A HOST runs the LLM and manages many clients; a CLIENT is the single
+1:1 connection to one server; a SERVER exposes tools/resources/prompts.
+MCP standardizes the wire, so ANY host talks to ANY server.
+
+role      who runs it                     job
+----------------------------------------------------------------------
+HOST      Claude Desktop / an agent       runs the LLM, manages client connections, enforces consent
+CLIENT    one per server, inside the host opens a stateful session; does the initialize handshake
+SERVER    subprocess or remote service    exposes tools/resources/prompts via MCP primitives
+
+[check] three canonical roles are HOST, CLIENT, SERVER: OK
+[check] each client has a 1:1 relationship with exactly one server: OK
+
+======================================================================
+SECTION B — A minimal FastMCP server: FastMCP('demo') + @mcp.tool
+======================================================================
+Build the server object, then register a tool with a decorator.
+FastMCP reads the type hints + docstring and generates the JSON
+schema automatically — this is what tools/list will hand back.
+
+server.name               = 'demo'
+server.list_tools() names = ['add']
+'add' description         = 'Add two integers.'
+
+[check] server is named 'demo': OK
+[check] server exposes a tool named 'add': OK
+[check] exactly one tool registered on the minimal server: OK
+
+======================================================================
+SECTION C — In-memory Client: async with Client(mcp) as c
+======================================================================
+Client(mcp) selects the IN-MEMORY transport: no socket, no subprocess.
+Entering `async with` runs the JSON-RPC initialize handshake; inside
+the block the connection is live. list_tools() is the JSON-RPC
+'tools/list' method and returns one mcp.types.Tool per tool.
+
+c.is_connected()        = True
+len(c.list_tools())     = 1
+tool names              = ['add']
+tool.name               = 'add'
+tool.inputSchema        = {'additionalProperties': False, 'properties': {'a': {'type': 'integer'}, 'b': {'type': 'integer'}}, 'required': ['a', 'b'], 'type': 'object'}
+
+[check] client reports connected inside the context manager: OK
+[check] list_tools includes 'add': OK
+[check] add's schema requires both 'a' and 'b': OK
+[check] add's schema types a and b as integer: OK
+
+======================================================================
+SECTION D — Lifecycle: the initialize handshake (protocolVersion + caps)
+======================================================================
+Per spec Lifecycle, connecting MUST first run 'initialize': the client
+sends its protocolVersion + clientInfo + capabilities; the server
+replies with ITS protocolVersion + serverInfo + capabilities; then the
+client sends notifications/initialized. FastMCP does all of this when
+you enter `async with Client(...)` and exposes the result directly.
+
+protocolVersion         = '2025-11-25'
+serverInfo.name         = 'demo'
+serverInfo.version      = '3.4.2'
+capabilities.tools      = {'listChanged': True}
+capabilities.prompts    = {'listChanged': True}
+capabilities.resources  = {'subscribe': False, 'listChanged': True}
+
+[check] initialize_result is populated (handshake ran): OK
+[check] server reported its name ('demo'): OK
+[check] server reported a protocol version (date-shaped): OK
+[check] server advertised the 'tools' capability: OK
+[check] server advertised the 'prompts' capability: OK
+[check] server advertised the 'resources' capability: OK
+
+======================================================================
+SECTION E — tools/call: call_tool('add', {a:2, b:3}) -> 5
+======================================================================
+call_tool() is the JSON-RPC 'tools/call' method. FastMCP returns a
+CallToolResult with two views: .content (wire content blocks, plain
+text here) and .data (the structured Python return value).
+
+type(res)               = CallToolResult
+res.data                = 5  (int)
+res.content[0].text     = '5'
+res.content[0] type     = TextContent
+res.is_error            = False
+
+[check] call_tool('add', {a:2,b:3}).data == 5: OK
+[check] structured data type is int (matches -> int): OK
+[check] wire content is the text '5': OK
+[check] result is not an error: OK
+
+======================================================================
+SECTION H — Three primitives preview: tools / resources / prompts
+======================================================================
+Per spec Server Overview, a server exposes three primitive kinds.
+Tools are model-controlled, resources are application-controlled,
+prompts are user-controlled. Each gets its own bundle later.
+
+tools      = ['add']
+resources  = [('app_config', AnyUrl('config://app'))]
+prompts    = ['code_review']
+
+[check] server exposes 1 tool ('add'): OK
+[check] server exposes 1 resource ('app_config'): OK
+[check] server exposes 1 prompt ('code_review'): OK
+
+======================================================================
+SECTION F — Transports: stdio (default) | Streamable HTTP | in-memory
+======================================================================
+The spec defines two standard transports: stdio and Streamable HTTP
+(HTTP+SSE is the deprecated 2024-11-05 form). FastMCP also offers an
+in-memory transport for tests. Client(mcp) infers in-memory; Client of
+a .py path -> stdio subprocess; Client of a URL -> Streamable HTTP.
+
+transport         Client(...) arg           fits
+----------------------------------------------------------------------
+stdio             Client('server.py')       local CLI tools, Claude Desktop
+Streamable HTTP   Client('https://x/mcp')   remote, multi-client, web
+in-memory         Client(mcp_instance)      tests, no socket, one process
+
+[check] spec defines exactly two standard transports (stdio, Streamable HTTP): OK
+[check] in-memory transport uses no socket and no subprocess: OK
+
+======================================================================
+SECTION G — MCP vs raw function-calling: who decides, who invokes
+======================================================================
+Function-calling is MODEL-INTERNAL: the LLM emits structured args for
+a function the host declared. MCP is the PROTOCOL the host then uses to
+DISCOVER + INVOKE the server's tool. Two steps, two layers.
+
+concern                   function-calling            MCP
+----------------------------------------------------------------------
+where it lives            inside the model            a wire protocol between processes
+who picks the function    the model emits args        host's client calls tools/call
+discovery                 host hardcodes the list     tools/list at runtime
+boundary                  one process                 host + server (1:many)
+
+[check] MCP sits between the model's tool decision and the server's code: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

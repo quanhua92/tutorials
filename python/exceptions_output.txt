@@ -1,0 +1,158 @@
+exceptions.py — Phase 1 bundle #8.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — try/except/else/finally phase ordering
+======================================================================
+A try statement has up to four clauses. The rules (Language
+Reference 8.4): the try suite runs first; if it raises, the first
+matching except runs; else runs ONLY when try left with no
+exception (and no return/break/continue); finally ALWAYS runs,
+even on return/break/continue or an unhandled exception.
+
+scenario                          phase order
+------------------------------------------------------------
+no exception raised               try -> else -> finally
+ValueError raised and caught      try -> except -> finally
+
+[check] else runs only when no exception: OK
+[check] else is skipped when an exception is caught: OK
+finally runs even when try contains a return:
+
+  (finally ran before the return took effect)
+  caller received: 'from-try'
+
+[check] finally runs even when try returns: OK
+A return INSIDE finally overrides try's return value:
+
+  caller received: 'from-finally'  (try said 'from-try')
+
+[check] return in finally overrides return in try: OK
+
+======================================================================
+SECTION B — Catching specifics & the bare-except trap
+======================================================================
+Match a specific type, a tuple of types, or Exception (broad). A
+class in an except clause matches the class AND its subclasses.
+The trap: bare `except:` (identical to `except BaseException`) also
+catches SystemExit and KeyboardInterrupt — which you usually want
+to let propagate. We simulate a Ctrl-C with a BaseException
+subclass so the demo stays deterministic.
+
+  except ValueError caught: ValueError('bad value')
+[check] except ValueError catches a ValueError: OK
+  except (KeyError, IndexError) caught: KeyError
+[check] except (KeyError, IndexError) catches a KeyError: OK
+  FakeInterrupt was NOT caught by `except Exception`
+[check] except Exception does NOT catch a BaseException subclass: OK
+  `except BaseException` DID catch the fake interrupt (the trap)
+[check] bare-except equivalent catches BaseException subclasses: OK
+
+  => Prefer `except Exception:` for a broad catch; reserve bare
+     `except:` / `except BaseException` for top-level log-and-reraise.
+
+======================================================================
+SECTION C — The exception hierarchy: BaseException vs Exception
+======================================================================
+Every exception subclasses BaseException. Exception is the base of
+all NON-system-exiting exceptions. KeyboardInterrupt, SystemExit
+and GeneratorExit branch directly off BaseException — on purpose,
+so `except Exception` can't swallow a Ctrl-C or sys.exit().
+
+expression                                result
+--------------------------------------------------------
+issubclass(ValueError, Exception)         True
+issubclass(Exception, BaseException)      True
+issubclass(ValueError, BaseException)     True
+issubclass(KeyboardInterrupt, Exception)  False
+issubclass(KeyboardInterrupt, BaseException)True
+issubclass(SystemExit, Exception)         False
+issubclass(SystemExit, BaseException)     True
+issubclass(ZeroDivisionError, ArithmeticError)True
+issubclass(KeyError, LookupError)         True
+issubclass(ZeroDivisionError, Exception)  True
+
+[check] ValueError is an Exception: OK
+[check] Exception is a BaseException: OK
+[check] KeyboardInterrupt is NOT an Exception (it is BaseException): OK
+[check] SystemExit is NOT an Exception (it is BaseException): OK
+[check] ZeroDivisionError -> ArithmeticError -> Exception chain: OK
+  ValueError.__mro__        = (<class 'ValueError'>, <class 'Exception'>, <class 'BaseException'>, <class 'object'>)
+  KeyboardInterrupt.__mro__ = (<class 'KeyboardInterrupt'>, <class 'BaseException'>, <class 'object'>)
+  SystemExit.__mro__        = (<class 'SystemExit'>, <class 'BaseException'>, <class 'object'>)
+
+======================================================================
+SECTION D — Exception chaining (__cause__/__context__) & re-raise
+======================================================================
+Explicit chaining: `raise B from A` sets B.__cause__ = A. Implicit
+chaining: raising ANY new exception inside an except/finally block
+sets new.__context__ to the exception being handled. Bare `raise`
+re-raises the active exception unchanged.
+
+  raised: RuntimeError from ValueError
+    e.__cause__           = ValueError('the root cause')
+    e.__context__         = None
+    e.__suppress_context__ = True
+[check] 'raise ... from' sets __cause__: OK
+[check] explicit __cause__ is the original exception: OK
+[check] 'from' also sets __suppress_context__ = True: OK
+
+  raised: RuntimeError inside a KeyError handler (no 'from')
+    e.__cause__   = None
+    e.__context__ = KeyError('missing key')
+[check] implicit chaining sets __context__ to the handled exception: OK
+[check] __cause__ is None when no explicit 'from': OK
+
+  bare `raise` re-raised: ValueError('original message')
+[check] bare raise re-raises the active exception: OK
+
+======================================================================
+SECTION E — Custom exception hierarchy
+======================================================================
+Derive app exceptions from Exception (NOT BaseException). A custom
+error can have subclasses, multiple inheritance, and a custom
+__str__ for friendlier messages.
+
+  ValidationError('email', 'missing @'):
+    type(err).__mro__ = (<class '__main__.section_e_custom_exceptions.<locals>.ValidationError'>, <class '__main__.section_e_custom_exceptions.<locals>.AppError'>, <class 'ValueError'>, <class 'Exception'>, <class 'BaseException'>, <class 'object'>)
+    str(err)          = '[email] invalid: missing @'
+    err.args          = ('email: missing @',)
+    err.field         = 'email'
+    err.reason        = 'missing @'
+
+[check] ValidationError is an AppError: OK
+[check] ValidationError is a ValueError (multiple inheritance): OK
+[check] ValidationError is an Exception: OK
+[check] custom __str__ is used: OK
+[check] except AppError catches the subclass: OK
+[check] except ValueError also catches it (2nd base class): OK
+  caught as AppError:   [email] invalid: missing @
+  caught as ValueError: [age] invalid: negative
+
+======================================================================
+SECTION F — EAFP (try first) vs LBYL (check first)
+======================================================================
+EAFP = 'Easier to Ask Forgiveness than Permission' (try the op,
+catch the error). LBYL = 'Look Before You Leap' (check first).
+EAFP is idiomatic Python and avoids TOCTOU races: between an LBYL
+check and the use, the state can change.
+
+  d = {'a': 1}
+  eafp('a') = EAFP got 1
+  eafp('x') = EAFP: key absent
+  lbyl('a') = LBYL got 1
+  lbyl('x') = LBYL: key absent
+
+[check] EAFP returns the value when key present: OK
+[check] EAFP handles absent key via except KeyError: OK
+[check] LBYL matches EAFP for present key: OK
+[check] LBYL matches EAFP for absent key: OK
+  finally is manual cleanup; `with` (context managers) is the
+  structured way to guarantee cleanup.
+  -> see CONTEXT_MANAGERS (Phase 3) for the with-statement protocol.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,158 @@
+lc_chains_lcel.py — Phase 6 bundle #38.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: the model is a
+FakeMessagesListChatModel (no network, no API key).
+langchain-core 1.4.8 on this machine.
+
+======================================================================
+SECTION A — The pipe: prompt | model is a RunnableSequence
+======================================================================
+In LCEL the `|` operator (Python's __or__ dunder) feeds the output of
+the left Runnable into the right Runnable. `prompt | model` returns a
+brand-new object — a RunnableSequence — that you invoke once. The
+output here is an AIMessage (because the model emits AIMessages).
+
+expression                                    value
+------------------------------------------------------------------------
+type(prompt).__name__                         ChatPromptTemplate
+type(model).__name__                          FakeMessagesListChatModel
+type(prompt | model).__name__                 RunnableSequence
+isinstance(prompt, Runnable)                  True
+isinstance(model, Runnable)                   True
+isinstance(chain, Runnable)                   True
+
+chain.invoke({'topic': 'cats'}) ->
+  type  : AIMessage
+  content: 'Cats are small carnivorous mammals.'
+
+[check] `prompt | model` is a RunnableSequence: OK
+[check] prompt, model, chain are ALL Runnables (uniform unit): OK
+[check] chain.invoke returns an AIMessage: OK
+[check] the AIMessage content is the canned string: OK
+
+======================================================================
+SECTION B — prompt | model | StrOutputParser -> a plain str
+======================================================================
+Append a StrOutputParser at the tail. The parser takes the AIMessage
+and returns its .content as a string, so the WHOLE chain now yields a
+str instead of an AIMessage. Every link is still a Runnable; the pipe
+keeps composing.
+
+expression                                    value
+------------------------------------------------------------------------
+type(parser).__name__                         StrOutputParser
+isinstance(parser, Runnable)                  True
+type(prompt | model | parser).__name__        RunnableSequence
+
+chain.invoke({'topic': 'dogs'}) ->
+  type  : TextAccessor
+  value : 'Dogs are loyal domesticated canines.'
+
+[check] parser is a Runnable too: OK
+[check] the three-stage chain is still a RunnableSequence: OK
+[check] adding the parser makes the output a str: OK
+[check] the str equals the canned AIMessage content: OK
+
+======================================================================
+SECTION C — RunnablePassthrough echoes its input unchanged
+======================================================================
+RunnablePassthrough is the identity Runnable: invoke(x) returns x.
+Its real power shows inside a parallel branch, where it echoes the
+original input alongside a freshly-computed value (see Section E).
+
+RunnablePassthrough().invoke({'question': 'what is lc?'})-> {'question': 'what is lc?'}
+RunnablePassthrough().invoke(['a', 'b'])            -> ['a', 'b']
+RunnablePassthrough().invoke('bare string')         -> 'bare string'
+RunnablePassthrough().invoke(42)                    -> 42
+
+[check] RunnablePassthrough is a Runnable: OK
+[check] dict passes through unchanged: OK
+[check] list passes through unchanged: OK
+[check] a bare string passes through unchanged: OK
+
+======================================================================
+SECTION D — RunnableLambda wraps a plain function as a Runnable
+======================================================================
+RunnableLambda(fn) turns any 1-arg callable into a Runnable you can
+pipe. This is how custom Python logic joins an LCEL chain without
+subclassing Runnable.
+
+upper.invoke('hello')         -> 'HELLO'
+upper.invoke('lc')            -> 'LC'
+upper.invoke('langchain')     -> 'LANGCHAIN'
+
+[check] RunnableLambda is a Runnable: OK
+[check] it uppercases the input: OK
+[check] a RunnableLambda can be piped into another Runnable: OK
+
+======================================================================
+SECTION E — RunnableParallel runs branches concurrently -> a dict
+======================================================================
+RunnableParallel(**branches) runs each branch on the SAME input and
+returns a dict keyed by the branch name. This is how LCEL fans out
+(e.g. echo the question while retrieving context).
+
+branches = RunnableParallel(
+    original=RunnablePassthrough(),
+    upper=RunnableLambda(lambda s: s.upper()),
+    length=RunnableLambda(lambda s: len(s)),
+)
+
+branches.invoke('hello') -> {'original': 'hello', 'upper': 'HELLO', 'length': 5}
+
+key       value       type
+--------------------------------------
+original  hello       str
+upper     HELLO       str
+length    5           int
+
+[check] RunnableParallel is a Runnable: OK
+[check] output has exactly the 3 branch keys: OK
+[check] 'original' echoes the input unchanged: OK
+[check] 'upper' applies its branch transform: OK
+[check] 'length' applies its branch transform: OK
+
+======================================================================
+SECTION F — stream + batch: every chain gets them for free
+======================================================================
+Because every step is a Runnable, every RunnableSequence inherits
+invoke / stream / batch / ainvoke / abatch uniformly. .stream(...) is
+a generator of output chunks; .batch([...]) runs a list of inputs and
+returns a list. (The fake model yields one chunk per response; real
+LLMs stream token-by-token — the API is identical.)
+
+chunks = list(chain.stream({'topic': 'cats'})) -> ['Chunk-0']
+number of chunks yielded: 1
+
+batched = chain.batch([{'topic':'cats'}, {'topic':'dogs'}])
+        -> ['answer-1', 'answer-2']
+length  : 2
+
+[check] chain.stream yields at least one chunk: OK
+[check] the stream chunk equals the canned content: OK
+[check] chain.batch returns a list of length 2: OK
+[check] batch preserves input order: OK
+
+======================================================================
+SECTION G — realistic: RunnablePassthrough.assign + prompt | model | parser
+======================================================================
+A RAG-shaped chain: take {'question': ...}, attach a 'context' key
+with RunnablePassthrough.assign(), then feed {question, context} into
+the prompt, model, and parser. assign() merges a new key into the dict
+while keeping the originals — the declarative glue RAG relies on.
+
+After assign step:
+  {'question': 'origin of cats?', 'context': 'stub-context-for: origin of cats?'}
+
+Full chain.invoke({'question': 'origin of cats?'}) ->
+  type  : TextAccessor
+  value : 'Answer: cats were domesticated ~9000 years ago.'
+
+[check] assign() adds the 'context' key while keeping 'question': OK
+[check] the full chain ends in a str (parser at the tail): OK
+[check] the final str equals the canned AIMessage content: OK
+[check] assign | prompt | model | parser is still ONE RunnableSequence: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

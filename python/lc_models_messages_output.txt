@@ -1,0 +1,167 @@
+lc_models_messages.py — Phase 6 bundle #36.
+Every value below is printed by this file; the .md guide pastes it
+verbatim. OFFLINE: FakeMessagesListChatModel only — no network/API key.
+Python 3.13.5, langchain_core 1.4.8.
+
+======================================================================
+SECTION A — Message types: System/Human/AI/Tool; .type, .content, .tool_calls
+======================================================================
+LangChain's unified message format (python.langchain.com/docs/concepts/
+messages): every message has a ROLE and CONTENT. Each subclass maps to a
+role; .type exposes the role string; AIMessage adds .tool_calls and
+.usage_metadata (both empty by default).
+
+class           type      content
+--------------------------------------------------------
+SystemMessage   system    'You are a helpful assistant.'
+HumanMessage    human     'What is 2+2?'
+AIMessage       ai        '2 + 2 = 4'
+ToolMessage     tool      '4'
+
+AIMessage.tool_calls        = []
+AIMessage.invalid_tool_calls= []
+AIMessage.usage_metadata    = None
+
+[check] SystemMessage.type == 'system': OK
+[check] HumanMessage.type == 'human': OK
+[check] AIMessage.type == 'ai': OK
+[check] ToolMessage.type == 'tool': OK
+[check] AIMessage.tool_calls defaults to []: OK
+[check] AIMessage.usage_metadata defaults to None: OK
+
+======================================================================
+SECTION B — model.invoke([...messages]) with FakeMessagesListChatModel
+======================================================================
+A chat model is a Runnable. .invoke takes a list of messages and returns
+ONE AIMessage. Here the model is FakeMessagesListChatModel — it returns a
+canned AIMessage regardless of input. Swap 'FakeMessagesListChatModel' for
+'ChatOpenAI'/'ChatAnthropic' and the SAME line runs against a real model.
+
+type(model).__name__ = FakeMessagesListChatModel
+type(out).__name__   = AIMessage
+out.type             = 'ai'
+out.content          = 'hi there'
+
+[check] model.invoke returns an AIMessage: OK
+[check] out.content == 'hi there' (canned response): OK
+[check] out.type == 'ai': OK
+
+======================================================================
+SECTION C — The Runnable interface: invoke / batch / stream
+======================================================================
+The Runnable contract (python.langchain.com/docs/concepts/runnables/) is
+UNIFORM across chat models, chains, output parsers, retrievers, and
+compiled LangGraph graphs:
+
+  invoke(input)           -> single output
+  batch([in1, in2, ...])  -> list of outputs (parallel; threadpool)
+  stream(input)           -> generator yielding output chunks
+
+Below: ONE canned AIMessage is reused for every call, so batch's parallel
+ordering cannot perturb the captured output.
+
+invoke(...)  -> AIMessage, content='ack'
+batch([...3]) -> list, len=3, contents=['ack', 'ack', 'ack']
+stream(...)  -> 1 chunk(s); first chunk class=AIMessage, content='ack'
+(Real models yield AIMessageChunk tokens; the fake has no _stream
+ override, so BaseChatModel.stream falls back to the full message.)
+
+[check] invoke returns an AIMessage: OK
+[check] batch returns a list: OK
+[check] batch returns 3 outputs (one per input): OK
+[check] every batch output is an AIMessage: OK
+[check] stream yields >=1 chunk: OK
+[check] stream chunk is a BaseMessage: OK
+
+======================================================================
+SECTION D — A conversation is a list of messages (chat history)
+======================================================================
+invoke() takes the WHOLE conversation as a list — system prompt, prior
+turns, tool results — and the model sees every message in order. Below we
+hand it a 4-message history; the fake model ignores the contents but the
+interface accepts the full list and returns a fresh AIMessage.
+
+#  type      content
+------------------------------------------------------------
+0  system    'You are a concise tutor.'
+1  human     'What is a Runnable?'
+2  ai        'A uniform interface: invoke/batch/stream.'
+3  human     'Give me a one-line example.'
+
+len(history) = 4
+out.type     = 'ai'
+out.content  = "model.invoke([HumanMessage('hi')])"
+
+[check] history has 4 messages: OK
+[check] history[0] is the SystemMessage: OK
+[check] history[-1] is a HumanMessage: OK
+[check] invoke over a 4-message history still returns an AIMessage: OK
+
+======================================================================
+SECTION E — content: a string OR a list of content blocks
+======================================================================
+message.content is usually a Python str. For multimodal or structured
+content it can also be a LIST of blocks (text / image / tool_use / ...).
+The exact block shape is provider-specific; LangChain passes it through.
+
+text_msg.content     = 'What color is the sky?'
+                       (type=str)
+blocks_msg.content   = [{'type': 'text', 'text': 'Describe this image:'}, {'type': 'image', 'source_type': 'url', 'url': 'https://example.com/sky.png'}]
+                       (type=list, 2 blocks)
+block[0]['type']     = 'text'
+block[1]['type']     = 'image'
+
+[check] string content has type str: OK
+[check] block content has type list: OK
+[check] blocks_msg has 2 content blocks: OK
+[check] first block is a text block: OK
+
+======================================================================
+SECTION F — Why a fake model: offline, deterministic, key-free
+======================================================================
+FakeMessagesListChatModel is a BaseChatModel subclass that returns a
+canned response list. Properties that make it the right tool here:
+
+  * DETERMINISTIC: same responses list -> same output, byte-for-byte.
+  * OFFLINE:       no network, no provider, no API key, no rate limit.
+  * UNIFORM:       it implements the SAME Runnable methods as
+                   ChatOpenAI / ChatAnthropic — invoke/batch/stream.
+  * SWAP-IN SAFE:  tests written against the fake pass unchanged when
+                   you swap in a real model behind the same interface.
+
+Real providers add: real text generation, token-level streaming,
+usage_metadata from the API, and live tool-calling. The Runnable contract
+above stays identical — that is why the fake is a faithful test double.
+
+has invoke/batch/stream: True
+_llm_type               = 'fake-messages-list-chat-model'
+
+[check] FakeMessagesListChatModel exposes invoke/batch/stream: OK
+[check] FakeMessagesListChatModel is a BaseChatModel subclass: OK
+
+======================================================================
+SECTION G — AIMessage.tool_calls: the model decides to call a tool
+======================================================================
+An AIMessage can carry .tool_calls — a list of {name, args, id, type}
+dicts the model produced instead of (or alongside) plain text. With a real
+tool-calling model this is how agents hand off to tools; with the fake
+model we CANNED one to assert the parsing shape. (🔗 LC_TOOLS_AGENTS.)
+
+len(out.tool_calls)      = 1
+tool_call keys           = ['args', 'id', 'name', 'type']
+tc['type']               = 'tool_call'
+tc['name']               = 'get_weather'
+tc['args']               = {'city': 'San Francisco', 'units': 'metric'}
+tc['id']                 = 'call_abc123'
+out.invalid_tool_calls   = []
+
+[check] invoke returns an AIMessage carrying tool_calls: OK
+[check] tool_call has 'name' key: OK
+[check] tool_call has 'args' key: OK
+[check] tool_call name is 'get_weather': OK
+[check] tool_call args.city == 'San Francisco': OK
+[check] parsed tool_call carries 'type' == 'tool_call': OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

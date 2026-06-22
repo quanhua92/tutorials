@@ -1,0 +1,167 @@
+lc_rag.py — Phase 6 bundle #40.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: SeededFakeEmbeddings +
+FakeMessagesListChatModel (no network, no API key, byte-reproducible).
+Fake embeddings give DETERMINISTIC but MEANINGLESS vectors — we assert
+structure (counts/types), not semantic ranking.
+langchain-core 1.4.8 on this machine.
+
+======================================================================
+SECTION A — Document: page_content (the text) + metadata (the tags)
+======================================================================
+A Document is the atom of RAG: the text to be embedded/retrieved
+(page_content) plus a free-form dict of tags (metadata) that travel
+with it. metadata is where source URLs, page numbers, chunk offsets,
+and ACL tags live — it is NOT embedded, only stored alongside.
+
+Document(page_content='The cat is a small carnivorous mammal.',
+          metadata={'source': 'wiki', 'topic': 'animals'})
+
+field           value                                   type
+----------------------------------------------------------------
+page_content    The cat is a small carnivorous mammal.  str
+metadata        {'source': 'wiki', 'topic': 'animals'}  dict
+
+[check] doc.page_content is a str: OK
+[check] doc.metadata is a dict: OK
+[check] metadata carries the 'source' tag: OK
+[check] metadata is NOT embedded (it rides along, not in the vector): OK
+
+======================================================================
+SECTION B — Embeddings: text -> fixed-dim vector (dim 5; MEANINGLESS)
+======================================================================
+An embedder maps text to a fixed-dimension vector. embed_query maps
+ONE query string; embed_documents maps a LIST. Both return
+dim-N lists of floats. Below: dim=5, seeded so output is stable.
+
+embed_query('what is a cat?') ->
+  len   : 5
+  vector: [2.178, 1.393, 1.6912, 0.8718, -0.3147]
+  type  : list of float
+
+embed_documents(['cat', 'dog']) ->
+  count : 2
+  lens  : [5, 5]
+  cat   : [0.1936, 0.7359, -0.6705, -0.5204, 0.2583]
+  dog   : [-0.8389, 0.0541, -0.8219, -0.1102, 0.8187]
+  same? : False  (different text -> different vector)
+
+[check] embed_query returns a list of length 5: OK
+[check] embed_documents returns one vector per input text: OK
+[check] different texts map to different vectors: OK
+[check] isinstance(emb, FakeEmbeddings) (it IS a FakeEmbeddings): OK
+[check] vectors are MEANINGLESS: same-len noise, not topical similarity: OK
+
+======================================================================
+SECTION C — InMemoryVectorStore: add_documents + similarity_search
+======================================================================
+A vector store indexes Documents by their embedding vector.
+add_documents embeds each page_content and stores (id, vector, doc).
+similarity_search embeds the query, then returns the k nearest docs
+by cosine similarity. IDs are passed explicitly so output is stable.
+
+vs.add_documents(CORPUS, ids=['c1', 'c2', 'c3']) -> ['c1', 'c2', 'c3']
+store size: 3 documents indexed
+
+vs.similarity_search('feline mammal', k=2) ->
+  count   : 2
+  types   : ['Document', 'Document']
+  contents: ['A dog is a loyal domesticated canine.', 'Python is a high-level programming language.']
+  (ranking is reproducible noise, NOT real topical relevance)
+
+[check] add_documents returns the explicit ids we passed: OK
+[check] similarity_search returns exactly k=2 docs: OK
+[check] every hit is a Document: OK
+[check] each hit carries its page_content + metadata: OK
+
+======================================================================
+SECTION D — as_retriever: a Runnable that returns k Documents
+======================================================================
+as_retriever() wraps the vector store as a RETRIEVER — a Runnable
+whose .invoke(query) returns list[Document]. Because it is a Runnable
+it pipes into LCEL (| prompt | model | parser). search_kwargs={'k':
+N} fixes how many docs come back.
+
+retriever = vs.as_retriever(search_kwargs={'k': 2})
+type(retriever)     : VectorStoreRetriever
+isinstance Runnable : True
+has .invoke         : True
+
+retriever.invoke('carnivore') ->
+  count   : 2
+  types   : ['Document', 'Document']
+
+[check] retriever is a Runnable: OK
+[check] retriever has .invoke (uniform interface): OK
+[check] retriever.invoke returns exactly k=2 docs: OK
+[check] every returned item is a Document: OK
+
+======================================================================
+SECTION E — the RAG chain: retriever | format | prompt | model | parser -> str
+======================================================================
+The canonical RAG chain is ONE LCEL pipeline. A dict-branch feeds
+'context' (retriever | format_docs) and 'question' (passthrough) into
+the prompt; then model; then StrOutputParser. invoke(question) -> str.
+
+chain = ({'context': retriever | format_docs,
+          'question': RunnablePassthrough()}
+         | prompt | model | StrOutputParser())
+
+(retriever | format_docs).invoke('feline') ->
+  type  : str
+  value : 'A dog is a loyal domesticated canine.\nPython is a high-level programming language.'
+
+chain.invoke('feline') ->
+  type  : TextAccessor  (str subclass: True)
+  value : 'A cat is a small carnivorous mammal.'
+
+[check] format_docs joins page_content into one str: OK
+[check] the chain type is RunnableSequence: OK
+[check] chain.invoke returns a str (parser at the tail): OK
+[check] the final str equals the canned AIMessage content: OK
+[check] retriever pipes into the chain via | (it is a Runnable): OK
+
+======================================================================
+SECTION F — Chunking: split a long doc before embedding
+======================================================================
+Long documents must be split into CHUNKS before embedding: the
+embedder has a token cap, and smaller chunks give more precise
+retrieval (a hit returns the right paragraph, not a whole manual).
+RecursiveCharacterTextSplitter tries separators in priority order
+(\n\n, \n, space, char) so chunks break on natural boundaries.
+
+long_doc length: 205 chars
+chunk_size=80
+chunks produced: 3
+
+  chunk[0] (58 chars): 'Cats are small carnivorous mammals. They are popular pets.'
+  chunk[1] (77 chars): 'Dogs are loyal domesticated canines. They were the first domesticated animal.'
+  chunk[2] (66 chars): 'Python is a high-level programming language known for readability.'
+
+[check] a long doc splits into >1 chunk: OK
+[check] every chunk is within the chunk_size budget: OK
+[check] no text is lost (joined chunks reconstruct the doc): OK
+
+======================================================================
+SECTION G — The garbage-in rule: RAG quality is bounded by retrieval
+======================================================================
+A RAG chain cannot answer better than its retrieved context allows.
+If the retriever returns the WRONG chunk (bad embedding, bad chunk
+boundary, k too small), the model faithfully answers from garbage.
+The leverage point is NOT the model — it is chunking + embeddings +
+k. Most RAG bugs live there, not in the prompt.
+
+Wrong corpus (geography), question about cats ->
+  retrieved : 'Mount Everest is the tallest peak.'
+  answer    : 'Based on context: I cannot answer about cats from this.'
+
+  The model did its job; the RETRIEVER fed it the wrong context.
+  Fix the retrieval (better chunks/embeddings/k), not the model.
+
+[check] garbage retrieval -> the model answers from the wrong context: OK
+[check] the chain still runs end-to-end (returns a str): OK
+[check] the failure is in RETRIEVAL, not the model or the prompt: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

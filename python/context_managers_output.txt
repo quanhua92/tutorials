@@ -1,0 +1,148 @@
+context_managers.py — Phase 3 bundle #22.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Class-based CM: __enter__ -> resource, __exit__ -> cleanup
+======================================================================
+`with C() as x:` binds x to whatever __enter__ RETURNS (often self).
+When the with-block ends, Python calls __exit__(exc_type, exc_val,
+exc_tb). On a clean exit all three exc_* args are None. This is the
+With-Statement Context Managers protocol (Data model §3.3.6 / PEP 343).
+
+    __enter__ -> OPEN 'data.txt'; returning <FakeFile 'data.txt' open=False>
+    inside with: f = <FakeFile 'data.txt' open=True>
+[check] f is exactly what __enter__ returned: OK
+[check] resource is OPEN inside the with-block: OK
+    __exit__  -> CLOSE 'data.txt' (exc_type=None)
+    after with:  f = <FakeFile 'data.txt' open=False>
+
+[check] __enter__ return is bound to the `as` target: OK
+[check] resource is CLOSED after the with-block: OK
+[check] exc_type is None on a clean exit (we saw 'None' printed): OK
+
+======================================================================
+SECTION B — __exit__ ALWAYS runs (even when the body raises)
+======================================================================
+If the with-block raises, Python still calls __exit__, passing the
+exception's (type, value, traceback). Unless __exit__ returns a true
+value, the exception then PROPAGATES out of the with-statement. The
+cleanup guarantee is the whole point of `with` over bare try/finally.
+
+    caught outside with: ValueError('boom from the body')
+    events = ['enter', 'body-before-raise', 'exit(exc_type=ValueError)']
+
+[check] body raised ValueError (propagated past __exit__): OK
+[check] __exit__ had NOT yet run at the raise site: OK
+[check] __exit__ ran AFTER the raise (saw exc_type=ValueError): OK
+[check] full lifecycle: enter -> body -> exit(exc_type=ValueError): OK
+
+======================================================================
+SECTION C — __exit__ returning True SUPPRESSES the exception
+======================================================================
+Data model: 'a true value [from __exit__] signifies that the
+exception... will be suppressed.' Below we selectively swallow
+ValueError but let every other exception propagate.
+
+    __exit__ saw ValueError -> returning True
+    (ValueError did NOT propagate past the with)
+
+[check] returning True from __exit__ suppressed the ValueError: OK
+    __exit__ saw KeyError -> returning False
+    KeyError DID propagate: KeyError('not swallowed')
+
+[check] __exit__ returning False lets KeyError propagate: OK
+[check] __exit__ is SELECTIVE: ValueError swallowed, KeyError not: OK
+
+======================================================================
+SECTION D — contextlib.contextmanager: a generator-based CM
+======================================================================
+@contextmanager turns a generator into a CM. Code BEFORE yield is
+setup (== __enter__); the yielded value is bound to the `as` target;
+code AFTER yield is cleanup (== __exit__). The decorator requires
+exactly one yield.
+
+    [setup]  <section>
+    [body]   bound to: 'payload-for-section'
+    [cleanup] </section>
+
+[check] the yielded value is bound to the `as` target: OK
+[check] cleanup-after-yield ran (we saw '[cleanup] </section>'): OK
+
+  One-yield rule: yielding twice is a usage error at runtime.
+
+    body saw: 'first'
+    RuntimeError: "generator didn't stop"
+
+[check] a generator CM must yield exactly once (2nd yield raises): OK
+
+======================================================================
+SECTION E — Generator CM + exception: re-raised AT the yield
+======================================================================
+docs.python.org contextlib: 'If an unhandled exception occurs in the
+block, it is reraised inside the generator at the point where the
+yield occurred.' So a try/finally around the yield runs cleanup, and
+a try/except can SUPPRESS the exception (don't re-raise it).
+
+    trace = ['setup', 'before-yield', 'body-got-resource', 'caught-in-generator', 'finally-cleanup']
+
+[check] yielded value still bound to `as` target: OK
+[check] exception re-raised AT the yield (skipped 'after-yield-clean'): OK
+[check] except in the generator caught the RuntimeError: OK
+[check] finally cleanup ran regardless: OK
+[check] RuntimeError was SUPPRESSED (generator caught and did not re-raise): OK
+
+======================================================================
+SECTION F — ExitStack: compose CMs dynamically; cleanups run LIFO
+======================================================================
+ExitStack lets you enter a VARIABLE number of CMs (driven by input
+data or conditions). enter_context(cm) returns __enter__'s value and
+registers __exit__ on a stack; on exit the stack unwinds in REVERSE
+registration order (LIFO) — exactly like nested with-statements.
+
+    entered order:  ['a.txt', 'b.txt', 'c.txt', 'optional']
+    log (open+close) = ['open:a.txt', 'open:b.txt', 'open:c.txt', 'open:optional', 'close:optional', 'close:c.txt', 'close:b.txt', 'close:a.txt']
+
+[check] all four resources were entered in registration order: OK
+[check] opens happened in registration order: OK
+[check] closes happened in REVERSE order (LIFO): OK
+[check] every open has a matching close: OK
+
+======================================================================
+SECTION G — contextlib helpers: suppress / closing / redirect_stdout
+======================================================================
+suppress(*exc): swallow the listed exception types (== try/except:
+pass). closing(thing): call thing.close() on exit (for objects that
+have .close() but aren't CMs). redirect_stdout(target): swap
+sys.stdout for the duration of the block.
+
+    suppress(FileNotFoundError): second os.remove swallowed -> removed='file still exists'
+[check] suppress swallowed the FileNotFoundError: OK
+    closing(c): bound-to-itself=True, c.closed=True
+[check] closing(thing) yields the thing itself: OK
+[check] closing(thing) called thing.close() on exit: OK
+    redirect_stdout captured 52 chars: 'hello from inside redirect_stdout\nand a second line\n'
+
+[check] redirect_stdout captured the first print: OK
+[check] redirect_stdout captured the second print too: OK
+[check] stdout restored after the block (this line reached the terminal): OK
+
+======================================================================
+SECTION H — async with (PEP 492): __aenter__ / __aexit__ coroutines
+======================================================================
+PEP 492 added `async with`. The protocol mirrors the sync one but
+uses __aenter__/__aexit__, BOTH coroutines (they must be awaited).
+The same cleanup guarantee holds: __aexit__ always runs, even on an
+exception in the body. Full async treatment lives in ASYNCIO (P3 #21).
+
+    log = ['aenter:db', 'body:using-db', 'aexit:db']
+
+[check] __aenter__ ran before the body: OK
+[check] the body saw the resource: OK
+[check] __aexit__ ran after the body (cleanup guaranteed): OK
+[check] async-with lifecycle: aenter -> body -> aexit: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

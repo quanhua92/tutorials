@@ -1,0 +1,189 @@
+mcp_tools.py — Phase 8 bundle #51.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: the client uses
+FastMCP's in-memory transport (Client(mcp)) — no HTTP, no socket,
+no API key, byte-reproducible.
+fastmcp 3.4.2 on this machine.
+
+======================================================================
+SECTION A — @mcp.tool: function -> tool with auto name + description
+======================================================================
+@mcp.tool (no parens) registers a Python function as an MCP tool.
+FastMCP auto-derives: name <- function name, description <- the
+docstring, args <- the type hints. The host's model sees the tool
+via tools/list and may invoke it via tools/call.
+
+expression                          value
+------------------------------------------------------------
+sorted tool names                   ['add', 'create_customer', 'fail', 'plain_text', 'with_progress']
+add.name                            'add'
+add.description                     'Add two numbers.'
+type(add).__name__                  function
+
+[check] 'add' is registered as a tool: OK
+[check] add.name == 'add' (from the function name): OK
+[check] add.description == 'Add two numbers.' (from the docstring): OK
+
+======================================================================
+SECTION B — The auto inputSchema: JSON-Schema from type hints
+======================================================================
+list_tools() returns each tool's inputSchema — a JSON-Schema dict
+derived from the function's parameter annotations. The host model
+reads this schema to decide HOW to call the tool.
+
+add.inputSchema = {'additionalProperties': False, 'properties': {'a': {'type': 'integer'}, 'b': {'type': 'integer'}}, 'required': ['a', 'b'], 'type': 'object'}
+
+Schema shape (the MCP/JSON-Schema contract):
+  type                 = 'object'
+  properties.keys()    = ['a', 'b']
+  properties['a']      = {'type': 'integer'}
+  properties['b']      = {'type': 'integer'}
+  required             = ['a', 'b']
+  additionalProperties = False
+
+[check] schema type is 'object': OK
+[check] properties are a, b (from the param names): OK
+[check] a is JSON-Schema integer: OK
+[check] b is JSON-Schema integer: OK
+[check] both a and b are required: OK
+
+======================================================================
+SECTION C — A Pydantic-arg tool: nested JSON-Schema from the model
+======================================================================
+A Pydantic model as a parameter yields a NESTED JSON-Schema: each
+field becomes a property, with descriptions (Field(description=...))
+and constraints (Field(ge=..., le=...)) carried through. The model
+reads the nested schema and produces a matching JSON object.
+
+create_customer.inputSchema = {'additionalProperties': False, 'properties': {'customer': {'properties': {'name': {'type': 'string'}, 'age': {'maximum': 150, 'minimum': 0, 'type': 'integer'}, 'address': {'properties': {'street': {'description': 'street name', 'type': 'string'}, 'zip': {'description': 'postal code', 'type': 'string'}}, 'required': ['street', 'zip'], 'type': 'object'}}, 'required': ['name', 'age', 'address'], 'type': 'object'}}, 'required': ['customer'], 'type': 'object'}
+
+Schema highlights:
+  customer.required              = ['name', 'age', 'address']
+  customer.age (with constraints) = {'maximum': 150, 'minimum': 0, 'type': 'integer'}
+  customer.address.street          = {'description': 'street name', 'type': 'string'}
+
+[check] top-level arg is 'customer': OK
+[check] customer has nested fields name, age, address: OK
+[check] age carries ge=0 and le=150 constraints from Field(...): OK
+[check] nested street description came through: OK
+
+======================================================================
+SECTION D — call_tool: the CallToolResult shape
+======================================================================
+await c.call_tool(name, {args}) runs the function server-side and
+returns a CallToolResult. It carries FOUR views of the same answer:
+  .content             list of MCP content blocks (TextContent, ...)
+  .structured_content  the JSON dict (wraps primitives under 'result')
+  .data                the typed python value (5, str, model, ...)
+  .is_error            False here; True for tool failures (Section F)
+
+result                 = CallToolResult(content=[TextContent(type='text', text='5', annotations=None, meta=None)], structured_content={'result': 5}, meta={'fastmcp': {'wrap_result': True}}, data=5, is_error=False)
+result.content[0]      = type='text' text='5' annotations=None meta=None
+result.content[0].text = '5'
+result.structured_content = {'result': 5}
+result.data            = 5  (type=int)
+result.is_error        = False
+
+[check] result.data == 5 (typed python int): OK
+[check] structured_content wraps the int under 'result': OK
+[check] content[0].text is '5' (the human-readable view): OK
+[check] is_error is False for a successful call: OK
+
+======================================================================
+SECTION E — Return content vs structured: primitive, str, Pydantic
+======================================================================
+Three return shapes, one rule: the function's return type hint
+controls what the host sees. Primitives WITH a hint -> wrapped
+{'result': N} structured content + '5' text; str -> {'result': ...};
+a Pydantic model -> its fields as structured content + JSON text.
+
+tool              return hint data                      structured_content
+--------------------------------------------------------------------------------
+add(2,3)          int         5                         {'result': 5}
+plain_text(7)     str         value is 7                {'result': 'value is 7'}
+create_customer   Customer    Root(name='Ada', age=30, address=Root(street='X St', zip='00000')){'name': 'Ada', 'age': 30, 'address': {'street': 'X St', 'zip': '00000'}}
+
+create_customer content[0].text = '{"name":"Ada","age":30,"address":{"street":"X St","zip":"00000"}}'
+
+[check] int return: data==5, structured wrapped under 'result': OK
+[check] str return: data=='value is 7', structured wraps the string: OK
+[check] Pydantic return: structured_content has the model's fields: OK
+[check] Pydantic return: content[0].text is the JSON serialization: OK
+
+======================================================================
+SECTION F — Tool errors are returned as results (NOT an HTTP 500)
+======================================================================
+MCP separates two error paths: PROTOCOL errors (unknown tool, bad
+JSON-RPC) come back as JSON-RPC error objects; TOOL EXECUTION
+errors (the function raised) come back as a NORMAL result whose
+is_error is True. The host model sees the failure message and can
+retry. FastMCP's Client raises ToolError by default; pass
+raise_on_error=False to inspect the raw result shape.
+
+result               = CallToolResult(content=[TextContent(type='text', text="Error calling tool 'fail': boom: invalid x", annotations=None, meta=None)], structured_content=None, meta=None, data=None, is_error=True)
+result.is_error      = True
+result.content[0]    = type='text' text="Error calling tool 'fail': boom: invalid x" annotations=None meta=None
+result.content[0].text = "Error calling tool 'fail': boom: invalid x"
+result.data          = None
+result.structured_content = None
+
+[check] is_error is True for a raised exception: OK
+[check] the error message is carried in content[0].text: OK
+[check] data is None on error (no value to return): OK
+[check] structured_content is None on error: OK
+
+======================================================================
+SECTION G — Context: progress reporting + logging inside a tool
+======================================================================
+A tool that takes a Context-typed parameter gets server-side access
+to MCP capabilities: ctx.info/warning/error (logging),
+ctx.report_progress(progress, total), ctx.read_resource(uri), and
+ctx.sample(...) (LLM round-trip — covered in MCP_CONTEXT_SAMPLING).
+The host subscribes via call_tool(..., progress_handler=cb).
+
+result.data            = 'done'
+progress_handler saw   = [(0.0, 3.0), (1.0, 3.0), (2.0, 3.0), (3.0, 3.0)]
+
+Context has these capabilities (dir):
+  ctx.info
+  ctx.debug
+  ctx.warning
+  ctx.error
+  ctx.report_progress
+  ctx.read_resource
+  ctx.sample
+  ctx.request_id
+  ctx.session_id
+
+[check] the tool returned 'done' after reporting progress: OK
+[check] the host saw 4 progress updates (0/3, 1/3, 2/3, 3/3): OK
+[check] Context exposes report_progress, info, sample: OK
+
+======================================================================
+SECTION H — Contrast with LangChain @tool: wire protocol vs in-process
+======================================================================
+Same idea (fn -> JSON-Schema -> model-invokable), DIFFERENT layer:
+LangChain @tool wraps a fn into a BaseTool (a Runnable) used IN the
+agent's process — bind_tools -> .invoke() is a Python call. MCP
+@mcp.tool wraps a fn into a tool EXPOSED OVER THE WIRE — tools/list
+and tools/call are JSON-RPC messages, so the host and server may
+live in different processes or machines.
+
+aspect                    LangChain @tool                 MCP @mcp.tool
+------------------------------------------------------------------------------------------
+wraps fn into             BaseTool (Runnable)             FunctionTool
+schema source             type hints + docstring          type hints + docstring
+invocation                tool.invoke({args})             await c.call_tool(name, {args})
+transport                 in-process Python call          JSON-RPC over stdio/http/SSE/in-memory
+where the fn runs         same process as agent           server process (often remote)
+result shape              the python return value         CallToolResult (.content/.data/.is_error)
+errors                    raise ToolException -> caught   raised -> result with is_error=True
+
+[check] LC @tool yields a BaseTool: OK
+[check] LC tool name == 'add_lc' (the full function name): OK
+[check] LC description == 'Add two numbers.' (from the docstring): OK
+[check] LC tool.invoke({'a':2,'b':3}) == 5  (in-process): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

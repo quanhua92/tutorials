@@ -1,0 +1,204 @@
+generators_iterators.py — Phase 1 bundle #5.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Iterable vs iterator: the protocol Python's `for` runs on
+======================================================================
+Every `for x in xs` first calls iter(xs) to get an ITERATOR, then
+calls next() on it until StopIteration. iter() works on any
+ITERABLE (list/str/dict/range/file...); next() works ONLY on
+iterators. A list is iterable but NOT an iterator: it has no
+__next__ method.
+
+lst = [1, 2, 3]
+type(lst).__name__           = list
+hasattr(lst, '__iter__')     = True
+hasattr(lst, '__next__')     = False   <- no __next__: NOT an iterator
+it = iter(lst)
+type(it).__name__            = list_iterator
+iter(it) is it               = True   <- an iterator's __iter__ returns SELF
+next(it)                     = 1
+next(it)                     = 2
+next(it)                     = 3
+next(it)                     -> StopIteration (iterator exhausted)
+
+next([1, 2, 3])              -> TypeError: 'list' object is not an iterator
+
+[check] iter(it) is it for an iterator (protocol: __iter__ returns self): OK
+[check] a list has __iter__ (it is iterable): OK
+[check] a list has NO __next__ (it is NOT an iterator): OK
+
+======================================================================
+SECTION B — A hand-rolled iterator: __iter__ + __next__ (Countdown)
+======================================================================
+The whole protocol is two methods. __iter__ returns the iterator
+(for an iterator, it returns self). __next__ returns the next
+value, or raises StopIteration to say 'done'. This is exactly
+what iter([1,2,3]) returns under the hood — no magic.
+
+class Countdown:
+    def __iter__(self): return self
+    def __next__(self):
+        if self.n <= 0: raise StopIteration
+        self.n -= 1; return self.n + 1
+
+cd = Countdown(3)
+iter(cd) is cd        = True
+for v in Countdown(3): seq = [3, 2, 1]
+manual walk of Countdown(2): next, next, next -> [2, 1, 'StopIteration']
+
+[check] Countdown(3) yields 3, 2, 1 then stops: OK
+[check] iter(cd) is cd (an iterator's __iter__ returns self): OK
+[check] iter(cd) is cd for a Countdown instance: OK
+[check] manual walk ends in StopIteration: OK
+
+======================================================================
+SECTION C — `yield` makes a function into a generator (frame suspends)
+======================================================================
+A function containing `yield` is a GENERATOR FUNCTION. CALLING it
+does NOT execute the body — it returns a fresh GENERATOR object.
+Each next() runs the body until the next `yield`, then SUSPENDS
+the frame (locals + instruction pointer are kept alive). Calling
+next() again RESUMES exactly where it left off.
+
+Calling two_yields() returns a generator; body has NOT run yet:
+type(g).__name__               = generator
+g.gi_frame is not None         = True  (frame exists, suspended)
+
+Driving it with next() — watch the body prints interleave:
+calling next(g)...
+    [body: running up to first yield]
+  -> 1
+calling next(g)...
+    [body: resumed between yields; local state preserved]
+  -> 2
+calling next(g)...
+    [body: resumed after second yield; about to fall off the end]
+  -> StopIteration (body ran off the end)
+
+Frame-suspension demo: local var `total` persists across yields.
+rt = running_total(10)   # total starts at 10
+next(rt) -> 10
+next(rt) -> 11
+next(rt) -> 12   (10 -> 11 -> 12: SAME frame, local persisted)
+
+[check] calling a generator function returns a generator object: OK
+[check] an exhausted generator's frame is None (gi_frame cleared): OK
+[check] a fresh generator's frame is live before first next(): OK
+[check] next() walks the yields in order: OK
+[check] a single generator's local var accumulates across next() calls: OK
+
+======================================================================
+SECTION D — Iterators are single-use: exhaustion is permanent
+======================================================================
+An iterator is CONSUMED by iteration. Once exhausted, every
+further next() raises StopIteration and list(it) returns []. This
+is true of generator expressions, generator functions, map/filter
+objects, zip objects, file objects, and EVERY itertools output.
+A LIST survives repeated iteration; an ITERATOR does not.
+
+g = (x*x for x in range(3))
+list(g) (1st pass) = [0, 1, 4]
+list(g) (2nd pass) = []   <- EMPTY: g was consumed
+
+def small_gen(): yield 'a'; yield 'b'
+g_a = small_gen(); g_b = small_gen()
+g_a is g_b        = False   <- two DISTINCT generator objects
+list(g_a)         = ['a', 'b']
+list(g_b)         = ['a', 'b']   <- each call makes a fresh generator
+list(g_a) again   = []   <- but each generator is single-use
+
+lst = [1, 2]
+list(lst) x3      = [[1, 2], [1, 2], [1, 2]]
+  (a list is an ITERABLE: iter() mints a fresh iterator each time)
+
+[check] generator expression is single-use: list() twice -> 2nd empty: OK
+[check] two calls to a generator function -> two distinct objects: OK
+[check] each fresh generator yields its values on the first pass: OK
+[check] a generator is exhausted after one full pass: OK
+[check] a list survives repeated iteration: OK
+
+======================================================================
+SECTION E — `yield from` delegates to a sub-generator (PEP 380)
+======================================================================
+`yield from sub` makes the outer generator transparently delegate
+to `sub`: each value the sub yields is re-yielded by the outer,
+and when the sub raises StopIteration, control returns to the
+outer. `sub` can be any iterable (another generator, a list, a
+string, a range...).
+
+def sub_gen(): yield 'x'; yield 'y'
+def delegating_gen():
+    yield 'start'
+    yield from sub_gen()       # delegate to a sub-generator
+    yield from ['a', 'b']      # works on any iterable
+    yield 'end'
+
+list(delegating_gen()) = ['start', 'x', 'y', 'a', 'b', 'end']
+
+`yield from` ALSO captures the sub-generator's return value:
+def returning_sub(): yield 1; yield 2; return 'SUB_RESULT'
+def outer(): sent = yield from returning_sub(); yield f'got: {sent}'
+list(outer())         = [1, 2, 'got: SUB_RESULT']
+
+[check] yield from flattens sub-generator values into the outer stream: OK
+[check] yield from forwards the sub-generator's return value: OK
+
+======================================================================
+SECTION F — Infinite generators + islice: lazy pipelines in O(1) memory
+======================================================================
+A generator with `while True: yield ...` never stops on its own.
+That's SAFE because it's lazy — it only produces a value when
+next() asks for one, so the infinite stream costs O(1) memory.
+itertools.islice(it, n) is the standard way to take the first N
+items of any (possibly infinite) iterator.
+
+def naturals():
+    i = 0
+    while True: yield i; i += 1
+
+list(islice(naturals(), 5))      = [0, 1, 2, 3, 4]
+list(islice(naturals(), 10, 13)) = [10, 11, 12]   (start/stop, like slicing)
+
+sys.getsizeof(naturals()) before pulls = 184 bytes
+sys.getsizeof(naturals()) after 3 pulls = 184 bytes
+  (fixed — pulling 1 or 1e9 values does not grow the object)
+
+[check] infinite generator + islice(_, 5) -> [0,1,2,3,4]: OK
+[check] islice supports start/stop like sequence slicing: OK
+[check] the generator object size is constant regardless of pulls: OK
+
+======================================================================
+SECTION G — itertools greatest hits: count, chain, takewhile, accumulate, product
+======================================================================
+itertools is the stdlib's iterator algebra. EVERY function returns
+a LAZY iterator — chaining/accumulating over a million items costs
+O(1) memory until you materialize them with list(). Below: one
+demo of each, plus a composed lazy pipeline.
+
+tool        expression                                      result
+----------------------------------------------------------------------------------
+count       islice(count(10), 5)                            [10, 11, 12, 13, 14]
+chain       chain('AB', 'CD')                               ['A', 'B', 'C', 'D']
+takewhile   takewhile(lambda x: x<3, [1,2,3,4,1])           [1, 2]
+accumulate  accumulate([1,2,3,4])                           [1, 3, 6, 10]
+accumulate  accumulate([1,2,3,4], initial=10)               [10, 11, 13, 16, 20]
+product     product('AB', 'xy')                             [('A', 'x'), ('A', 'y'), ('B', 'x'), ('B', 'y')]
+
+Lazy pipeline (no intermediate list is ever materialized):
+  list(islice( (x*x for x in takewhile(lambda n: n<100, count(7))), 5 ))
+  = [49, 64, 81, 100, 121]
+
+[check] count(10) is an infinite arithmetic stream: OK
+[check] chain concatenates iterables lazily: OK
+[check] takewhile stops at the first False (and consumes that item): OK
+[check] accumulate gives running totals: OK
+[check] accumulate with initial= prepends the start value: OK
+[check] product is the cartesian product: OK
+[check] lazy pipeline composition works end-to-end: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

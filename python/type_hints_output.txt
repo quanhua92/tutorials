@@ -1,0 +1,206 @@
+type_hints.py — Phase 3 bundle #18.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Basic annotations: f.__annotations__ + NOT enforced at runtime
+======================================================================
+Annotations live in f.__annotations__ as a dict. This file has
+'from __future__ import annotations' (PEP 563) in effect, so each
+value is the SOURCE TEXT of the annotation. typing.get_type_hints()
+resolves those strings back to real type objects. Either way, the
+runtime does NOT enforce them when you call f.
+
+def f(x: int, y: str) -> bool: return bool(x) and bool(y)
+expression                              result
+----------------------------------------------------------------------
+f.__annotations__                       {'x': 'int', 'y': 'str', 'return': 'bool'}
+get_type_hints(f)                       {'x': <class 'int'>, 'y': <class 'str'>, 'return': <class 'bool'>}
+f(2, "hello")                           True
+f("a", 1) (WRONG types)                 True  <- ran anyway!
+
+[check] f.__annotations__ stores STRINGS (PEP 563 deferred eval): OK
+[check] get_type_hints(f) resolves 'x' to the real type int: OK
+[check] get_type_hints(f) resolves 'return' to the real type bool: OK
+[check] calling f with wrong types does NOT raise at runtime: OK
+
+======================================================================
+SECTION B — Variable annotations (PEP 526): name: type = value
+======================================================================
+Annotations register types in __annotations__ at MODULE and CLASS
+scope. At FUNCTION scope they are pure hints — the runtime stores
+nothing. An annotation alone does NOT bind a name; only the
+assignment does.
+
+expression                              result
+----------------------------------------------------------------------
+module __annotations__                  {'module_count': 'int'}
+ServerConfig.__annotations__            {'host': 'str', 'port': 'int', 'debug': 'bool'}
+helper.__annotations__                  {'return': 'None'}
+ServerConfig.host (class default)       '127.0.0.1'
+
+[check] module __annotations__ records module_count as the STRING 'int': OK
+[check] ServerConfig.__annotations__ has host/port/debug (PEP 563 strings): OK
+[check] ServerConfig.host class default is the assigned value: OK
+[check] function-LOCAL variable annotations are NOT stored (only 'return'): OK
+
+======================================================================
+SECTION C — Container types: list[int], dict[str, float], tuple[int, ...]
+======================================================================
+Subscripting builtins produces a types.GenericAlias — a HINT to
+the checker. At runtime, list[int] does NOT constrain what you
+put in the list. tuple[T, ...] means 'variable-length, all T';
+tuple[int, str] means a fixed shape of exactly two elements.
+
+expression                      value
+----------------------------------------------------------------------
+type(nums)                      <class 'list'>
+type(scores)                    <class 'dict'>
+type(fixed)                     <class 'tuple'>
+nums (list[int])                [1, 2, 3]
+scores (dict[str, float])       {'alice': 9.5, 'bob': 7.0}
+fixed (tuple[int, str])         (1, 'x')
+list[int]                       list[int]
+dict[str, float]                dict[str, float]
+tuple[int, ...]                 tuple[int, ...]
+list[int].__origin__            <class 'list'>
+dict[str, float].__args__       (<class 'str'>, <class 'float'>)
+tuple[int, ...].__args__        (<class 'int'>, Ellipsis)
+
+After nums.append('not an int'): nums = [1, 2, 3, 'not an int']
+
+[check] nums is a plain list (annotation is just a hint): OK
+[check] list[int] is a GenericAlias, not a real class: OK
+[check] list[int].__origin__ is the built-in list: OK
+[check] dict[str, float].__args__ == (str, float): OK
+[check] tuple[int, ...].__args__ == (int, Ellipsis): OK
+[check] appending wrong type to list[int] runs fine (no TypeError): OK
+
+======================================================================
+SECTION D — TypeVar + Generic: a typed Stack[T]
+======================================================================
+TypeVar('T') is a placeholder type. Inheriting Generic[T] makes a
+class parameterizable: Stack[int] declares the element type, and
+mypy can check push/pop. At runtime a Stack is just a Stack —
+isinstance works against the plain class, but Stack[int] raises
+TypeError because parameters are erased (PEP 484).
+
+expression                              result
+----------------------------------------------------------------------
+s.push(1); s.push(2); s.push(3)         [1, 2, 3]
+s.pop()                                 3
+type(s)                                 <class '__main__.Stack'>
+isinstance(s, Stack)                    True
+isinstance(s, Stack[int])               TypeError: Subscripted generics cannot be used with class and instance checks
+Stack[int]                              __main__.Stack[int]
+Stack[int].__origin__                   <class '__main__.Stack'>
+Stack.__parameters__                    (~T,)
+
+[check] s.pop() returns the last-pushed int: OK
+[check] isinstance(s, Stack) works at runtime: OK
+[check] Stack[int].__origin__ is the unparameterized Stack: OK
+[check] Stack.__parameters__ == (T,) (unsubscripted): OK
+
+======================================================================
+SECTION E — Optional / Union / Callable: composable type hints
+======================================================================
+Optional[X] is just Union[X, None]. Python 3.10 added X | Y (PEP
+604). Callable[[ArgTypes], Ret] types higher-order functions. At
+runtime these build hints, NOT validators.
+
+expression                            result
+----------------------------------------------------------------------
+first_or_none([])                     None
+first_or_none([42])                   42
+format_id(7)                          'id=7'
+format_id("abc")                      'id=abc'
+apply(lambda a,b: a+b, 3, 4)          7
+int | None                            int | None
+Optional[int]                         typing.Optional[int]
+Union[int, str]                       typing.Union[int, str]
+Callable[[int, int], int]             typing.Callable[[int, int], int]
+(int | None) == Optional[int]         True
+Union[int, str] == (int | str)        True
+type(int | None).__name__             UnionType
+type(Optional[int]).__name__          _UnionGenericAlias
+
+[check] first_or_none([]) returns None: OK
+[check] first_or_none([42]) returns 42: OK
+[check] format_id accepts int and str equally (Union hint): OK
+[check] apply passes the callable through (Callable hint): OK
+[check] int | None equals Optional[int] (PEP 604 unifies them): OK
+[check] Union[int, str] equals int | str (order-independent): OK
+[check] X | Y syntax produces types.UnionType (PEP 604): OK
+
+======================================================================
+SECTION F — Protocol: structural typing + @runtime_checkable (PEP 544)
+======================================================================
+A Protocol describes a SHAPE — any object with the right methods
+is a structural subtype, NO inheritance required. With
+@runtime_checkable, isinstance() checks the shape at runtime via
+hasattr(). This is static duck typing.
+
+expression                                result
+----------------------------------------------------------------------
+isinstance(FileLike(), SupportsClose)     True
+isinstance(IntegerOnly(), SupportsClose)  True
+issubclass(FileLike, SupportsClose)       True
+issubclass(int, SupportsClose)            False
+FileLike.__mro__                          (<class '__main__.FileLike'>, <class 'object'>)
+SupportsClose.__mro__                     (<class '__main__.SupportsClose'>, <class 'typing.Protocol'>, <class 'typing.Generic'>, <class 'object'>)
+
+[check] FileLike structurally satisfies SupportsClose (has close()): OK
+[check] IntegerOnly does NOT satisfy SupportsClose (no close()): OK
+[check] issubclass works for runtime_checkable protocols: OK
+[check] FileLike does NOT inherit SupportsClose (structural, not nominal): OK
+
+======================================================================
+SECTION G — @overload: many signatures for the checker, ONE real impl
+======================================================================
+The @overload-decorated stubs declare every input->output mapping
+for STATIC checkers. The LAST (non-decorated) def is the runtime
+implementation. CPython discards the stubs; only the real impl
+is callable. mypy/pyright use the stubs to narrow return types.
+
+expression                            result
+----------------------------------------------------------------------
+parse(42)                             '42'
+parse("hello")                        5
+type(parse(42)).__name__              str
+type(parse("hi")).__name__            int
+parse.__annotations__                 {'value': 'int | str', 'return': 'str | int'}
+
+[check] parse(42) returns '42' (a str): OK
+[check] parse('hello') returns 5 (an int): OK
+[check] parse.__annotations__ is the REAL impl's (stubs discarded): OK
+
+======================================================================
+SECTION H — Runtime vs static: the gradual-typing contract
+======================================================================
+Python is GRADUALLY typed: annotations are pure hints. CPython
+stores them in __annotations__ and otherwise IGNORES them; mypy
+and pyright are the ENFORCERS, run separately in CI. This lets you
+add types incrementally without breaking existing code.
+
+expression                                result
+----------------------------------------------------------------------
+add(2, 3)                                 5
+add("x", "y") (mypy rejects, runtime OK)  'xy'
+add.__annotations__                       {'a': 'int', 'b': 'int', 'return': 'int'}
+
+Two KINDS of static typing, coexisting:
+  NOMINAL    : class B(A)    — B IS-A A because it SAYS so (MRO)
+  STRUCTURAL : class C: ...  — C is-a SupportsClose because it HAS
+                               close(), no inheritance needed
+
+Runtime type dispatch (e.g. functools.singledispatch) is a third
+axis — see FUNCTIONAL_TOOLKIT (P2 #15).
+
+[check] add(2, 3) == 5: OK
+[check] runtime accepts add('x', 'y') -> 'xy' (no TypeError): OK
+[check] annotations are stored in __annotations__ (CPython keeps them): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

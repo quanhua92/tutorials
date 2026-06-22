@@ -1,0 +1,198 @@
+gpu_distributed.py — Phase 5 bundle #34.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+torch 2.12.1 | running on device: mps (cuda=False, mps=True).
+
+======================================================================
+SECTION A — Device selection: cuda -> mps -> cpu
+======================================================================
+A torch.Tensor lives on a device. The portable selection ladder is:
+  device = 'cuda' if torch.cuda.is_available() else
+           ('mps'  if torch.backends.mps.is_available() else 'cpu')
+On this machine CUDA is absent, so the ladder falls through to mps
+or cpu. The chosen device is printed below; nothing is hard-coded.
+
+torch.cuda.is_available()             False
+torch.backends.mps.is_available()     True
+torch.cuda.device_count()             0
+selected device                       mps
+device.type                           mps
+
+CUDA-only facts (conceptual on this machine):
+  torch.cuda.device_count() -> #GPUs (0 here).
+  tensor.cuda() / tensor.cpu() -> shorthand .to(device) moves.
+  DataLoader(pin_memory=True) -> page-locked host RAM for faster
+    host->device DMA copy (only helps when a CUDA GPU exists).
+  torch.cuda.Stream -> an independent queue of CUDA kernels; lets
+    copy & compute overlap (🔗 CUDA_GRAPHS for the deep view).
+
+[check] a device was always selected (never None): OK
+[check] device.type is one of cuda/mps/cpu: OK
+[check] cuda device_count is 0 on this non-CUDA machine: OK
+[check] cuda.is_available() and mps.is_available() are mutually consistent with the pick: OK
+
+======================================================================
+SECTION B — .to(device): move a tensor and a model (same-device rule)
+======================================================================
+.to(device) returns a COPY on the target device for tensors, and
+moves ALL parameters/buffers IN PLACE for an nn.Module (it returns
+self). Inputs AND the model MUST land on the same device, else the
+first matmul raises RuntimeError.
+
+str(x_cpu.device)                       cpu
+str(x_dev.device)                       mps:0
+x_cpu is x_dev (new tensor object)      False
+str(model.fc1.weight.device)            mps:0
+str(model.fc2.bias.device)              mps:0
+
+model(x_dev).device                     mps:0
+tuple(model(x_dev).shape)               (1,)
+
+x_dev.device.type == params device.type True
+x_cpu.device vs params device (mixed?)  True
+model(cpu_input) raised RuntimeError    True
+
+[check] x_dev.device matches the selected device type: OK
+[check] .to(device) made a NEW tensor (not in-place for tensors): OK
+[check] model.fc1.weight is on the selected device after .to(device): OK
+[check] model.fc2.bias is also on the selected device (whole tree moved): OK
+[check] input+params on same device -> forward succeeds: OK
+[check] mixed-device forward raises RuntimeError: OK
+
+======================================================================
+SECTION C — CUDA specifics (conceptual: is_available / device_count / pinned / streams)
+======================================================================
+These APIs are CUDA-only. On this Mac they all report 'no CUDA' or
+are no-ops; the .py asserts the negative results so the API shapes
+are visible, and the .md explains what each DOES on a real GPU.
+
+torch.cuda.is_available()                 False
+torch.cuda.device_count()                 0
+hasattr(tensor, "pin_memory")             True
+hasattr(tensor, "is_pinned")              True
+
+What each does on a CUDA box (NOT runnable here, from the docs):
+  is_available()  -> True iff a usable CUDA runtime + GPU exist.
+  device_count()  -> int number of visible GPUs.
+  tensor.cuda()   -> alias for .to(torch.device('cuda')) .
+  DataLoader(..., pin_memory=True) -> stage batches in page-locked
+    host memory so the host->device copy can DMA in parallel with
+    compute (pair with .to(device, non_blocking=True)).
+  torch.cuda.Stream() -> an independent GPU command queue; multiple
+    streams let copy and compute overlap (🔗 CUDA_STREAMS).
+
+[check] torch.cuda.is_available() is a bool: OK
+[check] torch.cuda.device_count() is an int: OK
+[check] tensor exposes the pin_memory() API (CUDA-coupled, concept-only here): OK
+
+======================================================================
+SECTION D — DDP conceptual model: one PROCESS per GPU, AllReduce grads
+======================================================================
+DistributedDataParallel is DATA parallel: the WHOLE model is cloned
+to every GPU, each GPU eats a DIFFERENT batch, and after backward
+the per-rank gradients are averaged with AllReduce so every replica
+takes the SAME optimizer step and can never drift.
+
+  rank       = this process's id in [0, world_size).
+  world_size = number of processes (= number of GPUs).
+  local_rank = which GPU on this node (set via CUDA_VISIBLE_DEVICES
+               or torch.cuda.set_device(local_rank)).
+  ONE PROCESS PER GPU (not threads): the GIL would serialize a
+  single Python process, so DDP spawns N processes for N GPUs.
+  AllReduce   = a collective: every rank contributes a tensor and
+               every rank ends up with the SAME averaged result.
+
+world_size = 4; each rank's local grad (first elem):
+  rank 0: g[0] = [1.5409960746765137, -0.293428897857666, -2.1787893772125244]
+  rank 1: g[1] = [0.5684312582015991, -1.0845223665237427, -1.3985954523086548]
+  rank 2: g[2] = [0.40334683656692505, 0.8380263447761536, -0.7192575931549072]
+  rank 3: g[3] = [-0.40334352850914, -0.5966353416442871, 0.18203648924827576]
+AllReduce-MEAN gradient (every rank gets THIS) = [0.5273576974868774, -0.28414005041122437, -1.028651475906372]
+
+manual sum/ world_size == torch.stack(...).mean : True
+
+[check] world_size ranks produced world_size local gradients: OK
+[check] AllReduce average equals the manual mean of the per-rank grads: OK
+[check] every rank would receive the SAME averaged gradient: OK
+
+======================================================================
+SECTION E — DDP API sketch + single-process gloo init (world_size=1)
+======================================================================
+The DDP launch sequence (from the PyTorch DDP docstring):
+  torch.distributed.init_process_group(backend, rank, world_size)
+  torch.cuda.set_device(local_rank)          # one GPU / process
+  model = model.to(device)
+  model = DistributedDataParallel(model, device_ids=[local_rank])
+  sampler = DistributedSampler(dataset, shuffle=True)
+  loader = DataLoader(dataset, batch_size=..., sampler=sampler)
+
+'backend' is 'nccl' for NVIDIA GPUs (fastest, recommended),
+'gloo' for CPU/multi-node, 'mpi' if MPI is built. Below we attempt
+a REAL single-process gloo init (world_size=1) on CPU; if the host
+or port is busy we fall back to the conceptual assertion.
+
+dist.is_initialized() after init          True
+dist.get_rank()                           0
+dist.get_world_size()                     1
+
+[check] single-process gloo init succeeded (group initialized): OK
+[check] rank == 0 in a world_size=1 group: OK
+[check] world_size == 1: OK
+
+======================================================================
+SECTION F — Per-rank seeding + DistributedSampler data sharding
+======================================================================
+DDP only works if the K replicas actually do DIFFERENT work. Two
+things must differ per rank: (1) the SEED (else dropout/init/grad
+noise is identical and AllReduce is pointless), and (2) the DATA
+shard (else every rank trains on the same batch).
+
+If every rank calls torch.manual_seed(42) (WRONG):
+  rank 0: [0.33669036626815796, 0.12880940735340118, 0.23446236550807953]
+  rank 1: [0.33669036626815796, 0.12880940735340118, 0.23446236550807953]
+  rank 2: [0.33669036626815796, 0.12880940735340118, 0.23446236550807953]
+  rank 3: [0.33669036626815796, 0.12880940735340118, 0.23446236550807953]
+  -> identical draws across ranks; AllReduce would average the SAME
+     gradient K times -> no parallelism benefit.
+
+If every rank calls torch.manual_seed(42 + rank) (CORRECT):
+  rank 0 (seed 42): [0.33669036626815796, 0.12880940735340118, 0.23446236550807953]
+  rank 1 (seed 43): [-0.6484010815620422, -0.7058414220809937, 0.6432183980941772]
+  rank 2 (seed 44): [0.058945026248693466, -1.3944607973098755, 0.8447810411453247]
+  rank 3 (seed 45): [-1.1223719120025635, 0.031175758689641953, -0.6804271340370178]
+
+Dataset of 12 indices, world_size=4:
+  rank 0 shard: [0, 4, 8]
+  rank 1 shard: [1, 5, 9]
+  rank 2 shard: [2, 6, 10]
+  rank 3 shard: [3, 7, 11]
+
+[check] identical seed -> identical first draw on every rank: OK
+[check] per-rank seed 42+rank -> distinct first draws: OK
+[check] shards are disjoint (a partition of the dataset): OK
+[check] each rank gets dataset_size/world_size items: OK
+
+======================================================================
+SECTION G — DDP vs Tensor Parallel vs Pipeline Parallel vs FSDP
+======================================================================
+All four 'parallel' strategies; pick by what does NOT fit on one
+GPU. DDP replicates everything; the others shard the model itself.
+
+strategy          what is SHARDED             what is REPLICATED              comm primitive
+------------------------------------------------------------------------------------------------------
+DDP               data                        nothing (full replica per GPU)  AllReduce grads (once/step)
+Tensor Parallel   weights                     data + activations              AllReduce per sharded layer
+Pipeline Par.     layers                      data + activations              Send/Recv between stages
+FSDP              params+opt+grad (sharded)   data                            AllGather + ReduceScatter
+
+Rule of thumb:
+  - Model fits on 1 GPU -> DDP (simplest, linear throughput).
+  - One layer's matmul does not fit -> Tensor Parallel.
+  - Model fits per-stage but not whole -> Pipeline Parallel.
+  - Optimizer state is the bottleneck -> FSDP (shards it).
+[check] DDP is the only strategy that does NOT shard the model: OK
+[check] FSDP shards params + optimizer + gradients: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

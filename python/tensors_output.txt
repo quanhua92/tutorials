@@ -1,0 +1,236 @@
+tensors.py — Phase 5 bundle #29.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. All tensors live on CPU for
+determinism; cuda/mps are mentioned only conceptually.
+torch 2.12.1, numpy 2.5.0 on this machine.
+
+======================================================================
+SECTION A — Creation, dtype, device
+======================================================================
+A torch.Tensor is a multi-dimensional matrix of a SINGLE data type
+(docs.pytorch.org tensors.html). torch.tensor(data) infers dtype from
+the data; the factory ops (zeros/ones/arange/randn) use the DEFAULT
+dtype = torch.float32. torch.get_default_dtype() confirms it.
+
+expression                    dtype           shape
+----------------------------------------------------------
+torch.tensor([1,2,3])         torch.int64     (3,)
+torch.tensor([1.,2.,3.])      torch.float32   (3,)
+torch.zeros(2,2)              torch.float32   (2, 2)
+torch.ones(3)                 torch.float32   (3,)
+torch.arange(0,12)            torch.int64     (12,)
+torch.randn(2,3) [seeded]     torch.float32   (2, 3)
+
+torch.get_default_dtype() = torch.float32
+every tensor above is on device: cpu
+torch.backends.mps.is_available() = True  (Apple Silicon GPU; conceptual)
+seeded randn(2,3) values:
+tensor([[ 1.5410, -0.2934, -2.1788],
+        [ 0.5684, -1.0845, -1.3986]])
+
+[check] torch.tensor([1,2,3]) infers int64 (integral data): OK
+[check] torch.tensor([1.,2.,3.]) infers float32 (default float dtype): OK
+[check] torch.zeros uses the default dtype (float32): OK
+[check] default dtype is float32: OK
+[check] CPU tensors report device type 'cpu': OK
+[check] torch.arange(0,12) has 12 elements: OK
+
+======================================================================
+SECTION B — dtype taxonomy, element_size(), and .to()
+======================================================================
+PyTorch's dtype fixes (a) the numeric kind and (b) the bytes/element.
+element_size() returns bytes per element; nbytes = element_size() *
+numel(). float32 is the DEFAULT and most accurate; float16/bfloat16
+halve memory for training/inference; int64 is the index dtype.
+
+dtype             element_size (bytes)  nbytes (10 elems)
+------------------------------------------------------------
+torch.float32     4                     40
+torch.float16     2                     20
+torch.bfloat16    2                     20
+torch.int64       8                     80
+torch.bool        1                     10
+
+base.dtype = torch.float32,  cast = base.to(torch.float16)
+cast.dtype = torch.float16
+base.data_ptr() == cast.data_ptr() : False  (.to() to a new dtype COPIES)
+cast values (note fp16 rounding of -2.25): tensor([ 1.5000, -2.2500,  3.0000], dtype=torch.float16)
+
+[check] float32 element_size == 4 bytes: OK
+[check] float16 element_size == 2 bytes (half the memory): OK
+[check] int64 element_size == 8 bytes (the index dtype): OK
+[check] bool element_size == 1 byte: OK
+[check] nbytes == element_size() * numel(): OK
+[check] .to(new_dtype) produces a DISTINCT buffer (a copy): OK
+
+======================================================================
+SECTION C — view / reshape / permute / contiguous + shared storage
+======================================================================
+A tensor is a (dtype, shape, stride, storage-ptr) HEADER over a raw
+1-D data buffer. view()/permute()/transpose() REWRITE the header and
+SHARE the buffer (zero copy); reshape() shares when it can, COPIES
+when it must; contiguous() materializes a row-major copy if needed.
+
+a = torch.arange(12).reshape(2,6) =
+tensor([[ 0,  1,  2,  3,  4,  5],
+        [ 6,  7,  8,  9, 10, 11]])
+a.stride() = (6, 1)  (row-jump=6, col-jump=1)
+
+v = a.view(3,4) =
+tensor([[ 0,  1,  2,  3],
+        [ 4,  5,  6,  7],
+        [ 8,  9, 10, 11]])
+a.data_ptr() == v.data_ptr() : True  (view SHARES the buffer)
+v[0,0] = 999  ->  a[0,0] = 999  (mutation visible in base)
+
+t = a.transpose(0,1): shape=(6, 2) stride=(1, 6)
+t.is_contiguous() = False
+t.view(2,6) on non-contiguous t -> RuntimeError: view size is not compatible with input tensor's size and stride
+
+c = t.contiguous(): is_contiguous=True stride=(2, 1)
+c.data_ptr() == t.data_ptr() : False  (contiguous COPIED non-contiguous data)
+c.view(2,6) after contiguous() -> shape (2, 6) (works)
+
+r = t.reshape(2,6): shape=(2, 6), data_ptr == t: False  (reshape copied)
+a.contiguous() returns same object when already contiguous: True
+p = a.permute(1,0): shape=(6, 2) stride=(1, 6) data_ptr == a: True
+
+[check] a.view(3,4) shares the buffer with a (same data_ptr): OK
+[check] mutating a view is visible in the base (a[0,0] == 999): OK
+[check] transpose() yields a non-contiguous view: OK
+[check] .view() on a non-contiguous transpose raises RuntimeError: OK
+[check] contiguous() copies non-contiguous data (new data_ptr): OK
+[check] reshape() succeeds on non-contiguous input (shape (2,6)): OK
+[check] contiguous() on already-contiguous tensor returns the same object: OK
+[check] permute(1,0) shares storage with the base (same data_ptr): OK
+
+======================================================================
+SECTION D — Strides & is_contiguous: the header that interprets the buffer
+======================================================================
+The k-th stride is the number of ELEMENTS to skip in the 1-D storage
+to advance one step along axis k. A row-major (C-contiguous) tensor
+has decreasing strides; a transposed view flips them. is_contiguous()
+is True iff walking the axes in order visits storage in order.
+
+base = torch.arange(12).reshape(3,4)
+  shape=(3, 4)  stride=(4, 1)  is_contiguous=True
+col = base.transpose(0,1)
+  shape=(4, 3)  stride=(1, 4)  is_contiguous=False
+  col.data_ptr() == base.data_ptr() : True  (SAME buffer, flipped strides)
+
+Reading col[0,:] walks storage with step 4 -> the FIRST column of base.
+  base[:, 0] = [0, 4, 8]
+  col[0, :]  = [0, 4, 8]   (identical: same bytes, new map)
+
+[check] a (3,4) row-major tensor has stride (4,1): OK
+[check] transpose flips the strides to (1,4): OK
+[check] base is contiguous, its transpose is NOT: OK
+[check] transpose shares the buffer (same data_ptr): OK
+[check] col[0,:] equals base[:,0] (same bytes, reinterpreted): OK
+
+======================================================================
+SECTION E — Broadcasting: align TRAILING dims; each must be equal or 1
+======================================================================
+Two shapes are broadcastable iff, iterating from the TRAILING dim, each
+pair is equal OR one of them is 1 (or absent). The result dim is the
+max. Broadcasting expands WITHOUT copying (a stride-0 trick).
+
+matrix  shape (3, 4)
+row_vec shape (4,)  -> matrix + row_vec shape (3, 4)
+col_vec shape (3, 1) ; one_row shape (1, 4) -> col_vec * one_row shape (3, 4)
+
+matrix + row_vec (row broadcast across 3 rows):
+tensor([[10., 21., 32., 43.],
+        [14., 25., 36., 47.],
+        [18., 29., 40., 51.]])
+
+col_vec * one_row (outer product via broadcasting):
+tensor([[ 100.,  200.,  300.,  400.],
+        [ 200.,  400.,  600.,  800.],
+        [ 300.,  600.,  900., 1200.]])
+
+(2,3) + (2,2) -> RuntimeError: The size of tensor a (3) must match the size of tensor b (2) at non-si  (3 != 2)
+
+[check] (3,4) + (4,) broadcasts the row to (3,4): OK
+[check] (3,1) * (1,4) broadcasts to (3,4) (outer product): OK
+[check] matrix + row_vec adds the SAME row to every row: OK
+[check] (2,3) + (2,2) is NOT broadcastable (trailing 3 != 2): OK
+[check] broadcasting result dim = max of the two along each axis: OK
+
+======================================================================
+SECTION F — In-place ops: the `_` suffix and the autograd trap
+======================================================================
+A method ending in `_` (add_, relu_, abs_, zero_) mutates the tensor
+in place and returns it — no new buffer. Fast, but DANGEROUS under
+autograd: an in-place op on a LEAF tensor that requires grad raises
+immediately. (🔗 AUTOCRAD, Phase 5 #30, covers the full graph theory.)
+
+t = [-1.0, 2.0, -3.0]
+t.relu_() -> t = [0.0, 2.0, 0.0]  (mutated in place)
+data_ptr(t) unchanged: True  ret is t: True  (same object, same buffer)
+
+torch.tensor([...]).relu() (OUT-of-place) -> [0.0, 2.0, 0.0]
+(the `_`-less form returns a NEW tensor; original untouched)
+
+leaf.add_(1) on a requires_grad=True leaf -> RuntimeError: a leaf Variable that requires grad is being used in an in-place operation.
+
+[check] relu_() mutates in place (t == [0,2,0]): OK
+[check] the in-place method returns the SAME object (ret is t): OK
+[check] the out-of-place relu() does NOT mutate its source: OK
+[check] in-place on a requires_grad leaf raises RuntimeError: OK
+
+======================================================================
+SECTION G — Indexing: slice (view) vs boolean mask vs advanced (copy)
+======================================================================
+PyTorch follows NumPy: BASIC indexing (slices/int) returns a VIEW of
+the base; BOOLEAN MASK and ADVANCED indexing (tensor/idx arrays) return
+a COPY. Writing through either kind is always in-place.
+
+t =
+tensor([[ 0,  1,  2,  3],
+        [ 4,  5,  6,  7],
+        [ 8,  9, 10, 11]])
+
+t[0, :]   (basic slice)    -> [0, 1, 2, 3]
+  is view of t: True
+(t > 5)   (boolean mask)    -> shape (3, 4), 6 True entries
+t[t>5]    (advanced, mask)  -> [6, 7, 8, 9, 10, 11]  (1-D copy)
+t[[0,2,2],:]  (advanced idx) -> shape (3, 4) (rows 0,2,2 gathered)
+
+row0[0] = -7 (mutate the slice view) -> t[0,0] = -7
+
+[check] basic slice t[0,:] shares storage with t (a view): OK
+[check] boolean mask t[t>5] returns a 1-D copy of the matches: OK
+[check] advanced indexing t[[0,2,2],:] gathers rows (0,2,2): OK
+[check] mutating a slice view mutates the base (t[0,0] == -7): OK
+[check] the mask dtype is bool: OK
+
+======================================================================
+SECTION H — NumPy interop: t.numpy() and torch.from_numpy() share memory
+======================================================================
+On CPU, a torch.Tensor and the ndarray from t.numpy() share the SAME
+raw buffer (zero copy). torch.from_numpy(arr) wraps an ndarray as a
+tensor the same way. Mutating either is visible to the other.
+
+t = torch.tensor([1.,2.,3.,4.])
+arr = t.numpy()  -> type=ndarray, dtype=float32, values=[1.0, 2.0, 3.0, 4.0]
+t.data_ptr() == arr.__array_interface__['data'][0] : True  (shared buffer)
+
+arr[0] = 99.0  ->  t = [99.0, 2.0, 3.0, 4.0]  (torch sees the numpy mutation)
+t[1] = -42.0  ->  arr = [99.0, -42.0, 3.0, 4.0]  (numpy sees the torch mutation)
+
+back = torch.from_numpy(arr) -> shares buffer: True
+(from_numpy PRESERVES dtype: float32 ndarray -> float32 tensor,
+ NOT the float32 'default' rule that torch.tensor() uses.)
+np.array([1.,2.], dtype=float64) -> from_numpy -> dtype torch.float64 (preserved, NOT float32)
+
+[check] t.numpy() returns a numpy.ndarray: OK
+[check] t.numpy() shares the buffer with t (same data pointer): OK
+[check] mutating the ndarray is visible in the tensor (t[0] == 99.0): OK
+[check] mutating the tensor is visible in the ndarray (arr[1] == -42.0): OK
+[check] torch.from_numpy(arr) shares the buffer too: OK
+[check] from_numpy PRESERVES dtype (float64 ndarray -> torch.float64): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

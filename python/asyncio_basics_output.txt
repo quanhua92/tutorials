@@ -1,0 +1,127 @@
+asyncio_basics.py — Phase 3 bundle #21.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Coroutine object + asyncio.run: calling f() does NOT run it
+======================================================================
+An `async def` function is a COROUTINE FUNCTION. Calling it returns
+a COROUTINE OBJECT (repr '<coroutine object f at 0x...>'); the body
+does NOT run yet. The object is an awaitable. asyncio.run(coro)
+creates an event loop, schedules the coroutine, drives it to done.
+
+type(coro).__name__                 -> coroutine
+asyncio.iscoroutine(coro)           -> True
+asyncio.iscoroutinefunction(greet)  -> True
+
+[check] type(coro).__name__ == 'coroutine': OK
+[check] asyncio.iscoroutine(coro) is True: OK
+[check] greet is a coroutine function (iscoroutinefunction): OK
+
+asyncio.run(coro) -> 'hello from coroutine'
+[check] asyncio.run returned the coroutine's value: OK
+
+======================================================================
+SECTION B — await yields control to the loop (interleaved execution)
+======================================================================
+Inside one coroutine, `await asyncio.sleep(0)` SUSPENDS it and hands
+control back to the event loop, which runs OTHER ready coroutines.
+Two coroutines that each await therefore INTERLEAVE — proof that
+await is a real yield, not a no-op (all on ONE thread).
+
+execution log = ['A:1', 'B:1', 'A:2', 'B:2', 'A:3', 'B:3']
+(A and B alternate at every await point — single thread, interleaved)
+
+[check] log[0] == 'A:1' (A was scheduled first): OK
+[check] log[1] == 'B:1' (B ran while A was suspended): OK
+[check] A and B interleaved (never A:1,A:2,A:3,B:1,...): OK
+
+======================================================================
+SECTION C — asyncio.gather: concurrent waits take ~max, NOT ~sum
+======================================================================
+gather(*aws) schedules every awaitable CONCURRENTLY on the one loop.
+Two sleeps of 0.10s and 0.20s overlap: total ~= max (0.20s), not
+~= sum (0.30s). Awaiting them SEQUENTIALLY (one await, then the
+other) WOULD sum. (Exact ms vary; the ORDERING facts below hold.)
+
+concurrent gather  -> ['x@0.10s', 'y@0.20s'] in 0.202s
+sequential awaits  -> ['x@0.10s', 'y@0.20s'] in 0.304s
+sum of durations = 0.30s  |  max of durations = 0.20s
+
+[check] gather returned both results in submission order: OK
+[check] concurrent elapsed < sum (0.30s) — the waits overlapped: OK
+[check] concurrent elapsed < sequential elapsed (overlap beat serial): OK
+[check] sequential elapsed ~= sum (>= 0.28s, no overlap): OK
+
+======================================================================
+SECTION D — asyncio.create_task: schedule once, overlap, await later
+======================================================================
+create_task(coro) wraps a coroutine in a Task and schedules it to run
+SOON on the loop — WITHOUT awaiting. It runs CONCURRENTLY with the
+code that created it, so a long background task overlaps your other
+work and may already be DONE by the time you await it.
+
+  main:created task
+  background:done
+  main:task.done()=True
+  main:joined
+
+[check] background finished BEFORE main joined it (true overlap): OK
+[check] task.done() was True before the final await (it already completed): OK
+
+======================================================================
+SECTION E — THE TRAP: a blocking call (time.sleep) freezes the WHOLE loop
+======================================================================
+asyncio.sleep() SUSPENDS the coroutine (cooperative — the loop is
+free to run others). time.sleep() is a plain SYNCHRONOUS block: the
+entire thread — and thus the whole event loop — STALLS. Other tasks
+cannot make ANY progress while it runs.
+
+watcher ticks before time.sleep(0.10)   : 0
+watcher ticks AFTER  time.sleep(0.10)   : 0   <- NO progress
+watcher ticks AFTER  asyncio.sleep(0.10): 5   <- resumes
+
+[check] time.sleep froze the loop (watcher made NO progress during it): OK
+[check] asyncio.sleep did NOT freeze (watcher progressed after it): OK
+
+======================================================================
+SECTION F — Primitives: wait_for (timeout), as_completed, Queue, Lock
+======================================================================
+Four workhorses. wait_for(aw, t) cancels + raises TimeoutError at t.
+as_completed(aws) yields results in COMPLETION order. Queue and Lock
+are the async analogues of queue.Queue / threading.Lock.
+
+wait_for(sleep(1.0), timeout=0.05) -> TimeoutError after 0.052s
+[check] wait_for raised TimeoutError near 0.05s (cancelled, not 1.0s): OK
+as_completed(slow@0.10, fast@0.02) -> ['fast', 'slow']
+[check] as_completed yields 'fast' before 'slow' (completion order, not input): OK
+asyncio.Queue producer/consumer -> [0, 1, 2]
+[check] Queue handed off 0,1,2 via async put/get: OK
+Lock-protected critical sections -> ['X:in', 'X:out', 'Y:in', 'Y:out']
+[check] Lock kept each section atomic (no interleave): OK
+
+======================================================================
+SECTION G — When to use asyncio vs threads vs multiprocessing
+======================================================================
+asyncio overlaps I/O WAITS on ONE thread. It does NOT parallelize
+CPU. Proof: a coroutine doing pure CPU (no await) runs to completion
+and BLOCKS every other coroutine until it returns.
+
+  gather(cpu_hog, io_waiter) -> ['cpu done: 499999500000', 'io:ran']
+  (cpu_hog finished ENTIRELY before io_waiter got a single tick)
+
+[check] CPU coroutine with no await blocked the loop (ran first, fully): OK
+workload                        best fit          why
+------------------------------------------------------------------------
+many slow I/O connections       asyncio           one thread overlaps waits
+quick blocking I/O / sync libs  threads           easy wrap, GIL-OK for I/O
+CPU-bound (math, hashing)       multiprocessing   real parallel cores
+mix of CPU + I/O                procs + asyncio   per-core event loop
+
+[check] asyncio fits MANY slow I/O connections (not CPU work): OK
+[check] multiprocessing fits CPU-bound work (real parallel cores): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

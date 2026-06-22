@@ -1,0 +1,149 @@
+gc_weakrefs.py — Phase 3 bundle #17.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — Refcounting: deleting the last strong ref frees immediately
+======================================================================
+CPython is refcount-FIRST. Every object carries an ob_refcnt; when
+the count hits 0 the object is freed *at that instant* (no pause,
+no sweep). We watch the death through a weakref.ref handle, which
+returns the object while alive and None once it is gone.
+
+sys.getrefcount(obj) (live, 2 refs: 'obj' + getrefcount arg): 2
+ref() is obj  (weakref resolves while alive): True
+del obj  -> ob_refcnt drops to 0 -> CPython frees it now
+ref() after del  (the weakref no longer resolves): None
+
+[check] weakref returns the object while it is alive: OK
+[check] after del, the weakref returns None (object was freed): OK
+
+======================================================================
+SECTION B — A reference cycle survives del; gc.collect() frees it
+======================================================================
+Two objects that point at each other form a CYCLE. After `del a,
+del b`, neither ob_refcnt reaches 0 — each still has one reference
+(from the other). Refcounting alone cannot free them. The cyclic
+GC must step in. We force it deterministically with gc.collect().
+
+cycle built: a.x is b -> True; b.x is a -> True
+del a, del b  (only the names go away; the objects keep each other)
+ra() right after del  (NOT None -> still alive): True
+rb() right after del  (NOT None -> still alive): True
+gc.collect() returned (objects freed): 38
+ra() after gc.collect()  (None -> freed): None
+rb() after gc.collect()  (None -> freed): None
+
+[check] cycle objects survive del of both names (refcount can't break it): OK
+[check] after gc.collect(), the cycle is gone (weakrefs return None): OK
+
+======================================================================
+SECTION C — gc generations, thresholds, and forced collection
+======================================================================
+The cyclic GC groups tracked objects into three GENERATIONS. New
+objects enter gen 0; survivors are promoted to gen 1 then gen 2.
+Younger generations are collected more often. Collection runs
+automatically when (allocations - deallocations) > threshold0; you
+can also force it with gc.collect(generation).
+
+gc.get_threshold()  (default thresholds t0, t1, t2): (2000, 10, 10)
+gc.get_count()     (current counts c0, c1, c2):      (4, 0, 0)
+gc.isenabled()     (automatic cyclic GC on?):        True
+
+counts before any forced collect:  (4, 0, 0)
+after gc.collect(0) [gen 0 only]:  (0, 1, 0)
+after gc.collect(1) [gen 0 + 1]:   (0, 0, 1)
+after gc.collect(2) [full sweep]:  (0, 0, 0)
+
+gc.disable(); gc.isenabled() -> False
+gc.enable();  gc.isenabled() -> True
+
+[check] gc.get_threshold() returns a 3-tuple (t0, t1, t2): OK
+[check] gc.collect(0) resets the gen-0 count to a small value: OK
+[check] gc.disable() turns the automatic collector off: OK
+[check] gc.enable() turns it back on: OK
+
+======================================================================
+SECTION D — weakref.ref: a soft pointer that does not add to the refcount
+======================================================================
+weakref.ref(obj) returns a *callable* handle. Calling it returns
+obj while obj is alive, and None once obj has been collected. The
+weakref itself does NOT increment obj's ob_refcnt — that is the
+whole point: you can hold a handle without keeping the object alive.
+
+sys.getrefcount(obj) before weakref: 2
+sys.getrefcount(obj) after  weakref: 2
+(unchanged -> the weakref did NOT add a strong reference)
+ref() is obj  (handle resolves while alive): True
+ref() after del obj  (handle resolves to None): None
+
+[check] creating a weakref does not change the strong refcount: OK
+[check] weakref resolves to the object while it is alive: OK
+
+======================================================================
+SECTION E — WeakValueDictionary: values auto-evict when their last strong ref dies
+======================================================================
+A WeakValueDictionary holds weak refs to its VALUES. When the last
+strong ref to a value disappears (and the cyclic GC notices), the
+entry is silently dropped. Perfect for caches keyed by something
+else — the cache never keeps a big object alive on its own.
+
+cache['thumbnail'] = img; 'thumbnail' in cache -> True
+cache['thumbnail'] is img -> True
+del img  (the only strong ref)
+gc.collect(); 'thumbnail' in cache -> False
+
+bucket.add(one); 'one in bucket' before del -> True
+del one + gc.collect(); bucket empty -> True
+
+[check] WeakValueDictionary entry present while strong ref exists: OK
+[check] WeakValueDictionary entry vanishes after value is collected: OK
+[check] WeakSet drops the element once its strong ref dies: OK
+
+======================================================================
+SECTION F — __del__ pitfalls and the weakref.finalize alternative
+======================================================================
+Before PEP 442, an object with __del__ inside a reference cycle was
+UNCOLLECTABLE and leaked into gc.garbage. PEP 442 (Python 3.4+) made
+__del__ safe in cycles by calling finalizers *before* breaking the
+cycle and re-checking reachability. Even so, __del__ is fragile
+(exception swallowing, interpreter-shutdown ordering, resurrection
+hazards). For resource cleanup, prefer a context manager or
+weakref.finalize.
+
+fin.alive before del -> True
+fin.alive after  del -> False
+callback fired with: ['victim finalized']
+
+WithDel object in a cycle, freed after gc.collect() -> True
+(pre-PEP-442 this leaked into gc.garbage; PEP 442 fixed it)
+
+[check] weakref.finalize callback fires exactly once on collection: OK
+[check] after firing, fin.alive is False: OK
+[check] PEP 442: __del__ objects in a cycle ARE collectible now: OK
+
+======================================================================
+SECTION G — tracemalloc: snapshot where allocations come from
+======================================================================
+tracemalloc traces Python-level memory blocks. You take a snapshot
+before and after a workload, then compare to see which lines of
+code allocated (or freed) the most memory.
+
+workload: 50_000 fresh str objects in a list
+len(payload) -> 50000
+payload[0] -> 'row-0-payload'
+
+top 3 allocation diffs (compare_to(snap_before, 'lineno')):
+  gc_weakrefs.py:386 size_diff=3333210 count_diff=50001
+  tracemalloc.py:560 size_diff=384 count_diff=2
+  tracemalloc.py:423 size_diff=328 count_diff=1
+
+tracemalloc.get_traced_memory() -> current=3338894, peak=3339014
+
+[check] tracemalloc recorded allocations from this file: OK
+[check] the workload allocated non-zero memory (current > 0): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

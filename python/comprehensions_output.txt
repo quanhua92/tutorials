@@ -1,0 +1,143 @@
+comprehensions.py — Phase 1 bundle #4.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — The four forms: list, dict, set, generator
+======================================================================
+A comprehension is one expression + one or more 'for' clauses.
+The brackets decide the result type:
+  []      -> list          (eager, ordered, allows duplicates)
+  {k:v}   -> dict          (eager, insertion-ordered, unique keys)
+  {x}     -> set           (eager, dedups)
+  ()      -> generator     (LAZY iterator object)
+
+expression                      value                         type
+------------------------------------------------------------------------
+[x*x for x in range(5)]         [0, 1, 4, 9, 16]              list
+{c: ord(c) for c in 'abc'}      {'a': 97, 'b': 98, 'c': 99}   dict
+{n%3 for n in range(10)}        {0, 1, 2}                     set
+(x*x for x in range(5))         <generator object>            generator
+
+[check] list comprehension builds a list: OK
+[check] dict comprehension builds a dict: OK
+[check] dict comprehension values: {c: ord(c) for c in 'abc'}: OK
+[check] set comprehension builds a set: OK
+[check] set comprehension dedups: {n%3 for n in range(10)} == {0,1,2}: OK
+[check] generator expression has type 'generator': OK
+[check] genexpr is its own iterator: iter(g) is g: OK
+
+======================================================================
+SECTION B — Py3 scope isolation: the loop variable does NOT leak
+======================================================================
+In Python 2, a list comprehension's loop variable LEAKED into the
+enclosing scope (after [i for i in range(3)], i == 2). Python 3
+gave every comprehension its own scope (equivalent to wrapping a
+generator expression), so the loop variable is invisible after.
+
+_scope_probe() ran: [k for k in range(3)] -> [0, 1, 2]
+After the comprehension, 'k' in locals() -> False
+  (False = the loop variable stayed inside the comprehension)
+
+In Py2 the same code would have left k == 2 polluting the enclosing
+scope. The Py3 fix removes a whole class of 'stale loop variable'
+bugs at the cost of one extra frame per comprehension.
+
+[check] comprehension loop var does NOT leak into enclosing locals: OK
+[check] the comprehension still produces the expected list: OK
+
+======================================================================
+SECTION C — Filtering vs conditional expressions (two different 'if's)
+======================================================================
+'if' can appear in TWO places in a comprehension, with different
+meanings:
+  1. At the END (filter):     [n for n in src if cond]
+       keeps only items where cond is truthy.
+  2. In the VALUE (ternary):  [a if cond else b for ...]
+       transforms each item via a conditional expression.
+They compose but they are NOT the same operator.
+
+expression                                        value
+--------------------------------------------------------------------------
+[n for n in range(10) if n % 2 == 0]              [0, 2, 4, 6, 8]
+['even' if n%2==0 else 'odd' for n in range(6)]   ['even', 'odd', 'even', 'odd', 'even', 'odd']
+[n*10 for n in range(10) if n % 2 == 0]           [0, 20, 40, 60, 80]
+
+[check] filter at end keeps only evens from 0..9: OK
+[check] conditional expression labels each item: OK
+[check] filter + transform compose into one expression: OK
+
+======================================================================
+SECTION D — Nested / double-for comprehensions & matrix flatten
+======================================================================
+Multiple 'for' clauses read left-to-right as NESTED loops:
+the LEFTMOST 'for' is the OUTERMOST loop (it advances slowest).
+The value expression is evaluated once per innermost iteration.
+
+expression                                            value
+--------------------------------------------------------------------------
+[i*j for i in range(3) for j in range(3)]             [0, 0, 0, 0, 1, 2, 0, 2, 4]
+[[1,2],[3,4]] flattened via double-for                [1, 2, 3, 4]
+
+Equivalent plain nested loops:
+  for i in range(3):
+      for j in range(3): equiv.append(i*j)
+  -> [0, 0, 0, 0, 1, 2, 0, 2, 4]
+
+[check] double-for: leftmost for is outermost (slowest) loop: OK
+[check] matrix flatten via double-for: OK
+[check] double-for comprehension == equivalent nested loops: OK
+
+======================================================================
+SECTION E — Generator expressions: lazy & single-use (PEP 289)
+======================================================================
+A generator expression uses PARENS, not brackets. It does NOT
+build a list — it returns a generator OBJECT that computes each
+value on demand via next(). It is SINGLE-USE: once exhausted, it
+stays empty forever. Memory cost is O(1) regardless of how many
+items it will eventually yield.
+
+g = (x*x for x in range(5))
+type(g).__name__    = generator
+iter(g) is g        = True   (a genexpr IS its own iterator)
+next(g)             = 0    # 0*0, computed lazily
+next(g)             = 1    # 1*1, computed lazily
+list(g) (rest)      = [4, 9, 16]   # consumed the remaining 3
+list(g) again       = []   # EMPTY: the generator is exhausted
+
+sys.getsizeof([x for x in range(1000)]) = 8856 bytes
+sys.getsizeof((x for x in range(1000))) = 192 bytes
+  (the generator's size is FIXED; the list grows with its length)
+
+PEP 289 — outermost iterable is eager: ['before create', 'make_iter(outer) called', 'after create, before consume', 'after consume']
+
+[check] genexpr has type 'generator': OK
+[check] genexpr is single-use: list() twice -> second empty: OK
+[check] genexpr uses less memory than the equivalent list: OK
+[check] PEP 289: outermost iterable evaluated at create time: OK
+
+======================================================================
+SECTION F — Readability guardrail: when to STOP using a comprehension
+======================================================================
+Comprehensions shine for simple map / filter / flatten. Past one
+line, two for-clauses, or a nested ternary, they HURT readability.
+Rule of thumb: if a reader cannot state the result without
+re-reading, use a for-loop.
+
+data = list(range(-3, 4))   # [-3, -2, -1, 0, 1, 2, 3]
+
+DON'T (nested ternary + filter packed into one comp):
+  bad = [(n, 'neg' if n<0 else 'zero' if n==0 else 'pos')
+         for n in data if n%2 != 0 or n == 0]
+  bad  = [(-3, 'neg'), (-1, 'neg'), (0, 'zero'), (1, 'pos'), (3, 'pos')]
+
+DO (equivalent for-loop — same result, readable):
+  good = [(-3, 'neg'), (-1, 'neg'), (0, 'zero'), (1, 'pos'), (3, 'pos')]
+
+[check] both forms produce identical results: OK
+[check] the result matches the hand-derived expectation: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,138 @@
+mcp_context_sampling.py — Phase 8 bundle #53.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed. OFFLINE: the server-side Context
+reaches UP to four HOST-SIDE STUB callbacks (sampling/elicitation/
+log/progress) on the in-memory Client — no network, no API key, no
+real LLM. Byte-reproducible.
+fastmcp 3.4.2 on this machine.
+
+======================================================================
+SECTION A — Context basics: a tool with `ctx: Context` runs
+======================================================================
+Add a parameter annotated `ctx: Context` and FastMCP auto-injects a
+context object (the param is EXCLUDED from the tool's input schema).
+Inside, the tool can log, report progress, read resources, ask the
+host's LLM to sample, elicit user input, and read granted roots.
+
+ctx_basics(7).data          = "x=7 cfg='version=9.9'"
+result.is_error             = False
+Context methods exercised here + later sections:
+  ctx.info
+  ctx.debug
+  ctx.warning
+  ctx.error
+  ctx.report_progress
+  ctx.read_resource
+  ctx.sample
+  ctx.elicit
+  ctx.list_roots
+
+[check] a tool with a Context arg ran and returned data: OK
+[check] the call was not an error: OK
+[check] Context exposes info/report_progress/sample/elicit/list_roots: OK
+
+======================================================================
+SECTION B — Logging: ctx.info/debug/warning/error reach the host
+======================================================================
+ctx.<level>(msg) sends a JSON-RPC `notifications/message` log up to
+the client. The host installs `log_handler=` to receive them. Each
+notification carries level + data{msg, extra}.
+
+ctx_logger().data           = 'logged-at-4-levels'
+captured_logs (level, msg)  = [('debug', 'debug-msg'), ('info', 'info-msg'), ('warning', 'warn-msg'), ('error', 'error-msg')]
+
+[check] the tool logged at all 4 levels: OK
+[check] the messages arrived intact: OK
+
+======================================================================
+SECTION C — Progress: ctx.report_progress(done, total) -> host callback
+======================================================================
+report_progress(progress, total) streams progress notifications up to
+the client. The host passes `progress_handler=` to call_tool (or to
+the Client) and receives (progress, total, message=None) per update.
+
+ctx_progress(3).data        = 'done'
+captured_progress           = [(1.0, 3.0), (2.0, 3.0), (3.0, 3.0)]
+
+[check] the tool returned 'done' after 3 updates: OK
+[check] the host saw 3 updates (1/3, 2/3, 3/3): OK
+
+======================================================================
+SECTION D — Sampling: ctx.sample asks the HOST's LLM (the inversion)
+======================================================================
+ctx.sample(messages, ...) sends `sampling/createMessage` UP to the
+client. The host's sampling_handler forwards to ITS model and returns
+the generation. The server never sees an API key. Here the host is a
+STUB returning a canned string; in production the host's REAL model
+answers.
+
+ctx_sample(...).data        = "host-said:'[HOST-STUB] The capital of France is Paris.'"
+stub host reply (STUB_HOST_REPLY) = '[HOST-STUB] The capital of France is Paris.'
+
+[check] ctx.sample returned the host-stub's canned text: OK
+[check] the server got text back WITHOUT owning a model or key: OK
+
+======================================================================
+SECTION E — The inversion: the server BORROWS the host's model
+======================================================================
+Normally a server is dumb data + code. With sampling, the server can
+ASK the host's LLM to reason — enabling AGENTIC servers (the server
+decides a plan, then uses the host's model to think) without each
+server shipping its own LLM, key, or trust. The HOST owns the model.
+
+who       owns the model?     owns the API key?     job
+------------------------------------------------------------------------------
+SERVER    NO (borrows it)     NO                    tools/data + can ASK host to sample
+HOST      YES                 YES                   runs the LLM, mediates all requests, holds trust
+USER      -                   -                     approves sampling/elicitation, grants roots
+
+[check] the inversion: server borrows the host model (no own model/key): OK
+
+======================================================================
+SECTION F — Elicitation: ctx.elicit asks the USER for structured input
+======================================================================
+ctx.elicit(message, response_type=T) sends `elicitation/create` up to
+the client; the host shows a form to the USER and returns one of three
+actions: 'accept' (+data), 'decline', or 'cancel'. The host (not the
+server) owns the UI and the user's trust. Here the user is a STUB.
+
+ctx_elicit_demo().data      = "action=accept data='octocat'"
+stub user reply             = 'octocat'
+
+[check] elicit returned action='accept': OK
+[check] elicit returned the stub user's data: OK
+
+======================================================================
+SECTION G — Roots: ctx.list_roots reads the dirs the USER granted
+======================================================================
+Roots are filesystem boundaries the USER granted the server (the host
+declares the `roots` capability + passes them down). The server asks
+`roots/list` and must respect those boundaries — the permission fence.
+
+ctx_roots_demo().data       = "roots=[('file:///home/user/project', 'My Project')]"
+GRANTED_ROOTS               = [('file:///home/user/project', 'My Project')]
+
+[check] ctx.list_roots returned the one granted root: OK
+
+======================================================================
+SECTION H — The trust model: sampling/elicitation/roots are host-mediated
+======================================================================
+All four Context capabilities route THROUGH the host. The server never
+gets the model, the key, or direct filesystem access — it ASKS, the
+host SHOWS the user, the user APPROVES, the host returns the result.
+This is the security pillar that makes 'agentic servers' safe.
+
+capability            direction         who answers       mediated by
+--------------------------------------------------------------------------
+logging               server -> host    host console      host (display only)
+progress              server -> host    host UI           host (display only)
+sampling              server -> host    HOST's LLM        host + USER approval
+elicitation           server -> host    the USER          host + USER approval
+roots                 host -> server    USER-granted dirs host (permission fence)
+
+[check] every Context capability is mediated by the host: OK
+[check] the server never receives the model or API key directly: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

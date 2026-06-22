@@ -1,0 +1,150 @@
+memory_efficiency.py — Phase 4 bundle #25.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — The object-header tax: every PyObject pays for a header
+======================================================================
+A Python `int` is NOT 4 bytes. Every object carries a PyObject
+header (refcount + type pointer + GC bookkeeping) plus its value.
+On a 64-bit CPython build the header alone is ~16-28 bytes. The
+docs warn: getsizeof counts ONLY what is directly attributed to
+the object, NOT what it refers to (so a list does NOT count its
+elements). That makes the list-of-pointers overhead easy to miss.
+
+object                    getsizeof (bytes)
+------------------------------------------------
+0 (small int)             28
+1 (small int)             28
+True (bool singleton)     28
+2**100 (big int)          40
+() (empty tuple)          40
+[] (empty list)           56
+[0] (1 element)           64
+[0]*1000 (1000 ptrs)      8056
+range(1000)               48
+
+list growth for 1000 slots = 8000 bytes (~8 bytes/slot = one PyObject* pointer)
+vs 1000 raw C ints would be ~4000 bytes (4 bytes each)
+
+[check] a Python int 0 is > 20 bytes (header + digit storage): OK
+[check] 2**100 is bigger than 0 (more digits stored): OK
+[check] a list grows by ~8 bytes per slot (one pointer): OK
+[check] range(1000) is tiny regardless of size (stores start/stop/step): OK
+
+======================================================================
+SECTION B — __slots__: trade the per-instance __dict__ for a fixed layout
+======================================================================
+A normal instance carries a __dict__ (a hash table) to hold its
+attributes — typically a few hundred bytes, even for one field. A
+class with __slots__ drops that __dict__ and stores attributes in a
+fixed slot array. The catch: getsizeof(instance) is SHALLOW, so to
+compare honestly we must add getsizeof(instance.__dict__) for the
+non-slotted class.
+
+measurement                       bytes
+--------------------------------------------------
+getsizeof(NoSlots())              48
+getsizeof(NoSlots().__dict__)     296
+  -> NoSlots TOTAL                344
+getsizeof(WithSlots())            56
+  -> WithSlots TOTAL (no __dict__)56
+hasattr(WithSlots(), __dict__)    False
+
+non-slotted / slotted ratio = 6.14x more memory per instance
+
+[check] __slots__ instance has NO __dict__: OK
+[check] non-slotted instance DOES have a __dict__: OK
+[check] slotted TOTAL < non-slotted TOTAL (the whole point): OK
+at 1,000,000 instances, __slots__ saves ~288,000,000 bytes (~275 MiB)
+
+
+======================================================================
+SECTION C — array.array: store raw C values, not PyObjects
+======================================================================
+A list of ints holds POINTERS to int objects (each ~28 bytes).
+array.array stores the raw C values inline (4 bytes for 'i'), so
+1000 ints cost ~4 KB in an array vs ~28 KB+ as a list of int
+objects (28 bytes/int + 8 bytes/pointer). The trade: every read
+BOXES the C value back into a Python int on the fly.
+
+container                       getsizeof (bytes)
+----------------------------------------------------
+[0]*1000  (list of 1000 int objects)8056
+array("i", [0]*1000)  (raw C ints)4080
+array.itemsize                  4
+
+list / array ratio = 1.97x (array is 2.0x smaller for the same 1000 ints)
+
+[check] array.itemsize == 4 for 'i' (one C int per slot): OK
+[check] array('i', 1000 ints) < list of 1000 ints: OK
+[check] reading an array element returns a Python int (boxes on read): OK
+[check] array scales by itemsize (1000 * 4 + small header): OK
+
+======================================================================
+SECTION D — memoryview: a zero-copy view over a bytes-like buffer
+======================================================================
+bytes is an immutable compact buffer (1 byte per element + a small
+header). memoryview wraps any buffer-protocol object and lets you
+slice / read / (if mutable) write WITHOUT copying the data. The
+view object itself is ~184 bytes regardless of how big a slice it
+describes, because it shares the underlying buffer.
+
+object                                  getsizeof (bytes)
+------------------------------------------------------------
+bytes(1_000_000)                        1000033
+memoryview(bytes(1_000_000))            184
+memoryview(...)[:1000]  (a slice)       184
+mv_slice.nbytes (logical bytes seen)    1000
+
+The 184-byte slice view shares the 1,000,033-byte buffer -> zero copy.
+
+ba = bytearray(b'hello world')
+memoryview(ba)[0:5] = b'HELLO'  ->  ba now = b'HELLO world'
+
+[check] bytes(1MB) is ~1 MB (33-byte header + 1,000,000 data): OK
+[check] memoryview of a 1 MB buffer is tiny (zero-copy): OK
+[check] a slice view is the same tiny size (shares the buffer): OK
+[check] the slice sees 1000 logical bytes but copies none: OK
+[check] writing through a memoryview mutates the underlying bytearray: OK
+
+======================================================================
+SECTION E — Generator vs list: O(1) vs O(N) peak memory
+======================================================================
+A generator yields one item at a time and forgets it; a list holds
+all N items at once. We measure PEAK memory with tracemalloc across
+growing N: the generator's peak stays ~constant, the list's scales
+linearly. (🔗 GENERATORS_ITERATORS for the iterator protocol.)
+
+         N      gen_peak     list_peak    list/gen
+------------------------------------------------------
+     1,000           456        31,952       70.1x
+   100,000           456     3,991,952     8754.3x
+ 1,000,000           456    39,991,952    87701.6x
+
+[check] generator peak memory is ~constant across N (O(1)): OK
+[check] list peak memory grows with N (O(N)): OK
+[check] at N=1,000,000 the list peak >> generator peak: OK
+[check] the two produce the same answer (sum is equal): OK
+
+======================================================================
+SECTION F — Which lever wins when: the decision table
+======================================================================
+Pick the tool by data SHAPE and ACCESS pattern, not by habit.
+
+scenario                                  best tool             why
+--------------------------------------------------------------------------------------------
+small, heterogeneous records              objects / dict        __dict__ overhead is negligible; flexibility wins
+huge homogeneous numeric column           array / numpy         raw C values, no per-element header
+streaming / one-pass transformation       generator             O(1) peak memory; nothing buffered
+binary buffer (parse / slice)             bytes / memoryview    compact + zero-copy slicing
+millions of small uniform instances       class with __slots__  drops the per-instance __dict__
+lazy arithmetic sequence                  range                 stores only start/stop/step; O(1)
+
+[check] a decision rule was printed for every lever above: OK
+[check] array beats list for a numeric column (re-assert from Section C): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -209,14 +209,14 @@ def section_a_memory_wall():
     print("SPECULATIVE VERIFY (verify K tokens in 1 forward - load weights ONCE):")
     print("| K  | FLOPs (2*P*K) | Bytes (P*2, ONCE) | Intensity | GPU peak % |")
     print("|----|---------------|-------------------|-----------|------------|")
-    gpu_peak = 208  # A100 FP16: 312 TFLOPS / 1.5 TB/s
+    gpu_peak = 156  # A100 80GB SXM FP16: 312 TFLOPS / 2.0 TB/s
     for K in (1, 2, 4, 8, 16):
         flops = 2 * P * K
         intensity = flops / decode_bytes
         pct = intensity / gpu_peak * 100
         print(f"| {K:<2} | {flops:.2e}     | {decode_bytes:.2e}         | {intensity:<9.0f} | {pct:.1f}%      |")
     print()
-    print(f"GPU peak (A100 FP16): ~{gpu_peak} FLOP/byte (312 TFLOPS / 1.5 TB/s)")
+    print(f"GPU peak (A100 FP16): ~{gpu_peak} FLOP/byte (312 TFLOPS / 2.0 TB/s)")
     print(f"Decode runs at {decode_intensity/gpu_peak*100:.1f}% of peak -> MEMORY-BOUND (the math units")
     print(f"starve waiting for weights). Spec K=4 runs at {4/gpu_peak*100:.1f}% -> Kx better utilization.")
     print()

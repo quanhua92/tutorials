@@ -48,7 +48,8 @@ You don't need math to get the idea. Picture a giant **transformer** as a long
   that computes gradients).
 - **The bubble:** while the first car is still being driven through factories
   1, 2, …, those factories are **empty** (idle). That idle time is the *bubble*,
-  and naive pipelining wastes ~75% of every GPU on it.
+  and naive pipelining wastes `(K−1)/K` of every GPU on it (e.g. ~75% for K=4,
+  ~87.5% for K=8).
 
 The lineage is four refinements of the same idea — each kills a different cost:
 
@@ -103,7 +104,7 @@ graph LR
 
 | | **naive** | **GPipe** | **1F1B** | **interleaved 1F1B** |
 |---|---|---|---|---|
-| **bubble** | `(K-1)/K` ≈ 75% | `(K-1)/(K+M-1)` | `(K-1)/(K+M-1)` *(same)* | `(K-1)/(K+M·V-1)` |
+| **bubble** | `(K-1)/K` (75% for K=4; 87.5% for K=8) | `(K-1)/(K+M-1)` | `(K-1)/(K+M-1)` *(same)* | `(K-1)/(K+M·V-1)` |
 | **peak activation mem** | `1×` | `M×` | `K×` | `K×` |
 | **comm pattern** | P2P | P2P | P2P | P2P (more of it) |
 | **paper** | (Huang Fig 1) | Huang 2019 | Narayanan SC21 | Megatron-LM SC21 |
@@ -552,9 +553,9 @@ from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
 with torch.device("meta"):
     model = Transformer()
     if stage_index == 0:
-        del model.layers["1"]; model.norm = None; model.output = None
+        del model.layers[1]; model.norm = None; model.output = None
     elif stage_index == 1:
-        model.tok_embeddings = None; del model.layers["0"]
+        model.tok_embeddings = None; del model.layers[0]
 
 # 2. wrap in a PipelineStage; pick a schedule
 stage = PipelineStage(model, stage_index, num_stages=2, device=device)
@@ -593,7 +594,8 @@ Why this is faithful:
   1F-1B steady + cooldown, are produced by the *same* dependency rules a real
   scheduler enforces (`F(m,k)` needs `F(m,k-1)`, `B(m,k)` needs `B(m,k+1)`).
 - **Bubble fraction** `(K-1)/(K+M-1)` — derived from `2(K-1)` idle slots in
-  `2(K+M-1)` total slots. Independent of op latency, comm delay, or hardware.
+  `2(K+M-1)` total slots under the uniform-F/B-time model. Real comm latency
+  or op-time variance can inflate the bubble beyond this idealized fraction.
 - **Activation memory** — peak in-flight count from the schedule sweep matches
   the SC21 paper's `p` or fewer microbatches bound exactly.
 - **Only the comm latency itself is skipped** — see [§6](#6-p2p-activation-handoff--section-f-output)

@@ -36,7 +36,7 @@
 | **page_size** | Tokens per page. Smaller → less last-page waste, more block-table overhead. |
 | **block table** | The per-request *index card*: logical page index → physical page id. (See §5.) |
 | **free list** | The pool's stack of available physical page ids — like an OS frame allocator's free frames. |
-| **fragmentation** | Empty slots inside reserved-but-unused memory. Dense: huge (up to 93.75%); paged: only the last partial page (`< 1/page_size`). |
+| **fragmentation** | Reserved-but-unused memory — two distinct wastes: **internal waste / over-reservation** (empty slots *inside* a reserved block) and **external fragmentation** (free pages scattered too small to coalesce). Dense's killer is the former (up to 93.75%); paged pays only the last partial page (`< 1/page_size`). §4 unpacks the distinction. |
 | **offset** | How many tokens are already in the cache. **Equals RoPE's position offset** for the new chunk: `slice(offset, offset+L)`. |
 | **rewind(n)** | Tear out the last `n` tokens (when speculative decoding rejects them). Dense: `offset -= n`; paged: pop pages back to the free list (using **ceil**, never floor — see §8). |
 

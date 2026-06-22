@@ -1,6 +1,6 @@
 # SUBAGENTS_RESEARCH_GUIDE — Delegating Bundle-Building at Scale
 
-> A note from past-me to future-me: **how to spin up many `research/` concept
+> A note from past-me to future-me: **how to spin up many `llm/` concept
 > bundles in parallel using subagents, without losing rigor.**
 >
 > This sits **above** [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) (which is the
@@ -14,7 +14,7 @@ graph TD
     ME --> A2["agent: concept B"]
     ME --> A3["agent: concept C ..."]
     ME --> GUIDE["SUBAGENTS_RESEARCH_GUIDE.md<br/>(THIS file)"]
-    A1 --> WS["shared workspace<br/>research/"]
+    A1 --> WS["shared workspace<br/>llm/"]
     A2 --> WS
     A3 --> WS
     ME -->|after all return| VERIFY["verification sweep<br/>run .py / node --check / gold"]
@@ -46,7 +46,7 @@ each get a *fresh* context, so bundle #9 is as rigorous as bundle #1.
 - **Each worker** owns exactly ONE bundle (4 files) and is told to follow
   `HOW_TO_RESEARCH.md` + `HOW_TO_ANIMATE.md` to the letter. It is forbidden from
   touching any other bundle's files.
-- **The workspace is shared** (`research/`), but file ownership is disjoint, so
+- **The workspace is shared** (`llm/`), but file ownership is disjoint, so
   parallel writes are safe.
 
 ---
@@ -59,17 +59,17 @@ back uniform.
 
 ```text
 You are building ONE "concept bundle" for the ZeroServe learning repo. Work
-ENTIRELY inside /Volumes/data/workspace/learning/research/. Do NOT touch any
+ENTIRELY inside /Volumes/data/workspace/tutorials/llm/. Do NOT touch any
 file that is not part of your assigned bundle.
 
 === STEP 0: ABSORB THE WORKFLOW (mandatory, do first, in order) ===
-1. Read /Volumes/data/workspace/learning/research/HOW_TO_RESEARCH.md IN FULL.
+1. Read /Volumes/data/workspace/tutorials/llm/HOW_TO_RESEARCH.md IN FULL.
    It is the law: the 4-file bundle = {name}.py (ground truth) +
    {name}_output.txt (captured stdout) + {NAME}.md (guide) + {name}.html (anim).
-2. Read /Volumes/data/workspace/learning/research/HOW_TO_ANIMATE.md IN FULL.
+2. Read /Volumes/data/workspace/tutorials/llm/HOW_TO_ANIMATE.md IN FULL.
 3. Study the two canonical model bundles and COPY THEIR STYLE EXACTLY:
-   - research/rope.py + research/ROPE.md + research/rope.html
-   - research/absolute_pe.py + research/ABSOLUTE_PE.md + research/absolute_pe.html
+   - llm/rope.py + llm/ROPE.md + llm/rope.html
+   - llm/absolute_pe.py + llm/ABSOLUTE_PE.md + llm/absolute_pe.html
    Match: the banner/section print structure of the .py; the
    "> From {name}.py Section X:" callouts + mermaid in the .md; the dark palette
    + slider + [check: OK] gold-badge in the .html.
@@ -99,11 +99,11 @@ can, or flag it explicitly in your final report. Start your searches at:
   behavior shows.
 
 === DELIVERABLES (exact paths) ===
-- /Volumes/data/workspace/learning/research/{name}.py
-- /Volumes/data/workspace/learning/research/{name}_output.txt
+- /Volumes/data/workspace/tutorials/llm/{name}.py
+- /Volumes/data/workspace/tutorials/llm/{name}_output.txt
    (produce via: uv run python {name}.py > {name}_output.txt 2>/dev/null)
-- /Volumes/data/workspace/learning/research/{NAME}.md
-- /Volumes/data/workspace/learning/research/{name}.html
+- /Volumes/data/workspace/tutorials/llm/{NAME}.md
+- /Volumes/data/workspace/tutorials/llm/{name}.html
 
 {NAME}.md MUST contain: the lineage old→new with WHY each step happened; mermaid
 diagrams; "> From {name}.py Section X:" verbatim tables; a worked sample-level
@@ -165,7 +165,7 @@ The brief is where your judgment as orchestrator actually lives.
 
 1. **Disjoint file ownership.** Each worker writes only its 4 files. State the
    exact paths in the prompt and forbid edits elsewhere. This is what makes
-   parallel writes safe in the shared `research/` dir.
+   parallel writes safe in the shared `llm/` dir.
 2. **No dependency edits.** `pyproject.toml` / `uv.lock` are read-only to
    workers. torch is pre-installed and suffices for everything. If a worker
    "needs" another lib, it must implement from scratch (more educational anyway).
@@ -183,9 +183,14 @@ Workers self-verify, but you independently re-check the whole batch. Run this
 sweep; it catches silent failures (a worker that reported OK but shipped a bug):
 
 ```bash
-cd /Volumes/data/workspace/learning/research
+cd /Volumes/data/workspace/tutorials/llm
 for name in normalization mlp_activation gqa causal_mask tokenization \
-            sampling flash_attention quantization kv_cache; do
+            sampling flash_attention quantization kv_cache rope absolute_pe \
+            paged_attention block_manager scheduler prefix_cache cuda_graphs \
+            peft_lora lmcache nccl_collectives ddp tensor_parallel \
+            pipeline_parallel zero gradient_checkpointing moe_routing \
+            speculative_decoding disaggregated_serving ktransformers_offload \
+            jax_xla_tpu; do
   echo "===== $name ====="
   uv run python $name.py > /tmp/$name.out 2>/tmp/$name.err \
     && echo "  py: ran" || { echo "  py: FAILED"; cat /tmp/$name.err; }
@@ -193,7 +198,7 @@ for name in normalization mlp_activation gqa causal_mask tokenization \
   python3 -c "import re,sys; h=open('$name.html').read(); \
     open('/tmp/$name.js','w').write(re.search(r'<script>(.*)</script>',h,re.S).group(1))" \
     && node --check /tmp/$name.js && echo "  html JS: OK" || echo "  html JS: FAIL"
-  test -s $name_output.txt && echo "  output.txt: present" || echo "  output.txt: MISSING"
+  test -s "${name}_output.txt" && echo "  output.txt: present" || echo "  output.txt: MISSING"
 done
 ```
 
@@ -213,12 +218,14 @@ bundles lack), spawn a **style-consistency worker** to backport. Its brief:
 
 ```text
 Bring the EXISTING bundles up to the current house style. Edit ONLY:
-  research/rope.py, research/ROPE.md, research/rope.html,
-  research/absolute_pe.py, research/ABSOLUTE_PE.md, research/absolute_pe.html.
+  llm/rope.py, llm/ROPE.md, llm/rope.html,
+  llm/absolute_pe.py, llm/ABSOLUTE_PE.md, llm/absolute_pe.html.
 Do NOT change any computed number (they are ground truth). Do NOT touch the
 new bundles. Conformance checklist per bundle:
-  - .md has a "## Sources" section with arXiv URLs (web-search the RoPE paper
-    arXiv:2104.09864, original Transformer sinusoidal PE arXiv:1706.03762).
+  - .md has a "## Sources" section with arXiv URLs. For `ROPE.md` cite the
+    RoFormer paper (arXiv:2104.09864 — this is the RoPE paper). For
+    `ABSOLUTE_PE.md` cite the original Transformer paper (arXiv:1706.03762 —
+    this defines sinusoidal absolute position encoding).
   - .md cross-references the new sibling bundles where relevant (🔗).
   - .html has the [check: OK] gold badge + links to .md/.py.
   - .py / .html style matches the new bundles (banners, palette).

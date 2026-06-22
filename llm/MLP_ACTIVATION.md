@@ -30,7 +30,7 @@ details:
 |---|---|---|
 | **ReLU = a hard on/off wall switch** | Negative input → **off** (0). Positive input → **full blast** (unchanged). | The *"dying ReLU"* — a switch that gets stuck **off forever** (its gradient is exactly 0, so it can never learn its way back on). |
 | **GELU / SiLU = a smooth dimmer switch** | Eases gently around 0, lets a *little* negative signal through, never fully dead. | (Newer, nicer — basically no downside. This is why GPT-2 uses GELU and Llama/Qwen use SiLU.) |
-| **SwiGLU block = a faucet with a handle** | `gate` = the handle that sets *how open*; `up` = the *water* (the raw feature). Multiply them → only water whose valve is open gets through. | If you wire the handle to the wrong pipe (`silu(up)` instead of `silu(gate)`) the model runs fine but quietly outputs garbage. §7. |
+| **SwiGLU block = a faucet with a handle** | `gate` = the handle that sets *how open*; `up` = the *water* (the raw feature). Multiply them → only water whose valve is open gets through. | If you wire the handle to the wrong pipe (`silu(up)` instead of `silu(gate)`) the model runs fine but quietly emits **silently wrong outputs** — a small per-layer error that compounds over depth/generation (§7). |
 
 ```mermaid
 graph LR
@@ -113,8 +113,9 @@ graph LR
 
 In a Transformer, every layer is `Attention → MLP`. The MLP (a.k.a. FFN) is the
 "per-token thinking" step — it has no cross-token mixing, just a wide hidden
-layer with a non-linearity. In Qwen3-0.5B the MLP holds **roughly 2/3 of every
-layer's parameters** because of the wide `FFN_dim = 4864` projection. Getting
+layer with a non-linearity. In Qwen3-0.5B the MLP holds **~80%+ of every
+layer's parameters** (≈88%: SwiGLU's 3 matrices at ~5.4× ratio dwarf even GQA's
+slim attention) because of the wide `FFN_dim = 4864` projection. Getting
 the activation and the wiring right is *the* thing that distinguishes a
 GPT-2-era block from a Llama-era block.
 

@@ -578,7 +578,7 @@ tensor the dense path would have produced directly.*
 | 7 | Hashing partial pages (prefix cache) | Wrong cache hits, prefix mismatch | Only hash FULL blocks ([KV_CACHE.md §5](./KV_CACHE.md#5-pagedattention-os-virtual-memory-for-kv--section-d-output); nano-vllm `hash_blocks`) |
 | 8 | GQA: wrong `kv_head` from `q_head` | Reading the wrong KV head's page | `kv_head = q_head / (H_q / H_kv)` 🔗 [GQA.md](./GQA.md) |
 | 9 | `page_size` incompatible with quant group | Wrong KV dequant | Match `page_size` to `quantization_group_size` (tiny-llm: 128) |
-| 10 | One pool per layer instead of per model | No cross-layer/page sharing | ONE shared pool for ALL layers (`Qwen3ModelWeek3.__init__`) |
+| 10 | Per-layer block table instead of per-model | No cross-layer/page sharing | ONE shared block **table/allocator** for ALL layers (`Qwen3ModelWeek3.__init__`) — the logical block ids are shared per-layer, but each layer still owns its own KV cache tensors (a single logical pool is managed, not one physical tensor) |
 
 ---
 

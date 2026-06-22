@@ -225,6 +225,11 @@ graph TD
 > collide. Chaining makes a block's fingerprint a function of its **entire token
 > prefix**, so only *true* prefixes match.
 
+> **Hash-table eviction policy:** when `hash_to_block_id` itself must be pruned
+> under memory pressure, vLLM prefers evicting entries whose target block has
+> `ref_count == 0`, then falls back to LRU, then to the end of the longest
+> prefix — keeping the most broadly reusable prefixes alive longest.
+
 > 🔗 This is the content-addressed layer *above* [`KV_CACHE.md`](./KV_CACHE.md)
 > §5's scattered-storage layer. KV_CACHE shows a block table maps
 > logical→physical (pages can be non-contiguous); here the same block table also
@@ -418,6 +423,11 @@ only when a token lands in seat 1 of a fresh page — i.e. exactly when
 `len(seq) % block_size == 1` (the previous page just filled up). At every other
 position the token simply drops into an existing page's free slot.*
 
+> **Convention:** this check is applied **after** the new token is appended to
+> `seq.token_ids` but **before** a physical page is allocated — `len(seq)`
+> already includes the incoming token, so the boundary test answers "does this
+> just-appended token open a fresh page?"
+
 ```mermaid
 graph TD
     Dec["decode: append 1 token"] --> Cond{"len(seq) % block_size == 1?<br/>(token opens a fresh page)"}
@@ -527,6 +537,14 @@ work. That is prefix caching's end-to-end payoff in one picture.
 > seq back to `WAITING`, flags `is_prefill=True` (so it re-prefills from
 > `num_cached_tokens`), and pushes it to the **front** of the waiting queue
 > (high-priority re-entry). See [`SCHEDULER.md`](./SCHEDULER.md).
+
+### Copy-on-Write / fork — out of scope here
+
+BlockManager also supports **fork** for parallel sampling and beam search: a
+duplicated sequence initially shares all physical pages with its parent
+(`ref_count++` per shared block), and pages are copied (Copy-on-Write) only
+when a fork diverges and writes new tokens. This builds directly on [§7](#7-preemption--ref-counting--shared-blocks-survive-freed-blocks-stay-reclaimable-section-g-output)'s
+ref-counting; the guide's worked example never forks, so CoW is not exercised.
 
 ---
 

@@ -1,13 +1,14 @@
 # HOW_TO_RESEARCH — The "Concept-as-a-Bundle" Workflow
 
-> A note from past-me to future-me: **how this `research/` folder is organized,
+> A note from past-me to future-me: **how this `llm/` folder is organized,
 > why, and how to extend it.** This is the meta-guide that sits above the
 > individual concept guides ([`ROPE.md`](./ROPE.md),
 > [`ABSOLUTE_PE.md`](./ABSOLUTE_PE.md)) and the animation guide
 > ([`HOW_TO_ANIMATE.md`](./HOW_TO_ANIMATE.md)).
 >
-> Source material these guides draw from: `learning_guide/` (the ZeroServe
-> journey).
+> Source material these guides draw from: the ZeroServe learning notes
+> (originally Apple-MLX-based; see the `learning_guide` at
+> `/Volumes/data/workspace/learning/learning_guide`).
 
 ---
 
@@ -38,7 +39,7 @@ graph TD
 ## 1. The directory layout
 
 ```
-research/
+llm/
 ├── HOW_TO_RESEARCH.md      ← you are here (meta-workflow)
 ├── HOW_TO_ANIMATE.md       ← how to build the .html animations
 ├── pyproject.toml          ← uv env (torch)
@@ -74,7 +75,7 @@ When you add a concept (e.g. KV cache, speculative decode), add all four.
 
 ```mermaid
 graph LR
-    S1["1. Mine<br/>learning_guide/"] --> S2["2. Write .py<br/>(reference + prints)"]
+    S1["1. Mine<br/>source notes"] --> S2["2. Write .py<br/>(reference + prints)"]
     S2 --> S3["3. Run + save<br/>_output.txt"]
     S3 --> S4["4. Write .md<br/>paste numbers"]
     S4 --> S5["5. Write .html<br/>recompute + gold-check"]
@@ -85,7 +86,9 @@ graph LR
 ```
 
 ### Step 1 — Mine the source
-`grep` the topic across `learning_guide/*.md`. Read the relevant sections fully.
+`grep` the topic across the ZeroServe learning notes (at
+`/Volumes/data/workspace/learning/learning_guide/*.md`). Read the relevant
+sections fully.
 Note: the code, the math, the pitfalls, the "what to implement" checklists. These
 become the spine of the `.md`.
 
@@ -99,7 +102,7 @@ become the spine of the `.md`.
 
 ### Step 3 — Run & capture
 ```bash
-cd research
+cd llm
 uv run python name.py > name_output.txt 2>/dev/null   # also prints to terminal
 ```
 Verify `[check] ... OK` lines pass inside the script before moving on.
@@ -109,7 +112,7 @@ Verify `[check] ... OK` lines pass inside the script before moving on.
   `> From name.py Section X:` callout.
 - Add mermaid diagrams for the *dynamic* structure (pipelines, shapes, contrast).
 - Add a worked example at the sample level (`B=1, L=4, H=2, D=8`).
-- Add pitfalls table (reuse the ones from `learning_guide/`).
+- Add pitfalls table (reuse the ones from the source learning notes).
 - End with a cheat sheet.
 
 ### Step 5 — Write the `.html`
@@ -168,9 +171,11 @@ node --check /tmp/c.js
 
 ## 6. Tooling
 
-- **`uv`** manages the env; **PyTorch** is the numerical backend (NOT numpy — the
-  source material targets MLX, PyTorch is the portable, universal analogue and
-  what we standardize on here). See `pyproject.toml`.
+- **`uv`** manages the env; **PyTorch** is the numerical backend (NOT numpy).
+  The original source notes targeted MLX, which is Apple-only. We standardize on
+  PyTorch because it is portable across CUDA, ROCm, and MPS backends and is the
+  universal reference implementation — so the numbers reproduce on any machine,
+  not just Apple Silicon. See `pyproject.toml`.
 - Run anything with `uv run python <file>`. No manual venv activation.
 - Mermaid renders in GitHub/GitLab and most markdown viewers natively.
 - `.html` needs nothing — open with any browser, even offline.
@@ -179,7 +184,7 @@ node --check /tmp/c.js
 
 ## 7. Adding a new concept (checklist)
 
-- [ ] `grep` the concept in `learning_guide/`; read all hits.
+- [ ] `grep` the concept in the source learning notes; read all hits.
 - [ ] `name.py`: reference impl + `section_*()` printouts + `[check]` asserts.
 - [ ] `uv run python name.py > name_output.txt 2>/dev/null` — all checks pass.
 - [ ] `NAME.md`: mermaid + verbatim tables + worked example + pitfalls + cheat sheet, 🔗 to existing siblings.
@@ -204,12 +209,11 @@ node --check /tmp/c.js
 
 ## 9. Where to start next
 
-Pick the next hard concept from `learning_guide/` and run the workflow:
-- **KV cache + `offset`** (`02_Acceleration.md` §3) — the `offset` is already in
-  `rope.py`; a dedicated bundle would animate prefill→decode→rewind.
-- **GQA** (`00_Foundations.md` §7.5) — the broadcasting trick is very visualizable.
-- **SwiGLU / RMSNorm** (`00_Foundations.md` §7.2, §7.4) — simpler bundles, good
-  warm-up.
+The core curriculum is **complete — all 29 bundles are shipped and green**
+(Phases 1–5). To extend it, pick a *new* concept not yet covered (e.g. ring
+attention, continuous batching with chunked prefill internals, expert
+parallelism for MoE) and run the workflow from §3. Use an existing bundle
+as the style template.
 
 Open [`HOW_TO_ANIMATE.md`](./HOW_TO_ANIMATE.md) for the `.html` recipe, and
 [`ROPE.md`](./ROPE.md) / [`ABSOLUTE_PE.md`](./ABSOLUTE_PE.md) for the model

@@ -54,7 +54,7 @@ graph LR
 | **What's split** | nothing | the **data** (batches) | optimizer **state** | the **weights** (matrices) |
 | **What's replicated** | — | full model + full optimizer | full model | full data |
 | **Communication** | none | AllReduce grads (once/step) | ReduceScatter+AllGather | AllReduce per layer |
-| **Memory/GPU** | 20N | 20N (**redundant**) | 16N/K → 2N/K | 20N/TP |
+| **Memory/GPU** | 20N | 20N (**redundant**) | Z1: 4+16/K, Z2: 2+14/K, Z3: 16/K | 20N/TP |
 | **Scales throughput?** | — | **linearly** with GPU count | yes (+memory win) | limited to NVLink node |
 
 > **One plain sentence:** DDP trades **redundant memory** (every GPU stores the
@@ -450,16 +450,16 @@ The `nanoGPT` schedule (verbatim logic, readable scale `peak=1.0, min_lr=0.1`):
 > | fp32 grad copy | 4 | upcast fp16 grad for the optimizer |
 > | fp32 Adam momentum | 4 | first moment (beta1 running avg) |
 > | fp32 Adam variance | 4 | second moment (beta2 running avg) |
-> | **TOTAL** | **20** | ~16N effective (20N raw) |
+> | **TOTAL** | **20** | 20N total (of which 16N is optimizer state) |
 >
 > Concrete sizes (DDP = **replicated** on every GPU):
 >
 > | model | params | bytes/param | per-GPU (DDP) |
 > |---|---|---|---|
 > | tiny demo W | 12 | 20 | 0.00 GB |
-> | GPT-2 small | 124,000,000 | 20 | 2.31 GB |
-> | LLaMA-3 8B | 8,000,000,000 | 20 | 149.01 GB |
-> | GPT-3 175B | 175,000,000,000 | 20 | 3259.63 GB |
+> | GPT-2 small | 124,000,000 | 20 | 2.48 GB |
+> | LLaMA-3 8B | 8,000,000,000 | 20 | 160.00 GB |
+> | GPT-3 175B | 175,000,000,000 | 20 | 3500.00 GB |
 
 > One plain sentence: the optimizer's fp32 bookkeeping (16 of the 20 bytes) is
 > pure redundancy under DDP — identical on every GPU.

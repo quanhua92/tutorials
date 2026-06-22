@@ -454,7 +454,7 @@ graph LR
 
 The mask itself is `[L,S]`. But QK-Norm and RoPE have a **shape-ordering
 dependency** that is the #1 silent-corruption source after the `k=(S−L)` bug.
-Both must run **while the tensor is still `[B,L,H,D]`** (i.e. *before* the
+Both should, by convention, run **while the tensor is still `[B,L,H,D]`** (i.e. *before* the
 attention transpose to `[B,H,L,D]`), because the position axis is `L` and that
 is what they index over.
 

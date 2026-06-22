@@ -242,8 +242,10 @@ graph LR
 **The rule:** `T→0` ⇒ one-hot on the argmax (= greedy, §5); `T→∞` ⇒ uniform.
 `T<1` is "confident", `T>1` is "creative". **Order matters:** temperature is a
 *rescaling*, applied **after** any top-k/top-p masking in the tiny-llm pipeline
-(see §9) — masking to `-inf` survives any rescaling, but applying temperature
-*before* masking changes which tokens cross the threshold.
+(see §9) — masking to `-inf` survives any rescaling, and applying temperature
+*before* masking changes which tokens cross the threshold for **top-p**
+(temperature reshapes the cumulative distribution) but **NOT for top-k** (positive
+scaling preserves the top-k set exactly, since it does not change logit order).
 
 ---
 
@@ -303,7 +305,7 @@ graph LR
 ```
 
 **The flaw** (introduced by Fan et al., 2018, fixed by top-p): `k` is **fixed**.
-On a *peaked* distribution (one token at 95%), keeping 50 tokens lets 49 bits of
+On a *peaked* distribution (one token at 95%), keeping 50 tokens lets 49 tokens of
 junk back in. On a *flat* distribution (many plausible continuations), keeping
 only 10 chops off good options. Top-k cannot tell the difference — that is
 exactly what top-p fixes.

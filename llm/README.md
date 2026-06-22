@@ -1,13 +1,13 @@
-# research/ — ZeroServe Concept Bundles
+# llm/ — ZeroServe Concept Bundles
 
 > **One idea = four files that cite each other**, all deriving from a runnable
 > `.py` that prints every number. Nothing is hand-computed; everything is
 > fact-checked against the original papers. Each guide is written so a person
 > with **minimal math and coding** background can follow every step.
 >
-> Source material: [`../learning_guide/`](../learning_guide/) (the ZeroServe
-> journey). Start at [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) for the
-> philosophy, or just pick a bundle below.
+> Source material: the ZeroServe learning notes. Start at
+> [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) for the philosophy, or just pick a
+> bundle below.
 
 ---
 
@@ -109,27 +109,27 @@ Also commit `*_output.txt` (captured stdout — see each `.md`'s `> From X.py Se
 | 8 | **Attention compute** — materialized softmax → FlashAttention (online softmax) ★hardest | 2 | [`flash_attention.py`](./flash_attention.py) | [`FLASH_ATTENTION.md`](./FLASH_ATTENTION.md) | [`flash_attention.html`](./flash_attention.html) |
 | 9 | **Precision & weights** — FP16 → W4A16 group quantization | 2 | [`quantization.py`](./quantization.py) | [`QUANTIZATION.md`](./QUANTIZATION.md) | [`quantization.html`](./quantization.html) |
 | 10 | **KV memory** — recompute → dense cache → paged cache (+ rewind) | 2 | [`kv_cache.py`](./kv_cache.py) | [`KV_CACHE.md`](./KV_CACHE.md) | [`kv_cache.html`](./kv_cache.html) |
-| 12 | **Paged attention** — dense prealloc KV (93% wasted) → PagedAttention: OS virtual memory, logical→physical pages | 3 | [`paged_attention.py`](./paged_attention.py) | [`PAGED_ATTENTION.md`](./PAGED_ATTENTION.md) | [`paged_attention.html`](./paged_attention.html) |
-| 13 | **Block manager** — flat alloc → BlockManager: chained xxHash prefix dedup + `ref_count` sharing | 3 | [`block_manager.py`](./block_manager.py) | [`BLOCK_MANAGER.md`](./BLOCK_MANAGER.md) | [`block_manager.html`](./block_manager.html) |
-| 14 | **Scheduler** — static batching → continuous batching (Orca) + chunked prefill + preemption | 3 | [`scheduler.py`](./scheduler.py) | [`SCHEDULER.md`](./SCHEDULER.md) | [`scheduler.html`](./scheduler.html) |
-| 15 | **Prefix cache** — block-hash reuse → RadixAttention: radix tree for arbitrary prefix sharing | 3 | [`prefix_cache.py`](./prefix_cache.py) | [`PREFIX_CACHE.md`](./PREFIX_CACHE.md) | [`prefix_cache.html`](./prefix_cache.html) |
-| 16 | **CUDA graphs** — eager Python overhead per step → captured/replayed decode graphs (one per BS) | 3 | [`cuda_graphs.py`](./cuda_graphs.py) | [`CUDA_GRAPHS.md`](./CUDA_GRAPHS.md) | [`cuda_graphs.html`](./cuda_graphs.html) |
-| 17 | **PEFT / LoRA** — full fine-tune replicas → LoRA/QLoRA low-rank adapters + Punica/S-LoRA grouped GEMM | 3 | [`peft_lora.py`](./peft_lora.py) | [`PEFT_LORA.md`](./PEFT_LORA.md) | [`peft_lora.html`](./peft_lora.html) |
-| 18 | **LMCache** — single-GPU prefix cache → hierarchical GPU→CPU→NVMe→S3 global pool + RDMA lookup | 3 | [`lmcache.py`](./lmcache.py) | [`LMCACHE.md`](./LMCACHE.md) | [`lmcache.html`](./lmcache.html) |
-| 19 | **NCCL collectives** — P2P comms → NCCL 5 primitives + ring-AllReduce (2N bytes regardless of K) | 4 | [`nccl_collectives.py`](./nccl_collectives.py) | [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) | [`nccl_collectives.html`](./nccl_collectives.html) |
-| 20 | **DDP** — single-GPU training → DDP: full replica + grad AllReduce + AMP + grad accumulation + cosine LR | 4 | [`ddp.py`](./ddp.py) | [`DDP.md`](./DDP.md) | [`ddp.html`](./ddp.html) |
-| 21 | **Tensor parallel** — matrices too big for 1 GPU → Megatron column/row parallel (AllReduce cancels across MLP/attn) | 4 | [`tensor_parallel.py`](./tensor_parallel.py) | [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md) | [`tensor_parallel.html`](./tensor_parallel.html) |
-| 22 | **Pipeline parallel** — TP not enough → GPipe micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | 4 | [`pipeline_parallel.py`](./pipeline_parallel.py) | [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) | [`pipeline_parallel.html`](./pipeline_parallel.html) |
-| 23 | **ZeRO** — DDP redundancy (20N bytes) → ZeRO 1/2/3 partition opt-state/grad/params | 4 | [`zero.py`](./zero.py) | [`ZERO.md`](./ZERO.md) | [`zero.html`](./zero.html) |
-| 24 | **MoE routing** — dense FFN (all params active) → top-k sparse MoE + load-balance/z-loss + DeepSeek aux-free | 5 | [`moe_routing.py`](./moe_routing.py) | [`MOE_ROUTING.md`](./MOE_ROUTING.md) | [`moe_routing.html`](./moe_routing.html) |
-| 25 | **Speculative decoding** — 1 token/step (memory-bound) → draft+verify parallel (rejection sampling, exact dist) | 5 | [`speculative_decoding.py`](./speculative_decoding.py) | [`SPECULATIVE_DECODING.md`](./SPECULATIVE_DECODING.md) | [`speculative_decoding.html`](./speculative_decoding.html) |
-| 26 | **Gradient checkpointing** — O(L) activation memory → selective recompute (√L trick) | 4 | [`gradient_checkpointing.py`](./gradient_checkpointing.py) | [`GRADIENT_CHECKPOINTING.md`](./GRADIENT_CHECKPOINTING.md) | [`gradient_checkpointing.html`](./gradient_checkpointing.html) |
-| 27 | **Disaggregated serving** — co-located prefill+decode contention → DistServe/Mooncake split + KV RDMA transfer | 5 | [`disaggregated_serving.py`](./disaggregated_serving.py) | [`DISAGGREGATED_SERVING.md`](./DISAGGREGATED_SERVING.md) | [`disaggregated_serving.html`](./disaggregated_serving.html) |
-| 28 | **KTransformers offload** — GPU-only (671B won't fit) → CPU DRAM expert offload + AMX/AVX (activation-only transfer) | 5 | [`ktransformers_offload.py`](./ktransformers_offload.py) | [`KTRANSFORMERS_OFFLOAD.md`](./KTRANSFORMERS_OFFLOAD.md) | [`ktransformers_offload.html`](./ktransformers_offload.html) |
-| 29 | **JAX / XLA / TPU** — PyTorch/CUDA eager → JAX trace → XLA → Pallas TPU kernels (Splash Attention) | 5 | [`jax_xla_tpu.py`](./jax_xla_tpu.py) | [`JAX_XLA_TPU.md`](./JAX_XLA_TPU.md) | [`jax_xla_tpu.html`](./jax_xla_tpu.html) |
+| 11 | **Paged attention** — dense prealloc KV (93% wasted) → PagedAttention: OS virtual memory, logical→physical pages | 3 | [`paged_attention.py`](./paged_attention.py) | [`PAGED_ATTENTION.md`](./PAGED_ATTENTION.md) | [`paged_attention.html`](./paged_attention.html) |
+| 12 | **Block manager** — flat alloc → BlockManager: chained xxHash prefix dedup + `ref_count` sharing | 3 | [`block_manager.py`](./block_manager.py) | [`BLOCK_MANAGER.md`](./BLOCK_MANAGER.md) | [`block_manager.html`](./block_manager.html) |
+| 13 | **Scheduler** — static batching → continuous batching (Orca) + chunked prefill + preemption | 3 | [`scheduler.py`](./scheduler.py) | [`SCHEDULER.md`](./SCHEDULER.md) | [`scheduler.html`](./scheduler.html) |
+| 14 | **Prefix cache** — block-hash reuse → RadixAttention: radix tree for arbitrary prefix sharing | 3 | [`prefix_cache.py`](./prefix_cache.py) | [`PREFIX_CACHE.md`](./PREFIX_CACHE.md) | [`prefix_cache.html`](./prefix_cache.html) |
+| 15 | **CUDA graphs** — eager Python overhead per step → captured/replayed decode graphs (one per BS) | 3 | [`cuda_graphs.py`](./cuda_graphs.py) | [`CUDA_GRAPHS.md`](./CUDA_GRAPHS.md) | [`cuda_graphs.html`](./cuda_graphs.html) |
+| 16 | **PEFT / LoRA** — full fine-tune replicas → LoRA/QLoRA low-rank adapters + Punica/S-LoRA grouped GEMM | 3 | [`peft_lora.py`](./peft_lora.py) | [`PEFT_LORA.md`](./PEFT_LORA.md) | [`peft_lora.html`](./peft_lora.html) |
+| 17 | **LMCache** — single-GPU prefix cache → hierarchical GPU→CPU→NVMe→S3 global pool + RDMA lookup | 3 | [`lmcache.py`](./lmcache.py) | [`LMCACHE.md`](./LMCACHE.md) | [`lmcache.html`](./lmcache.html) |
+| 18 | **NCCL collectives** — P2P comms → NCCL 5 primitives + ring-AllReduce (2N bytes regardless of K) | 4 | [`nccl_collectives.py`](./nccl_collectives.py) | [`NCCL_COLLECTIVES.md`](./NCCL_COLLECTIVES.md) | [`nccl_collectives.html`](./nccl_collectives.html) |
+| 19 | **DDP** — single-GPU training → DDP: full replica + grad AllReduce + AMP + grad accumulation + cosine LR | 4 | [`ddp.py`](./ddp.py) | [`DDP.md`](./DDP.md) | [`ddp.html`](./ddp.html) |
+| 20 | **Tensor parallel** — matrices too big for 1 GPU → Megatron column/row parallel (AllReduce cancels across MLP/attn) | 4 | [`tensor_parallel.py`](./tensor_parallel.py) | [`TENSOR_PARALLEL.md`](./TENSOR_PARALLEL.md) | [`tensor_parallel.html`](./tensor_parallel.html) |
+| 21 | **Pipeline parallel** — TP not enough → GPipe micro-batching, 1F1B, interleaved (bubble `(K-1)/(K+M-1)`) | 4 | [`pipeline_parallel.py`](./pipeline_parallel.py) | [`PIPELINE_PARALLEL.md`](./PIPELINE_PARALLEL.md) | [`pipeline_parallel.html`](./pipeline_parallel.html) |
+| 22 | **ZeRO** — DDP redundancy (20N bytes) → ZeRO 1/2/3 partition opt-state/grad/params | 4 | [`zero.py`](./zero.py) | [`ZERO.md`](./ZERO.md) | [`zero.html`](./zero.html) |
+| 23 | **MoE routing** — dense FFN (all params active) → top-k sparse MoE + load-balance/z-loss + DeepSeek aux-free | 5 | [`moe_routing.py`](./moe_routing.py) | [`MOE_ROUTING.md`](./MOE_ROUTING.md) | [`moe_routing.html`](./moe_routing.html) |
+| 24 | **Speculative decoding** — 1 token/step (memory-bound) → draft+verify parallel (rejection sampling, exact dist) | 5 | [`speculative_decoding.py`](./speculative_decoding.py) | [`SPECULATIVE_DECODING.md`](./SPECULATIVE_DECODING.md) | [`speculative_decoding.html`](./speculative_decoding.html) |
+| 25 | **Gradient checkpointing** — O(L) activation memory → selective recompute (√L trick) | 4 | [`gradient_checkpointing.py`](./gradient_checkpointing.py) | [`GRADIENT_CHECKPOINTING.md`](./GRADIENT_CHECKPOINTING.md) | [`gradient_checkpointing.html`](./gradient_checkpointing.html) |
+| 26 | **Disaggregated serving** — co-located prefill+decode contention → DistServe/Mooncake split + KV RDMA transfer | 5 | [`disaggregated_serving.py`](./disaggregated_serving.py) | [`DISAGGREGATED_SERVING.md`](./DISAGGREGATED_SERVING.md) | [`disaggregated_serving.html`](./disaggregated_serving.html) |
+| 27 | **KTransformers offload** — GPU-only (671B won't fit) → CPU DRAM expert offload + AMX/AVX (activation-only transfer) | 5 | [`ktransformers_offload.py`](./ktransformers_offload.py) | [`KTRANSFORMERS_OFFLOAD.md`](./KTRANSFORMERS_OFFLOAD.md) | [`ktransformers_offload.html`](./ktransformers_offload.html) |
+| 28 | **JAX / XLA / TPU** — PyTorch/CUDA eager → JAX trace → XLA → Pallas TPU kernels (Splash Attention) | 5 | [`jax_xla_tpu.py`](./jax_xla_tpu.py) | [`JAX_XLA_TPU.md`](./JAX_XLA_TPU.md) | [`jax_xla_tpu.html`](./jax_xla_tpu.html) |
 
-> The 11 files map to the **10 key problems** in the curriculum — position
-> encoding is one problem split across two sibling bundles (`ROPE` ↔ `ABSOLUTE_PE`).
+> The 29 bundles cover the core LLM-systems curriculum; position encoding is one
+> topic split across two sibling bundles (`ROPE` ↔ `ABSOLUTE_PE`), which share #2.
 
 ---
 
@@ -140,15 +140,15 @@ ground-truth numbers. Build the mental model bottom-up:
 
 ```mermaid
 graph TD
-    A["1. TOKENIZATION<br/>text → IDs"] --> B["2. NORMALIZATION<br/>keep features stable"]
+    A["6. TOKENIZATION<br/>text → IDs"] --> B["1. NORMALIZATION<br/>keep features stable"]
     B --> C["3. MLP_ACTIVATION<br/>the 'thinking' block"]
-    C --> D["4. POSITION ENCODING<br/>ROPE + ABSOLUTE_PE"]
-    D --> E["5. GQA<br/>sharing the KV cabinets"]
-    E --> F["6. CAUSAL_MASK<br/>no peeking at the future"]
+    C --> D["2. POSITION ENCODING<br/>ROPE + ABSOLUTE_PE"]
+    D --> E["4. GQA<br/>sharing the KV cabinets"]
+    E --> F["5. CAUSAL_MASK<br/>no peeking at the future"]
     F --> G["7. SAMPLING<br/>picking the next word"]
-    G --> H["8. KV_CACHE<br/>stop recomputing the past"]
-    H --> I["9. FLASH_ATTENTION<br/>beat the memory wall"]
-    I --> J["10. QUANTIZATION<br/>4× smaller weights"]
+    G --> H["10. KV_CACHE<br/>stop recomputing the past"]
+    H --> I["8. FLASH_ATTENTION<br/>beat the memory wall"]
+    I --> J["9. QUANTIZATION<br/>4× smaller weights"]
     J --> K["11. PAGED_ATTENTION<br/>virtual memory for KV"]
     K --> L["12. BLOCK_MANAGER<br/>chained-hash allocation"]
     L --> M["13. SCHEDULER<br/>continuous batching"]
@@ -194,7 +194,7 @@ Every `.py` runs clean with `[check]` asserts; every `.html` passes `node --chec
 and shows a green `[check: OK]` gold badge. Re-confirm the whole folder:
 
 ```bash
-cd research
+cd llm
 for n in normalization mlp_activation gqa causal_mask tokenization sampling \
          flash_attention quantization kv_cache rope absolute_pe \
          paged_attention block_manager scheduler prefix_cache cuda_graphs peft_lora lmcache \
@@ -215,7 +215,7 @@ diff them against `{name}_output.txt` to audit any value.
 
 ## ➕ Add a new bundle
 
-1. Pick a concept from [`../learning_guide/`](../learning_guide/).
+1. Pick a new concept to add (see the ZeroServe learning notes for ideas).
 2. Follow [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) (the 6-step workflow).
 3. If building several at once, delegate via [`SUBAGENTS_RESEARCH_GUIDE.md`](./SUBAGENTS_RESEARCH_GUIDE.md).
 4. Add a row to the table above and the reading-order mermaid.

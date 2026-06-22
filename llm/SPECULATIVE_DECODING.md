@@ -98,8 +98,8 @@ graph LR
 > requires loading the ENTIRE model's weights (P parameters) from HBM to the GPU
 > compute units. For each parameter loaded (2 bytes in FP16), the GPU does ~2
 > FLOPs (one multiply, one add). That's an **arithmetic intensity of 1 FLOP/byte**.
-> An A100 GPU can do ~208 FLOPs per byte (312 TFLOPS ÷ 1.5 TB/s) — so the math
-> units run at **0.5% of peak**, spending 99.5% of the time waiting for weights.
+> An A100 GPU can do ~156 FLOPs per byte (312 TFLOPS ÷ 2.0 TB/s) — so the math
+> units run at **0.6% of peak**, spending 99.4% of the time waiting for weights.
 
 ```
 Arithmetic intensity = FLOPs / Bytes loaded
@@ -107,7 +107,7 @@ Arithmetic intensity = FLOPs / Bytes loaded
 DECODE (1 token):
   FLOPs  = 2 × P × 1     (2 FLOPs per param, 1 token)
   Bytes  = P × 2          (load ALL weights once, FP16)
-  Intensity = 2P / 2P   = 1 FLOP/byte   ← GPU can do 208x more
+  Intensity = 2P / 2P   = 1 FLOP/byte   ← GPU can do 156x more
 
 SPECULATIVE VERIFY (K tokens in 1 forward):
   FLOPs  = 2 × P × K     (K times more compute)
@@ -119,24 +119,24 @@ SPECULATIVE VERIFY (K tokens in 1 forward):
 >
 > | K | FLOPs (2·P·K) | Bytes (P·2, ONCE) | Intensity | GPU peak % |
 > |---|---|---|---|---|
-> | 1 | 1.40e+11 | 1.40e+11 | **1** | 0.5% |
-> | 2 | 2.80e+11 | 1.40e+11 | **2** | 1.0% |
-> | 4 | 5.60e+11 | 1.40e+11 | **4** | 1.9% |
-> | 8 | 1.12e+12 | 1.40e+11 | **8** | 3.8% |
-> | 16 | 2.24e+12 | 1.40e+11 | **16** | 7.7% |
+> | 1 | 1.40e+11 | 1.40e+11 | **1** | 0.6% |
+> | 2 | 2.80e+11 | 1.40e+11 | **2** | 1.3% |
+> | 4 | 5.60e+11 | 1.40e+11 | **4** | 2.6% |
+> | 8 | 1.12e+12 | 1.40e+11 | **8** | 5.1% |
+> | 16 | 2.24e+12 | 1.40e+11 | **16** | 10.3% |
 >
-> GPU peak (A100 FP16): ~208 FLOP/byte. Decode runs at **0.5%** of peak →
-> memory-bound. Spec K=4 runs at **1.9%** → K× better utilization.
+> GPU peak (A100 FP16): ~156 FLOP/byte. Decode runs at **0.6%** of peak →
+> memory-bound. Spec K=4 runs at **2.6%** → K× better utilization.
 
 ```mermaid
 graph LR
     subgraph decode["DECODE: 1 token (memory-bound)"]
         D1["Load ALL weights P<br/>(P × 2 bytes from HBM)"] --> D2["Do 2P FLOPs<br/>(1 token of math)"]
-        D2 --> D3["Intensity = 1 FLOP/byte<br/>GPU at 0.5% peak"]
+        D2 --> D3["Intensity = 1 FLOP/byte<br/>GPU at 1/156 of peak"]
     end
     subgraph spec["SPECULATIVE: K tokens (compute-amortized)"]
         S1["Load ALL weights P<br/>ONCE (same P × 2 bytes)"] --> S2["Do 2PK FLOPs<br/>(K tokens of math)"]
-        S2 --> S3["Intensity = K FLOP/byte<br/>GPU at K% of peak"]
+        S2 --> S3["Intensity = K FLOP/byte<br/>GPU at K/156 of peak"]
     end
     style D3 fill:#fdecea,stroke:#c0392b
     style S3 fill:#eafaf1,stroke:#27ae60
@@ -684,4 +684,4 @@ graph LR
   §9.1: `S = (1−α^{K+1}) / ((1−α)(1+Kγ))`.
 - **Arithmetic intensity** (~1 FLOP/byte for decode, ~K for spec) derived from
   `learning_guide/05_Next_Gen_Architecture.md` §3.1 and cross-checked against
-  the A100 spec sheet (312 TFLOPS FP16 / 1.5 TB/s HBM ≈ 208 FLOP/byte).
+  the A100 spec sheet (312 TFLOPS FP16 / 2.0 TB/s HBM ≈ 156 FLOP/byte).

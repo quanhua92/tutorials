@@ -286,7 +286,7 @@ one-liner in real `run_model()`:
 graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
 ```
 
-**Wasted slots** (`graph_bs − current_bs`) are exactly why [§6](#6-section-g--the-slot_mappingfill_-1-padding-trick)'s
+**Wasted slots** (`graph_bs − current_bs`) are exactly why [§8](#8-section-g--the-slot_mappingfill_-1-padding-trick)'s
 `-1` padding trick exists: the graph always runs `graph_bs` slots; the unused
 ones must be marked so the attention kernel ignores them.
 

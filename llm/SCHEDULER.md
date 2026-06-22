@@ -94,8 +94,11 @@ serving (vLLM, SGLang, TGI) runs the green stack.*
 | New request wait time | until whole batch done | **1 iteration** | 1 iteration (prefill priority) |
 | Long prefill vs decodes | blocks everything | can starve decodes | **chunked** — never starves |
 | On KV-cache OOM | crash / reject | crash | **preempt** newest seq |
-| GPU utilization | ~75% (padded) | ~92%+ | ~92%+ without crashing |
+| GPU utilization | ~75% (padded)¹ | ~92%+¹ | ~92%+ without crashing |
 | Used by | naive Week-1 servers | Orca (OSDI'22) | **vLLM / nano-vllm** |
+
+> ¹ Illustrative — from the §1 toy scenario (3-token/6-token requests), not
+> universal numbers.
 
 *(See the [Glossary](#glossary-read-once-refer-back) above for any unfamiliar term.)*
 
@@ -298,9 +301,11 @@ for the step. The budget is filled greedily from the front of the waiting queue.
 
 **Reading it like a story:** seq0's whole 3-token prompt fits in the budget (3
 ≤ 4), so it is fully prefilled and promoted to RUNNING. seq1 needs 5 tokens but
-only 1 budget slot remains — and because seq1 is **second** in line (not the
-first waiting seq), the chunked-prefill rule (§4) makes it wait for the next
-step rather than grabbing a partial slice. That rule is what stops a parade of
+only 1 budget slot remains — and because `scheduled_seqs` is already non-empty
+(seq0 was scheduled this step), the chunked-prefill rule (§4: `remaining <
+num_tokens and scheduled_seqs → break`) makes seq1 wait for the next step rather
+than grabbing a partial slice. Only the **first** sequence considered for
+prefill in a step is ever allowed to chunk; that rule is what stops a parade of
 long prompts from dribbling out one chunk each and starving the decodes.
 
 > 🔗 `can_allocate` / `allocate` are the block-manager calls that decide whether
@@ -408,6 +413,10 @@ slot 1 of a fresh page — i.e. the previous page just filled exactly:
 def can_append(seq):
     return len(free_block_ids) >= (len(seq) % block_size == 1)
 ```
+
+Here `len(seq)` is the length **after** the new token has been appended to
+`seq.token_ids` — the check runs post-append but **before** a physical page is
+allocated, so it decides whether allocation is needed for the just-appended token.
 
 With `block_size=2`: a seq of length 2 needs no new block to append (slot 1 of
 page 0 is free); a seq of length 3 *does* (page 0 is full, slot 0 of page 1

@@ -262,9 +262,24 @@ graph TD
 >
 > insert(tokens):                      # share + split + attach, O(L)
 >     matched, node = match(tokens)
->     # walk again, ref_count++ on each fully-matched edge; SPLIT on partial
->     # attach tokens[matched:] as a new leaf (ref_count=1)
->     return matched                  # = cache-hit length (prefill skipped)
+>     node.ref_count += 1             # this request reads the attach node
+>     i = matched
+>     while i < len(tokens):
+>         child = node.children.get(tokens[i])
+>         if child is None: break     # rest is new -> leaf below
+>         j = common_prefix_len(child.token_ids, tokens[i:])
+>         if j < len(child.token_ids):              # partial -> SPLIT edge
+>             split = Node(child.token_ids[:j])     # matched part = new internal
+>             split.children[child.token_ids[j]] = child   # old tail hangs off
+>             node.children[tokens[i]] = split      # replace the old edge
+>             split.ref_count = child.ref_count + 1 # old readers + this req
+>             break                                 # match stops mid-edge here
+>         child.ref_count += 1       # full edge -> descend, this req reads it
+>         node = child; i += j
+>     if i < len(tokens):            # attach the unmatched suffix as a new leaf
+>         leaf = Node(tokens[i:]); leaf.ref_count = 1
+>         node.children[tokens[i]] = leaf
+>     return matched                 # = cache-hit length (prefill skipped)
 > ```
 
 ---
@@ -300,6 +315,13 @@ graph TD
 
 > From `prefix_cache.py` **Section D** — insert `Q1`, `Q2`, `Q3` in order;
 > after each: the cache-hit length and the tree.
+>
+> 📝 **Tree legend** — each node line reads `[key] [token-segment] {meta}`:
+> `[key]` is the **child key** (the node's first token, used for O(1) lookup in
+> `children{}`); `[token-segment]` is the node's `token_ids` — the **edge
+> segment** leading in from its parent; `{meta}` holds `ref=N` (ref_count) and
+> `leaf` (= a radix-tree node with **no children**, i.e. a unique conversation
+> tail).
 >
 > **`insert(Q1 = [100,101,102,200,201,202])`** — cache-hit = **0** (COLD miss;
 > whole prompt is new; attach one edge):

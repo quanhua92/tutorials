@@ -631,7 +631,7 @@ def section_bandwidth_rule():
     print("bandwidth, or it stalls the GPUs.\n")
     print("| link              | typical bandwidth | use case                  |")
     print("|-------------------|-------------------|---------------------------|")
-    print("| NVLink (intra-node)| ~300 GB/s (bi-dir)| TENSOR PARALLEL (here)    |")
+    print("| NVLink (intra-node)| ~300 GB/s per direction (~600 GB/s aggregate bi-directional)| TENSOR PARALLEL (here) |")
     print("| NVSwitch (8x H100) | ~900 GB/s agg.    | large TP within a node    |")
     print("| PCIe Gen5 x16     | ~64 GB/s          | small TP, or CPU fallback |")
     print("| InfiniBand (inter)| ~25-50 GB/s       | DP / Pipeline (🔗 DDP/PP) |")

@@ -256,9 +256,13 @@ graph LR
 > |---|---|---|---|
 > | 1 | 16 | 0.2500 | 4.00× |
 > | **2** | **32** | **0.5000** | **2.00×** |
-> | 4 | 64 | 1.0000 | 1.00× |
-> | 8 | 128 | 2.0000 | 0.50× |
-> | 16 | 256 | 4.0000 | 0.25× |
+> | 4 | 64 | 1.0000 | N/A (equal to full FT) |
+> | 8 | 128 | 2.0000 | N/A (LoRA 2× larger than full FT) |
+> | 16 | 256 | 4.0000 | N/A (LoRA 4× larger than full FT) |
+
+> **Note:** the toy size `d=k=8` is unrealistically small, so the crossover at
+> `r=4` (where LoRA ties or exceeds full FT) is a toy artifact. In real models
+> `r ≪ d` (e.g. `r=8, d=4096`), so `r(d+k)/(dk) ≪ 1` and LoRA savings always hold.
 
 > Real model — one GPT-3 attention layer `d=k=12288`, `r=4`:
 > full FT = `150,994,944` weights vs LoRA = `98,304` → **1536× fewer** trainable

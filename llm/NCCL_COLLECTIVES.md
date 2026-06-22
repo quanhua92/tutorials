@@ -464,7 +464,7 @@ bandwidth `B` decides the wall-clock time (`time = 2·(K−1)/K·N / B`).
 >
 > | interconnect | bandwidth | where used |
 > |---|---|---|
-> | NVLink 4.0 (A100) | ~600 GB/s | within a node (TP, DDP) |
+> | NVLink 4.0 (A100) | ~600 GB/s aggregate (~300 GB/s per direction) | within a node (TP, DDP) |
 > | InfiniBand NDR | ~50 GB/s | across nodes (PP, ZeRO) |
 > | PCIe Gen4 | ~64 GB/s | CPU↔GPU within machine |
 > | Ethernet 100GbE | ~12.5 GB/s | commodity clusters |
@@ -478,15 +478,15 @@ bandwidth `B` decides the wall-clock time (`time = 2·(K−1)/K·N / B`).
 >
 > ```
 > ring per-GPU bytes = 2*(K-1)/K*N = 2*7/8*1GB = 1.75 GB
-> ring time          = 1.75 GB / 600 GB/s = 2.92 ms   (~3.3 ms)
+> ring time          = 1.75 GB / 600 GB/s = 2.92 ms exact   (~3.3 ms with ~2N approximation)
 > naive root         = K*N = 8 GB on the root
 > naive time         = 8 GB / 600 GB/s    = 13.33 ms   (~13 ms)
 > ring / naive       = 0.22x   (ring wins; the gap WIDENS with K)
 > ```
 >
 > `[check] ring time ~3.3 ms matches 2*1GB/600GB/s = 3.33 ms` (the `~2N`
-> approximation: `2N/B` overestimates the exact `2(K−1)/K·N/B` by only `1/K`,
-> here `12.5%`).
+> approximation: `2N/B` overestimates the exact `2(K−1)/K·N/B` by only `1/(K−1)`,
+> here `14.3%`).
 
 > 🔗 This is exactly why **tensor parallelism is confined to a single NVLink
 > node** (it does one AllReduce *per layer*), while **pipeline parallelism**

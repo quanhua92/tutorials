@@ -491,7 +491,7 @@ def section_bandwidth_timing():
     print("Interconnect bandwidth (per-link, one direction):\n")
     print("| interconnect        | bandwidth    | where used                |")
     print("|---------------------|--------------|---------------------------|")
-    print("| NVLink 4.0 (A100)   | ~600 GB/s    | within a node (TP, DDP)   |")
+    print("| NVLink 4.0 (A100)   | ~600 GB/s aggregate (~300 GB/s per direction) | within a node (TP, DDP) |")
     print("| InfiniBand NDR      | ~50 GB/s     | across nodes (PP, ZeRO)   |")
     print("| PCIe Gen4           | ~64 GB/s     | CPU<->GPU within machine  |")
     print("| Ethernet 100GbE     | ~12.5 GB/s   | commodity clusters        |")
@@ -511,7 +511,7 @@ def section_bandwidth_timing():
     print(f"  ring-AllReduce per-GPU bytes = 2*(K-1)/K*N = "
           f"2*{K-1}/{K}*1GB = {ring_bytes / 1e9:.2f} GB")
     print(f"  ring time      = {ring_bytes / 1e9:.2f} GB / 600 GB/s "
-          f"= {t_ring * 1e3:.2f} ms  (~3.3 ms)")
+          f"= {t_ring * 1e3:.2f} ms exact  (~3.3 ms with ~2N approximation)")
     print(f"  naive root     = K*N = {naive_bytes / 1e9:.0f} GB on the root")
     print(f"  naive time     = {naive_bytes / 1e9:.0f} GB / 600 GB/s "
           f"= {t_naive * 1e3:.2f} ms  (~13 ms)")

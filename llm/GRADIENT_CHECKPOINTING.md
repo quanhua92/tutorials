@@ -543,7 +543,7 @@ graph LR
 - **Overhead:** `+1/3 ≈ +33%` (one extra forward on a ~3-forward step).
 - **API:** `checkpoint(fn, *args, use_reentrant=False)` — drops forward
   intermediates, recomputes on backward, **bit-identical gradients**.
-- **Graduates are exact, not approximate** — `0.00e+00` grad diff (§5).
+- **Gradients are exact, not approximate** — `0.00e+00` grad diff (§5).
 
 > 🔗 Want the *model + optimizer* memory axis? Read [`DDP.md`](./DDP.md) (the 20N
 > rule) and [`ZERO.md`](./ZERO.md) (shard it across K GPUs). Want the

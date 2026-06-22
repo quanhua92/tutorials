@@ -1,15 +1,16 @@
-# NEXT.md — the build queue
+# NEXT.md — the build queue (historical record)
 
-> The build history for every bundle, in priority order. The build is now
-> **FINISHED** — read this for the lineage; read
+> **Historical record** — the build is FINISHED. This file documents how the
+> 18 wave-built bundles were constructed; read
 > [`HOW_TO_RESEARCH.md`](./HOW_TO_RESEARCH.md) / [`SUBAGENTS_RESEARCH_GUIDE.md`](./SUBAGENTS_RESEARCH_GUIDE.md)
 > for *how* bundles were built.
 >
 > Companion to [`README.md`](./README.md) (the 29 bundles now shipped).
 
-> **✅ CURRICULUM COMPLETE** — all 29 bundles (Phases 0–5) built + independently
-> verified GREEN across 3 waves (W1: 10, W2: 4, W3: 4) through generator →
-> verifier → editor. `research/` holds **29 bundles**.
+> **✅ CURRICULUM COMPLETE** — all 29 bundles (Phases 1–5) are built and green.
+> 18 were built across 3 waves (W1: 10, W2: 4, W3: 4 = 18) through generator →
+> verifier → editor; the remaining 11 (Phase 1 + Phase 2) were pre-existing.
+> `llm/` holds **29 bundles**.
 
 ---
 
@@ -32,7 +33,7 @@ graph LR
 
 | Stage | Who | Does |
 |---|---|---|
-| **0 · setup** | 1 subagent (one-off, **DONE**) | rebuilt `research/.venv`; verified the 11 existing bundles. **Do NOT rebuild again.** |
+| **0 · setup** | 1 subagent (one-off, **DONE**) | rebuilt `llm/.venv`; verified the 11 existing bundles. **Do NOT rebuild again.** |
 | **1 · generators** | N subagents (one per bundle, parallel) | build the 4-file bundle per its brief; self-verify `[check]` passes; web-check every formula |
 | **2 · verifier** | 1 subagent | independent re-run: `uv run python`, `node --check`, gold value vs `.py`; report per-bundle pass/fail |
 | **3 · editor** | 1 subagent | fix ONLY what the verifier flagged; backport house style; cross-link siblings; **never alter a computed number** |
@@ -48,13 +49,13 @@ graph LR
 
 ## TL;DR
 
-- **29 done & green — curriculum complete (Phases 0–5)** (Wave 1 shipped —
-  10 bundles, 3 batches; Wave 2 shipped — 4 bundles; Wave 3 shipped — 4 bundles).
-  The entire build is **FINISHED** — nothing is next.
+- **29 done & green — curriculum complete (Phases 1–5)**. 18 bundles were built
+  across 3 waves (Wave 1: 10, Wave 2: 4, Wave 3: 4 = 18); the other 11 (Phase 1
+  + Phase 2) were pre-existing. The entire build is **FINISHED** — nothing is next.
 - Executed in batches: Stage 1 generators → Stage 2 verifier → Stage 3 editor
   (see MANDATORY above), then promote. All waves shipped.
-- **Env:** `research/.venv` was fixed once by Stage 0 (torch 2.12.1, py 3.13.5) —
-  **do NOT rebuild it** (see §5).
+- **Env:** `llm/.venv` works (torch 2.12.1, py 3.13.5) — **do NOT rebuild it**
+  (see §5).
 
 ---
 
@@ -204,7 +205,7 @@ curriculum — `disaggregated_serving` cites the Wave-1 `scheduler` it splits,
 
 Follow [`SUBAGENTS_RESEARCH_GUIDE.md`](./SUBAGENTS_RESEARCH_GUIDE.md) §2:
 
-- [x] Fix `research/.venv` (§5 below).
+- [x] Fix `llm/.venv` (§5 below).
 - [x] Write **10 worker briefs** — each with: lineage, anchor formulas,
       `{WEB_ANCHORS}` (arXiv IDs), `{GOLD_VALUE}`, exact 4 file paths, source
       section refs. (~5 min each; this is where orchestrator judgment lives.)
@@ -217,13 +218,11 @@ Follow [`SUBAGENTS_RESEARCH_GUIDE.md`](./SUBAGENTS_RESEARCH_GUIDE.md) §2:
 
 ## 5. Blockers & gotchas
 
-- **`research/.venv` is broken** — points at a missing `libpython3.13.dylib`
-  from another project. All `uv run python *.py` fail until rebuilt:
-  ```bash
-  cd research && rm -rf .venv && uv venv --python 3.13 && uv sync
-  ```
-  Then re-run the README verification sweep to confirm the 11 existing bundles
-  are still green before adding new ones.
+- **`llm/.venv` — was broken, now FIXED.** It previously pointed at a missing
+  `libpython3.13.dylib` from another project; Stage 0 rebuilt it with
+  `cd llm && rm -rf .venv && uv venv --python 3.13 && uv sync`. It now works
+  (`uv run python -c "import torch"` succeeds, torch 2.12.1). Do NOT rebuild it
+  again — the above is historical.
 - **`pyproject.toml` / `uv.lock` are read-only** to workers. torch only.
 - **Never hand-compute a number** — paste from `_output.txt` or recompute in JS
   and gold-check against the `.py`.

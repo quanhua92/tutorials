@@ -96,16 +96,18 @@ dim, `D` is a single head's dim.
 
 ## 2. The shared frequency ladder (the key 🔗 link)
 
-Both families are built on the **same** frequency ladder. With `E = 8`, `base = 10000`:
+Both families share the **same inverse-exponential FORMULA structure** for their
+frequency ladder. With the toy dims `E = 8` (absolute) and `D = 8` (RoPE),
+`base = 10000`:
 
 > From `absolute_pe.py` **Section A**:
 >
 > | i | 2i/E | div_term = base^(2i/E) | freq = 1/div_term | = RoPE's θ_j? |
 > |---|---|---|---|---|
-> | 0 | 0.00 | 1.0000 | **1.000000** | YES (identical) |
-> | 1 | 0.25 | 10.0000 | **0.100000** | YES (identical) |
-> | 2 | 0.50 | 100.0000 | **0.010000** | YES (identical) |
-> | 3 | 0.75 | 1000.0000 | **0.001000** | YES (identical) |
+> | 0 | 0.00 | 1.0000 | **1.000000** | YES (same formula; equal here only because E=D=8) |
+> | 1 | 0.25 | 10.0000 | **0.100000** | YES (same formula; equal here only because E=D=8) |
+> | 2 | 0.50 | 100.0000 | **0.010000** | YES (same formula; equal here only because E=D=8) |
+> | 3 | 0.75 | 1000.0000 | **0.001000** | YES (same formula; equal here only because E=D=8) |
 
 ```mermaid
 graph TD
@@ -117,12 +119,19 @@ graph TD
     style A fill:#fdecea,stroke:#c0392b
 ```
 
-> One plain sentence: the *same* four wiggle-speeds power both families — RoPE
-> turns them into angles to spin with; absolute PE turns them into values to add.
+> One plain sentence: the *same* four wiggle-speeds power both families *in this
+> toy* — RoPE turns them into angles to spin with; absolute PE turns them into
+> values to add. **Caveat:** they match numerically only because both toys use
+> dim 8 (`E=8` for absolute, `D=8` for RoPE). In real models `E ≠ D` (e.g.
+> Qwen3-0.5B: `E=896`, `D=128`), so the actual frequency *values* differ — what
+> is shared is the inverse-exponential **formula structure**, not the numbers.
 
-**Same frequencies, different operation.** Sinusoidal PE stores
+**Same formula structure, different operation.** Sinusoidal PE stores
 `sin(m·θ_i)` / `cos(m·θ_i)` and *adds* them; RoPE uses `m·θ_j` as an angle to
-*rotate* with. This is the deepest connection between the two guides.
+*rotate* with. The **inverse-exponential ladder** `θ = base^(−2i/dim)` is the
+shared structure — but `dim` is `E` for absolute PE and `D` for RoPE, so the
+numerical frequencies coincide only when `E = D` (as in both toys here). This is
+the deepest connection between the two guides.
 
 ---
 

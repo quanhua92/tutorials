@@ -88,15 +88,18 @@ graph LR
 The three subword **model** families (Stage 3) are the heart of this guide:
 
 ```mermaid
-graph LR
-    subgraph lineage["Lineage"]
-        C["char / word<br/>(fixed vocab)"] --> WP["WordPiece<br/>BERT · 2012<br/>greedy longest-match<br/>likelihood-trained"]
-        WP --> BPE["BPE<br/>GPT-2/4 · Llama · Qwen<br/>frequency merges"]
-        BPE --> SP["SentencePiece<br/>Llama · Qwen · ALBERT<br/>raw byte stream"]
-    end
+graph TD
+    C["char / word<br/>(fixed vocab)"]
+    C --> WP["WordPiece<br/>BERT · 2012<br/>greedy longest-match<br/>likelihood-trained"]
+    C --> BPE["BPE<br/>GPT-2/4 · Llama · Qwen<br/>frequency merges"]
+    C --> SP["SentencePiece<br/>Llama · Qwen · ALBERT<br/>raw byte stream"]
+    WP --> MOD["modern tokenizers<br/>(three PARALLEL families —<br/>siblings, not a descent chain)"]
+    BPE --> MOD
+    SP --> MOD
     style WP fill:#fdecea,stroke:#c0392b
     style BPE fill:#eafaf1,stroke:#27ae60
     style SP fill:#eaf2f8,stroke:#2980b9
+    style MOD fill:#fef9e7,stroke:#f1c40f
 ```
 
 | | **WordPiece** | **BPE** | **SentencePiece** 🔗 |
@@ -279,7 +282,7 @@ Encoding uses the **learned merge ranks**, not frequency. The rule
 > | `newer` | `n e w e r` | `['new','e','r']` | **`[15, 1, 6]`** |
 > | `low` | `l o w` | `['low']` | `[11]` |
 > | `newest` | `n e w e s t` | `['newest']` | `[16]` |
-> | `xyz` | `x y z` | `['x','y','z']` | `[UNK]` → byte-fallback |
+> | `xyz` | `x y z` | `['x','y','z']` | `[UNK]` (no byte fallback — char-level demo) |
 
 Trace of **`lowest` → `[11, 13]`** (the gold used by the HTML check):
 
@@ -409,11 +412,12 @@ graph LR
 > (≈3 bytes/CJK char) keeps it tokenizable. **This is why Llama / Qwen / T5 /
 > ALBERT ship SentencePiece-style tokenizers.**
 
-> 🔗 **Llama & Qwen nuance:** they are *SentencePiece-trained* (raw stream,
-> `▁`-escaped) but served via **BPE** merges (tiktoken-style) at inference — the
-> so-called "BBPE" (byte-level BPE) + SentencePiece-normalization hybrid. The
-> Qwen3 tokenizer is a ~151,936-token BPE with special tokens `<|im_start|>`,
-> `<|im_end|>`, `<|endoftext|>` (see `learning_guide/01_Math_Pipe.md` §4.1).
+> 🔗 **Llama & Qwen nuance:** they use **tiktoken-style BPE** (byte-level BPE,
+> "BBPE") as the *training algorithm* — **not SentencePiece**. They may apply
+> SentencePiece-style **text normalization** (NFKC, `▁`-escaped spaces) first,
+> but the merge training is BPE. The Qwen3 tokenizer is a ~151,936-token BPE
+> with special tokens `<|im_start|>`, `<|im_end|>`, `<|endoftext|>` (see
+> `learning_guide/01_Math_Pipe.md` §4.1).
 
 ---
 

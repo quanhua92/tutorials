@@ -207,7 +207,7 @@ Treat the animation like the `.md`: it cites the `.py`, it doesn't invent.
 ## 7. File & naming conventions
 
 ```
-research/
+llm/
   rope.py              # ground truth
   rope_output.txt      # captured stdout (commit it)
   ROPE.md              # static guide, mermaid + numbers from .py
@@ -231,7 +231,7 @@ research/
 - [ ] Values shown on-canvas to 4 decimals.
 - [ ] `[check: OK]` badge or gold-value diff present.
 - [ ] Links to the `.md` and `.py` in the header.
-- [ ] Works in both light/dark? (we default to dark — matches code editor aesthetic).
+- [ ] Defaults to dark theme (light mode is out of scope).
 
 ---
 

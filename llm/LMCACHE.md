@@ -84,6 +84,10 @@ hierarchical pool and lets any node pull any cached chunk.
   in another node's DRAM/NVMe/S3, stream the KV pages over RDMA into the local
   block table (🔗 PAGED_ATTENTION). Prefill is skipped; only the (much smaller)
   KV bytes cross the wire."*
+- **Mooncake (KV-disaggregated)** = a *related but distinct* system that runs
+  prefill and decode on SEPARATE clusters and ships KV between them over RDMA —
+  the same "move KV, don't recompute" family, not LMCache itself (TL;DR table +
+  pitfall #8).
 
 ```mermaid
 graph LR
@@ -160,6 +164,11 @@ graph LR
 > `BLOCK_MANAGER.md` / `PREFIX_CACHE.md` (`compute_hash`, FNV-1a). LMCache
 > reuses the same content-addressing idea; the difference is the signature is
 > now looked up **across the cluster**, not just on one node.
+>
+> 📝 **Context truncation** (defined here because the pitfalls table relies on
+> it): a serving technique that drops the oldest tokens of a conversation to fit
+> a max length. Truncation **changes the prefix**, so it breaks prefix-cache
+> matches and can roughly halve the hit ratio even with a global pool (§8 #10).
 
 ---
 
@@ -433,9 +442,9 @@ graph LR
 > | Remote node DRAM → VRAM (RoCE 400G) | 50.0 GB/s | 0.2517 ms | 13.5× faster |
 >
 > Recompute (prefill) roofline FLOOR at batch=1:
-> - mem-bound (read all weights once) = **2.076 ms**
+> - mem-bound (read all weights once) = **1.038 ms**
 > - compute-bound (`2·N·S` FLOPs / peak) = **3.407 ms**
-> - arithmetic intensity = **256 FLOP/B**; crossover = **156 FLOP/B**
+> - arithmetic intensity = **512 FLOP/B**; crossover = **156 FLOP/B**
 > - → **COMPUTE-bound**; floor = **3.407 ms** *(IDEAL; real prefill is higher:
 >   kernel launch + MFU<1)*
 >
@@ -445,6 +454,12 @@ graph LR
 > - **transfer < prefill ? True (ratio 13.5×)**
 >
 > `[check]` Latency_transfer < Latency_prefill_floor: **OK**
+>
+> ⚠️ **Transfer-only ceiling.** End-to-end LMCache latency also includes the
+> **global-index lookup** (a network round-trip to the distributed chunk-hash
+> index before the RDMA pull), so the 13.5× ratio is a *transfer-only* ceiling
+> — the lookup adds a small constant on top, easily absorbed by the wide margin
+> but not free.
 
 ### Worked sample — the single example to remember
 

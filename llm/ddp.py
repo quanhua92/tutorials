@@ -399,14 +399,14 @@ def section_memory():
     for name, b, why in rows:
         total += b
         print(f"| {name:<19} | {b:>11} | {why:<37} |")
-    print(f"| {'TOTAL':<19} | {total:>11} | {'~16N effective (20N raw)':<37} |")
+    print(f"| {'TOTAL':<19} | {total:>11} | {'20N total (16N is optimizer state)':<37} |")
     print()
     print("Concrete sizes (DDP = this is REPLICATED on every GPU):")
     print("| model        | params    | bytes/param | per-GPU (DDP) |")
     print("|--------------|-----------|-------------|---------------|")
     for name, n in [("tiny demo W", E_IN * E_OUT), ("GPT-2 small", 124_000_000),
                     ("LLaMA-3 8B", 8_000_000_000), ("GPT-3 175B", 175_000_000_000)]:
-        gb = n * total / (1024 ** 3)
+        gb = n * total / 1e9
         print(f"| {name:<12} | {n:>9,} | {total:>11} | {gb:>11.2f} GB |")
     print()
     print("  [check] total = 2+2+4+4+4+4 = 20 bytes/param")

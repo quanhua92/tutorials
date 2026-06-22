@@ -346,14 +346,14 @@ def prefill_floor(n_params: int, s: int, bytes_: int,
     """Roofline FLOOR for recomputing a prompt of S tokens at batch=1.
 
     Returns (mem_bound_s, compute_bound_s, floor_s, arithmetic_intensity).
-      mem_bound     = read all weights once = 2*N*bytes / HBM_BW
+      mem_bound     = read all weights once = N*bytes / HBM_BW
       compute_bound = 2*N*S FLOPs (forward, MACs=2FLOP) / peak_TFLOPS
       floor         = max(mem, compute)   <- the roofline
       arithmetic_intensity = FLOPs / bytes  (> crossover => compute-bound)
     This is an IDEAL floor; real prefill adds kernel-launch + low-MFU overhead,
     so actual wall-clock is higher (strengthening the transfer-wins verdict).
     """
-    weight_bytes = 2 * n_params * bytes_
+    weight_bytes = n_params * bytes_
     flops = 2 * n_params * s
     mem = weight_bytes / hbm_bw
     comp = flops / peak_tflops

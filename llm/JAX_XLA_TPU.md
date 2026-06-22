@@ -269,6 +269,11 @@ execution").
 > [check] eager_writes == 4 AND fused_writes == 1:  OK
 > ```
 
+> **GOLD caveat:** the "1 fused write" is the ideal/target under this model;
+> real XLA keeps large GEMM anchors as separate kernels, so a two-matmul chain
+> like `silu(x@W1+b1)@W2` may emit **2** kernels in practice (see the `[SIM]`
+> note below). The pinned concept is the *collapse toward 1*.
+
 **Read it like a story:** `dot1`'s result is consumed only by `add` → stays
 on-chip; `add`'s result is consumed only by `silu` → stays on-chip; `silu`'s
 result is consumed only by `dot2` → stays on-chip; `dot2` is the final output →
@@ -356,9 +361,9 @@ graph LR
     style C fill:#eaf2f8,stroke:#2980b9
 ```
 
-For an `N × N` grid the wall-clock is the **fill+drain latency** = `3N−1` cycles
+For an `N × N` grid the wall-clock is the **fill+drain latency** = `2N−1` cycles
 (`N` to fill the diagonal pipeline + `N−1` to drain the last partial sums). For
-`N=256` that is 767 cycles per dense matmul — but each PE **reuses its stationary
+`N=256` that is 511 cycles per dense matmul — but each PE **reuses its stationary
 weight 256 times**, which is the whole efficiency win (data reuse without memory
 round-trips, exactly the bandwidth-bound problem from §2).
 
@@ -514,7 +519,10 @@ differs.
 > | 9 | 10 | 1 | 10× |
 
 Our gold `f(x)=silu(x@W1+b1)@W2` has `E=2` element-wise ops (`add`, `silu`) →
-eager **4** writes, fused **1** write, a **4×** win.
+eager **4** writes, fused **1** write, a **4×** win. Note the table above is
+**per matmul anchor** (`E` element-wise ops fused onto a single GEMM); the gold
+chain has **two** matmul anchors (`dot1`, `dot4`), so its eager count is
+`2 anchors + 2 element-wise = 4` total writes.
 
 > **Three regimes side by side:**
 >
@@ -580,7 +588,7 @@ graph LR
   **GOLD: 4 → 1.**
 - **jaxpr:** traced op list IR (no math during tracing); cached by signature.
 - **MXU:** weight-stationary systolic array; weights fixed, activations stream,
-  partial sums accumulate with no writeback. fill+drain = `3N−1` cycles.
+  partial sums accumulate with no writeback. fill+drain = `2N−1` cycles.
 - **VMEM/SMEM/ICI:** fast scratchpad / scalar mem / inter-chip links (≈ SRAM / regs / NVLink).
 - **Pallas:** Grid (parallel index space) + BlockSpec (HBM↔VMEM tile map);
   single write-back per output tile.
@@ -642,7 +650,7 @@ IDs:** two IDs suggested in the build brief were checked and found to be
   https://arxiv.org/abs/1704.04760 — the original TPU paper. Documents the
   **256×256 weight-stationary systolic MXU** ("weights preloaded, activations
   flow, partial sums accumulate without register writeback"), the HBM↔VMEM
-  hierarchy, and the `3N−1`-cycle matmul latency (§5).
+  hierarchy, and the `2N−1`-cycle matmul latency (§5).
 
 - **Haziza, D.; Vyas, N.; et al. — Splash Attention.** The TPU-optimized tiled
   online-softmax attention kernel written in **Pallas**, distributed as part of

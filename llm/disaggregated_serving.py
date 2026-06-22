@@ -326,14 +326,14 @@ def prefill_floor(n_params: int, s: int, bytes_: int,
     """Roofline FLOOR for recomputing a prompt of S tokens at batch=1.
 
     Returns (mem_bound_s, compute_bound_s, floor_s, arithmetic_intensity).
-      mem_bound     = read all weights once = 2*N*bytes / HBM_BW
+      mem_bound     = read all weights once = N*bytes / HBM_BW
       compute_bound = 2*N*S FLOPs (forward, MACs=2FLOP) / peak_TFLOPS
       floor         = max(mem, compute)   <- the roofline
       arithmetic_intensity = FLOPs / bytes  (> crossover => compute-bound)
     This is an IDEAL floor; real prefill adds kernel-launch + low-MFU overhead,
     so actual wall-clock is higher (strengthening the transfer-wins verdict).
     """
-    weight_bytes = 2 * n_params * bytes_
+    weight_bytes = n_params * bytes_
     flops = 2 * n_params * s
     mem = weight_bytes / hbm_bw
     comp = flops / peak_tflops
@@ -376,7 +376,7 @@ def section_a_characteristics():
     # intensity vs the roofline crossover.
     n_params = model_params(LAYERS, N_Q_HEADS, N_KV_HEADS, HEAD_DIM,
                             HIDDEN, INTERMEDIATE)
-    weight_bytes = 2 * n_params * BYTES
+    weight_bytes = n_params * BYTES
     crossover = A100_BF16_TFLOPS / A100_HBM_BW   # FLOP/B
 
     # Prefill AI at S=512
@@ -390,11 +390,11 @@ def section_a_characteristics():
     print("Arithmetic intensity (AI = FLOPs / bytes_moved) vs A100 crossover:")
     print(f"  A100 crossover = peak_TFLOPS / HBM_BW = {A100_BF16_TFLOPS:.0e} / "
           f"{A100_HBM_BW:.0e} = {crossover:.0f} FLOP/B\n")
-    print(f"  PREFILL (S={DEFAULT_S}): AI = 2*N*{DEFAULT_S} / 2*N*{BYTES} = "
-          f"{DEFAULT_S}/{BYTES} = {prefill_ai:.0f} FLOP/B")
+    print(f"  PREFILL (S={DEFAULT_S}): AI = 2*N*{DEFAULT_S} / N*{BYTES} = "
+          f"2*{DEFAULT_S}/{BYTES} = {prefill_ai:.0f} FLOP/B")
     print(f"    {prefill_ai:.0f} > {crossover:.0f} crossover -> COMPUTE-bound "
           f"(saturates GPU math units)\n")
-    print(f"  DECODE (S=1):     AI = 2*N*1 / 2*N*{BYTES} = 1/{BYTES} = "
+    print(f"  DECODE (S=1):     AI = 2*N*1 / N*{BYTES} = 2/{BYTES} = "
           f"{decode_ai:.0f} FLOP/B")
     print(f"    {decode_ai:.0f} < {crossover:.0f} crossover -> MEMORY-bound "
           f"(starved for weight bandwidth)")

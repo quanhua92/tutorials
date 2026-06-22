@@ -45,8 +45,10 @@ graph LR
     style MQA fill:#fdecea,stroke:#c0392b
 ```
 
-For **Qwen3-0.5B** (the reference model in this repo): **14 workers, 2 cabinets →
-7 workers per cabinet**. That `7` is the whole story — it is `n_repeats = 14 // 2`.
+For the bundle's reference config **"Qwen3-0.5B"** (a Qwen-class 0.5B config
+whose 14/2 head shape matches **Qwen2.5-0.5B**; real Qwen3-0.6B uses 16/8 — see
+[Sources](#sources)): **14 workers, 2 cabinets → 7 workers per cabinet**. That
+`7` is the whole story — it is `n_repeats = 14 // 2`.
 
 > **One-line definition:** *Grouped-Query Attention* = give the `H_q` query
 > heads only `H_kv < H_q` shared key/value heads, so groups of query heads
@@ -510,21 +512,14 @@ graph LR
     tensors and hence the memory bandwidth requirements of incremental decoding."
 - **MHA** — Vaswani et al. *Attention Is All You Need.* NeurIPS 2017.
   arXiv:1706.03762. https://arxiv.org/abs/1706.03762
-- **Reference-model shape (H_q=14, H_kv=2, D=64, n_repeats=7).** These exact
-  head counts are a real published config: `Qwen/Qwen2.5-0.5B` `config.json`
-  has `num_attention_heads=14`, `num_key_value_heads=2`, `hidden_size=896`
-  (→ `head_dim = 896/14 = 64`). https://huggingface.co/Qwen/Qwen2.5-0.5B
-  - *Naming note:* this bundle follows the local learning repo's reference-model
-    name **"Qwen3-0.5B"** as used in `learning_guide/00_Foundations.md` §7.5
-    (the source material this bundle is mined from, and which the bundle is
-    faithful to). The published `Qwen/Qwen3-0.6B` config is *different*
-    (`num_attention_heads=16, num_key_value_heads=8, head_dim=128,
-    num_hidden_layers=28` → `n_repeats=2`); the 14/2/7 shape here corresponds
-    to the Qwen2.5-0.5B config above. The `layers=28` used in the KV-cache byte
-    math is the Qwen3 layer count from the same learning-guide source. The
-    structural claims of this guide (the GQA broadcast trick, the 7× cache
-    savings for a 14/2 model, the equivalence proof) hold regardless of which
-    Qwen checkpoint supplies the exact counts.
+- **Reference-model shape (H_q=14, H_kv=2, D=64, n_repeats=7).** This is a
+  Qwen-class 0.5B config: the head counts match `Qwen/Qwen2.5-0.5B`
+  (`num_attention_heads=14, num_key_value_heads=2, hidden_size=896`,
+  `head_dim=64`). The published `Qwen/Qwen3-0.6B` differs (16/8 heads,
+  `head_dim=128`, `n_repeats=2`). This bundle follows the local learning repo's
+  "Qwen3-0.5B" name for its worked example; the structural claims (broadcast
+  trick, 7× cache savings, equivalence proof) hold regardless.
+  https://huggingface.co/Qwen/Qwen2.5-0.5B
 - **Local source material** (the 14/2/7 reference-model config; the
   reshape+broadcast reference implementation; the full forward pass):
   `learning_guide/00_Foundations.md` §7.5, `learning_guide/01_Math_Pipe.md` §2.5.

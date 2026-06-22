@@ -53,7 +53,7 @@ the multiply.*
 |---|---|---|
 | **Weight storage** | 2 bytes / weight | 0.5 bytes + scale/bias overhead |
 | **Activation storage** | 2 bytes | **2 bytes (unchanged)** |
-| **Weight footprint** | 1.0× | **~3.8×** smaller (group_size=128) |
+| **Weight footprint** | 1.0× | **3.76×** smaller (group_size=128) |
 | **Accuracy** | baseline | near-lossless (per LLM.int8()) |
 | **Where it runs** | everywhere | MLX, vLLM, llama.cpp, GPTQ models |
 
@@ -535,7 +535,7 @@ graph LR
   `scale = edge/q0` (zero-error anchor on the heavier extreme).
 - **Dequant:** `w = scale*w_int + bias` (MLX; bias in **float** units).
 - **Pack:** `bits[4k:4k+4] = w_int[k]`; 8 nibbles per uint32.
-- **Memory:** ~3.8× smaller weights (group_size=128); activations unchanged.
+- **Memory:** 3.76× smaller weights (group_size=128); activations unchanged.
 - **Matmul:** dequant fused inside the MAC loop — never materialize full weights.
 - **Win:** bandwidth-bound decode speeds up ~3–4×, accuracy near-lossless
   (worst-case ~2.6% relative error on our toy matmul, one output exact).

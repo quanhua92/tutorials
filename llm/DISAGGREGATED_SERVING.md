@@ -173,12 +173,12 @@ graph LR
 > ```
 > A100 crossover = peak_TFLOPS / HBM_BW = 312 / 2.0 = 156 FLOP/B
 >
-> PREFILL (S=512): AI = S/bytes = 512/2 = 256 FLOP/B  >= 156  -> COMPUTE-bound
-> DECODE (S=1):     AI = 1/bytes = 1/2   = 0   FLOP/B  <  156  -> MEMORY-bound
+> PREFILL (S=512): AI = 2*S/bytes = 2*512/2 = 512 FLOP/B  >= 156  -> COMPUTE-bound
+> DECODE (S=1):     AI = 2*S/bytes = 2*1/2 = 1 FLOP/B  <  156  -> MEMORY-bound
 > ```
 >
-> `[check]` prefill is COMPUTE-bound (AI 256 ≥ crossover 156): **OK**
-> `[check]` decode is MEMORY-bound (AI 0 < crossover 156): **OK**
+> `[check]` prefill is COMPUTE-bound (AI 512 ≥ crossover 156): **OK**
+> `[check]` decode is MEMORY-bound (AI 1 < crossover 156): **OK**
 
 > One plain sentence: prefill saturates the math units (AI = S/bytes); decode
 > starves for weight bandwidth (AI = 1/bytes). Co-locating them means each
@@ -421,7 +421,7 @@ graph TD
 
 **Analogy:** *is it cheaper to fax the recipe card (transfer KV) or to re-cook
 the banquet from scratch (re-prefill)? The recipe card is SMALL (64 MiB of KV);
-the banquet ingredients (model weights, ~28 GB) are HUGE. So even though the
+the banquet ingredients (model weights, ~14 GB) are HUGE. So even though the
 fax line (RoCE 400G, ~50 GB/s) is slower than the pantry (HBM, 2 TB/s), the
 SIZE ratio wins: you move ~400× fewer bytes. That single inequality —
 `Size_KV / network_BW < prefill_cost` — is the economic justification for
@@ -430,7 +430,7 @@ disaggregation.*
 ```mermaid
 graph LR
     Size["Size_KV = 2*KV*L*H_kv*hd*S*bytes<br/>= 64.0 MiB (S=512)"] --> T["Latency_transfer<br/>= Size_KV / BW"]
-    Size --> W["vs model weights<br/>2*N*bytes = 28 GB<br/>(prefill reads ALL)"]
+    Size --> W["vs model weights<br/>N*2 bytes = ~14 GB<br/>(prefill reads ALL)"]
     T --> Ver{"transfer < prefill?"}
     W --> PF["Latency_prefill<br/>roofline floor 22.9 ms<br/>(empirical ~80 ms)"]
     PF --> Ver
@@ -460,9 +460,9 @@ graph LR
 > | RoCEv2 / 100 GbE (cross-node) | 12.5 GB/s | 5.3687 ms | 4.3× faster |
 >
 > Recompute (prefill) roofline FLOOR at batch=1:
-> - mem-bound (read all weights once) = **13.959 ms**
+> - mem-bound (read all weights once) = **6.979 ms**
 > - compute-bound (`2·N·S` FLOPs / peak) = **22.906 ms**
-> - arithmetic intensity = **256 FLOP/B**; crossover = **156 FLOP/B**
+> - arithmetic intensity = **512 FLOP/B**; crossover = **156 FLOP/B**
 > - → **COMPUTE-bound**; floor = **22.906 ms** *(IDEAL; real prefill ~80 ms)*
 >
 > **BUDGET VERDICT (primary: 400G RoCEv2 transfer):**
@@ -572,8 +572,8 @@ graph LR
 
 - **Lineage (🔗 SCHEDULER → DistServe → Mooncake):** co-location causes ITL
   spikes; DistServe splits onto 2 pools; Mooncake adds KV-centric routing.
-- **Prefill = compute-bound** (AI = S/bytes ≥ crossover → saturates math units);
-  **decode = memory-bound** (AI = 1/bytes < crossover → starved for HBM BW).
+- **Prefill = compute-bound** (AI = 2*S/bytes ≥ crossover → saturates math units);
+  **decode = memory-bound** (AI = 2/bytes < crossover → starved for HBM BW).
 - **Co-location interference:** prefill priority blocks decode → ITL spike =
   `prefill_ms + decode_ms` (100 ms = 80 + 20, a 5× spike).
 - **Disaggregation:** prefill pool (TP, low TTFT) → KV transfer over RDMA →

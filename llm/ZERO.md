@@ -339,6 +339,10 @@ graph LR
 > | ZeRO-2 | 5.5 | 5,500,000 | 5.50 | 3.64x |
 > | ZeRO-3 | 4 | 4,000,000 | 4.00 | 5.00x |
 >
+> **Baseline note:** the DDP row uses the **20N** baseline (this guide +
+> [`DDP.md`](./DDP.md) §F); the original ZeRO paper uses **16N** (Adam `Ψ`
+> states only, no separate fp32 grad copy) — see the accounting note below.
+>
 > ```
 > GOLD PINS (zero.html recomputes these, K=4):
 >   DDP    = 20.00 MB
@@ -410,6 +414,12 @@ graph LR
 > * ZeRO-3 adds one more AllGather (params gathered for BOTH fwd and bwd)
 >   -> 3*Psi = 1.5x DDP. (DeepSpeed team: 'modest 50% increase'.)
 > ```
+>
+> **Latency note:** although DDP's `AllReduce` and ZeRO-1's `RS+AG` move the
+> same total bytes (`2Ψ`), ZeRO-1 splits them into **two separate collectives**
+> with an extra synchronization point between them, so wall-clock latency can
+> be marginally higher than DDP's single fused collective (mitigated by
+> `overlap_comm`).
 >
 > Concrete (7B params, fp16 = 2 bytes/param), per-device GB:
 >
@@ -546,7 +556,7 @@ assert mem_bytes(7_000_000_000, 8, "3")   / 1e9 == 14.0   # headline
 |---|---|---|---|
 | 1 | Thinking ZeRO-3 is "3×" slower to communicate than DDP | Wrong mental model — over-provisioning links | By **volume** it is `1.5×` (3Ψ vs 2Ψ, per the ZeRO authors); "3×" counts collectives. Enable `overlap_comm` to hide the extra AllGather. |
 | 2 | Confusing ZeRO with 🔗 Tensor Parallelism | Sharding the wrong axis (model vs data) | ZeRO shards **states across data-parallel ranks** (fits any topology); TP shards **weight matrices within an NVLink node**. They compose (ZeRO in DP group, TP in node). |
-| 3 | Forgetting the fp32 master copy in the byte count | Under-counting by 4N | DDP = **20N** (incl. master 4N + grad copy 4N + mom 4N + var 4N), not 16N. See §1. |
+| 3 | Forgetting the fp32 master copy in the byte count | Under-counting by 4N | DDP = **20N** = 2N fp16 params + 2N fp16 grads + 4N fp32 master + 4N fp32 grad + 4N Adam m + 4N Adam v. The "16N of redundancy" = optimizer state + fp32 master (the four 4N columns); the **total** DDP footprint is 20N. See §1. |
 | 4 | ZeRO-3 without `overlap_comm` | ~2× slower forward (AllGather stalls) | Set `overlap_comm: True`; prefetch the next layer's AllGather during current compute. |
 | 5 | Sharding granularity not divisible by `K` | Crash / uneven chunks in ReduceScatter | Pad `N` (or the sharding dim) to a multiple of `K`; keep `chunk = N/K` integral. |
 | 6 | Mixing ZeRO stages inconsistently across DP subgroups | Some ranks shard params, others don't | Set the same `stage` for every rank in the DP group; check the DeepSpeed config is broadcast. |

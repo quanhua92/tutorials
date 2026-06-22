@@ -68,6 +68,13 @@ for the whole MLP block.
 | **partial sum** | what a row-parallel rank produces *before* `AllReduce` — a piece of the answer, not the answer |
 | **GeLU** | element-wise activation between `A` and `B` in a vanilla MLP. Element-wise is WHY the AllReduce cancels. 🔗 `MLP_ACTIVATION` |
 
+> **Why "column-parallel" names the output axis:** in Megatron-LM the weight is
+> stored as `[in, out]`, so the output dimension (dim 1) *is* the column
+> dimension — slicing it is "column-parallel". PyTorch stores `W` transposed as
+> `[out, in]` (dim 0 = output), so the same cut is `W[0:out/TP, :]`. Same
+> operation, different storage convention; the name comes from Megatron's
+> `[in, out]` layout.
+
 ### The technical TL;DR
 
 ```mermaid
@@ -405,7 +412,7 @@ run**: only on links fast enough that the `AllReduce` doesn't dominate.
 >
 > | link | typical bandwidth | use case |
 > |---|---|---|
-> | NVLink (intra-node) | ~300 GB/s (bi-dir) | **TENSOR PARALLEL (here)** |
+> | NVLink (intra-node) | ~300 GB/s per direction (~600 GB/s aggregate bi-directional) | **TENSOR PARALLEL (here)** |
 > | NVSwitch (8× H100) | ~900 GB/s agg. | large TP within a node |
 > | PCIe Gen5 ×16 | ~64 GB/s | small TP, or CPU fallback |
 > | InfiniBand (inter) | ~25–50 GB/s | DP / Pipeline (🔗 DDP/PP) |
@@ -469,7 +476,7 @@ Why this is faithful:
 | 4 | Splitting heads when `H_q % TP != 0` | Crash / `divide()` assert | Pick `H_q` divisible by max intended TP |
 | 5 | Same for `H_kv` under GQA | Crash in `QKVParallelLinear` | Pick `H_kv` divisible by max TP (🔗 GQA) |
 | 6 | TP across nodes (over IB) | Comm dominates; 10×+ slowdown | Keep `TP ≤ GPUs_per_node` ([§7](#7-bandwidth-rule--section-g-output)) |
-| 7 | Forgetting that TP also needs `AllReduce` in **backward** (for col-par weights) | Backward produces wrong grads | Backward of col-par = row-par of grads; same pattern |
+| 7 | Forgetting that TP also needs `AllReduce` in **backward** (for col-par weights) | Backward produces wrong grads | Column-parallel skips the forward AllReduce (each rank emits an output shard independently). In backward the roles mirror: the gradient w.r.t. a column-parallel weight arrives as per-rank partial sums that must be **AllReduced**, exactly like a row-parallel forward. The collective simply migrates from forward to backward — same reduce pattern, opposite pass. |
 | 8 | Treating `partial` as the answer (forgetting `AllReduce`) | Garbage output, no error | Row-par output is a *partial sum* — always `AllReduce` |
 
 ---

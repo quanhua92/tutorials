@@ -187,21 +187,21 @@ graph LR
 
 **Progress:**
 
-- [ ] **31** `meeting_openings` — Meeting Openings *(Days 61–62)*
-- [ ] **32** `contributing` — Contributing in Meetings *(Days 63–64)*
-- [ ] **33** `diplomatic_disagreement` — Diplomatic Disagreement *(Days 65–66)*
-- [ ] **34** `status_updates` — Status Updates & Standups *(Days 67–68)*
-- [ ] **35** `short_presentations` — Short Presentations *(Days 69–70)*
-- [ ] **36** `feedback_giving` — Giving Feedback *(Days 71–72)*
-- [ ] **37** `feedback_receiving` — Receiving Feedback *(Days 73–74)*
-- [ ] **38** `negotiating` — Negotiating *(Days 75–76)*
-- [ ] **39** `interviews_behavioral` — Behavioral Interview Q&A *(Days 77–78)*
-- [ ] **40** `networking` — Networking Small Talk *(Days 79–80)*
-- [ ] **41** `cross_cultural_clarifying` — Cross-Cultural Clarification *(Days 81–82)*
-- [ ] **42** `video_call_specifics` — Video-Call Specifics *(Days 83–84)*
-- [ ] **43** `explaining_simply` — Explaining Technical Concepts Simply *(Days 85–86)*
-- [ ] **44** `handling_questions` — Handling Q&A *(Days 87–88)*
-- [ ] **45** `delegating_instructions` — Delegating & Giving Instructions *(Days 89–90)*
+- [x] **31** `meeting_openings` — Meeting Openings *(Days 61–62)*
+- [x] **32** `contributing` — Contributing in Meetings *(Days 63–64)*
+- [x] **33** `diplomatic_disagreement` — Diplomatic Disagreement *(Days 65–66)*
+- [x] **34** `status_updates` — Status Updates & Standups *(Days 67–68)*
+- [x] **35** `short_presentations` — Short Presentations *(Days 69–70)*
+- [x] **36** `feedback_giving` — Giving Feedback *(Days 71–72)*
+- [x] **37** `feedback_receiving` — Receiving Feedback *(Days 73–74)*
+- [x] **38** `negotiating` — Negotiating *(Days 75–76)*
+- [x] **39** `interviews_behavioral` — Behavioral Interview Q&A *(Days 77–78)*
+- [x] **40** `networking` — Networking Small Talk *(Days 79–80)*
+- [x] **41** `cross_cultural_clarifying` — Cross-Cultural Clarification *(Days 81–82)*
+- [x] **42** `video_call_specifics` — Video-Call Specifics *(Days 83–84)*
+- [x] **43** `explaining_simply` — Explaining Technical Concepts Simply *(Days 85–86)*
+- [x] **44** `handling_questions` — Handling Q&A *(Days 87–88)*
+- [x] **45** `delegating_instructions` — Delegating & Giving Instructions *(Days 89–90)*
 
 ---
 
@@ -235,26 +235,26 @@ graph LR
 
 **Progress:**
 
-- [ ] **46** `email_anatomy` — Email Anatomy *(Days 91–92)*
-- [ ] **47** `formal_casual_register` — Formal vs Casual Register *(Days 93–94)*
-- [ ] **48** `requests_reminders` — Requests & Reminders *(Days 95–96)*
-- [ ] **49** `apology_emails` — Apology Emails *(Days 97–98)*
-- [ ] **50** `bad_news_messages` — Bad-News / Sensitive Messages *(Days 99–100)*
-- [ ] **51** `meeting_followups` — Meeting Notes & Follow-ups *(Days 101–102)*
-- [ ] **52** `status_reports` — Status Reports *(Days 103–104)*
-- [ ] **53** `im_slack_style` — IM / Slack Style *(Days 105–106)*
-- [ ] **54** `linkedin_posts` — LinkedIn / Professional Posts *(Days 107–108)*
-- [ ] **55** `cover_letters` — Cover Letters *(Days 109–110)*
-- [ ] **56** `cv_bullets` — CV / Résumé Bullets *(Days 111–112)*
-- [ ] **57** `client_messages` — Customer / Client Messages *(Days 113–114)*
-- [ ] **58** `invitations_thankyous` — Invitations & Thank-You Notes *(Days 115–116)*
-- [ ] **59** `proposals` — Persuasive Writing / Proposals *(Days 117–118)*
-- [ ] **60** `editing_concision` — Editing: Concision & Active Voice *(Days 119–120)*
-- [ ] **61** `editing_hedging` — Editing: Hedging & Tone *(Days 121–122)*
-- [ ] **62** `requests_to_boss` — Upward Requests (to manager) *(Days 123–124)*
-- [ ] **63** `out_of_office_auto` — Out-of-Office & Auto-Replies *(Days 125–126)*
-- [ ] **64** `complaints_written` — Written Complaints / Disputes *(Days 127–128)*
-- [ ] **65** `summaries` — Summaries & Executive Briefs *(Days 129–130)*
+- [x] **46** `email_anatomy` — Email Anatomy *(Days 91–92)*
+- [x] **47** `formal_casual_register` — Formal vs Casual Register *(Days 93–94)*
+- [x] **48** `requests_reminders` — Requests & Reminders *(Days 95–96)*
+- [x] **49** `apology_emails` — Apology Emails *(Days 97–98)*
+- [x] **50** `bad_news_messages` — Bad-News / Sensitive Messages *(Days 99–100)*
+- [x] **51** `meeting_followups` — Meeting Notes & Follow-ups *(Days 101–102)*
+- [x] **52** `status_reports` — Status Reports *(Days 103–104)*
+- [x] **53** `im_slack_style` — IM / Slack Style *(Days 105–106)*
+- [x] **54** `linkedin_posts` — LinkedIn / Professional Posts *(Days 107–108)*
+- [x] **55** `cover_letters` — Cover Letters *(Days 109–110)*
+- [x] **56** `cv_bullets` — CV / Résumé Bullets *(Days 111–112)*
+- [x] **57** `client_messages` — Customer / Client Messages *(Days 113–114)*
+- [x] **58** `invitations_thankyous` — Invitations & Thank-You Notes *(Days 115–116)*
+- [x] **59** `proposals` — Persuasive Writing / Proposals *(Days 117–118)*
+- [x] **60** `editing_concision` — Editing: Concision & Active Voice *(Days 119–120)*
+- [x] **61** `editing_hedging` — Editing: Hedging & Tone *(Days 121–122)*
+- [x] **62** `requests_to_boss` — Upward Requests (to manager) *(Days 123–124)*
+- [x] **63** `out_of_office_auto` — Out-of-Office & Auto-Replies *(Days 125–126)*
+- [x] **64** `complaints_written` — Written Complaints / Disputes *(Days 127–128)*
+- [x] **65** `summaries` — Summaries & Executive Briefs *(Days 129–130)*
 
 ---
 
@@ -283,21 +283,21 @@ graph LR
 
 **Progress:**
 
-- [ ] **66** `hedging_vagueness` — Hedging & Vagueness *(Days 131–132)*
-- [ ] **67** `humor_sarcasm` — Light Humor & Sarcasm *(Days 133–134)*
-- [ ] **68** `politeness_strategies` — Politeness Strategies *(Days 135–136)*
-- [ ] **69** `frequency_idioms` — Top-Frequency Idioms *(Days 137–138)*
-- [ ] **70** `phrasal_verbs_work` — Phrasal Verbs: Work *(Days 139–140)*
-- [ ] **71** `phrasal_verbs_social` — Phrasal Verbs: Social *(Days 141–142)*
-- [ ] **72** `collocations` — Collocations *(Days 143–144)*
-- [ ] **73** `register_switching` — Register Switching *(Days 145–146)*
-- [ ] **74** `storytelling_structure` — Storytelling Structures *(Days 147–148)*
-- [ ] **75** `discourse_markers` — Discourse Markers *(Days 149–150)*
-- [ ] **76** `fluency_fillers` — Fluency Fillers / Buying Time *(Days 151–152)*
-- [ ] **77** `vague_language` — Vague Language *(Days 153–154)*
-- [ ] **78** `emphasis_cleft` — Emphasis & Cleft Sentences *(Days 155–156)*
-- [ ] **79** `conditionals_spoken` — Conditionals in Spoken English *(Days 157–158)*
-- [ ] **80** `narrative_tenses` — Narrative Tenses *(Days 159–160)*
+- [x] **66** `hedging_vagueness` — Hedging & Vagueness *(Days 131–132)*
+- [x] **67** `humor_sarcasm` — Light Humor & Sarcasm *(Days 133–134)*
+- [x] **68** `politeness_strategies` — Politeness Strategies *(Days 135–136)*
+- [x] **69** `frequency_idioms` — Top-Frequency Idioms *(Days 137–138)*
+- [x] **70** `phrasal_verbs_work` — Phrasal Verbs: Work *(Days 139–140)*
+- [x] **71** `phrasal_verbs_social` — Phrasal Verbs: Social *(Days 141–142)*
+- [x] **72** `collocations` — Collocations *(Days 143–144)*
+- [x] **73** `register_switching` — Register Switching *(Days 145–146)*
+- [x] **74** `storytelling_structure` — Storytelling Structures *(Days 147–148)*
+- [x] **75** `discourse_markers` — Discourse Markers *(Days 149–150)*
+- [x] **76** `fluency_fillers` — Fluency Fillers / Buying Time *(Days 151–152)*
+- [x] **77** `vague_language` — Vague Language *(Days 153–154)*
+- [x] **78** `emphasis_cleft` — Emphasis & Cleft Sentences *(Days 155–156)*
+- [x] **79** `conditionals_spoken` — Conditionals in Spoken English *(Days 157–158)*
+- [x] **80** `narrative_tenses` — Narrative Tenses *(Days 159–160)*
 
 ---
 
@@ -321,16 +321,16 @@ graph LR
 
 **Progress:**
 
-- [ ] **81** `impromptu_talks` — 60-Second Impromptu Talks *(Days 161–162)*
-- [ ] **82** `debating` — Debating a Viewpoint *(Days 163–164)*
-- [ ] **83** `live_feedback` — Giving Live Feedback *(Days 165–166)*
-- [ ] **84** `handling_misunderstood` — Handling Being Misunderstood *(Days 167–168)*
-- [ ] **85** `speaking_under_pressure` — Speaking Under Pressure *(Days 169–170)*
-- [ ] **86** `timed_writing` — Writing Under Time *(Days 171–172)*
-- [ ] **87** `self_correction` — Self-Correction Strategies *(Days 173–174)*
-- [ ] **88** `sustained_monologue` — Sustained 5-Min Monologue *(Days 175–176)*
-- [ ] **89** `conversation_simulations` — Full Conversation Simulations *(Days 177–178)*
-- [ ] **90** `integration_review` — Integration & Review *(Days 179–180)*
+- [x] **81** `impromptu_talks` — 60-Second Impromptu Talks *(Days 161–162)*
+- [x] **82** `debating` — Debating a Viewpoint *(Days 163–164)*
+- [x] **83** `live_feedback` — Giving Live Feedback *(Days 165–166)*
+- [x] **84** `handling_misunderstood` — Handling Being Misunderstood *(Days 167–168)*
+- [x] **85** `speaking_under_pressure` — Speaking Under Pressure *(Days 169–170)*
+- [x] **86** `timed_writing` — Writing Under Time *(Days 171–172)*
+- [x] **87** `self_correction` — Self-Correction Strategies *(Days 173–174)*
+- [x] **88** `sustained_monologue` — Sustained 5-Min Monologue *(Days 175–176)*
+- [x] **89** `conversation_simulations` — Full Conversation Simulations *(Days 177–178)*
+- [x] **90** `integration_review` — Integration & Review *(Days 179–180)*
 
 ---
 

@@ -1,0 +1,95 @@
+error_handling.rs — Phase 2 bundle.
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — Result<T,E>: Ok/Err, match, and the ? shortcut
+======================================================================
+  enum Result<T, E> { Ok(T), Err(E) }
+  (T = success value type; E = error type)
+    "42".parse::<i32>()  = Ok(42)
+    "NaN".parse::<i32>() = Err(ParseIntError { kind: InvalidDigit })
+    match on Ok extracts the inner value: 42
+[check] match on Ok extracts the inner value (42): OK
+    read_config("42")      = Ok(42)
+    read_config("missing") = Err(Io(Custom { kind: NotFound, error: "record not found" }))
+    read_config("NaN")     = Err(Parse(ParseIntError { kind: InvalidDigit }))
+[check] read_config("42") propagates the Ok value (42): OK
+[check] read_config("missing") early-returns Err via ? (io path): OK
+[check] read_config("NaN") early-returns Err via ? (parse path): OK
+
+======================================================================
+SECTION B — custom error type: Debug + Display + Error (by hand)
+======================================================================
+  // `thiserror` would derive all of this; here we write it by hand:
+  #![derive(Debug)]
+  enum AppError { Io(io::Error), Parse(ParseIntError), Config(String) }
+    Display ({}):  Io     = "io failure: record not found"
+    Display ({}):  Parse  = "parse failure: invalid digit found in string"
+    Display ({}):  Config = "config failure: port out of range"
+    Debug   ({:?}): Io    = Io(Custom { kind: NotFound, error: "record not found" })
+[check] Display of AppError::Io contains the inner io message: OK
+[check] Display of AppError::Config shows its message: OK
+[check] AppError implements std::error::Error (usable as &dyn Error): OK
+
+======================================================================
+SECTION C — From<E> for AppError: ? converts io::Error -> AppError
+======================================================================
+  impl From<io::Error> for AppError       { fn from(e) { AppError::Io(e) } }
+  impl From<ParseIntError> for AppError    { fn from(e) { AppError::Parse(e) } }
+  // `?` calls From::from on the Err -> the fn returns AppError.
+    AppError::from(io::Error::new(PermissionDenied, "access denied"))
+      -> Io(Custom { kind: PermissionDenied, error: "access denied" })
+[check] From<io::Error> wraps the value into AppError::Io: OK
+    read_config("missing") uses ? on an io op -> Err(Io(Custom { kind: NotFound, error: "record not found" }))
+[check] a Result<_,AppError> fn can ? an io::Error (From converts it): OK
+
+======================================================================
+SECTION D — Error::source(): walking the cause chain
+======================================================================
+  impl Error for AppError {
+      fn source(&self) -> Option<&(dyn Error + 'static)> {
+          match self { Io(e)|Parse(e) => Some(e), Config(_) => None }
+      }
+  }
+[check] source() on AppError::Io returns Some(inner io::Error): OK
+[check] source() on AppError::Config returns None (a leaf, no cause): OK
+    source chain from AppError::Io (2 levels):
+      [0] io failure: record not found
+      [1] record not found
+[check] the chain starts at AppError::Io and reaches its wrapped cause (>=2 levels): OK
+
+======================================================================
+SECTION E — Option <-> Result: ok_or / ok_or_else / .ok() / .err()
+======================================================================
+  // Option -> Result: turn None into a concrete Err.
+  // Result -> Option: discard the Err with .ok().
+    Some(5).ok_or("missing") = Ok(5)
+    None.ok_or("missing")     = Err("missing")
+[check] None.ok_or("missing") == Err("missing"): OK
+[check] Some(5).ok_or("missing") == Ok(5): OK
+    None.ok_or_else(|| "built lazily") = Err("built lazily")
+[check] ok_or_else builds the Err only on None: OK
+    Ok::<i32,&str>(5).ok()   = Some(5)
+    Err::<i32,&str>("x").ok()= None
+    Ok::<i32,&str>(5).err()  = None
+[check] Ok(5).ok() == Some(5): OK
+[check] Err("x").ok() == None: OK
+    first_line("alpha\\nbeta") via ? on Option = Some("alpha")
+[check] ? on Option early-returns None inside an Option-returning fn: OK
+
+======================================================================
+SECTION F — panic! vs Result: unrecoverable vs recoverable
+======================================================================
+  // panic!  = unrecoverable; unwinds the stack (or aborts).
+  // Result  = recoverable; the caller decides what to do.
+  // Rule: panic for BROKEN INVARIANTS; Result for EXPECTED failure.
+    catch_unwind caught a panic! payload: Some("invariant violated: vector index out of bounds")
+[check] catch_unwind turns a panic! into Err (an unwind is catchable): OK
+[check] the panic payload is the &'static str message: OK
+    "NaN".parse::<i32>() = Err(ParseIntError { kind: InvalidDigit })  (Result, NOT a panic)
+[check] expected failure (bad parse) returns Err, not a panic: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

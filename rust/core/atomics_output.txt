@@ -1,0 +1,66 @@
+atomics.rs — Phase 4 bundle #4 (Concurrency).
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — load / store / fetch_add / swap: the RMW vocabulary
+======================================================================
+  let a = AtomicI32::new(0);   a.load(Relaxed) = 0
+  a.store(7, Relaxed);         a.load(Relaxed) = 7
+[check] store writes a whole word: a.load(Relaxed) == 7 after store(7): OK
+  let c = AtomicI32::new(0); c.fetch_add(5, Relaxed) -> 0 (OLD); c.load -> 5
+[check] fetch_add returns the PREVIOUS value (0); the cell then holds 0+5 = 5: OK
+  c.fetch_add(5, Relaxed) -> 5 (OLD);  c.load -> 10
+[check] second fetch_add returns 5 (the previous), cell now 10: OK
+  c.swap(99, Relaxed) -> 10 (OLD);       c.load -> 99
+[check] swap returns the previous (10) and stores 99: OK
+
+======================================================================
+SECTION B — Ordering: a Release store pairs with an Acquire load
+======================================================================
+  data = AtomicI32::new(0);  ready = AtomicBool::new(false);
+  after join: consumer broke the Acquire spin loop and read data = 42
+[check] Release-store / Acquire-load handshake: consumer observed the payload (42): OK
+[check] producer's Relaxed store of 42 is the cell's final value after join: OK
+
+======================================================================
+SECTION C — the CAS loop: a lock-free update via compare_exchange
+======================================================================
+  counter = AtomicUsize::new(0);  8 threads x 20000 increments each
+  CAS-loop version: final counter.load(Relaxed) = 160000  (== 8 * 20000)
+[check] lock-free CAS loop: N threads x K increments -> final == N*K (no lost updates): OK
+  fetch_add version: final = 160000  (one RMW per increment, no retry loop)
+[check] fetch_add(1, Relaxed) reaches the same total as the CAS loop (both lock-free): OK
+
+======================================================================
+SECTION D — compare_exchange: Ok on match, Err on mismatch
+======================================================================
+  let a = AtomicI32::new(5);
+  a.compare_exchange(5, 10, Acquire, Relaxed) -> Ok(5)
+  a.load(Relaxed) -> 10 (swapped)
+[check] compare_exchange Ok when expected matches: Ok(5), cell now 10: OK
+  a.compare_exchange(6, 12, SeqCst, Acquire) -> Err(10)
+  a.load(Relaxed) -> 10 (unchanged)
+[check] compare_exchange Err on mismatch: Err(10) (the ACTUAL value), cell unchanged: OK
+
+======================================================================
+SECTION E — when atomics beat a mutex (and when they don't)
+======================================================================
+  hits = AtomicI32::new(0); two fetch_add(1) -> 2
+[check] single counter: two atomic increments -> 2 (lock-free, no mutex needed): OK
+  acct = Mutex(Account { checking: 100, savings: 0 })
+  after a 50 transfer: checking + savings = 100 (invariant held)
+[check] multi-field invariant needs a mutex: total preserved across the transfer (== 100): OK
+
+======================================================================
+SECTION F — atomics under the hood: Arc's refcount IS an AtomicUsize
+======================================================================
+  let a = Arc::new(7);  strong_count = 1
+[check] Arc starts at strong_count == 1 (its AtomicUsize refcount = 1): OK
+  after 2 worker clones dropped: strong_count = 1
+[check] atomic refcount: count returns to 1 after the worker clones drop: OK
+[check] the shared value is still readable (Arc kept it alive): *a == 7: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

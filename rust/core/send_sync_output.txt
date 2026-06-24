@@ -1,0 +1,69 @@
+send_sync.rs — Phase 4 bundle #2 (Concurrency).
+Every value below is computed by this file; witnesses are compile-time proofs.
+
+
+======================================================================
+SECTION A — Send: ownership can be MOVED to another thread
+======================================================================
+  assert_send::<i32/bool/String/Vec<u8>>() all compiled -> these types are Send
+[check] primitives + String + Vec<u8> are Send (witness compiled): OK
+[check] a type is auto-Send when ALL its fields are Send (the auto-trait rule): OK
+
+======================================================================
+SECTION B — Sync: &T can be SHARED across threads (T is Sync iff &T is Send)
+======================================================================
+  assert_sync::<i32/bool/String/str>() all compiled -> these types are Sync
+[check] primitives + String + str are Sync (witness compiled): OK
+  &String, &mut String: Send/Sync witnesses all compiled (the reference rules)
+[check] &T is Send iff T: Sync; &mut T is Send iff T: Send; both refs Sync iff T: Sync: OK
+[check] &mut T is Sync (when T: Sync): a & &mut T is read-only, so no race: OK
+
+======================================================================
+SECTION C — Rc is !Send and !Sync: the refcount is NOT atomic
+======================================================================
+  let rc = Rc::new(42i32);  let rc2 = Rc::clone(&rc);
+    Rc::strong_count(&rc) = 2  (two owners)
+[check] two Rc clones share one allocation (strong_count == 2): OK
+  drop(rc2);  Rc::strong_count(&rc) = 1
+[check] dropping a clone decrements the count back to 1: OK
+  Rc<i32> is !Send/!Sync: moving it to a thread would be E0277 (use Arc)
+[check] Rc's non-atomic refcount is WHY it is !Send/!Sync; Arc is the fix: OK
+  Cell<i32> and RefCell<i32> are Send (T: Send) but !Sync
+[check] Cell/RefCell are Send iff T: Send, but always !Sync (no synchronization): OK
+
+======================================================================
+SECTION D — Arc<T> is Send + Sync iff T: Send + Sync (atomic refcount)
+======================================================================
+  assert_send::<Arc<i32>>() and assert_sync::<Arc<i32>>() both compiled
+[check] Arc<i32> is Send + Sync (witness compiled): OK
+  let a = Arc::new(42i32);  let a2 = Arc::clone(&a);  count = 2
+[check] cloning an Arc bumps the atomic strong_count to 2: OK
+  moved a2 to a thread; thread read value=42, strong_count=2
+  after join (a2 dropped in worker): strong_count(&a) = 1
+[check] Arc moved to a thread: value preserved (42), count seen there was 2: OK
+[check] the moved Arc clone dropped in the worker; main's count fell to 1: OK
+
+======================================================================
+SECTION E — Mutex<T>: Sync iff T: Send; runtime proof with two sharers
+======================================================================
+  assert_send::<Mutex<i32>>() and assert_sync::<Mutex<i32>>() both compiled
+[check] Mutex<i32> is Send + Sync (witness compiled; needs only i32: Send): OK
+  let m = Mutex::new(0i32);  two scoped threads each lock and add
+  before=0 -> after=15  (10 + 5 added under the lock)
+[check] two threads shared &Mutex and added 10+5 == 15 (Mutex: Sync, race-free): OK
+[check] MutexGuard is !Send but lets you read &T here safely: OK
+
+======================================================================
+SECTION F — a struct is auto Send/Sync iff ALL fields are; one Rc field opts out
+======================================================================
+  struct Good { n: i32, s: String } -> assert_send/sync::<Good>() compiled
+[check] Good (all fields Send+Sync) is auto Send + auto Sync; values intact: OK
+  adding an Rc<String> field -> the whole struct becomes !Send/!Sync
+[check] one !Send field (Rc) opts the WHOLE struct out of Send (auto-cascade): OK
+  NotThreadSafe(PhantomData<*const ()>) is !Send/!Sync on STABLE Rust
+[check] stable opt-out: PhantomData<*const ()> makes a struct !Send/!Sync: OK
+[check] opt-IN: `unsafe impl Send/Sync` asserts thread-safety the compiler can't prove: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

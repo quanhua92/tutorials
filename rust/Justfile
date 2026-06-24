@@ -1,0 +1,132 @@
+# rust/Justfile — bundle runner & verification harness for the Cargo workspace.
+#
+# Each bundle is a `[[bin]]` in a dep-tier member crate. Run any bundle
+# workspace-wide via `cargo run --bin <name>` (bin names are unique).
+# The Justfile locates the member dir (where <name>.rs / <name>.md /
+# <name>_output.txt live) automatically.
+#
+# Common:
+#   just run ownership          # run a bundle
+#   just out  ownership          # (re)capture its _output.txt (next to the .rs)
+#   just check ownership         # verify ONE (run + [check] count + rustfmt + clippy + output)
+#   just sweep                   # verify ALL bundles
+#   just list                    # list every bundle stem + its member
+#   just fmt [name]              # rustfmt one (or all)
+#   just clippy [name]           # clippy one (or all)
+#   just new <name> [member]     # scaffold a bundle (default member: core)
+#   just clean                   # cargo clean
+
+set shell := ["bash", "-c"]
+default := "list"
+
+# Resolve the member directory holding a bundle's .rs (e.g. core/ , serde/ ).
+memberof name:
+  @echo "$(dirname "$(find . -type f -name '{{name}}.rs' -not -path './target/*' | head -1)")"
+
+# List every bundle stem + its member.
+list:
+  @echo "Rust bundles in the workspace:"
+  @for f in $(find . -type f -name '*.rs' -not -path './target/*' -not -path './scripts/*'); do \
+    name=$(basename "$f" .rs); dir=$(dirname "$f"); \
+    echo "  $name  [$dir]"; \
+  done
+
+# Run a bundle by stem (workspace-wide bin resolution).
+run name:
+  cargo run --bin {{name}} -q
+
+# (Re)capture a bundle's stdout to <member>/<name>_output.txt (deterministic: §4.2 rules).
+out name:
+  @d=$(dirname "$(find . -type f -name '{{name}}.rs' -not -path './target/*' | head -1)"); \
+    cargo run --bin {{name}} -q > "$d/{{name}}_output.txt" 2>/tmp/rust_{{name}}.err \
+      && echo "captured $d/{{name}}_output.txt ($(wc -l < "$d/{{name}}_output.txt" | tr -d ' ') lines)" \
+      || { echo "run FAILED:"; cat /tmp/rust_{{name}}.err; }
+
+# rustfmt one bundle (name) or all bundles (no arg).
+fmt name='':
+  @if [ -z "{{name}}" ]; then \
+    cargo fmt --all; echo "formatted all"; \
+  else \
+    d=$(dirname "$(find . -type f -name '{{name}}.rs' -not -path './target/*' | head -1)"); \
+    rustfmt --edition 2024 "$d/{{name}}.rs"; echo "formatted $d/{{name}}.rs"; \
+  fi
+
+# clippy one bundle (name, strict: -D warnings) or the whole workspace.
+clippy name='':
+  @if [ -z "{{name}}" ]; then \
+    cargo clippy --workspace --all-targets -q -- -D warnings && echo "clippy (workspace): clean" || echo "clippy (workspace): warnings"; \
+  else \
+    cargo clippy --bin {{name}} -q -- -D warnings && echo "clippy {{name}}: clean" || echo "clippy {{name}}: warnings"; \
+  fi
+
+# Verify ONE bundle: run, count [check]s, rustfmt, clippy, _output.txt presence.
+check name:
+  @echo "===== {{name}} ====="
+  @d=$(dirname "$(find . -type f -name '{{name}}.rs' -not -path './target/*' | head -1)"); \
+    if cargo run --bin {{name}} -q > /tmp/rust_{{name}}.out 2>/tmp/rust_{{name}}.err; then \
+      printf "  cargo run: OK\n"; \
+    else \
+      printf "  cargo run: FAILED\n"; cat /tmp/rust_{{name}}.err; exit 1; \
+    fi; \
+    n=$(grep -c "\[check\]" /tmp/rust_{{name}}.out 2>/dev/null); n=${n:-0}; printf "  checks printed: %s\n" "$n"; \
+    if rustfmt --check --edition 2024 "$d/{{name}}.rs" >/dev/null 2>&1; then printf "  rustfmt: OK\n"; else printf "  rustfmt: NEEDS FORMAT\n"; fi; \
+    if cargo clippy --bin {{name}} -q -- -D warnings >/dev/null 2>&1; then printf "  clippy: clean\n"; else printf "  clippy: warnings/-Dwarnings fail\n"; fi; \
+    if test -s "$d/{{name}}_output.txt"; then printf "  output.txt: present\n"; else printf "  output.txt: MISSING\n"; fi
+
+# (Re)capture _output.txt for ALL bundles.
+outall:
+  @for f in $(find . -type f -name '*.rs' -not -path './target/*' -not -path './scripts/*'); do \
+    name=$(basename "$f" .rs); dir=$(dirname "$f"); \
+    cargo run --bin $name -q > "$dir/${name}_output.txt" 2>/dev/null \
+      && echo "  $name: captured" \
+      || echo "  $name: FAILED"; \
+  done
+
+# Batch verification sweep across ALL bundles (run + checks + rustfmt + clippy + output).
+sweep:
+  @echo "===== sweep: all bundles ====="
+  @fail=0; \
+  for f in $(find . -type f -name '*.rs' -not -path './target/*' -not -path './scripts/*' | sort); do \
+    name=$(basename "$f" .rs); dir=$(dirname "$f"); \
+    printf "\n--- %s [%s] ---\n" "$name" "$dir"; \
+    if cargo run --bin $name -q > /tmp/rust_$name.out 2>/tmp/rust_$name.err; then \
+      printf "  cargo run: OK\n"; \
+    else \
+      printf "  cargo run: FAILED\n"; cat /tmp/rust_$name.err; fail=1; \
+    fi; \
+    n=$(grep -c "\[check\]" /tmp/rust_$name.out 2>/dev/null); n=${n:-0}; printf "  checks printed: %s\n" "$n"; \
+    if rustfmt --check --edition 2024 "$f" >/dev/null 2>&1; then printf "  rustfmt: OK\n"; else printf "  rustfmt: NEEDS FORMAT\n"; fail=1; fi; \
+    if cargo clippy --bin $name -q -- -D warnings >/dev/null 2>&1; then printf "  clippy: clean\n"; else printf "  clippy: warnings\n"; fail=1; fi; \
+    if test -s "$dir/${name}_output.txt"; then printf "  output.txt: present\n"; else printf "  output.txt: MISSING\n"; fi; \
+  done; \
+  echo; \
+  if [ $fail -eq 0 ]; then echo "SWEEP: all green"; else echo "SWEEP: failures detected (see above)"; fi
+
+# Workspace sanity (parses + compiles every member's graph).
+module:
+  @echo "--- cargo check --workspace ---"
+  @cargo check --workspace -q 2>&1 && echo "  workspace: OK" || echo "  workspace: FAIL"
+
+# Scaffold a new bundle from scripts/skeleton.rs into a member (default: core).
+new name member='core':
+  @test ! -f "{{member}}/{{name}}.rs" || { echo "{{member}}/{{name}}.rs already exists"; exit 1; }
+  @test -f scripts/skeleton.rs || { echo "scripts/skeleton.rs missing"; exit 1; }
+  @mkdir -p {{member}}
+  @upper=$(echo "{{name}}" | tr '[:lower:]' '[:upper:]'); \
+    sed -e "s/__STEM__/{{name}}/g" -e "s/__STEM_UPPER__/$upper/g" scripts/skeleton.rs > {{member}}/{{name}}.rs
+  @rustfmt --edition 2024 {{member}}/{{name}}.rs
+  @echo "created {{member}}/{{name}}.rs"
+  @echo "REMINDER: add to {{member}}/Cargo.toml ->  [[bin]] name=\"{{name}}\" path=\"{{name}}.rs\""
+  @echo "then: just run {{name}}  (edit sections, capture: just out {{name}})"
+
+# cargo clean
+clean:
+  @cargo clean -q && echo "cargo clean done"
+
+# phony aliases
+alias r := run
+alias o := out
+alias c := check
+alias s := sweep
+alias l := list
+alias n := new

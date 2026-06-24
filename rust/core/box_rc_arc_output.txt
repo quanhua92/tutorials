@@ -1,0 +1,85 @@
+box_rc_arc.rs — Phase 3 bundle #1 (Memory & Smart Pointers).
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — Box<T>: ONE owner of heap data; a pointer is all it is
+======================================================================
+  let b = Box::new(42_u64);
+    *b = 42  (Deref: a Box<T> behaves like the value it owns)
+    size_of::<Box<u64>>() = 8 == size_of::<usize>() = 8
+[check] Box<T> is one pointer: size_of::<Box<u64>>() == size_of::<usize>() == 8: OK
+[check] Box<T> owns the value: *b == 42 (Deref works like &T): OK
+  Cons(1, Box(Cons(2, Box(Cons(3, Box(Nil)))))) ; list_sum = 6
+[check] Box enables a recursive type (the cons list sums to 6): OK
+  let g: Box<dyn Greet> = Box::new(English); g.greet() = "hello"
+    size_of::<Box<dyn Greet>>() = 16 (data-ptr + vtable-ptr = 2 usizes)
+[check] Box<dyn Trait> is a fat pointer: 2 * usize == 16: OK
+
+======================================================================
+SECTION B — Rc<T>: SHARED ownership, SINGLE thread (non-atomic refcount)
+======================================================================
+  let a = Rc::new("shared");  Rc::strong_count(&a) = 1
+[check] Rc::new -> strong_count == 1: OK
+  let b = Rc::clone(&a);      Rc::strong_count(&a) = 2
+[check] one Rc::clone -> strong_count == 2: OK
+  let _c = Rc::clone(&a);     Rc::strong_count(&a) = 3
+[check] two Rc::clone -> strong_count == 3: OK
+  (inner `c` dropped at `}`)  Rc::strong_count(&a) = 2
+[check] dropping one clone decrements strong_count back to 2: OK
+  a = "shared", b = "shared"  (both owners, one allocation)
+[check] Rc shares data: both owners read the same value: OK
+
+======================================================================
+SECTION C — Weak<T>: a non-owning reference (does not keep the value alive)
+======================================================================
+  let strong = Rc::new(99);  strong_count = 1, weak_count = 0
+  let weak = Rc::downgrade(&strong);  strong_count = 1, weak_count = 1
+[check] Rc::downgrade bumps weak_count, not strong_count: OK
+  weak.upgrade() while alive -> Some(99)
+[check] Weak::upgrade on a LIVE value -> Some(99): OK
+  after `drop(strong)`: weak.upgrade() -> None
+[check] Weak::upgrade after all strong refs drop -> None (value freed): OK
+
+======================================================================
+SECTION D — Arc<T>: ATOMIC refcount — shared ownership across THREADS
+======================================================================
+  let a = Arc::new(vec![10,20,30]);  strong_count = 1
+[check] Arc::new -> strong_count == 1: OK
+  let a_clone = Arc::clone(&a);     strong_count = 2
+[check] Arc::clone -> strong_count == 2: OK
+  spawned thread: strong_count seen inside = 2, sum = 60
+[check] Arc crossed into a thread; worker saw strong_count == 2 (a + its clone): OK
+  after thread joined (its clone dropped): strong_count = 1
+[check] Arc count returns to 1 after the thread's clone drops: OK
+
+======================================================================
+SECTION E — why Rc<T> is !Send / !Sync (documented; Arc proven Send+Sync)
+======================================================================
+  is_send_sync::<Arc<i32>>() compiled -> Arc<i32>: Send + Sync.
+  (is_send_sync::<Rc<i32>>() would be E0277 -> Rc is !Send/!Sync.)
+[check] Arc<i32> is Send + Sync (compile-time proved); Rc<i32> is not: OK
+
+======================================================================
+SECTION F — reference cycles LEAK; Weak<T> breaks them
+======================================================================
+
+  -- a cycle of two Rcs: LEAKS (refcount never hits 0) --
+  after cycle: a strong_count = 2, b strong_count = 2
+[check] cycle: a and b each have strong_count == 2 (each pointed at by the other): OK
+  after dropping both handles: weak_a.upgrade() -> Some(1)
+[check] Rc cycle LEAKS: node `a` survives with no named owner (weak_a still upgrades): OK
+
+  -- same shape, but child->parent is Weak: NO leak --
+  leaf.parent.upgrade() before branch exists -> false
+  inside scope: leaf strong=2, branch strong=1, branch weak=1, branch children=1
+[check] branch owns leaf (leaf strong=2, branch owns 1 child); leaf->branch is weak (branch weak=1): OK
+  leaf.parent.upgrade() while branch alive -> true
+[check] while branch is alive, leaf.parent.upgrade() -> Some: OK
+  after branch dropped: leaf.parent.upgrade() -> None? true (branch FREED)
+[check] Weak broke the cycle: branch was freed (leaf.parent.upgrade() -> None): OK
+[check] leaf still owned by its own handle (strong_count == 1), value still readable: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

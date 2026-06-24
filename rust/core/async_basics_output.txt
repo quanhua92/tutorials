@@ -1,0 +1,95 @@
+async_basics.rs — Phase 4 bundle #2 (Concurrency).
+Every value below is computed by this file (no timers, no runtime).
+
+
+======================================================================
+SECTION A — async fn returns a Future; NOTHING happens until polled
+======================================================================
+  async fn add(a: i32, b: i32) -> i32 { a + b }
+  let fut = add(2, 3);        // fut is a Future; body NOT run yet
+  let result = block_on(fut); // NOW the executor polls it to Ready
+  result = 5
+[check] block_on(add(2, 3)) == 5: OK
+  block_on(async { add(10,10).await + 1 }) = 21
+[check] nested .await across two await points: result == 21: OK
+
+======================================================================
+SECTION B — a hand-rolled block_on: poll until Ready (the executor)
+======================================================================
+  pub trait Future {
+      type Output;
+      fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output>;
+  }
+  pub enum Poll<T> { Ready(T), Pending }
+
+  block_on = `loop { if Ready(v) = poll(cx) { return v } }`
+  (with a Waker in the Context; we use a noop one + busy poll)
+  block_on(std::future::ready(42)) -> 42  (Ready on poll #1)
+[check] block_on drives std::future::ready(42) == 42: OK
+  block_on(Ready(Some(42)))     -> 42  (Ready on poll #1)
+[check] our Ready<T> wrapper == std::future::ready behavior: OK
+[check] block_on always returns exactly the future's Output (here i32): OK
+
+======================================================================
+SECTION C — Poll semantics: a custom Future that is Pending ONCE, then Ready
+======================================================================
+  impl Future for YieldOnce<T> {
+      fn poll(self: Pin<&mut Self>, cx) -> Poll<T> {
+          if self.yielded { Poll::Ready(value) }
+          else { self.yielded = true; cx.waker().wake_by_ref();
+                Poll::Pending }   // <- yields the thread once
+      }
+  }
+  block_on(YieldOnce::counted("done")) -> "done"
+  poll count = 2  (Pending on poll #1, Ready on poll #2)
+[check] YieldOnce returned its value: "done": OK
+[check] YieldOnce polled exactly twice: Pending once, then Ready: OK
+
+======================================================================
+SECTION D — async fn is a state machine: suspend & resume across awaits
+======================================================================
+  async fn two_steps(log) -> i32 {
+      log.push("step1..."); let a = yield(10).await;
+      log.push("step2..."); let b = yield(a+5).await;
+      log.push("step3..."); b
+  }
+  block_on(two_steps(..)) -> 15   (suspend, resume, suspend, resume)
+  execution trace (in order):
+    step1: before first await
+    step2: after await #1, a = 10
+    step3: after await #2, b = 15
+[check] two_steps returned the final value 15 (10 then 10+5): OK
+[check] state machine ran step1, step2, step3 in ORDER (suspend+resume preserves it): OK
+
+======================================================================
+SECTION E — concurrency on ONE thread: round-robin join of two futures
+======================================================================
+  block_join2(StepFuture("A",100), StepFuture("B",200))
+  poll order (deterministic round-robin):
+    A: Pending (yield once)
+    B: Pending (yield once)
+    A: Ready(100)
+    B: Ready(200)
+  outputs = (100, 200);  sorted = [100, 200]
+[check] both futures completed: outputs (100, 200): OK
+[check] round-robin interleaving is deterministic: A-pend, B-pend, A-ready, B-ready: OK
+[check] sorted outputs == [100, 200] (determinism discipline): OK
+
+======================================================================
+SECTION F — why Pin: async state machines can be self-referential
+======================================================================
+  async fn body -> a generated state-machine struct.
+  Locals LIVE across an .await are stored IN that struct. If a local
+  holds a reference into ANOTHER local of the same struct, the struct
+  is SELF-REFERENTIAL. Moving it in memory would dangle that pointer.
+  Pin<&mut Self> in poll's signature GUARANTEES the value will not be
+  moved, so the self-reference stays valid. `Unpin` types opt out.
+
+  i32 is Unpin -> Pin::new(&mut x); *p.get_mut() = 2; -> x = 2
+[check] Unpin type (i32): Pin<&mut> allows mutation via get_mut: OK
+  needs_unpin::<i32>() compiled  (i32: Unpin).
+[check] i32: Unpin (compile-witness); an async-block future is !Unpin: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

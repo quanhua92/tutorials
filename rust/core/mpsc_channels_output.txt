@@ -1,0 +1,72 @@
+mpsc_channels.rs — Phase 4 bundle.
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — basic send/recv: send MOVES the value, recv blocks
+======================================================================
+  let (tx, rx) = channel();   // async, UNBOUNDED, send never blocks
+  tx.send(42);   // 42 moved into the channel; tx still usable
+  rx.recv() -> Ok(42)
+[check] tx.send(42) then rx.recv() yields Ok(42): OK
+
+======================================================================
+SECTION B — send MOVES: ownership crosses the channel (E0382 if reused)
+======================================================================
+  let msg = String::from("hello");  (msg owns the heap buffer)
+  tx.send(msg);   // msg MOVED into the channel; the binding is poisoned
+  rx.recv() -> "hello"  (receiver now OWNS the String; len 5)
+[check] ownership transferred through the channel: receiver owns the String: OK
+
+======================================================================
+SECTION C — rx.iter(): drain the channel until every Sender drops
+======================================================================
+  let (tx, rx) = channel();
+  tx.send(1); tx.send(2); tx.send(3);
+  drop(tx);   // closes the channel -> rx.iter() will terminate
+  collected via rx.iter() -> [1, 2, 3]
+[check] rx.iter() yields [1, 2, 3] in FIFO order from one producer: OK
+
+======================================================================
+SECTION D — multiple producers: clone tx per thread; collect and SORT
+======================================================================
+  let (tx, rx) = channel();
+  spawned 3 threads, each cloned tx and sent one of [10, 20, 30]
+  collected (sorted) -> [10, 20, 30]
+[check] 3 cloned senders delivered exactly {10, 20, 30} (as a set): OK
+
+======================================================================
+SECTION E — bounded sync_channel: send BLOCKS when the buffer is full
+======================================================================
+  let (tx, rx) = sync_channel(1);   // bounded buffer of size 1
+  tx.send(1).unwrap();   (slot now FULL)
+  tx.try_send(2) -> Err(TrySendError::Full(..))   (Full == backpressure: send would block)
+[check] bounded(1) channel is full after 1 send -> try_send returns Full(2): OK
+  rx.recv() -> Ok(1)   (freed the slot)
+  tx.send(2); rx.recv() -> Ok(2)
+[check] after draining, the bounded channel accepts the queued value: OK
+  let (tx0, rx0) = sync_channel(0);   // rendezvous: 0-buffer
+  spawned send(7) handed off -> rx0.recv() = Ok(7)
+[check] sync_channel(0) rendezvous: recv returns the handed-off value: OK
+
+======================================================================
+SECTION F — channel close: drop ALL Senders -> recv returns Err
+======================================================================
+  let (tx, rx) = channel::<i32>();
+  drop(tx);   // no Senders remain -> channel is CLOSED
+  rx.recv() -> Err(RecvError)
+[check] recv returns Err(RecvError) once all Senders are dropped: OK
+  rx.iter().collect::<Vec<_>>() -> []
+[check] rx.iter() over a closed channel yields nothing: OK
+
+======================================================================
+SECTION G — send error: drop the Receiver -> send returns Err(SendError)
+======================================================================
+  let (tx, rx) = channel();
+  drop(rx);   // consumer gone
+  tx.send(99) -> Err(SendError { .. })   (value bounced back to the sender)
+[check] send returns the value (99) when the Receiver was dropped: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

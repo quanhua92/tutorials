@@ -1,0 +1,71 @@
+atomic_state.go — Phase 3 bundle (lock-free state).
+Every total below is computed by this file; the .md guide pastes it
+verbatim. No goroutine prints; only scheduling-invariant totals are
+asserted -> byte-identical runs.
+
+======================================================================
+SECTION A — Atomic integer counter (Add/Load/Store/Swap, race-free)
+======================================================================
+API tour on one int64 (single-threaded):
+  StoreInt64(&n, 10); LoadInt64 -> 10
+  SwapInt64(&n, 99)   -> previous 10 (n now 99)
+  AddInt64(&n, 1)     -> new 100
+[check] StoreInt64 then LoadInt64 == 10: OK
+[check] SwapInt64 returns the previous value 10: OK
+[check] AddInt64(&n,1) after Swap to 99 yields 100: OK
+
+1000 goroutines, each atomic.AddInt64(&c, 1) -> final == 1000
+[check] atomic counter == 1000 (exactly, no lost updates): OK
+[check] atomic counter lost no increments (final not < 1000): OK
+
+======================================================================
+SECTION B — CAS retry loop (lock-free update)
+======================================================================
+1000 goroutines increment via a CAS retry loop -> final == 1000
+(retry count is scheduling-dependent and therefore NOT printed; only the total is asserted)
+[check] CAS-loop counter final == 1000: OK
+[check] CAS-loop counter >= 1000 (no lost increments): OK
+
+======================================================================
+SECTION C — atomic.Pointer[T]: typed snapshot, lock-free readers
+======================================================================
+8 readers x 1000 Loads each (8000 total) racing one updater
+consistent snapshots: 8000   torn snapshots: 0 (atomic.Pointer publishes whole structs)
+final snapshot after updater joined -> version 3, greeting "v3"
+[check] every snapshot was consistent (0 torn reads): OK
+[check] snapshot count == readers*iters (8000): OK
+[check] final snapshot is generation 3 (single updater, deterministic last Store): OK
+
+======================================================================
+SECTION D — sync.Map: concurrent LoadOrStore (read-heavy workload)
+======================================================================
+16 callers LoadOrStore across 8 keys (2 callers/key) -> 8 stores, 8 loads
+sorted keys after Range -> [k0 k1 k2 k3 k4 k5 k6 k7]
+[check] sync.Map holds all 8 keys: OK
+[check] sorted keys == [k0 k1 k2 k3 k4 k5 k6 k7]: OK
+[check] exactly 8 stores (one winner per key): OK
+[check] exactly 8 loads (one duplicate per key): OK
+
+======================================================================
+SECTION E — singleflight (from scratch): N callers, ONE computation
+======================================================================
+10 callers request the SAME key concurrently via singleflight
+expensive function executed: 1 time(s) (dedup worked -> all callers shared one compute)
+callers that received the shared result == 499500: 10/10
+[check] singleflight computed exactly once: OK
+[check] all 10 callers received the shared result: OK
+
+======================================================================
+SECTION F — atomic vs mutex: single counter vs multi-field invariant
+======================================================================
+single counter (atomic): AddInt64(&c, 42) -> 42  (one word, no lock needed)
+[check] single counter via atomic == 42: OK
+transfer: 3 accounts {100 200 300}, total before = 600
+10 groups x 100 mutex-guarded transfers -> total after = 600 (conserved)
+[check] initial total == 600: OK
+[check] final total == 600 (multi-field invariant conserved by mutex): OK
+[check] total conserved across all transfers (before == after): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,125 @@
+testing.go — Phase 5 bundle (testing & tooling).
+Go's testing package (TestXxx / BenchmarkXxx / FuzzXxx), driven
+from main: table-driven cases, an in-process benchmark, and a
+seed-corpus fuzz replay. Nothing is hand-computed.
+NOTE: this is a META bundle — it teaches `go test` but runs via
+`go run`. The canonical TestXxx/BenchmarkXxx/FuzzXxx signatures
+and the `go test` invocations live in TESTING.md.
+
+======================================================================
+SECTION A — Table-driven test: a slice of {in, want} + a loop
+======================================================================
+A table-driven test is a []struct{in, want} ranged in a loop.
+Each row is one case; the same assert runs for every row, so
+adding coverage means adding a row, not copy-pasting a test.
+
+name               in           want     got
+----------------------------------------------------------
+empty              ""           0        0
+one                "I"          1        1
+additive           "III"        3        3
+subtractive_iv     "IV"         4        4
+subtractive_ix     "IX"         9        9
+fifty_eight        "LVIII"      58       58
+mcmxciv            "MCMXCIV"    1994     1994
+[check] romanToInt("") == 0: OK
+[check] romanToInt("I") == 1: OK
+[check] romanToInt("III") == 3: OK
+[check] romanToInt("IV") == 4: OK
+[check] romanToInt("IX") == 9: OK
+[check] romanToInt("LVIII") == 58: OK
+[check] romanToInt("MCMXCIV") == 1994: OK
+[check] all table-driven cases passed: OK
+
+======================================================================
+SECTION B — Subtests: the t.Run(name, fn) shape (runSub analog)
+======================================================================
+t.Run(name, func(t *testing.T){...}) turns each table row into
+a NAMED subtest. The runner below is the .go analog: runSub
+reports each case by name and keeps going on failure (like
+t.Errorf, a SOFT fail). t.Fatalf would stop only the current
+subtest, not its siblings or the parent. The .md shows the
+real t.Run + t.Parallel form.
+
+    --- PASS: roman/empty
+    --- PASS: roman/one
+    --- PASS: roman/additive
+    --- PASS: roman/subtractive_iv
+    --- PASS: roman/subtractive_ix
+    --- PASS: roman/fifty_eight
+    --- PASS: roman/mcmxciv
+[check] all subtest-shaped cases reported PASS: OK
+
+======================================================================
+SECTION C — Benchmark: testing.Benchmark runs b.N; compare AllocsPerOp
+======================================================================
+testing.Benchmark(func(b *testing.B){...}) runs a benchmark
+IN-PROCESS and returns a BenchmarkResult. The harness picks
+b.N (auto-scaled until the run is long enough to time) and
+calls the function repeatedly. b.ReportAllocs() makes it count
+allocations; result.AllocsPerOp() is a deterministic integer
+for a fixed workload. (ns/op and b.N vary per run and are NOT
+printed.) Under `go test` you write BenchmarkXxx(b) instead.
+
+'+=' concat (8 parts)        allocs/op = 7
+strings.Builder (8 parts)    allocs/op = 3
+Builder allocates fewer than '+='? true
+[check] '+=' concat allocates >= 1 per op: OK
+[check] strings.Builder allocates <= '+=' concat: OK
+[check] strings.Builder allocates STRICTLY fewer than '+=': OK
+
+======================================================================
+SECTION D — Fuzz: a seed corpus replayed through the target's property
+======================================================================
+A fuzz test is func FuzzXxx(f *testing.F). f.Add(seed...) adds
+CORPUS seeds; f.Fuzz(func(t *testing.T, s string){...}) is the
+TARGET the engine runs against generated + seed inputs. You can't
+predict outputs, so you check PROPERTIES. Here the property is
+reverseRunes(reverseRunes(s)) == s (the double-reverse identity).
+`go test` replays the seeds; `go test -fuzz=FuzzXxx` generates
+mutated inputs to hunt for panics/failures (any failing input is
+saved to testdata/fuzz/<Name> as a regression case).
+
+seed           runes        property_holds
+-----------------------------------------
+""             0            true
+"a"            1            true
+"ab"           2            true
+"hello"        5            true
+"世界"           2            true
+"Go 🚀"         4            true
+[check] fuzz seed "": double-reverse identity holds: OK
+[check] fuzz seed "a": double-reverse identity holds: OK
+[check] fuzz seed "ab": double-reverse identity holds: OK
+[check] fuzz seed "hello": double-reverse identity holds: OK
+[check] fuzz seed "世界": double-reverse identity holds: OK
+[check] fuzz seed "Go 🚀": double-reverse identity holds: OK
+[check] all fuzz seeds satisfied the property (no panic): OK
+
+======================================================================
+SECTION E — t.Helper(): a test helper is skipped in failure line reports
+======================================================================
+t.Helper() marks the calling function as a test helper. When a
+failure is printed, the testing package SKIPS helper frames, so
+the reported file:line is the line that CALLED the helper — not
+the line inside it. This is what makes custom assertEqual/t
+helpers usable: failures point at your test, not at the helper.
+
+Mechanism demo (runtime.Caller mirrors the frame skip). skip=0
+reports the helper's OWN function; skip=1 reports its CALLER:
+  ownName()    -> "main.ownName"    (skip=0: points INSIDE the helper)
+  callerName() -> "main.sectionE"    (skip=1: points at the CALLER)
+
+assertEqual(t, got, want) (cited verbatim in TESTING.md) uses
+reflect.DeepEqual under the hood; its comparison logic is
+asserted here directly:
+[check] skip=0 reports the helper's own function (main.ownName): OK
+[check] skip=1 reports the CALLER's function (main.sectionE): OK
+[check] the two skip levels report different functions: OK
+[check] reflect.DeepEqual(3, 3) is true (assertEqual equality logic): OK
+[check] reflect.DeepEqual(3, 4) is false (assertEqual rejects unequal): OK
+[check] reflect.DeepEqual("abc", "abc") is true: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

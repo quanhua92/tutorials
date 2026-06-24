@@ -1,0 +1,116 @@
+time.go — Phase 5 bundle (the time package: Time, Duration, the
+layout reference date, and the wall/monotonic clocks). Every value
+below is computed by this file; the .md guide pastes it verbatim.
+Nothing is hand-computed; no time.Now() VALUE is ever printed.
+
+======================================================================
+SECTION A — Duration: an int64 nanosecond count
+======================================================================
+type: time.Duration = time.Duration (underlying int64)
+time.Second       = 1000000000 ns   (1e9 nanoseconds)
+time.Millisecond  = 1000000 ns
+time.Microsecond  = 1000 ns
+time.Nanosecond   = 1 ns
+time.Minute       = 60000000000 ns
+time.Hour         = 3600000000000 ns
+identity chain: 1*time.Hour == 60*time.Minute == 3600*time.Second == 3.6e12 ns
+d := 2*time.Hour + 30*time.Minute + 500*time.Millisecond
+  d.String()      = "2h30m0.5s"
+  d.Hours()       = 2.500138888888889   (float64)
+  d.Minutes()     = 150.00833333333333
+  d.Seconds()     = 9000.5
+  d.Milliseconds()= 9000500   (int64)
+start=Date(2024,6,15,12,0,0,0,UTC); end=start.Add(d); end.Sub(start) = 2h30m0.5s
+[check] Duration is int64-based: OK
+[check] time.Second == 1e9 nanoseconds: OK
+[check] 1*time.Hour == 60*time.Minute: OK
+[check] 60*time.Minute == 3600*time.Second: OK
+[check] 3600*time.Second == 3_600_000*time.Millisecond: OK
+[check] end.Sub(start) equals the added duration: OK
+[check] d.String() == "2h30m0.5s": OK
+
+======================================================================
+SECTION B — Format & the canonical reference layout
+======================================================================
+ref := time.Date(2006, 1, 2, 15, 4, 5, 0, time.UTC)
+  ref.Format("2006-01-02")         = "2006-01-02"   (DateOnly)
+  ref.Format("15:04:05")           = "15:04:05"   (TimeOnly)
+  ref.Format("2006-01-02 15:04:05") = "2006-01-02 15:04:05"   (DateTime)
+  ref.Format(time.RFC3339)         = "2006-01-02T15:04:05Z"
+  ref.Format(time.UnixDate)        = "Mon Jan  2 15:04:05 UTC 2006"
+token map (the reference date IS the format):
+  "2006"->year "06"->year(2)   "01"->month "1"->month
+  "02"->day   "_2"->day(sp)    "15"->hour(24h) "03"->hour(12h)
+  "04"->minute "05"->second    "PM"->AM/PM   "-0700"->zone offset
+[check] Format DateOnly exact: OK
+[check] Format TimeOnly exact: OK
+[check] Format DateTime exact: OK
+[check] ref.Format(time.UnixDate) == "Mon Jan  2 15:04:05 UTC 2006" (_2 space-pads day): OK
+[check] predefined DateOnly == "2006-01-02": OK
+
+======================================================================
+SECTION C — Parse: the inverse of Format (round-trip)
+======================================================================
+time.Parse("2006-01-02", "2024-06-15") -> err=<nil>
+  t1.Format("2006-01-02") = "2024-06-15"   (round-trip)
+time.Parse(time.RFC3339, "2024-06-15T13:45:30Z") -> err=<nil>
+  t2.Format(time.RFC3339) = "2024-06-15T13:45:30Z"
+time.Parse("2006-01-02", "not-a-date") -> err != nil? true
+t1 in UTC? true   (Parse with no zone parses as UTC)
+[check] Parse round-trip date-only: OK
+[check] Parse round-trip RFC3339: OK
+[check] Parse of garbage returns an error: OK
+[check] Parse with no location yields UTC: OK
+
+======================================================================
+SECTION D — The layout mnemonic: 1 2 3 4 5 6 7
+======================================================================
+const layout = "01/02 03:04:05PM '06 -0700"  (== time.Layout)
+ref, _ := time.Parse(layout, layout)  -> err=<nil>
+  Year=2006  Month=1 (January)  Day=2
+  Hour=15  Minute=4  Second=5
+  Zone offset = -25200 seconds  (== -7h? true)
+mnemonic "Mon Jan 2 15:04:05 MST 2006":
+  month=1  day=2  hour=15(=3PM)  min=4  sec=5  year=2006(->"06")  zone=-07(=7)
+  i.e. the numbers 1 2 3 4 5 6 7 in order map to M D H M S Y Z.
+[check] parsed layout Year == 2006: OK
+[check] parsed layout Month == January: OK
+[check] parsed layout Day == 2: OK
+[check] parsed layout Hour == 15 (3PM, 24h): OK
+[check] parsed layout Minute == 4: OK
+[check] parsed layout Second == 5: OK
+[check] parsed layout zone offset == -7h: OK
+[check] time.Layout == "01/02 03:04:05PM '06 -0700": OK
+
+======================================================================
+SECTION E — Wall clock vs monotonic clock (the expert core)
+======================================================================
+a := Date(2024,1,1,...,UTC); b := a.Add(24*time.Hour)
+  b.Sub(a)  = 24h0m0s   (wall-clock arithmetic on fixed times)
+  b.After(a)= true   a.Before(b) = true
+parsed time: t == t.Round(0)? true   t.Equal(t.Round(0))? true   (no monotonic to strip)
+n := time.Now()  (value NOT printed)
+  n.Add(time.Hour).Sub(n) = 1h0m0s   (monotonic: exact, immune to clock resets)
+  n == n.Round(0)? false   n.Equal(n.Round(0))? true   (Round(0) strips the monotonic reading)
+[check] fixed times: b.Sub(a) == 24h (wall arithmetic): OK
+[check] fixed times: b.After(a) is true: OK
+[check] parsed time has no monotonic: t == t.Round(0): OK
+[check] parsed time has no monotonic: t.Equal(t.Round(0)): OK
+[check] Now monotonic: Add(time.Hour).Sub(n) == 1h exactly: OK
+[check] Now has monotonic: n != n.Round(0) (== sees the reading): OK
+[check] Now has monotonic: n.Equal(n.Round(0)) (same instant, wall fallback): OK
+
+======================================================================
+SECTION F — Timer / After / Ticker: channels over time
+======================================================================
+<-time.After(1ms): received a value? true   (value NOT printed)
+NewTimer(1h).Stop() before it fires -> stopped (was active)? true
+NewTicker(1ms): collected 5/5 ticks, then Stop() (tick values NOT printed)
+idioms: time.Since(start) == time.Now().Sub(start); time.Until(deadline) == deadline.Sub(time.Now())
+[check] time.After channel delivered a value: OK
+[check] NewTimer.Stop() returned true (was still active): OK
+[check] Ticker collected exactly wantTicks ticks: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

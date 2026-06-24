@@ -1,0 +1,83 @@
+embedding_composition.go — Phase 2 bundle #14.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — STRUCT EMBEDDING & PROMOTION (forwarding, same storage)
+======================================================================
+s := Server{Logger: Logger{prefix: "[srv] "}, id: 7}
+s.Log("boot")        == "[srv] boot"   (PROMOTED method, forwarded to s.Logger.Log)
+s.Logger.Log("boot") == "[srv] boot"   (explicit selector, identical receiver)
+s.prefix (promoted)  == "[srv] "   (PROMOTED field == s.Logger.prefix)
+s.Logger.prefix      == "[srv] "   s.id == 7 (declared field)
+s.prefix = "[S] "  ->  s.Logger.prefix == "[S] "  (promoted write reaches embedded field)
+reflect: Server method set = [Log]  (Log PROMOTED from Logger)
+[check] promoted method s.Log() == s.Logger.Log(): OK
+[check] promoted field s.prefix == s.Logger.prefix: OK
+[check] promoted write reaches the embedded field: s.Logger.prefix == "[S] ": OK
+[check] reflect sees promoted Log in Server's method set: OK
+
+======================================================================
+SECTION B — COMPOSITION NOT INHERITANCE (no subtype polymorphism)
+======================================================================
+var lg Loggable = s   -> lg.Log("hi") == "[srv] hi"   (Server SATISFIES Loggable via promotion)
+                       %T of lg == main.Server  (dynamic type is Server, not Logger)
+COMPILE ERROR (documented): var lp *Logger = &s   // *Server is NOT a *Logger (no subtype)
+COMPILE ERROR (documented): var lf Logger  = s    // Server is NOT a Logger
+var innerPtr *Logger = &s.Logger -> innerPtr.Log("x") == "[inner] x"  (reach the embedded field)
+[check] Server satisfies Loggable via promoted Log: OK
+[check] the interface value's dynamic type is Server: OK
+[check] embedded field is extractable: &s.Logger is a *Logger: OK
+
+======================================================================
+SECTION C — INTERFACE EMBEDDING (union of method sets)
+======================================================================
+io.ReadWriter (stdlib) = interface { Reader; Writer }  // embedded union
+var rw TokenReadWriter = &TokenStream{}
+rw.ReadToken() == "tok1"   (satisfies the embedded union)
+TokenReadWriter method set = [ReadToken WriteToken]   (UNION of ReadToken + WriteToken)
+var ioRW io.ReadWriter = &bytes.Buffer -> %T = *bytes.Buffer  (stdlib composite, same shape)
+[check] TokenReadWriter's method set is the union {ReadToken, WriteToken}: OK
+[check] *TokenStream satisfies TokenReadWriter: OK
+[check] *bytes.Buffer satisfies io.ReadWriter (non-nil interface): OK
+
+======================================================================
+SECTION D — MOCK/DECORATOR: embed + override one (no virtual dispatch)
+======================================================================
+o.Hello()  == "Override.Hello"   (depth-0 Override.Hello wins on direct call)
+o.Greet()  == "Base.Hello"   (Greet promoted from Base; calls Base.Hello, NOT Override.Hello)
+=> embedding has NO virtual dispatch: the receiver is always the inner type.
+cb.Write([]byte("hello")) -> n=5, writeCalls=1, cb.String()=="seedhello"
+cb.WriteString("!!")      -> writeCalls=1 (UNCHANGED), cb.String()=="seedhello!!"
+var rw io.ReadWriter = cb   -> %T = *main.CountingBuffer  (decorator keeps the interface)
+[check] direct o.Hello() picks the depth-0 override: OK
+[check] no virtual dispatch: o.Greet() still calls Base.Hello: OK
+[check] override counts direct Write calls: writeCalls == 1: OK
+[check] delegated WriteString bypasses the override: writeCalls still 1, content appended: OK
+[check] *CountingBuffer satisfies io.ReadWriter: OK
+
+======================================================================
+SECTION E — EMBEDDING AN INTERFACE: delegate field + the nil-deref trap
+======================================================================
+var d Decoder  ->  d.Reader == <nil>  (embedded INTERFACE field is nil by default)
+d.Read(buf) with nil Reader -> panicked=true, msg="runtime error: invalid memory address or nil pointer dereference"
+d.Reader = strings.NewReader("hi"); d.Read(buf) -> n=2, data="hi"
+[check] fresh Decoder's embedded io.Reader is nil: OK
+[check] calling Read on a nil embedded interface panics: OK
+[check] after assigning the field, the promoted Read works: OK
+
+======================================================================
+SECTION F — NAME CONFLICTS: same-depth ambiguity vs shallowest-wins
+======================================================================
+Ambiguous embeds Alpha + Beta (both Name() at depth 1)
+a.Alpha.Name() == "Alpha"   a.Beta.Name() == "Beta"   (explicit selectors disambiguate)
+COMPILE ERROR (documented): a.Name()   // ambiguous selector (same depth)
+Shadowed embeds Alpha + Beta AND declares its own Name() at depth 0
+s.Name() == "Shadowed"   (depth-0 Shadowed.Name shadows both depth-1 candidates)
+[check] explicit selector a.Alpha.Name() reaches Alpha: OK
+[check] explicit selector a.Beta.Name() reaches Beta: OK
+[check] shallowest-depth wins: s.Name() == Shadowed.Name() (depth 0): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

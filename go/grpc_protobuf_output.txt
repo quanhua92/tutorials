@@ -1,0 +1,108 @@
+grpc_protobuf.go — Phase 6 bundle.
+The RUNNABLE core is the PROTOBUF WIRE FORMAT (via protowire);
+gRPC RPC mechanics (proto3, the 4 RPC kinds, interceptors,
+HTTP/2 transport, the protoc codegen pipeline) are DOCUMENTED
+in the .md. Every byte below is produced by this file; the .md
+guide pastes it verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — Varint encoding (the 7-bit-grouped atom)
+======================================================================
+AppendVarint(nil, 1)   = 01   (1 byte)
+AppendVarint(nil, 150) = 96 01   (2 bytes)
+AppendVarint(nil, 300) = ac 02   (2 bytes)
+SizeVarint(150) = 2 (must equal the real length)
+ConsumeVarint(96 01) = 150, consumed 2 bytes
+bit view of 150:
+  byte0 = 0x96 = 1001_0110  (MSB=1 -> more bytes follow; payload = 001_0110 = 22)
+  byte1 = 0x01 = 0000_0001  (MSB=0 -> last byte;     payload = 000_0001 = 1)
+  value = byte0_payload + byte1_payload<<7 = 22 + 128 = 150
+[check] AppendVarint(nil, 150) == [0x96, 0x01]: OK
+[check] AppendVarint(nil, 1) == [0x01]: OK
+[check] SizeVarint(150) == 2: OK
+[check] ConsumeVarint decodes 150 back: OK
+[check] ConsumeVarint consumed the whole slice: OK
+
+======================================================================
+SECTION B — Tag = (field_number << 3) | wire_type
+======================================================================
+AppendTag(nil, 1, VarintType) = 08   (field 1, wire type 0)
+AppendTag(nil, 2, BytesType)  = 12   (field 2, wire type 2)
+AppendTag(nil, 15, VarintType) = 78  (field 15, wire type 0)
+EncodeTag(1, VarintType) = 8  ((1<<3)|0 = 8)
+EncodeTag(2, BytesType)  = 18  ((2<<3)|2 = 18)
+DecodeTag(EncodeTag(2, BytesType)) = field 2, wire type 2
+ConsumeTag(08) = field 1, wire type 0, consumed 1
+[check] AppendTag(nil, 1, VarintType) == [0x08]: OK
+[check] tag byte 0x08: wire type = 0x08 & 0x7 == 0: OK
+[check] tag byte 0x08: field number = 0x08 >> 3 == 1: OK
+[check] AppendTag(nil, 2, BytesType) == [0x12]: OK
+[check] EncodeTag(1, VarintType) == 8: OK
+[check] DecodeTag round-trips field number: OK
+[check] DecodeTag round-trips wire type: OK
+[check] ConsumeTag recovers field 1 / VarintType: OK
+
+======================================================================
+SECTION C — Full message round-trip (tag-value field by field)
+======================================================================
+encoded message = 08 96 01 12 05 68 65 6c 6c 6f
+  08       = tag: field 1, wire type 0 (varint)
+  96 01    = varint payload: 150
+  12       = tag: field 2, wire type 2 (length-delimited)
+  05       = length prefix: 5 bytes follow
+  68 65 6c 6c 6f = UTF-8 bytes of "hello"
+total length: 10 bytes
+decoded field 1 (varint)   = 150
+decoded field 2 (bytes)    = "hello"
+ConsumeField walk (number, type, total length):
+  field 1, wire type 0, record length 3
+  field 2, wire type 2, record length 7
+[check] encoded message is exactly 08 96 01 12 05 68 65 6c 6c 6f: OK
+[check] round-trip: field 1 decoded == 150: OK
+[check] round-trip: field 2 decoded == "hello": OK
+[check] message total length == 10: OK
+
+======================================================================
+SECTION D — Wire types (the low 3 bits of every tag)
+======================================================================
+field 1, each wire type -> tag byte and extracted wire-type bits:
+  VarintType(0)    tag byte=0x08  tag&0x7=0  (== 0? true)
+  Fixed64Type(1)   tag byte=0x09  tag&0x7=1  (== 1? true)
+  BytesType(2)     tag byte=0x0a  tag&0x7=2  (== 2? true)
+  Fixed32Type(5)   tag byte=0x0d  tag&0x7=5  (== 5? true)
+fixed64 field 3 = 0x0102030405060708 -> 19 08 07 06 05 04 03 02 01  (tag + 8 raw LE bytes)
+fixed32 field 4 = 0x01020304         -> 25 04 03 02 01  (tag + 4 raw LE bytes)
+[check] VarintType tag & 0x7 == 0: OK
+[check] Fixed64Type tag & 0x7 == 1: OK
+[check] BytesType tag & 0x7 == 2: OK
+[check] Fixed32Type tag & 0x7 == 5: OK
+[check] fixed64 payload is 8 bytes little-endian: OK
+[check] fixed32 payload is 4 bytes little-endian: OK
+
+======================================================================
+SECTION E — Unknown fields are SKIPPED (forward/backward compat)
+======================================================================
+message with unknown field 99 = 08 96 01 98 06 e7 07 12 05 68 65 6c 6c 6f
+  field  1: KNOWN -> decoded
+  field 99: unknown -> SKIPPED (2 bytes, wire type 0)
+  field  2: KNOWN -> decoded
+decoded field 1 = 150, field 2 = "hello", skipped 1 unknown field(s)
+[check] unknown field 99 skipped, field 1 still == 150: OK
+[check] unknown field 99 skipped, field 2 still == "hello": OK
+[check] exactly 1 unknown field was skipped: OK
+
+======================================================================
+SECTION F — Protobuf vs JSON size (the compactness argument)
+======================================================================
+protobuf = 08 96 01 12 05 68 65 6c 6c 6f
+  length: 10 bytes
+json     = {"id":150,"name":"hello"}
+  length: 25 bytes
+protobuf is 15 bytes smaller (40% of the JSON size)
+[check] protobuf is smaller than JSON for the same payload: OK
+[check] protobuf == 10 bytes: OK
+[check] json == 25 bytes: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

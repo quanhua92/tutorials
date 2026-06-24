@@ -1,0 +1,79 @@
+resilience_patterns.go — Phase 8 bundle (resilience patterns).
+Every value below is computed by this file; the .md guide pastes it verbatim.
+Deterministic: fake ops, seeded jitter, no printed timings, sorted goroutine output.
+
+======================================================================
+SECTION A — Retry + exponential backoff + seeded jitter
+======================================================================
+retry config: maxAttempts=5, base=1ms, cap=50ms, jitter=seeded additive[0,base)
+fake op: fails first 3 calls then succeeds -> result="ok", attempts=4, op.calls=4, err=<nil>
+backoff delays actually slept (base*2^attempt + seeded jitter, capped): [1.619289ms 2.376165ms 4.638116ms]
+[check] retry eventually succeeded (err == nil): OK
+[check] final result == "ok": OK
+[check] attempts == 4 (3 failures + 1 success): OK
+[check] op invoked exactly 4 times: OK
+[check] exactly 3 backoff delays slept (one per failure, none after success): OK
+non-retryable op -> attempts=1, fatalCalls=1, err=fatal non-retryable error: bad request (no retry attempted)
+[check] non-retryable error: attempts == 1 (no retry): OK
+[check] non-retryable error: op invoked exactly once: OK
+[check] non-retryable error returned is errFatal: OK
+
+======================================================================
+SECTION B — Circuit breaker (gobreaker): Closed -> Open -> HalfOpen -> Closed
+======================================================================
+after 2 failures: state=open, opCalls=2
+[check] after 2 failures the breaker is Open: OK
+[check] op was invoked exactly 2 times: OK
+Execute while Open -> err=circuit breaker is open, opCalls=2 (op NOT invoked)
+[check] Open Execute returned gobreaker.ErrOpenState: OK
+[check] op STILL invoked exactly 2 times (Open fast-failed without calling it): OK
+after cooldown + probe success: state=closed, opCalls=3, probe err=<nil>
+[check] after cooldown+success the breaker is Closed: OK
+[check] op invoked exactly 3 times (the probe ran): OK
+[check] probe Execute returned nil: OK
+state transitions observed (via OnStateChange): [closed -> open open -> half-open half-open -> closed]
+[check] first transition was closed -> open: OK
+[check] transition sequence is [closed->open, open->half-open, half-open->closed]: OK
+
+======================================================================
+SECTION C — Rate limiter (x/time/rate): token bucket, burst then block
+======================================================================
+Limiter: rate=Every(1h) = 0.0002777777777777778 tokens/sec, burst=3, bucket initially full
+Allow() x5 outcomes: [true true true false false]
+[check] exactly burst=3 Allows returned true: OK
+[check] the (burst+1)th Allow returned false (bucket empty, ~1 token/hour refill): OK
+[check] the (burst+2)th Allow returned false too: OK
+Wait(pre-cancelled ctx) -> err=context canceled (Wait blocks for a token unless ctx is done)
+[check] Wait on a pre-cancelled ctx returned context.Canceled: OK
+
+======================================================================
+SECTION D — Timeout (context.WithTimeout): slow op -> DeadlineExceeded
+======================================================================
+slow op (50ms) under ctx timeout (5ms) -> err=context deadline exceeded
+[check] slow op returned context.DeadlineExceeded: OK
+[check] ctx.Err() is also context.DeadlineExceeded: OK
+
+======================================================================
+SECTION E — Bulkhead (semaphore): cap concurrency at N, isolate a flooded dependency
+======================================================================
+bulkhead: chan struct{} cap=3 gates 10 workers (acquire=send, release=<-sem)
+workers that completed (sorted): [0 1 2 3 4 5 6 7 8 9]
+total token work (10 * sum(0..99999)): 49999500000
+[check] all 10 workers completed: OK
+[check] every worker id 0..9 ran exactly once: OK
+[check] peak in-flight <= capacity (3): OK
+[check] peak in-flight >= 1 (bulkhead was exercised): OK
+[check] total work == 10 * sum(0..99999) = 49999500000 (all goroutines completed): OK
+
+======================================================================
+SECTION F — Composition: timeout + retry + circuit breaker in one resilient call
+======================================================================
+composite call (timeout+retry+breaker) vs op(fails 3x then ok): err=<nil>
+op invocations=4, final breaker state=closed
+[check] composite call succeeded (err == nil): OK
+[check] op invoked exactly 4 times (3 retries + 1 success): OK
+[check] breaker ended Closed (the 3 transient fails did not trip the high threshold): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

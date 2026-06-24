@@ -1,0 +1,81 @@
+sqlx_gorm.go — Phase 6 bundle (the ORM contrast: sqlx vs gorm).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Both tools run against in-memory sqlite (:memory:).
+
+======================================================================
+SECTION A — sqlx: thin wrapper, manual SQL, struct scan
+======================================================================
+sqlx.Select(&[]SqlxProduct, "... ORDER BY name"):
+  id=1  code=A1  name=Alpha  price=5
+  id=2  code=B2  name=Beta   price=15
+  id=3  code=C3  name=Gamma  price=25
+[check] sqlx.Select returns 3 rows: OK
+[check] sqlx.Select sorted names == [Alpha Beta Gamma]: OK
+[check] sqlx struct scan mapped the db: tags (id=1->Alpha): OK
+
+======================================================================
+SECTION B — sqlx.Get (one row) + sqlx.NamedExec (:name params)
+======================================================================
+sqlx.Get(id=1) -> id=1 code=A1 name=Alpha price=5
+sqlx.NamedExec("...VALUES (:code,:name,:price)", SqlxProduct{...}) -> RowsAffected=1
+after NamedExec, products (ORDER BY name):
+  id=1  name=Alpha  price=5
+  id=2  name=Beta   price=15
+  id=3  name=Delta  price=35
+[check] sqlx.Get(id=1) returns Alpha: OK
+[check] sqlx.NamedExec affected 1 row: OK
+[check] sqlx now holds 3 rows: OK
+[check] sqlx NamedExec inserted Delta (sorted last): OK
+
+======================================================================
+SECTION C — gorm: AutoMigrate builds the table, Create inserts
+======================================================================
+gorm.AutoMigrate(&GormProduct{}) -> table built from struct tags
+  tags: column:id primaryKey autoIncrement | code not null size:16 | Note gorm:"-" (skipped)
+gorm.Find (Order name):
+  id=1  code=A1  name=Alpha  price=5  note=""  (gorm:"-" -> empty on read)
+  id=2  code=B2  name=Beta   price=15  note=""  (gorm:"-" -> empty on read)
+[check] gorm AutoMigrate+Create(2) -> Find returns 2 rows: OK
+[check] gorm autoIncrement assigned IDs 1 and 2: OK
+[check] gorm gorm:"-" field never scanned back (note empty): OK
+
+======================================================================
+SECTION D — gorm.Where chains build SQL; Find executes
+======================================================================
+gorm.Where("price > ?", 10).Find (Order name):
+  id=2  name=Beta   price=15
+  id=3  name=Gamma  price=25
+[check] gorm.Where price>10 returns 2 rows: OK
+[check] gorm.Where filtered set sorted == [Beta Gamma]: OK
+[check] gorm.Where excluded Alpha (price 5): OK
+
+======================================================================
+SECTION E — gorm.Updates + gorm.Delete -> ErrRecordNotFound
+======================================================================
+gorm.Update "price"=50 (id=1) -> id=1 name=Alpha price=50
+[check] gorm.Update set price to 50: OK
+gorm.Delete(id=1) then First(id=1) -> error = record not found
+[check] gorm.Delete -> First returns ErrRecordNotFound (errors.Is): OK
+gorm after delete, Find returns 1 row(s): [Beta]
+[check] gorm Delete left exactly 1 row (Beta): OK
+
+======================================================================
+SECTION F — the tradeoff: same task, sqlx (raw SQL) vs gorm (no SQL) + associations
+======================================================================
+same insert+query, two tools (data is identical):
+  sqlx  -> [Alpha Beta]   (you wrote CREATE TABLE + INSERT + SELECT)
+  gorm  -> [Alpha Beta]   (you wrote AutoMigrate + Create + Find; zero SQL)
+[check] sqlx and gorm return the same sorted names: OK
+associations WITHOUT Preload (gorm does NOT lazy-load):
+  U1: 0 items  (silently empty)
+  U2: 0 items  (silently empty)
+associations WITH Preload("Items") (eager: one extra query):
+  U1: 2 items -> [I1 I2]
+  U2: 1 items -> [I3]
+[check] without Preload every association is silently empty: OK
+[check] Preload eager-loaded U1's 2 items: OK
+[check] Preload eager-loaded U2's 1 item: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

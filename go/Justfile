@@ -1,0 +1,130 @@
+# go/Justfile — bundle runner & verification harness.
+#
+# Every run goes through `go run` (compiles to a temp dir, leaves NO binary in
+# the module), so there are never artifacts to gitignore-by-stem. Use these
+# recipes instead of calling `go build`/`go run` directly.
+#
+# Common:
+#   just run values_types_zero        # run a bundle
+#   just out  values_types_zero        # (re)capture its _output.txt
+#   just check values_types_zero       # verify ONE bundle (run + checks + fmt + vet + out)
+#   just sweep                         # verify ALL bundles (the batch sweep)
+#   just list                          # list every bundle stem
+#   just fmt [name]                    # gofmt + goimports one (or all)
+#   just new my_bundle                 # scaffold a new bundle from the house skeleton
+#   just clean                         # remove coverage/profile/test artifacts
+
+set shell := ["bash", "-c"]
+default := "list"
+
+# List every bundle stem (.go files in this dir).
+list:
+    @echo "Go bundles in $(pwd):"
+    @for f in *.go; do echo "  ${f%.go}"; done
+
+# Run a bundle by stem. No binary is produced (go run uses a temp dir).
+run name:
+    go run {{name}}.go
+
+# (Re)capture a bundle's stdout to <name>_output.txt (deterministic: §4.2 rules).
+out name:
+    go run {{name}}.go > {{name}}_output.txt 2>/dev/null
+    @test -s {{name}}_output.txt && echo "captured {{name}}_output.txt ($(wc -l < {{name}}_output.txt | tr -d ' ') lines)" || echo "EMPTY output — run failed?"
+
+# gofmt + goimports one bundle (name) or all bundles (no arg). Installs goimports if missing.
+fmt name='':
+    @if ! command -v goimports >/dev/null 2>&1; then \
+        echo "installing goimports..."; \
+        go install golang.org/x/tools/cmd/goimports@latest >/dev/null 2>&1 || true; \
+    fi
+    @if [ -z "{{name}}" ]; then \
+        gofmt -w *.go; \
+        command -v goimports >/dev/null 2>&1 && goimports -w *.go || true; \
+        echo "formatted all *.go"; \
+    else \
+        gofmt -w {{name}}.go; \
+        command -v goimports >/dev/null 2>&1 && goimports -w {{name}}.go || true; \
+        echo "formatted {{name}}.go"; \
+    fi
+
+# go vet a bundle by stem.
+vet name:
+    go vet {{name}}.go
+
+# staticcheck a bundle by stem (install if missing; deeper than go vet).
+static name:
+    @if ! command -v staticcheck >/dev/null 2>&1; then \
+        echo "installing staticcheck..."; \
+        go install honnef.co/go/tools/cmd/staticcheck@latest >/dev/null 2>&1 || { echo "staticcheck install failed"; exit 1; }; \
+    fi
+    staticcheck {{name}}.go
+
+# Verify ONE bundle: run it, count [check] lines, gofmt, go vet, _output.txt presence.
+check name:
+    @echo "===== {{name}} ====="
+    @go run {{name}}.go > /tmp/go_{{name}}.out 2>/tmp/go_{{name}}.err && echo "  go run: OK" || { echo "  go run: FAILED"; cat /tmp/go_{{name}}.err; exit 1; }
+    @n=$(grep -c "\[check\]" /tmp/go_{{name}}.out); echo "  checks printed: $n"
+    @gofmt -l {{name}}.go | grep -q . && echo "  gofmt: NEEDS FORMAT" || echo "  gofmt: OK"
+    @go vet {{name}}.go >/dev/null 2>&1 && echo "  go vet: OK" || echo "  go vet: FAIL"
+    @test -s {{name}}_output.txt && echo "  output.txt: present" || echo "  output.txt: MISSING"
+
+# (Re)capture _output.txt for ALL bundles (run after editing any .go).
+outall:
+    @for f in *.go; do \
+        name="${f%.go}"; \
+        go run "$f" > "${name}_output.txt" 2>/dev/null \
+            && echo "  $name: captured" \
+            || echo "  $name: FAILED"; \
+    done
+
+# Batch verification sweep across ALL bundles (run after a subagent swarm returns).
+sweep:
+    @echo "===== sweep: all bundles ====="
+    @fail=0; \
+    for f in *.go; do \
+        name="${f%.go}"; \
+        printf "\n--- %s ---\n" "$name"; \
+        if go run "$f" > /tmp/go_$name.out 2>/tmp/go_$name.err; then \
+            printf "  go run: OK\n"; \
+        else \
+            printf "  go run: FAILED\n"; cat /tmp/go_$name.err; fail=1; \
+        fi; \
+        n=$(grep -c "\[check\]" /tmp/go_$name.out 2>/dev/null); n=${n:-0}; \
+        printf "  checks printed: %s\n" "$n"; \
+        if gofmt -l "$f" | grep -q .; then printf "  gofmt: NEEDS FORMAT\n"; fail=1; else printf "  gofmt: OK\n"; fi; \
+        if go vet "$f" >/dev/null 2>&1; then printf "  go vet: OK\n"; else printf "  go vet: FAIL\n"; fail=1; fi; \
+        if test -s "${name}_output.txt"; then printf "  output.txt: present\n"; else printf "  output.txt: MISSING\n"; fi; \
+    done; \
+    echo; \
+    if [ $fail -eq 0 ]; then echo "SWEEP: all green"; else echo "SWEEP: failures detected (see above)"; fi
+
+# Whole-module sanity: verify every bundle has the //go:build ignore tag (so
+# `go build ./...` never hits a redeclared-main collision) and go.mod is coherent.
+module:
+    @echo "--- //go:build ignore invariant (first line of every .go) ---"
+    @bad=0; for f in *.go; do head -1 "$f" | grep -q '^//go:build ignore' || { echo "  MISSING tag: $f"; bad=1; }; done; \
+        [ $bad -eq 0 ] && echo "  all bundles tagged" || echo "  fix the files above"
+    @echo "--- go.mod ---"
+    @go mod verify >/dev/null 2>&1 && echo "  mod verify: OK" || echo "  mod verify: FAIL"
+
+# Scaffold a new bundle from scripts/skeleton.go (//go:build ignore + banner/check helpers).
+new name:
+    @test ! -f {{name}}.go || { echo "{{name}}.go already exists"; exit 1; }
+    @test -f scripts/skeleton.go || { echo "scripts/skeleton.go missing"; exit 1; }
+    @upper=$(echo "{{name}}" | tr '[:lower:]' '[:upper:]'); \
+        sed -e "s/__STEM__/{{name}}/g" -e "s/__STEM_UPPER__/$upper/g" scripts/skeleton.go > {{name}}.go
+    @gofmt -w {{name}}.go
+    @echo "created {{name}}.go — next: just run {{name}}   (edit sections, then capture: just out {{name}})"
+
+# Remove coverage / profile / test-binary artifacts (never source or _output.txt).
+clean:
+    @rm -f *.test *.prof *.pprof coverage.out coverage.html trace.out cpu.out mem.out block.out mutex.out goroutine.out
+    @echo "cleaned artifacts (binaries never land here — runs go through: just run NAME)"
+
+# phony aliases
+alias r := run
+alias o := out
+alias c := check
+alias s := sweep
+alias l := list
+alias n := new

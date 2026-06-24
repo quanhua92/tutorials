@@ -1,0 +1,93 @@
+encoding_json.go — Phase 5 bundle.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — Marshal/Unmarshal round-trip (struct + map)
+======================================================================
+User{Name:"Al", Age:42, email:"secret@x.io"}
+  -> Marshal  = {"name":"Al","age":42}
+  (note: email is unexported -> absent from JSON)
+  -> Unmarshal = {Name:Al Age:42 email:}  (email stayed zero: "")
+[check] Marshal(User) == {"name":"Al","age":42}: OK
+[check] round-trip: Name preserved: OK
+[check] round-trip: Age preserved: OK
+[check] round-trip: unexported email is lost (zero value): OK
+
+map[string]int{"zulu":1,"alpha":2,"mike":3}
+  -> Marshal  = {"alpha":2,"mike":3,"zulu":1}   (keys sorted: alpha,mike,zulu)
+[check] map keys sorted alphabetically: OK
+
+======================================================================
+SECTION B — Struct tags: omitempty, "-", and ",string"
+======================================================================
+Tagged{Visible:"hi", Hidden:"TOP SECRET", Age:0, Count:7}
+  -> Marshal  = {"visible":"hi","count":"7"}
+  (Age omitempty'd at 0; Hidden skipped via "-"; Count emitted as a string)
+[check] omitempty dropped Age (zero value): OK
+[check] json:"-" skipped Hidden: OK
+[check] ",string" emitted Count as a string: OK
+[check] exact bytes: OK
+
+======================================================================
+SECTION C — Custom MarshalJSON: a type controls its own form
+======================================================================
+LogItem{Level:LevelWarn, Msg:"disk 90%"}
+  -> Marshal  = {"level":"warn","msg":"disk 90%"}   (Level emitted as the quoted string "warn")
+[check] custom MarshalJSON: level == "warn": OK
+  -> Unmarshal = {Level:2 Msg:disk 90%}  ("warn" decoded back to LevelWarn)
+[check] custom UnmarshalJSON round-trips LevelWarn: OK
+
+var pLevel *Level // nil
+  -> Marshal(nil *Level) = null   (null; MarshalJSON NOT called)
+[check] nil *Level marshals to null (MarshalJSON skipped): OK
+
+======================================================================
+SECTION D — Streaming Encoder/Decoder vs Marshal/Unmarshal
+======================================================================
+value: {Msg:"<b>hi&bye</b>"}
+  Marshal        = {"msg":"\u003cb\u003ehi\u0026bye\u003c/b\u003e"}
+  Encoder.Encode = {"msg":"\u003cb\u003ehi\u0026bye\u003c/b\u003e"}
+   ^ note Encode added a trailing newline that Marshal does not
+[check] Encode output ends with newline: OK
+[check] Encode (minus newline) == Marshal output: OK
+
+  Encoder.SetEscapeHTML(false) = {"msg":"<b>hi&bye</b>"}
+   ^ raw <,>,& preserved; Marshal has no way to do this
+[check] SetEscapeHTML(false) keeps raw angle brackets/ampersand: OK
+
+stream of 3 concatenated JSON objects -> decoded IDs: [1 2 3]
+[check] streaming Decoder read all 3 in order: OK
+
+======================================================================
+SECTION E — json.RawMessage: defer parsing of a sub-field
+======================================================================
+input: {"type":"rgb","data":{...}}
+  envelope.Type = "rgb"
+  envelope.Data = {"r":98,"g":218,"b":255}   (still raw bytes; not yet parsed)
+  decoded as RGB      -> {R:98 G:218 B:255}
+[check] RawMessage: RGB decoded with exact channels: OK
+
+input: {"type":"reading","data":{"temp":36.6}}
+  envelope.Data = {"temp":36.6}
+  decoded as Reading  -> {Temp:36.6}
+[check] RawMessage: second envelope parsed as Reading: OK
+[check] RawMessage kept bytes verbatim (deferred, not float64): OK
+
+======================================================================
+SECTION F — json.Number vs float64 (precision) & dynamic JSON
+======================================================================
+input: {"id":9007199254740993}   (2^53 + 1)
+  default decode   -> float64 = 9.007199254740992e+15   -> int64 = 9007199254740992   (DRIFTED)
+  UseNumber decode -> json.Number = 9007199254740993   -> int64 = 9007199254740993   (EXACT)
+[check] float64 path drifted (precision lost): OK
+[check] json.Number path preserved exact int64: OK
+[check] json.Number.String() is the literal text: OK
+
+dynamic map[string]any -> Marshal = {"active":true,"meta":{"n":1},"name":"Al","tags":["go","json"]}
+  (flexible, but every access needs a type assertion; numbers are float64)
+[check] dynamic JSON marshals (keys sorted): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

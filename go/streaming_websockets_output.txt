@@ -1,0 +1,89 @@
+streaming_websockets.go — Phase 8 bundle (streaming: SSE + WebSockets).
+Every value below is produced by this file; the .md guide pastes it verbatim.
+Deterministic: in-process client + loopback server; random port never printed.
+
+======================================================================
+SECTION A — SSE basics: text/event-stream + http.Flusher + 3 events
+======================================================================
+Content-Type received   : "text/event-stream"
+ResponseWriter is http.Flusher: true
+client received 3 data events (sorted): [alpha bravo charlie]
+[check] Content-Type is text/event-stream: OK
+[check] ResponseWriter implements http.Flusher: OK
+[check] client received exactly 3 events: OK
+[check] sorted payloads == [alpha bravo charlie]: OK
+
+======================================================================
+SECTION B — SSE wire format: event/data/id + multi-line data
+======================================================================
+decoded 2 SSE events from the stream:
+  event#0: type="tick" data="42" id="7"
+  event#1: type="" data="line1\nline2" id=""
+[check] exactly 2 dispatchable events (the comment/retry block has no data): OK
+[check] event#0 type == "tick": OK
+[check] event#0 data == "42": OK
+[check] event#0 id == "7": OK
+[check] event#1 multi-line data == "line1\nline2": OK
+[check] event#1 has default type "" (no event: field): OK
+
+======================================================================
+SECTION C — WebSocket basics: Accept + Dial + echo (coder/websocket)
+======================================================================
+client sent "hello-ws" as a text frame; server echoed back "hello-ws" (type=MessageText)
+[check] echo: received the same bytes back: OK
+[check] echo frame type == MessageText: OK
+
+======================================================================
+SECTION D — WebSocket frames: MessageText vs MessageBinary round-trip
+======================================================================
+text frame   -> sent "plain text", echoed type=MessageText, bytes equal=true
+binary frame -> sent [0 255 66 1 254],  echoed type=MessageBinary, bytes equal=true
+[check] text frame echoed with type MessageText: OK
+[check] text frame bytes round-trip: OK
+[check] binary frame echoed with type MessageBinary: OK
+[check] binary frame bytes round-trip (incl. 0x00/0xFF): OK
+
+======================================================================
+SECTION E — WebSocket close handshake: StatusNormalClosure (1000)
+======================================================================
+client Read after server Close(1000,"bye") ->
+  CloseStatus(err) = 1000  (StatusNormalClosure = 1000)
+  errors.As(err, &CloseError) = true  -> Code=1000 Reason="bye"
+[check] CloseStatus(err) == StatusNormalClosure: OK
+[check] errors.As(err, &CloseError) succeeds: OK
+[check] CloseError.Code == 1000: OK
+[check] CloseError.Reason == "bye": OK
+
+======================================================================
+SECTION F — SSE vs WebSocket decision + backpressure (bounded buffer)
+======================================================================
+SSE vs WebSocket — when to choose which:
+  direction   : SSE=server->client (one-way)          WS=bidirectional (full-duplex)
+  transport   : SSE=HTTP response stream (text/event-stream, chunked)
+               WS=HTTP Upgrade handshake -> binary frames
+  reconnect   : SSE=built-in (EventSource auto-reconnect + Last-Event-ID)
+               WS=manual (the app must detect + re-dial)
+  data kinds  : SSE=UTF-8 text only               WS=text (UTF-8) and binary frames
+  rule of thumb: SSE for server-push (feeds, notifications, dashboards)
+                 WS  for interactive (chat, collaboration, multiplayer)
+browser SSE consumer (EventSource) — DOCUMENTED, not runnable here:
+  const es = new EventSource('/events');
+  es.onmessage = (e) => console.log(e.data);          // default 'message' events
+  es.addEventListener('tick', (e) => ...);            // named events (event: tick)
+  // reconnect is automatic; Last-Event-ID carries the id: field.
+
+backpressure demo (bounded chan, cap=2, drop policy):
+  enqueued m1,m2 (buffer full); m3 send -> dropped=true
+  drained 1; m4 send -> accepted=true
+  remaining in buffer (sorted): [m2 m4]
+[check] SSE is one-way (server->client): OK
+[check] WS is bidirectional (full-duplex): OK
+[check] SSE data is text-only; WS supports binary: OK
+[check] bounded buffer cap == 2: OK
+[check] send while full was dropped (producer not blocked): OK
+[check] send after a drain was accepted: OK
+[check] remaining buffer == [m2 m4] (m3 dropped, m4 enqueued): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

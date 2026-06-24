@@ -1,0 +1,85 @@
+unsafe_cgo.go — Phase 4 bundle (unsafe.Pointer + cgo).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — unsafe.Sizeof / Alignof / Offsetof (compile-time constants)
+======================================================================
+type                  Sizeof  Alignof   note
+--------------------  ------  -------   ----------------------------
+int8                     1       1
+int16                    2       2
+int32                    4       4
+int64                    8       8
+float64                  8       8
+bool                     1       1
+int (machine word)       8       8   <- platform-dependent (== word size)
+*int64 (any pointer)     8       8   <- platform-dependent (== word size)
+[]int64 (slice hdr)     24       8   <- ptr+len+cap, NOT the backing array
+string (string hdr)     16       8   <- ptr+len, NOT the bytes
+struct Padded{Flag bool; Val int64}:
+  Sizeof(Padded)   = 16   (1 + 7 padding + 8)
+  Alignof(Padded)  = 8   (dominant field: int64)
+  Offsetof(Flag)   = 0
+  Offsetof(Val)    = 8   (Flag + 7 bytes padding)
+[check] Sizeof(int8) == 1: OK
+[check] Sizeof(int16) == 2: OK
+[check] Sizeof(int32) == 4: OK
+[check] Sizeof(int64) == 8: OK
+[check] Sizeof(float64) == 8: OK
+[check] Sizeof(bool) == 1: OK
+[check] Alignof(int64) == 8 (every platform): OK
+[check] Sizeof(Padded) == 16 (bool + 7 pad + int64): OK
+[check] Alignof(Padded) == 8: OK
+[check] Offsetof(Padded.Flag) == 0: OK
+[check] Offsetof(Padded.Val) == 8 (after 7 bytes padding): OK
+[check] Sizeof([]int64) == 3 words (header only, not data): OK
+
+======================================================================
+SECTION B — unsafe.Pointer reinterpretation (pattern 1: *T1 -> *T2)
+======================================================================
+f = float64(1.0)
+bits := *(*uint64)(unsafe.Pointer(&f)) = 0x3ff0000000000000
+math.Float64bits(1.0)                 = 0x3ff0000000000000   (same bits, computed normally)
+n = int8(-1)
+*(*uint8)(unsafe.Pointer(&n)) = 255 (0xFF)   (two's-complement bits, re-typed)
+[check] float64(1.0) bits == math.Float64bits(1.0): OK
+[check] float64(1.0) bit pattern == 0x3FF0000000000000 (IEEE-754): OK
+[check] int8(-1) reinterpreted as uint8 == 255 (0xFF): OK
+
+======================================================================
+SECTION C — unsafe.String / Slice / StringData (zero-copy, Go 1.20+)
+======================================================================
+s := "hello, unsafe"  (len 13)
+unsafe.Slice(unsafe.StringData(s), len(s)) -> []byte (len 13, cap 13)  — NO copy
+string(b) == s ?  true
+raw := []byte{'x','y','z'} -> unsafe.String(&raw[0], len) = "xyz"  — NO copy
+[check] len(zero-copy []byte) == len(string): OK
+[check] string(zero-copy slice) == original string: OK
+[check] unsafe.String from []byte data == "xyz": OK
+
+======================================================================
+SECTION D — cgo: a real C function call across the Go<->C boundary
+======================================================================
+C.add(2, 3) = 5   (C compiled by clang, called from Go)
+C.CString("hello, cgo") -> C.c_strlen = 10   (Go string -> C heap -> strlen; len(greeting) = 10)
+[check] C.add(2,3) == 5 (real cgo call): OK
+[check] C.c_strlen("hello, cgo") == 10 (matches len): OK
+
+======================================================================
+SECTION E — CGO_ENABLED & the cgo cost (documentary + runtime proof)
+======================================================================
+runtime.NumCgoCall(): before C.add = 5   after C.add = 6   (delta 1)
+Documentary (NOT timed — ns/op is non-deterministic across runs):
+  - This binary is a cgo build: `import "C"` compiled against libc via clang.
+  - CGO_ENABLED=1 (default) links libc and allows the C calls above;
+    CGO_ENABLED=0 yields a pure-Go static binary and EXCLUDES import "C".
+  - Each C call crosses the goroutine<->OS-thread boundary: tens of ns to
+    ~200 ns of overhead plus possible M-thread handoff, and it defeats
+    inlining + escape analysis across the boundary. A tight loop of C calls
+    can be SLOWER than equivalent pure-Go code; batch C work or prefer Go.
+[check] runtime.NumCgoCall() advanced after one C.add call: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

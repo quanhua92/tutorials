@@ -1,0 +1,72 @@
+graceful_shutdown.go — Phase 8 bundle (production patterns).
+Every value below is produced by this file; the .md guide pastes it verbatim.
+No real OS signal is sent — the trigger is SIMULATED (stop()/Shutdown/Close
+called directly). httptest runs on loopback; no elapsed time is printed.
+
+======================================================================
+SECTION A — Shutdown drains an in-flight request (the core promise)
+======================================================================
+server.Shutdown(ctx) with 1 in-flight request -> err = <nil>
+in-flight request outcome: ok=true status=200 body="drained-ok"
+handler ran to completion and wrote the response: true
+[check] Shutdown returned nil (clean drain): OK
+[check] in-flight request received HTTP 200 (not dropped): OK
+[check] in-flight request body == "drained-ok": OK
+[check] handler ran to completion (wrote the response): OK
+
+======================================================================
+SECTION B — Shutdown (drain) vs Close (hard kill)
+======================================================================
+Shutdown: err=<nil>  request received-response=true status=200 body="shutdown-ok"
+Close:    err=<nil>  request received-response=false  handler-wrote-200=false
+[check] Shutdown returned nil: OK
+[check] Shutdown case: in-flight request finished with HTTP 200: OK
+[check] Close returned nil (it closes the listener): OK
+[check] Close case: in-flight request got NO response (dropped, transport error): OK
+[check] Close case: handler did NOT write 200 (cut off mid-flight): OK
+
+======================================================================
+SECTION C — context cancellation: cancel() -> worker exits and records 'cancelled'
+======================================================================
+cancel() -> worker observed ctx.Done() and recorded: "cancelled: context canceled"
+ctx.Err() after cancel = context canceled
+[check] worker recorded 'cancelled' after cancel(): OK
+[check] ctx.Err() == context.Canceled: OK
+
+======================================================================
+SECTION D — RegisterOnShutdown: a hook fires when Shutdown begins
+======================================================================
+server.Shutdown err = <nil>
+RegisterOnShutdown hook ran = true
+[check] Shutdown returned nil: OK
+[check] RegisterOnShutdown hook fired (flag set): OK
+
+======================================================================
+SECTION E — Full dance: signal.NotifyContext (simulated) -> Shutdown + worker drain
+======================================================================
+simulated signal (stop) -> server.Shutdown err = <nil>
+worker drained on ctx.Done: "drained: context canceled"
+RegisterOnShutdown cleanup hook ran (dbClosed) = true
+root ctx.Err() after stop() = context canceled
+[check] signal.NotifyContext ctx cancelled after stop(): OK
+[check] server.Shutdown returned nil (clean drain): OK
+[check] worker drained with 'context canceled': OK
+[check] RegisterOnShutdown cleanup hook ran: OK
+
+======================================================================
+SECTION F — Kubernetes graceful-termination timeline (DOCUMENTED)
+======================================================================
+k8s graceful-termination sequence (DOCUMENTED, not triggered here):
+  1. kubelet sends SIGTERM to the pod's process (PID 1).
+  2. App: signal.NotifyContext cancels root ctx -> stop accepting new requests,
+     drain in-flight handlers via server.Shutdown(deadlineCtx).
+  3. kubelet waits up to terminationGracePeriodSeconds (default 30s) for exit.
+  4. If still alive, kubelet sends SIGKILL (uncatchable) -> hard kill.
+recommended: Shutdown deadline (25s) < grace period (30s); margin = 5s
+note: the preStop hook AND Shutdown both count against the grace period.
+[check] recommended Shutdown deadline < k8s grace period: OK
+[check] safety margin is positive: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

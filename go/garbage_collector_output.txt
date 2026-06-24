@@ -1,0 +1,113 @@
+garbage_collector.go — Phase 4 bundle #23.
+Go's concurrent tri-color mark-sweep GC, measured via runtime.MemStats.
+Only RELATIVE deltas and deterministic counters are asserted
+(byte-identical across two `just out garbage_collector` runs).
+runtime.Version()=go1.26.4  GOMAXPROCS=10  NumCPU=10
+
+======================================================================
+SECTION A — Tri-color mark-sweep & runtime.MemStats
+======================================================================
+Go's GC is a CONCURRENT, NON-GENERATIONAL, NON-COMPACTING,
+tri-color MARK-AND-SWEEP collector:
+  WHITE = unscanned  (candidate for sweep)
+  GREY  = reachable, its pointers not yet scanned
+  BLACK = reachable, fully scanned (kept alive)
+Marking runs CONCURRENTLY with the mutator; only small STW
+(stop-the-world) windows occur at the start (sweep termination)
+and end (mark termination) of each cycle. Sweeping reclaims the
+WHITE objects. The WRITE BARRIER is enabled only while marking.
+
+runtime.MemStats key fields (measured here, asserted by direction):
+  HeapAlloc    bytes of allocated heap objects (live + not-yet-swept)
+  HeapObjects  count of allocated heap objects
+  NumGC        uint32, # of completed GC cycles (cumulative)
+  NumForcedGC  uint32, # of cycles forced by an application runtime.GC()
+  NextGC       target heap size; the goal is HeapAlloc <= NextGC
+  PauseTotalNs cumulative ns spent in STW pauses
+  EnableGC (always true, even when GOGC=off): true
+
+allocated 10000 *Box into a live slice:
+  HeapObjects went up? true
+  HeapAlloc   went up? true
+  (raw byte counts are runtime-dependent; only the delta is asserted)
+[check] MemStats.EnableGC is always true (even with GOGC=off): OK
+[check] NumGC is a cumulative, monotonic counter (after >= before): OK
+[check] allocating 10000 live objects raised HeapObjects: OK
+[check] allocating 10000 live objects raised HeapAlloc: OK
+
+======================================================================
+SECTION B — Force a cycle: runtime.GC() bumps NumGC/NumForcedGC
+======================================================================
+runtime.GC() runs a full collection and BLOCKS until it completes,
+so each call completes exactly one cycle. NumGC counts every cycle;
+NumForcedGC counts only the application-forced ones — a precise
+signal that is byte-identical across runs.
+forced 3 runtime.GC() calls:
+  NumGC       delta = 3  (>= 3; background cycles may add more)
+  NumForcedGC delta = 3  (exactly the forced cycles)
+  PauseTotalNs did not decrease? true  (STW pauses accumulate)
+[check] NumGC increased by >= 3 after 3 runtime.GC calls: OK
+[check] NumForcedGC increased by exactly 3: OK
+[check] PauseTotalNs is monotonic non-decreasing: OK
+
+======================================================================
+SECTION C — GOGC: the live-heap-growth trigger
+======================================================================
+GOGC (default 100) triggers a GC when the heap GROWS by GOGC% since
+the last sweep (at 100 it roughly doubles). GOGC=off disables automatic
+collection entirely (unless GOMEMLIMIT applies). debug.SetGCPercent
+returns the PREVIOUS value. Target heap = LiveHeap + (LiveHeap + GC
+roots) * GOGC/100 (roots counted since Go 1.18); minimum heap 4 MiB.
+SetGCPercent round-trip: initial=100  offEcho=-1  backEcho=100
+[check] SetGCPercent(-1) then restore echoes -1 (it was off): OK
+[check] SetGCPercent round-trips back to the initial value: OK
+GOGC=off, allocated ~64 MiB -> NumGC delta = 0 (no automatic GC)
+[check] with GOGC=off, allocating ~64 MiB triggered 0 GC cycles: OK
+GOGC=default(100), allocated ~64 MiB -> NumGC delta = 4 (>=1 automatic GC)
+[check] with GOGC enabled, allocating ~64 MiB triggered >= 1 GC cycle: OK
+
+======================================================================
+SECTION D — GOMEMLIMIT: the soft memory ceiling (Go 1.19+)
+======================================================================
+GOMEMLIMIT (debug.SetMemoryLimit, added in Go 1.19) sets a SOFT ceiling
+on total Go-runtime memory (MemStats.Sys - HeapReleased). It is enforced
+EVEN IF GOGC=off: the GC runs more often (up to ~50% CPU) to stay under
+it, which helps avoid OOM in memory-capped containers. It is SOFT on
+purpose: under extreme pressure the runtime lets memory exceed the limit
+rather than thrash (stall) the program. SetMemoryLimit returns the
+PREVIOUS limit; a NEGATIVE argument only queries, without changing it.
+current memory limit: 9223372036854775807 bytes  (math.MaxInt64 == disabled? true)
+SetMemoryLimit(1 GiB) -> previous=9223372036854775807  queryNow=1073741824  restoreEcho=1073741824
+[check] SetMemoryLimit(-1) is a non-mutating query (q1 == q2): OK
+[check] SetMemoryLimit(N) takes effect (a query then returns N): OK
+[check] SetMemoryLimit returns the value that was previously set: OK
+[check] after restore, querying again equals the original limit: OK
+
+======================================================================
+SECTION E — Finalizers are NOT a reliable cleanup hook
+======================================================================
+runtime.SetFinalizer attaches a callback that runs AFTER an object
+becomes unreachable and a GC sweeps it. But its timing is UNDEFINED
+and it is NOT guaranteed to run at process exit. Finalizers even
+RESURRECT the object (passing it in alive), so prefer defer / Close
+/ runtime.AddCleanup (1.24+). Here we only observe that it CAN fire.
+finalizer fired within a bounded GC loop? true
+[check] the object is no longer referenced by the program (obj == nil): OK
+[check] the finalizer was observed to run after forced GC: OK
+
+======================================================================
+SECTION F — Reducing GC pressure: sync.Pool vs fresh allocation
+======================================================================
+Fewer heap allocations = less GC work (see ESCAPE_ANALYSIS). sync.Pool
+loans out objects across GC cycles (Get/Put), turning a per-op heap
+allocation into ~0 in the steady state. testing.Benchmark reports
+AllocsPerOp, a deterministic integer we compare here.
+fresh &Box{} every op : AllocsPerOp = 1
+sync.Pool Get/Put      : AllocsPerOp = 0
+pool allocates fewer ops per iteration? true
+[check] fresh allocation allocates >= 1 object per op: OK
+[check] sync.Pool AllocsPerOp < fresh-allocation AllocsPerOp: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

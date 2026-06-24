@@ -1,0 +1,90 @@
+context.go — Phase 3 bundle (context.Context: deadlines,
+cancellation, request-scoped values). Every Err() code and Done() state
+below is computed by this file; the .md guide pastes it verbatim.
+Nothing is hand-computed; no wall-clock/duration values are printed.
+
+======================================================================
+SECTION A — Background, TODO & the context tree (the roots)
+======================================================================
+Background() == Background()? true   (same singleton, never cancelled)
+TODO()       == TODO()?       true   (same singleton, placeholder)
+Background().Done() == nil?  true   (Background can never be cancelled)
+TODO().Done()       == nil?  true   (TODO can never be cancelled either)
+child      Done() closed? false   Err() = <nil>   (live child)
+grandchild Done() closed? false   Err() = <nil>   (live grandchild)
+[check] Background() is the same singleton each call: OK
+[check] Background().Done() is nil (never cancellable): OK
+[check] TODO().Done() is nil (never cancellable): OK
+[check] live child: Done() not yet closed: OK
+[check] live child: Err() == nil: OK
+[check] live grandchild: Done() not yet closed: OK
+[check] live grandchild: Err() == nil: OK
+
+======================================================================
+SECTION B — WithCancel: cancel() closes Done(); Err()==context.Canceled
+======================================================================
+before cancel: Done() closed? false   Err() = <nil>
+after  cancel: Done() closed? true   Err() = context canceled
+[check] before cancel: Done() not closed: OK
+[check] before cancel: Err() == nil: OK
+[check] after cancel: Done() closed: OK
+[check] after cancel: Err() == context.Canceled: OK
+[check] after cancel: ctx.Err() is exactly the context.Canceled sentinel: OK
+
+======================================================================
+SECTION C — WithTimeout/WithDeadline: Err()==context.DeadlineExceeded
+======================================================================
+WithTimeout(bg, short-fixed): Done() closed? true   Err() = context deadline exceeded
+WithDeadline(bg, now+short) : Done() closed? true   Err() = context deadline exceeded
+[check] WithTimeout: Done() closed after it fires: OK
+[check] WithTimeout: Err() == context.DeadlineExceeded: OK
+[check] WithDeadline: Done() closed after it fires: OK
+[check] WithDeadline: Err() == context.DeadlineExceeded: OK
+
+======================================================================
+SECTION D — Cancellation propagates down the tree
+======================================================================
+before: parent closed? false  child closed? false  grandchild closed? false
+after parentCancel: parent.Err()=context canceled  child.Err()=context canceled  grandchild.Err()=context canceled
+[check] before: parent not closed: OK
+[check] before: child not closed: OK
+[check] before: grandchild not closed: OK
+[check] parentCancel -> child Done() closed: OK
+[check] parentCancel -> grandchild Done() closed: OK
+[check] parentCancel -> child.Err() == context.Canceled: OK
+[check] parentCancel -> grandchild.Err() == context.Canceled: OK
+
+======================================================================
+SECTION E — Values: right (unexported key) vs wrong (string key)
+======================================================================
+right: WithValue(bg, ctxKey{}, "req-123"); Value(ctxKey{}).(string) = "req-123", ok=true
+typed keys: Value(keyA(1))="a-val" ok=true   Value(keyB(1))="b-val" ok=true   (no collision)
+string key: outer role=admin, inner role=guest -> Value("role")="guest"   (nearest ancestor wins)
+note: go vet is silent here, but staticcheck/golint warn —
+      "should not use basic type string as key in context.WithValue".
+[check] right key: retrieved trace ID == "req-123": OK
+[check] right key: type assertion succeeded (ok==true): OK
+[check] typed keyA(1) retrieves a-val: OK
+[check] typed keyB(1) retrieves b-val: OK
+[check] string key shadowed: inner Value("role") == guest: OK
+[check] missing typed key returns nil (zero value): OK
+
+======================================================================
+SECTION F — ctx-first convention: worker(ctx) selects on Done()
+======================================================================
+run 1 (cancelled before release):
+  worker-1 stopped: context canceled
+  worker-2 stopped: context canceled
+  worker-3 stopped: context canceled
+run 2 (never cancelled):
+  worker-1 ran to completion
+  worker-2 ran to completion
+  worker-3 ran to completion
+[check] run 1: all 3 workers stopped on cancel: OK
+[check] run 2: all 3 workers ran to completion: OK
+[check] run 1: ctx1.Err() == context.Canceled (we cancelled): OK
+[check] run 2: ctx2.Err() == nil (never cancelled): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

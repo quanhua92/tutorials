@@ -1,0 +1,163 @@
+docker_k8s_deploy.go — Phase 8 bundle.
+RUNNABLE: the /healthz vs /readyz probe server + the graceful-
+termination simulation. DOCUMENTED (Sections E,F): the multi-stage
+scratch Dockerfile and the k8s Deployment manifest. The .md guide
+pastes every status code and [check] verbatim. No real cluster;
+no printed ports/addresses/elapsed-time (deterministic output).
+
+======================================================================
+SECTION A — /healthz (liveness) vs /readyz (readiness)
+======================================================================
+ready=false: GET /healthz -> 200   GET /readyz -> 503  (warming, not in Service)
+ready=true : GET /healthz -> 200   GET /readyz -> 200  (now receiving traffic)
+[check] liveness /healthz is 200 even while NOT ready: OK
+[check] readiness /readyz is 503 when NOT ready: OK
+[check] liveness /healthz stays 200 once ready: OK
+[check] readiness /readyz is 200 once ready: OK
+[check] liveness never moved (200 both times): OK
+
+======================================================================
+SECTION B — Probe failure semantics -> k8s consequence
+======================================================================
+liveness  /healthz -> 503  -> kubelet RESTARTS the container (after failureThreshold)
+readiness /readyz  -> 503  -> Pod removed from Service (NOT restarted)
+probe type  on failure                          k8s action
+----------  --------------------------------    ------------------------------------------
+liveness    /healthz returns 503 (N times)       kubelet KILLS + restarts the container
+readiness   /readyz  returns 503                 Pod's IP removed from EndpointSlice (no traffic, still runs)
+startup     /healthz never succeeds in time     kubelet KILLS + restarts the container
+[check] liveness failure yields 503: OK
+[check] readiness failure yields 503: OK
+[check] both failure modes are 503 (k8s distinguishes by WHICH probe): OK
+
+======================================================================
+SECTION C — Graceful termination: preStop -> SIGTERM -> Shutdown -> drain -> exit
+======================================================================
+STEP 1: pod marked Terminating; removed from Service endpoints (no new traffic)
+STEP 2: preStop hook executed (bridges endpoint-removal/SIGTERM propagation latency)
+STEP 3: SIGTERM delivered to PID 1  -> app stops accepting new connections, begins drain
+STEP 4: in-flight request drained; background worker drained
+STEP 5: app exits cleanly (drained in 500ms < grace 5s) -> no SIGKILL
+        server.Shutdown(ctx) err = <nil>
+        background worker items drained = 3
+[check] in-flight request drained (handler completed): OK
+[check] background worker drained (finished batch of 3): OK
+[check] server.Shutdown returned nil (drained within deadline): OK
+[check] graceful exit within grace period (no SIGKILL needed): OK
+
+======================================================================
+SECTION D — Startup gate: readiness 503 -> 200 as the app warms up
+======================================================================
+before warm (still loading caches / connecting DB): /readyz -> 503
+after warm  (warmed up, deps connected):          /readyz -> 200
+[check] readiness is 503 while still warming: OK
+[check] readiness transitions to 200 once warmed: OK
+[check] the warm-up flipped readiness exactly once (503 -> 200): OK
+
+======================================================================
+SECTION E — DOCKERFILE (documented): multi-stage, CGO_ENABLED=0, FROM scratch
+======================================================================
+
+# syntax=docker/dockerfile:1
+# =============================================================================
+# Stage 1 (builder): compile a STATIC binary. CGO disabled => no libc link =>
+# the binary runs in 'scratch' (which has zero shared libraries).
+# =============================================================================
+FROM golang:1.26-alpine AS builder
+WORKDIR /src
+# Cache deps: copy manifests first, download, THEN copy source.
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Static binary: -trimpath + -ldflags="-s -w" strip paths/symbols for a tiny
+# reproducible image; -X injects the release version at link time.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath -ldflags="-s -w -X main.version=v1.2.3" -o /out/app .
+
+# =============================================================================
+# Stage 2 (runtime): FROM scratch. ~5 MB image; no shell, no package manager,
+# no libc -> minimal attack surface. A static Go binary + CA certs is all it has.
+# (Alternative: FROM gcr.io/distroless/static:nonroot -> ships CA certs + tzdata
+#  + a nonroot user (UID 65532); still no shell/package manager.)
+# =============================================================================
+FROM scratch
+# CA certs so net/http can do TLS to external services (scratch ships none).
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# The static binary (and only that).
+COPY --from=builder /out/app /app
+# Run as non-root (numeric UID works in scratch with no /etc/passwd).
+USER 65532:65532
+EXPOSE 8080
+# No HEALTHCHECK: scratch has no shell/binary to run one. Rely on k8s probes.
+ENTRYPOINT ["/app"]
+[properties]
+[check] Dockerfile is multi-stage (has an AS builder stage): OK
+[check] builder disables CGO for a static binary (CGO_ENABLED=0): OK
+[check] builder targets linux (GOOS=linux): OK
+[check] final stage is FROM scratch (no OS, no shell): OK
+[check] final stage runs as a non-root UID (USER 65532): OK
+[check] image documents its port (EXPOSE 8080): OK
+
+======================================================================
+SECTION F — K8S MANIFEST (documented): 3 probes + preStop + grace period
+======================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: app }
+  template:
+    metadata:
+      labels: { app: app }
+    spec:
+      terminationGracePeriodSeconds: 30   # SIGTERM..SIGKILL window (default 30s)
+      containers:
+        - name: app
+          image: registry.example.com/app:v1.2.3
+          ports:
+            - { containerPort: 8080 }
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: LOG_LEVEL, value: "info" }
+          # startupProbe GATES liveness+readiness until the app is up, so a slow
+          # boot is not mistaken for a liveness failure. (failureThreshold x
+          # periodSeconds = the max boot time the app is granted.)
+          startupProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            failureThreshold: 30            # 30 x 10s = up to 5 min to come up
+            periodSeconds: 10
+          # livenessProbe failure => kubelet RESTARTS the container.
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 3
+          # readinessProbe failure => Pod removed from the Service (NOT restarted).
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 1
+          lifecycle:
+            preStop:
+              exec:
+                # scratch has no 'sleep': the binary ships its own grace-sleep
+                # to bridge the endpoint-removal/SIGTERM propagation race.
+                command: ["/app", "-grace-sleep", "5s"]
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+[properties]
+[check] manifest sets terminationGracePeriodSeconds: OK
+[check] manifest defines a startupProbe (gates liveness+readiness): OK
+[check] manifest defines a livenessProbe (failure -> restart): OK
+[check] manifest defines a readinessProbe (failure -> removed from Service): OK
+[check] manifest has a preStop lifecycle hook: OK
+[check] probes use httpGet against /healthz and /readyz: OK
+[check] manifest sets resource requests and limits: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,79 @@
+escape_analysis.go — Phase 4 bundle (memory, runtime & internals).
+Every allocs/op below is MEASURED by testing.Benchmark; the .md guide
+pastes these numbers verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — Stack: a value that stays put (0 allocs)
+======================================================================
+stackSum(a,b int) int returns a plain VALUE — no pointer leaves
+the frame, so nothing escapes. The compiler keeps everything on
+the stack, which is reclaimed for free (no GC) when the frame pops.
+  stackSum(2,3)                    allocs/op = 0    bytes/op = 0
+[check] stackSum allocates 0 (stays on the stack): OK
+
+======================================================================
+SECTION B — Heap: `return &local` escapes (>=1 alloc)
+======================================================================
+heapInt() *int { x := 1; return &x } — the address of x leaves
+the frame, so x's lifetime can't be confined to the stack. Escape
+analysis MOVES x to the heap: one allocation the GC must track.
+  heapInt() -> sinkPtr             allocs/op = 1    bytes/op = 8
+[check] heapInt allocates >=1 (x moved to heap): OK
+
+======================================================================
+SECTION C — Interface boxing: strconv.Itoa (0) vs fmt.Sprintf (>=1)
+======================================================================
+fmt.Sprintf takes (string, ...any): the int is BOXED into an
+interface{} and formatted through reflection-like dispatch -> an
+allocation. strconv.Itoa is monomorphic and uses a stack buffer
+for small ints -> 0 allocations. Same output, different cost.
+  strconv.Itoa(42)                 allocs/op = 0    bytes/op = 0
+  fmt.Sprintf("%d",42)             allocs/op = 1    bytes/op = 2
+[check] strconv.Itoa(42) allocates 0: OK
+[check] strconv.Itoa allocates <= fmt.Sprintf: OK
+[check] fmt.Sprintf allocates >=1 (interface boxing): OK
+
+======================================================================
+SECTION D — Slice preallocation: make(_,0,n) (0) vs append growth (>=1)
+======================================================================
+Neither slice below escapes (only an int sum is returned). But a
+slice preallocated with a KNOWN capacity can keep its backing array
+on the stack (0 allocs), while one grown by appending from nil has
+its backing array heap-allocated by runtime.growslice (>=1 alloc).
+  preallocSum (make cap=8)         allocs/op = 0    bytes/op = 0
+  growSum (append from nil)        allocs/op = 1    bytes/op = 64
+[check] preallocated slice allocates 0: OK
+[check] grown slice allocates >=1: OK
+[check] preallocated allocates <= grown: OK
+
+======================================================================
+SECTION E — Closure capture: the captured value escapes (>=1 alloc)
+======================================================================
+makeAdder(base) returns a closure that captures base. Because the
+closure outlives the call, the captured base and the closure value
+itself are moved to the heap -> one allocation.
+  makeAdder(10) closure            allocs/op = 1    bytes/op = 16
+[check] closure capture allocates >=1: OK
+
+======================================================================
+SECTION F — Summary: every measured allocation count, pinned
+======================================================================
+label                            allocs/op   bytes/op   verdict
+-------------------------------- ---------- ---------- ----------------------------
+stackSum(2,3)                             0          0   stack (free)
+heapInt() return &x                       1          8   heap (moved to heap)
+strconv.Itoa(42)                          0          0   stack (monomorphic)
+fmt.Sprintf("%d",42)                      1          2   heap (interface box)
+preallocSum cap=8                         0          0   stack (known cap)
+growSum append nil                        1         64   heap (growslice)
+makeAdder(10) closure                     1         16   heap (closure esc)
+
+These counts are deterministic for a fixed workload and are what
+`just check escape_analysis` asserts. To SEE the compiler's escape
+DECISIONS (not just their cost), run:
+    go build -gcflags=-m escape_analysis.go
+and look for: "moved to heap", "escapes to heap", "does not escape".
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,102 @@
+observability_otel.go — Phase 8 bundle (observability).
+Every value below is captured by a CUSTOM deterministic SpanExporter;
+trace/span IDs and timestamps are never printed (random -> non-reproducible).
+
+======================================================================
+SECTION A — Span basics: the unit of work (tracer.Start, attributes, End)
+======================================================================
+[check] trace.SpanFromContext(ctx) is the span just started (ctx carries it): OK
+[check] span.IsRecording()==true BEFORE End: OK
+[check] span.IsRecording()==false AFTER End (it is complete): OK
+tracer.Start(ctx, "work"); span.End() -> exporter captured 1 span(s): [work]
+  name="work" kind="internal" hasParent=false service.name="demo-svc" attrs=[component=handler]
+[check] exporter captured exactly 1 span: OK
+[check] the captured span is named "work": OK
+[check] default SpanKind is "internal" (not provided -> internal): OK
+[check] a root span has NO parent (Parent SpanContext invalid): OK
+[check] resource service.name == "demo-svc" is attached to the span: OK
+
+======================================================================
+SECTION B — Parent/child tree: a child nests via the propagated ctx
+======================================================================
+parent + child (child created from parent's ctx) -> 2 spans (sorted): [child parent]
+  name="child" hasParent=true
+  name="parent" hasParent=false
+[check] exporter captured exactly 2 spans: OK
+[check] the "child" span has a parent (it nested): OK
+[check] the "parent" span is a root (no parent): OK
+[check] exactly one of the two spans has a parent: OK
+
+======================================================================
+SECTION C — Attributes + Status: annotate a span, mark it Error
+======================================================================
+span "checkout" recorded attrs (sorted): [attempt=3, user=al]
+span "checkout" recorded status: code="Error" description="card declined"
+[check] attribute user == "al" is recorded: OK
+[check] attribute attempt == 3 is recorded: OK
+[check] status code is "Error": OK
+[check] status description is "card declined": OK
+[check] attributes are sorted by key (attempt before user): OK
+
+======================================================================
+SECTION D — Context propagation: in-process nesting + W3C tracecontext
+======================================================================
+in-process: db.Query(ctx) called inside handle-request -> db.Query hasParent=true, handle-request hasParent=false
+[check] in-process: "db.Query" nested under its caller (has parent): OK
+[check] in-process: "handle-request" is the root (no parent): OK
+W3C: carrier has "traceparent"? true ; structure version="00-" & 4 dash-fields? true (raw value NOT printed: random IDs)
+W3C: "svcB.handle" hasParent=true parentRemote=true (child of the remote parent)
+[check] W3C: traceparent header present after Inject: OK
+[check] W3C: traceparent structure is version 00- + 4 dash-fields: OK
+[check] W3C: extracted remote parent SpanContext is valid: OK
+[check] W3C: extracted remote parent IsRemote()==true (crossed a process boundary): OK
+[check] W3C: extracted TraceID == root TraceID (SAME trace, equality only): OK
+[check] W3C: extracted parent SpanID == root SpanID (svcB is a child of svcA): OK
+[check] W3C: "svcB.handle" recorded with a parent: OK
+[check] W3C: "svcB.handle"'s parent is REMOTE: OK
+
+======================================================================
+SECTION E — Metrics: a Counter accumulates; attribute-sets = cardinality
+======================================================================
+counter "http.server.requests" snapshot (sorted by attribute fingerprint):
+  series[<no attributes>] = 3
+  series[route=/checkout] = 1
+[check] the default (no-attr) counter series accumulated 3 increments: OK
+[check] the attributed series (route=/checkout) is a SEPARATE data point == 1: OK
+[check] snapshot has exactly 2 series (cardinality = distinct attribute-sets): OK
+[check] a Counter is monotonic (all values > 0): OK
+
+======================================================================
+SECTION F — Production pipeline (DOCUMENTED): exporter -> collector -> backends
+======================================================================
+The three SIGNALS (the observability trinity), tied by one Trace ID:
+  TRACES  : a directed TREE of spans -> causality + timing across services.
+  METRICS : aggregated numbers (Counter/Histogram/Gauge) over time.
+  LOGS    : structured records, correlated to a trace by Trace ID/Span ID.
+  -> one Trace ID threads a request through traces, metrics, AND logs.
+
+Pipeline (provider -> processor -> exporter):
+  TracerProvider -> SpanProcessor (Simple=sync / Batch=async) -> SpanExporter.
+  WithSyncer (SimpleSpanProcessor) exports synchronously on span.End() (used here).
+  WithBatcher (BatchSpanProcessor) batches + exports async (production default).
+
+Exporters / backends (DOCUMENTED, not run here):
+  stdouttrace  : prints span JSON to stdout — contains RANDOM trace/span IDs +
+                 timestamps, so it is NON-reproducible (NOT used for this file's output).
+  OTLP exporter: sends OTLP/gRPC or OTLP/HTTP to the OpenTelemetry Collector.
+  Collector    : receives -> processes (batch, tail-sampling) -> exports to backends:
+                 Jaeger / Tempo (traces), Prometheus (metrics), Loki (logs), Grafana.
+  Baggage      : W3C baggage propagates arbitrary key/value pairs across services
+                 (do NOT put secrets/PII in it — it crosses trust boundaries).
+  Sampling     : head sampling (ParentBased/AlwaysSample, TraceIDRatio) decides at
+                 span creation; tail sampling decides at the collector (needs the full trace).
+
+Lifecycle (🔗 GRACEFUL_SHUTDOWN): on shutdown call tp.ForceFlush(ctx) then
+tp.Shutdown(ctx) so buffered spans are delivered before the process exits.
+[check] stdouttrace was NOT used for printed output (random IDs are non-reproducible): OK
+[check] WithSyncer exports synchronously on span.End (deterministic capture): OK
+[check] a Trace ID ties the three signals (traces + metrics + logs) together: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

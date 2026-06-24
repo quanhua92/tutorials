@@ -1,0 +1,139 @@
+lint_staticcheck.go — Phase 7 bundle #45 (the linting stack).
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Sections A–D are runnable (go/format + go/parser + go/ast);
+Sections E–F DOCUMENT the vet/staticcheck/golangci-lint CLIs.
+
+======================================================================
+SECTION A — go/format.Source: canonical formatting in the stdlib
+======================================================================
+messy  input bytes : "func  main(){x:=1}"
+canonical output   : "func main() { x := 1 }"
+(this is exactly what `gofmt` would print for the same snippet)
+
+format.Source(already-canonical file) == input ? true
+(this is why `gofmt -l` prints nothing for a formatted file)
+[check] format.Source(messy partial) == canonical bytes: OK
+[check] format.Source(already-canonical file) is a no-op (idempotent): OK
+[check] the canonical form has no double space after `func`: OK
+
+======================================================================
+SECTION B — go/parser + go/ast.Inspect: the linter engine
+======================================================================
+parsed demo.go: 3 FuncDecl, 3 fmt.Println call sites
+(vet/staticcheck find anti-patterns the same way: walk the AST, match shapes)
+[check] AST walk counted FuncDecls == 3 (alpha, beta, gamma): OK
+[check] AST walk counted fmt.Println calls == 3: OK
+
+======================================================================
+SECTION C — A mini-linter: two AST rules (interface{} params, _ = discards)
+======================================================================
+RULE                   LOCATION
+---------------------- -------------------------------------
+empty-interface-param  takesAny.x
+empty-interface-param  takesTwo.a
+empty-interface-param  takesTwo.b
+discarded-value        demo.go:9:2
+discarded-value        demo.go:10:2
+[check] rule 1 flagged empty-interface params == 3 (takesAny.x, takesTwo.a, takesTwo.b): OK
+[check] rule 2 flagged `_ =` discards == 2 (_ = err, _ = doAnother()): OK
+[check] total findings == 5 (rules compose; a real linter runs many): OK
+
+======================================================================
+SECTION D — gofmt -l gate: idempotency & stability
+======================================================================
+messy     -> once : "package main\n\nfunc foo(x int) int { return x + 1 }\n"
+messy     -> twice: "package main\n\nfunc foo(x int) int { return x + 1 }\n"   (identical to once? true)
+canonical -> once : "package main\n\nfunc foo(x int) int { return x + 1 }\n"   (identical to input? true)
+`gofmt -l` prints filenames whose once-formatted form differs from disk;
+an empty stdout is the green CI gate.
+[check] idempotent: format(format(messy)) == format(messy): OK
+[check] stable: format(canonical) == canonical (no-op on canon input): OK
+[check] the messy input really was different from its canon form: OK
+
+======================================================================
+SECTION E — go vet: the bundled checker (DOCUMENTED CLI catalog)
+======================================================================
+go vet runs ~35 analyzers. `go vet ./...` is part of `go test` by default.
+Curated flagship analyzers (from `go tool vet help`):
+
+ANALYZER       CHECKS (one-line)                            BAD-CODE EXAMPLE
+-------------- -------------------------------------------- -------------------------------------
+printf         check consistency of Printf format strings and arguments fmt.Printf("%d items", name, count)  // 2 args, 1 verb; wrong types
+copylocks      check for locks erroneously passed by value  func bad(m sync.Mutex) {}  // Mutex copied -> the lock is now useless
+structtag      check that struct field tags conform to reflect.StructTag.Get type T struct { X int "json" }  // tag missing ":name"; malformed
+lostcancel     check cancel func returned by context.WithCancel is called ctx, _ := context.WithCancel(parent)  // cancel discarded -> leak
+unreachable    check for unreachable code                   return 1; fmt.Println("never")  // after an unconditional return
+loopclosure    check references to loop variables from within nested functions for _, v := range items { go func(){ use(v) }() }  // pre-1.22 capture
+slog           check for invalid structured logging calls   slog.Info("msg", "k")  // missing value for key "k" (odd arg count)
+unusedresult   check for unused results of calls to some functions fmt.Errorf("oops")  // result discarded; likely meant `return`
+errorsas       report passing non-pointer or non-error values to errors.As errors.As(err, target)  // target must be *E where *E: error
+stdmethods     check signature of methods of well-known interfaces func (t T) String(s string) string  // String must take no args
+
+Run `go tool vet help` for the full list; `go tool vet help <name>` for one analyzer.
+[check] every vet catalog entry has a name, a one-line desc, and a bad-code example: OK
+[check] the catalog covers the flagship analyzers (printf, copylocks, structtag, lostcancel): OK
+
+======================================================================
+SECTION F — staticcheck + golangci-lint (DOCUMENTED CLIs + config)
+======================================================================
+staticcheck (honnef.co/go/tools) is a deeper analyzer than go vet.
+It splits its checks into four category PREFIXES (the codes you see in CI):
+
+  SA  staticcheck   correctness bugs        (SA1xxx stdlib, SA2xxx concurrency,
+                                           SA4xxx no-ops, SA5xxx crashes, SA6xxx perf)
+  S   simple        simplifications        (S1xxx: redundant / over-complex code)
+  ST  stylecheck    stylistic issues       (ST1xxx: naming, doc, idioms)
+  QF  quickfix      auto-fixable           (QF1xxx: `go fix` can apply these)
+
+Curated flagship staticcheck checks (from staticcheck.dev/docs/checks):
+
+CODE     CATEGORY                         DESCRIPTION
+-------- -------------------------------- -------------------------------------
+SA1019   SA (staticcheck / correctness)   Using a deprecated function, variable, constant or field
+SA4006   SA (staticcheck / correctness)   A value assigned to a variable is never read before being overwritten
+SA5001   SA (staticcheck / correctness)   Deferring Close before checking for a possible error
+SA9001   SA (staticcheck / correctness)   Defers in range loops may not run when you expect them to
+S1002    S (simple / simplification)      Omit comparison with boolean constant (if x == true {} -> if x {})
+S1029    S (simple / simplification)      Range over the string directly (not over []rune(s))
+ST1003   ST (stylecheck / style)          Poorly chosen identifier (avoid snake_case; use GoCaps)
+ST1005   ST (stylecheck / style)          Incorrectly formatted error string (no capitalization, no punctuation)
+QF1001   QF (quickfix / auto-fixable)     Apply De Morgan's law
+
+golangci-lint is a META-linter: one binary that runs ~30 linters (staticcheck,
+errcheck, govet, ineffassign, gosec, revive, ...) in parallel with one config.
+Minimal but realistic config (a repo commits this as .golangci.yml):
+
+    # .golangci.yml — golangci-lint is a META-linter that aggregates ~30 linters.
+    # Install:  go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+    # Run:      golangci-lint run ./...
+    linters:
+      enable:                    # add linters on top of the default set
+        - errcheck               # check unchecked errors (the blank-assign from section C)
+        - gosimple               # = staticcheck 'S' category
+        - govet                  # = the `go vet` analyzers
+        - ineffassign            # detect assignments to values that are never read
+        - staticcheck            # = staticcheck 'SA'/'ST' categories
+        - unused                 # = staticcheck 'U' category (unused code)
+        - revive                 # configurable, extensible drop-in for `golint`
+        - gosec                  # security-focused checks
+    linters-settings:
+      staticcheck:
+        checks: ["all", "-ST1000"]  # enable everything; opt out of noisy checks
+    issues:
+      max-issues-per-linter: 0     # no per-linter limit (show everything)
+      max-same-issues: 0
+
+CI integration (the red->green gate):
+  gofmt -l .           # MUST print nothing (canon gate)
+  go vet ./...         # MUST exit 0 (bundled checks)
+  staticcheck ./...    # OR: golangci-lint run  (deeper)
+All three green == merge-eligible. Cross-ref: a failure is the RED half of
+the red->green loop you already know from testing.
+[check] every staticcheck catalog entry has a 2-letter prefix code + category + desc: OK
+[check] staticcheck codes use the SA/S/ST prefixes documented above: OK
+[check] the golangci-lint config enables staticcheck and errcheck (the two flagship): OK
+[check] the CI gate is gofmt -l + go vet + staticcheck (three gates): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,72 @@
+concurrency_capstone.go — Phase 8 bundle (the concurrency synthesis).
+Every value below is computed by this file; the .md guide pastes it verbatim.
+No goroutine prints; results are collected, SORTED, and printed from main after
+every goroutine joins -> byte-identical runs.
+
+======================================================================
+SECTION A — The fetch primitive & the job stream
+======================================================================
+job stream: 8 jobs (ids 0..7); seeded payloads (math/rand/v2 PCG seed 42,42)
+fetch(id=1, healthy)  -> payload=37616, err=<nil>
+fetch(id=3, failing) -> payload=0, err=fetch id=3: injected upstream failure
+[check] job stream has exactly N=8 jobs: OK
+[check] fetch of a healthy id returns nil error: OK
+[check] fetch of a healthy id returns its seeded payload: OK
+[check] fetch of the failing id returns the injected error: OK
+[check] the injected error names the failing id: OK
+[check] each fetch went through lim.Wait (2 waits for 2 fetches): OK
+
+======================================================================
+SECTION B — errgroup-equivalent: Go/Wait, first-error-wins
+======================================================================
+errgroup-equivalent: 3 funcs launched (one returns an error)
+all 3/3 funcs ran (Wait blocks until EVERY goroutine exits)
+Wait() error: boom: stage 2 failed
+[check] all 3 funcs ran (Wait blocks until every goroutine exits): OK
+[check] Wait() returned a non-nil error: OK
+[check] Wait() error is the injected first error: OK
+
+======================================================================
+SECTION C — Bounded worker pool + rate limiter (fan-out, no failure)
+======================================================================
+bounded pool: 4 workers, 12 jobs, rate=10000 tokens/sec burst=4 (no failure)
+collected 12 payloads (sorted) -> [1946 14938 19442 23582 30182 33685 43992 52056 56356 75902 80979 96004]
+[check] pool processed all 12 jobs (12 payloads collected): OK
+[check] sorted result set == all N payloads (set is scheduler-independent): OK
+[check] every fetch went through lim.Wait (limWaits == fetches == N): OK
+
+======================================================================
+SECTION D — Cancellation on first error (errgroup.WithContext semantics)
+======================================================================
+cancellation: failing id=0 (first dispatched), 4 workers, ctx from errgroup.WithContext
+first error captured by Wait(): fetch id=0: injected upstream failure
+(fetches that raced the cancel signal are scheduler-dependent; asserting bounds only)
+[check] Wait() returned a non-nil error (first error captured): OK
+[check] the captured error is the injected failure for id=0: OK
+[check] completed fetches bounded: 1 <= fetchesInvoked <= N: OK
+
+======================================================================
+SECTION E — Graceful drain: cancel stops the stream, pool joins cleanly
+======================================================================
+graceful drain: generator feeds up to 1000, 3 workers; collector takes 5 then cancels
+(drained count is scheduler-dependent; asserting bounds only)
+[check] at least the requested results drained before cancel: OK
+[check] drain stopped far below streamCap (cancel stopped the generator): OK
+
+======================================================================
+SECTION F — The full system: pool + rate limiter + errgroup + metrics
+======================================================================
+full system: N=16 jobs, W=4 workers, rate=10000 tokens/sec, one injected failure at id=3
+successful payloads (sorted) -> [2610 12757 15826 18087 22841 23259 23704 25933 43122 44491 53205 56299 81397 82103 82503]
+first error captured         -> fetch id=3: injected upstream failure
+metrics: fetchesInvoked=16, limWaits=16 (NumGoroutine counts runtime-dependent, not printed)
+[check] all N fetches invoked (jobs channel fully drained): OK
+[check] every fetch went through lim.Wait (limWaits == fetches == N): OK
+[check] successful result set == all ids except the failing one (sorted): OK
+[check] exactly N-1 successes (one injected failure): OK
+[check] Wait() returned the injected error for the failing id: OK
+[check] no goroutine leak (NumGoroutine within baseline+3 after Wait): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

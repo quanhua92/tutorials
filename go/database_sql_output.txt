@@ -1,0 +1,81 @@
+database_sql.go — Phase 6 bundle.
+Every value below is produced by this file against an in-memory
+SQLite DB; the .md guide pastes it verbatim. No network, no file,
+no hand-computed numbers. database/sql is the only API used.
+
+======================================================================
+SECTION A — Open, driver, pool, Ping, CREATE TABLE, INSERT
+======================================================================
+sql.Drivers() = [sqlite]   (the "sqlite" driver is registered)
+db.Driver() type = *sqlite.Driver   (non-nil? true)
+db.Stats().MaxOpenConnections = 5   (reflects SetMaxOpenConns(5))
+db.Ping() err = <nil>   (nil == connection established on demand)
+CREATE TABLE -> err = <nil>   (schema OK)
+INSERT Alice -> LastInsertId = 1, RowsAffected = 1
+[check] sql.Drivers() contains "sqlite": OK
+[check] db.Driver() is non-nil: OK
+[check] SetMaxOpenConns(5) reflected in Stats: OK
+[check] db.Ping() returned no error: OK
+[check] INSERT Alice RowsAffected == 1: OK
+[check] INSERT Alice LastInsertId == 1: OK
+
+======================================================================
+SECTION B — Query / Next / Scan loop (sorted, defer Close)
+======================================================================
+SELECT name FROM users ORDER BY name -> [Alice Bob Carol]
+[check] sorted names == [Alice Bob Carol]: OK
+[check] exactly 3 rows scanned: OK
+
+======================================================================
+SECTION C — QueryRow + sql.ErrNoRows (errors.Is)
+======================================================================
+QueryRow(id=1) -> name="Alice", err=<nil>
+QueryRow(id=999) -> err="sql: no rows in result set", errors.Is(err, sql.ErrNoRows)=true
+[check] existing id scanned name == Alice: OK
+[check] missing id -> errors.Is(err, sql.ErrNoRows): OK
+[check] missing id err text == "sql: no rows in result set": OK
+[check] sql.ErrNoRows is the exact sentinel: OK
+
+======================================================================
+SECTION D — Prepared statements (parameterize, reuse)
+======================================================================
+prepared INSERT x3 -> COUNT(*) = 3
+parameterized WHERE name=? with hostile input -> errors.Is(ErrNoRows)=true (treated as literal, no injection)
+parameterized WHERE name=? 'Eve' -> "Eve"
+[check] 3 prepared inserts -> COUNT(*) == 3: OK
+[check] hostile input matched no row (no injection): OK
+[check] parameterized lookup of 'Eve' works: OK
+
+======================================================================
+SECTION E — NULL columns -> sql.NullString (Valid + value)
+======================================================================
+Alice email -> NullString{String:"alice@x.com", Valid:true}
+Bob   email -> NullString{String:"", Valid:false}   (NULL)
+[check] Alice email Valid == true: OK
+[check] Alice email String == alice@x.com: OK
+[check] Bob email Valid == false (NULL): OK
+[check] Bob email String == "" when NULL: OK
+
+======================================================================
+SECTION F — Transactions: Begin / Commit / Rollback
+======================================================================
+rollback path: before=3, during-tx=4, after-Rollback=3
+commit path:   before=3, after-Commit=5
+[check] before transaction COUNT(*) == 3: OK
+[check] during tx COUNT(*) == 4 (sees uncommitted row): OK
+[check] after Rollback COUNT(*) == 3 (insert discarded): OK
+[check] after Commit COUNT(*) == 5 (two inserts persisted): OK
+
+======================================================================
+SECTION G — N+1 problem: N+1 queries vs 1 JOIN
+======================================================================
+N+1 path: 4 queries for 3 users -> Alice=100, Bob=200, Carol=300
+JOIN path: 1 query  for 3 rows -> Alice=100, Bob=200, Carol=300
+[check] N+1 path issued 4 queries (1 + 3 users): OK
+[check] JOIN path issued 1 query: OK
+[check] N+1 queries > JOIN queries: OK
+[check] both paths returned 3 rows: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

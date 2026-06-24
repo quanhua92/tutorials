@@ -1,0 +1,93 @@
+errors.go — the `error` interface, wrapping, Is/As/Unwrap/Join, panic/recover.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+======================================================================
+SECTION A — `error` is a built-in one-method interface
+======================================================================
+var e error            -> <nil>   (zero value: a nil interface)
+e == nil               -> true
+nfe := NotFoundError{Item:"X"}; var asErr error = nfe
+    asErr              -> not found: X
+    concrete type      -> main.NotFoundError   (the dynamic type behind the interface)
+errors.New("dup") == errors.New("dup") -> false   (distinct instances; reuse a sentinel)
+[check] zero value of the error interface is nil: OK
+[check] NotFoundError satisfies error (assignable to error): OK
+[check] NotFoundError{X}.Error() == "not found: X": OK
+[check] two errors.New with same text are distinct (a != b): OK
+
+======================================================================
+SECTION B — Sentinels & errors.Is (walks the Unwrap chain)
+======================================================================
+wrap chain (built bottom-up with %w):
+  ErrNotFound (sentinel) = errors.New("not found")
+  inner   = fmt.Errorf("db:   %w", ErrNotFound)   -> "db: not found"
+  wrapped = fmt.Errorf("load: %w", inner)         -> "load: db: not found"
+errors.Is(wrapped, ErrNotFound)        = true   (walked the chain)
+wrapped == ErrNotFound                 = false   (== sees only the outer error)
+errors.Unwrap(wrapped)                 = "db: not found"   (one step -> inner)
+errors.Unwrap(errors.Unwrap(wrapped))  = "not found"   (two steps -> the sentinel)
+[check] errors.Is(wrapped, ErrNotFound) is true: OK
+[check] wrapped == ErrNotFound is false (identity differs): OK
+[check] two Unwrap steps reach the sentinel: OK
+
+======================================================================
+SECTION C — errors.As (extract a typed error from the chain)
+======================================================================
+source  = NotFoundError{Item:"X"}
+wrapped = fmt.Errorf("lookup: %w", fmt.Errorf("cache: %w", source)) -> "lookup: cache: not found: X"
+var target NotFoundError; errors.As(wrapped, &target) -> true
+target.Item = "X"   (the field survived the wrap chain)
+[check] errors.As found NotFoundError in the chain: OK
+[check] target.Item == "X" (per-call context preserved): OK
+errors.As(errors.New("something else"), &miss) -> false   (target untouched: "PRESET")
+[check] errors.As returns false when the type is absent in the chain: OK
+[check] errors.As leaves target untouched on failure (still PRESET): OK
+
+======================================================================
+SECTION D — %w (wrap) vs %v (format-only, breaks the chain)
+======================================================================
+withW = fmt.Errorf("open: %w", ErrNotFound) -> "open: not found"
+withV = fmt.Errorf("open: %v", ErrNotFound) -> "open: not found"   (SAME text!)
+The Error() strings are identical — the ONLY difference is the Unwrap method:
+errors.Unwrap(withW)        = "not found"   (%w produced an Unwrap() error method)
+errors.Unwrap(withV)        = <nil>   (%v produced NO Unwrap method -> nil)
+errors.Is(withW, ErrNotFound) = true   (chain alive)
+errors.Is(withV, ErrNotFound) = false   (chain BROKEN)
+[check] %w keeps the chain: errors.Is(withW, ErrNotFound) is true: OK
+[check] %v breaks the chain: errors.Is(withV, ErrNotFound) is false: OK
+[check] %w gives an Unwrap method (non-nil): OK
+[check] %v gives no Unwrap method (nil): OK
+
+======================================================================
+SECTION E — errors.Join (1.20) & multi-Unwrap ([]error)
+======================================================================
+e1     = errors.New("disk full") -> "disk full"
+e2     = errors.New("timeout")    -> "timeout"
+joined = errors.Join(e1, e2)
+    joined.Error() = "disk full\ntimeout"   (newline-joined messages)
+errors.Is(joined, e1) = true   (branch 1)
+errors.Is(joined, e2) = true   (branch 2)
+errors.Unwrap(joined)        = <nil>   (single-Unwrap does NOT see Join)
+joined.Unwrap() []error       = ["disk full" "timeout"]   (the multi-error branch list)
+[check] errors.Is(joined, e1) is true (branch 1): OK
+[check] errors.Is(joined, e2) is true (branch 2): OK
+[check] plain errors.Unwrap(joined) is nil (Join uses the []error form): OK
+[check] joined multi-Unwrap has exactly 2 branches: OK
+
+======================================================================
+SECTION F — panic & recover (programmer errors, NOT control flow)
+======================================================================
+deliberatePanic: panic("boom...") recovered -> "boom: unrecoverable programmer error"   (type string)
+    the function returned NORMALLY despite the panic
+indexOutOfRange: s[10] on a len-3 slice -> runtime panic recovered:
+    value = runtime error: index out of range [10] with length 3
+    implements error? true   (runtime.Error satisfies error)
+recover() called directly (not deferred) = <nil>   (nil: only works in a defer)
+[check] recover caught the string panic value: OK
+[check] runtime panic value implements error (runtime.Error): OK
+[check] recover() outside a defer returns nil: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

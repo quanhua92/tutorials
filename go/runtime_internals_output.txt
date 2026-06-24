@@ -1,0 +1,100 @@
+runtime_internals.go — Phase 4 bundle (the runtime package).
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Host-specific values (NumCPU, GOOS) are printed but only
+STRUCTURAL facts are asserted -> byte-identical `just out` runs.
+
+======================================================================
+SECTION A — runtime.NumCPU / GOMAXPROCS (the parallelism bound)
+======================================================================
+runtime.NumCPU()      = 10  (logical CPUs usable by this process)
+runtime.GOMAXPROCS(0) = 10  (current P count; #P bounds parallelism)
+(GOMAXPROCS == #P: at most this many goroutines run truly in parallel.)
+two GOMAXPROCS(0) queries: 10, 10  (identical -> query is side-effect-free)
+GOMAXPROCS(4)=10, then GOMAXPROCS(10)=4  (current restored to 10)
+[check] NumCPU() >= 1: OK
+[check] GOMAXPROCS(0) >= 1: OK
+[check] GOMAXPROCS(0) queries without changing the setting (q1==q2): OK
+[check] GOMAXPROCS(4) returned the previous setting (restored==4): OK
+
+======================================================================
+SECTION B — runtime.NumGoroutine (live count; the leak detector)
+======================================================================
+NumGoroutine (baseline) = 1
+NumGoroutine (+4 blocked) = 5  (delta = 4)
+NumGoroutine (after join) = 1  (blocked goroutines terminated)
+[check] NumGoroutine baseline >= 1: OK
+[check] blocked goroutines strictly increased NumGoroutine: OK
+[check] NumGoroutine fell back once the goroutines joined: OK
+
+======================================================================
+SECTION C — runtime.Caller / Callers / FuncForPC (stack introspection)
+======================================================================
+runtime.Caller(0) from sectionC:
+  ok   = true
+  file = runtime_internals.go   (filepath.Base of the full path)
+  line = 151   (the call site in this file)
+  func = main.sectionC   (via runtime.FuncForPC(pc).Name())
+whereCalledFrom() (Caller(1)) -> file=runtime_internals.go, func=main.sectionC
+runtime.Callers wrote 5 PCs; CallersFrames resolves these names:
+  [1] runtime.Callers
+  [2] main.sectionC
+  [3] main.main
+  [4] runtime.main
+  [5] runtime.goexit
+[check] Caller(0) file contains runtime_internals.go: OK
+[check] Caller(0) returned ok=true: OK
+[check] FuncForPC(pc) found the enclosing function (non-nil): OK
+[check] whereCalledFrom (Caller(1)) reports runtime_internals.go: OK
+[check] Callers returned >= 1 frame: OK
+[check] the call-stack walk included a main.* function: OK
+
+======================================================================
+SECTION D — runtime.Stack: capture a goroutine stack as text
+======================================================================
+runtime.Stack(buf, all=false) wrote 189 bytes
+first line: "goroutine 1 [running]:"   (header: 'goroutine N [state]:')
+(full trace NOT printed verbatim — line numbers/addresses may shift;
+ we assert STRUCTURAL substrings only, per the determinism discipline.)
+[check] captured stack is non-empty: OK
+[check] stack begins with the 'goroutine N [state]:' header: OK
+[check] stack text contains 'main.' (a user function is on it): OK
+[check] stack text contains 'runtime_internals.go' (this source): OK
+
+======================================================================
+SECTION E — runtime.LockOSThread / UnlockOSThread (pin a G to an M)
+======================================================================
+LockOSThread() then UnlockOSThread(): balanced (goroutine free to migrate again)
+(There is NO public runtime API to query locked state — the contract is
+ 'match every Lock with an Unlock'; a goroutine that exits locked TERMINATES its thread.)
+locked worker: locked worker ran on a fixed OS thread
+Use LockOSThread for: cgo callbacks, OpenGL/rendering contexts, signal
+ handling, the macOS Cocoa main thread, and any non-Go library that
+ depends on per-thread state.
+[check] locked goroutine completed its pinned section: OK
+
+======================================================================
+SECTION F — runtime.GOOS / GOARCH / Compiler (the build platform)
+======================================================================
+runtime.GOOS     = "darwin"   (operating system target)
+runtime.GOARCH   = "arm64"   (architecture target)
+runtime.Compiler = "gc"   (toolchain: 'gc' or 'gccgo')
+[check] GOOS is a non-empty known target: OK
+[check] GOARCH is a non-empty known target: OK
+[check] Compiler is the gc toolchain: OK
+
+======================================================================
+SECTION G — runtime.GC / Gosched / KeepAlive & debug.SetGCPercent
+======================================================================
+runtime.GC() forced a collection: NumGC 0 -> 1
+debug.SetGCPercent: orig=100, set(200) returned 100, set(400) returned 200, restore returned 400
+runtime.Gosched() returned (yielded the P, then resumed)
+runtime.KeepAlive(&obj) executed (matters for cgo/unsafe + finalizers)
+[check] runtime.GC incremented NumGC: OK
+[check] SetGCPercent(400) returned the previous setting (200): OK
+[check] SetGCPercent(orig) returned the value set before it (400): OK
+[check] Gosched() returned without panic: OK
+[check] KeepAlive(&obj) executed: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

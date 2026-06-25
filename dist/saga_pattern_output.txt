@@ -1,0 +1,245 @@
+saga_pattern.py - reference impl. All numbers below feed SAGA_PATTERN.md.
+python stdlib only (no external deps).
+
+========================================================================
+  SECTION A: the booking saga  (forward T1..T4 + reverse compensation)
+========================================================================
+Four services, no shared database. The saga runs them in order; if any
+fails, the COMPLETED ones are compensated in REVERSE.
+
+The 4 steps (each with its compensating transaction):
+
+| #  | forward (Ti)  | cost   | compensation (Ci) | refund | fee   |
+|----|---------------|--------|-------------------|--------|-------|
+| T1 | BookFlight    | $300    | CancelFlight      | $250    | $50    |
+| T2 | BookHotel     | $200    | CancelHotel       | $170    | $30    |
+| T3 | RentCar       | $100    | CancelCar         | $80     | $20    |
+| T4 | ChargeCard    | $50     | RefundCard        | $50     | $0     |
+
+starting wallet = $1000
+
+--- (1) HAPPY PATH: all 4 steps succeed (no failure) ---
+  forward : [BookFlight OK] -> [BookHotel OK] -> [RentCar OK] -> [ChargeCard OK]
+  terminal: COMPLETED  (no compensation needed)
+    wallet = $350    services: Flight=done, Hotel=done, Car=done, Card=done
+  all services DONE; wallet reduced by the full trip cost.
+
+--- (2) FAILURE PATH: step 4 (ChargeCard) fails ---
+  forward : [BookFlight OK] -> [BookHotel OK] -> [RentCar OK] -> [ChargeCard FAIL X]
+           ChargeCard FAILED (card declined). Now compensate the 3
+           COMPLETED steps in REVERSE (most-recent first):
+  comp    : [CancelCar] <- [CancelHotel] <- [CancelFlight]
+           (RefundCard is N/A: ChargeCard never charged anything, so
+            there is nothing to refund for the failed step itself.)
+  terminal: ROLLED_BACK
+    wallet = $900    services: Flight=compensated, Hotel=compensated, Car=compensated, Card=failed
+
+  wallet went $1000 -> $900: a loss of $100 = the SUM of cancellation fees.
+  -> compensation did NOT restore the starting balance. See Section D.
+
+[check] forward attempted 4 steps, 3 OK + 1 FAIL; compensations ran 3 in reverse order:  OK
+
+========================================================================
+  SECTION B: orchestration  (central coordinator drives a state machine)
+========================================================================
+An ORCHESTRATOR is the only component that knows the whole saga. It calls
+each service in order; on failure it walks BACKWARDS calling compensations.
+The services themselves are stateless workers -- they expose do()/undo() and
+know nothing of each other. This is the Temporal / Camunda / AWS Step
+Functions model.
+
+Run with ChargeCard (step 4) failing:
+
+  state                       action
+  --------------------------- -----------------------------------------
+  START                        orchestrator begins saga
+  DOING_BookFlight             orchestrator calls FlightService.BookFlight()
+  DONE_BookFlight              BookFlight OK
+  DOING_BookHotel              orchestrator calls HotelService.BookHotel()
+  DONE_BookHotel               BookHotel OK
+  DOING_RentCar                orchestrator calls CarService.RentCar()
+  DONE_RentCar                 RentCar OK
+  DOING_ChargeCard             orchestrator calls CardService.ChargeCard()
+  FAILED_ChargeCard            ChargeCard threw -> drive compensation  <-- failure point
+  COMPENSATING_CancelCar       orchestrator calls CarService.CancelCar()  <-- reverse unwind
+  COMPENSATING_CancelHotel     orchestrator calls HotelService.CancelHotel()  <-- reverse unwind
+  COMPENSATING_CancelFlight    orchestrator calls FlightService.CancelFlight()  <-- reverse unwind
+  ROLLED_BACK                  all completed steps compensated
+
+  terminal state: ROLLED_BACK
+    wallet = $900    services: Flight=compensated, Hotel=compensated, Car=compensated, Card=failed
+
+The orchestrator's state machine (the single source of truth for flow):
+  START
+    -> DOING_T1 -> DONE_T1 -> DOING_T2 -> DONE_T2 -> ... -> DOING_Tn
+         |                                              |
+         v (any failure)                                v (all OK)
+       FAILED_Tk -> COMPENSATING_T(k-1) -> ... ->     COMPLETED
+                -> COMPENSATING_T1 -> ROLLED_BACK
+
+  PRO of orchestration: the flow is explicit and greppable in one place;
+  easy to add retries, timeouts, branching. CON: the orchestrator is a
+  central dependency (and a scaling / single-failure concern).
+
+[check] orchestrator terminal == ROLLED_BACK, wallet == $900 (matches Section A failure path):  OK
+
+========================================================================
+  SECTION C: choreography  (no coordinator -- services react to events)
+========================================================================
+In CHOREOGRAPHY there is NO central brain. Each service SUBSCRIBES to the
+event that means 'your turn' and PUBLISHES an event when it is done. On
+failure it publishes a *_FAIL event; the preceding service (subscribed to
+it) compensates and publishes *_CANCELLED, which wakes the one before it --
+a reverse cascade with no driver. This is the Kafka / event-driven style.
+
+Run with ChargeCard failing -- watch the cascade ripple backwards:
+
+  client: publish StartSaga
+      FlightService reacts: BookFlight() -> OK -> publish Flight_OK
+          HotelService reacts: BookHotel() -> OK -> publish Hotel_OK
+              CarService reacts: RentCar() -> OK -> publish Car_OK
+                  CardService reacts: ChargeCard() -> FAIL -> publish Card_FAIL
+                      CarService reacts: CancelCar() -> publish Car_CANCELLED
+                          HotelService reacts: CancelHotel() -> publish Hotel_CANCELLED
+                              FlightService reacts: CancelFlight() -> publish Flight_CANCELLED
+                                  SAGA: SagaRolledBack (all completed compensated)
+
+  final state:
+    wallet = $900    services: Flight=compensated, Hotel=compensated, Car=compensated, Card=failed
+
+Notice there is NO 'orchestrator' anywhere. The reverse order emerges
+from WHO SUBSCRIBES TO WHAT: CarService listens for Card_FAIL, HotelService
+listens for Car_CANCELLED, FlightService listens for Hotel_CANCELLED. Each
+service owns only its own rule -- adding a 5th service means subscribing it,
+not editing a central workflow.
+
+  PRO of choreography: no central dependency, services are decoupled, easy
+  to extend. CON: the overall flow is NOT visible in one place (you must
+  trace event subscriptions across services); risk of cyclic event loops.
+
+[check] choreography reached wallet == $900 and all completed
+        services compensated -- SAME outcome as orchestration:  OK
+
+========================================================================
+  SECTION D: compensation is NOT undo  (it is a semantic inverse)
+========================================================================
+A database ROLLBACK pretends the transaction never happened: the row goes
+back to its exact prior value, net effect ZERO. Compensation cannot do
+that -- the real world moved on (a seat was held, a room blocked). A
+compensating transaction applies a BUSINESS counter-action whose net effect
+is generally NON-zero. Here, cancelling a booking refunds the charge MINUS
+a cancellation fee. So 'book then cancel' leaves the wallet LIGHTER.
+
+Per-step dollar math (forward then its compensation):
+
+| step (Ti)    | forward charge | compensation (Ci) | refund | fee   |
+|--------------|----------------|-------------------|--------|-------|
+| BookFlight   | -$300           | CancelFlight      | +$250    | $50    |
+| BookHotel    | -$200           | CancelHotel       | +$170    | $30    |
+| RentCar      | -$100           | CancelCar         | +$80     | $20    |
+
+Net effect of 'do Ti, then do Ci' (this is NOT zero):
+| step        | forward (wallet) | compensation (wallet) | NET   |
+|-------------|------------------|-----------------------|-------|
+| BookFlight  | -$300              | +$250                   | $-50   |
+| BookHotel   | -$200              | +$170                   | $-30   |
+| RentCar     | -$100              | +$80                    | $-20   |
+
+Total NET cost of a fully-rolled-back saga = sum of fees = $100.
+  compensation != undo: the wallet does NOT return to its starting value.
+
+Contrast with a DB ROLLBACK (e.g. inside one service's local txn):
+  begin; update accounts set bal = bal - 300 where id=42; -- BookFlight
+  rollback;  -- restores bal EXACTLY. Net effect $0. No fee.
+Rollback is only possible WITHIN one ACID database. Across the airline,
+hotel, and car-rental databases there is no shared rollback -- hence the
+saga's compensating transactions, and hence the fees.
+
+[check] sum(fees) = $100 != $0 -> compensation is a semantic inverse, not a rollback:  OK
+
+========================================================================
+  SECTION E: saga vs 2PC  (eventual consistency vs blocking ACID)
+========================================================================
+Two-phase commit (2PC) is the classic way to atomically update several
+databases. It gives true ACID across them but BLOCKS: phase 1 PREPARE makes
+every participant lock its rows and promise; phase 2 COMMIT/ABORT releases
+them. If the coordinator (or any participant) stalls between the phases,
+EVERYONE holds their locks and the system freezes. Sagas trade that
+isolation for non-blocking availability.
+
+| dimension          | saga                              | 2PC (XA)                       |
+|--------------------|-----------------------------------|--------------------------------|
+| consistency model  | EVENTUAL (via compensation)       | ACID (atomic commit)           |
+| isolation          | NONE -- partial states visible    | FULL -- locks hide partial work|
+| atomicity          | semantic (compensate on failure)  | all-or-nothing (commit/abort)  |
+| failure recovery   | run Cj in reverse order           | ABORT + true rollback          |
+| blocking?          | NO -- each step is independent    | YES -- stalls freeze everyone  |
+| locks held         | none across services              | from PREPARE until COMMIT      |
+| coordinator needed | only for orchestration variant    | always (the 2PC coordinator)   |
+| availability       | HIGH (services decoupled)         | LOW (all must be up to commit) |
+| latency (n parts)  | up to n sequential local txns     | 2 rounds, but BLOCKING         |
+| undo on failure    | compensation (non-zero, has fees) | rollback (exact, zero net)     |
+| fits               | microservices, long-lived work    | single DB / tightly-coupled    |
+| examples           | Temporal, Camunda, AWS Step Fn    | XA, DB coordinators            |
+
+The core trade-off, in one line:
+  2PC : locks + atomic commit  -> ACID, but BLOCKING and low availability.
+  Saga: no locks + compensate  -> eventual consistency, but ALWAYS AVAILABLE.
+
+Why microservices pick saga: you CANNOT hold a cross-service lock (the
+airline will not block its seat row waiting on your hotel DB). So you give
+up isolation (a reader can see 'flight booked, hotel pending') and accept
+that failures are fixed by compensation, not rollback. The system never
+jams. 🔗 Compare with CAP_TRADEOFFS.md (CP vs AP) and RAFT.md (consensus).
+
+Latency shape (1 logical update across n participants):
+| n  | saga worst-case (n steps) | 2PC (2 blocking rounds) |
+|----|---------------------------|-------------------------|
+| 2  | 2                         | 2 (blocking)            |
+| 4  | 4                         | 2 (blocking)            |
+| 8  | 8                         | 2 (blocking)            |
+| 16 | 16                        | 2 (blocking)            |
+
+Saga steps may also run in PARALLEL when they are independent (the chain
+shown here is the strict sequential worst case). 2PC always pays its 2
+blocking rounds regardless.
+
+[check] saga: non-blocking + eventual; 2PC: blocking + ACID -- the trade-off is explicit:  OK
+
+========================================================================
+  GOLD CHECK  (pinned values for saga_pattern.html)
+========================================================================
+Capstone invariant (Garcia-Molina 1987): a saga ends in EXACTLY ONE of two
+terminal states -- every Ti COMPLETED, or every Ti that started is
+COMPENSATED in reverse. No Ti is left half-applied. We verify this for the
+ChargeCard-fails scenario, AND check that orchestration and choreography
+reach the IDENTICAL final state (coordination-equivalence).
+
+  reference run (run_saga):
+    forward : [('BookFlight', 'OK'), ('BookHotel', 'OK'), ('RentCar', 'OK'), ('ChargeCard', 'FAIL')]
+    comp    : [('CancelCar', 'COMP'), ('CancelHotel', 'COMP'), ('CancelFlight', 'COMP')]
+    terminal: ROLLED_BACK
+    final   : wallet=$900, services={'Flight': 'compensated', 'Hotel': 'compensated', 'Car': 'compensated', 'Card': 'failed'}
+
+GOLD scalars (pinned for saga_pattern.html):
+  initial_wallet        = 1000
+  num_steps            = 4
+  failed_step_index    = 3  (ChargeCard)
+  forward_attempted    = 4
+  forward_ok           = 3
+  compensation_count   = 3
+  compensation_order   = ['CancelCar', 'CancelHotel', 'CancelFlight']
+  total_cancellation_fees = 100
+  final_wallet         = 900
+  final_services       = {'Flight': 'compensated', 'Hotel': 'compensated', 'Car': 'compensated', 'Card': 'failed'}
+  orchestration_wallet = 900  (== final_wallet)
+  choreography_wallet  = 900  (== final_wallet)
+  all_compensated      = True
+
+[check] failed step compensated all priors in reverse; orchestration &
+        choreography reached the SAME final state; wallet reflects fees:
+        OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

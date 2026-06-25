@@ -1,0 +1,272 @@
+two_phase_commit.py - reference impl. All numbers below feed TWO_PHASE_COMMIT.md.
+python stdlib only. Run with: python3 two_phase_commit.py
+
+========================================================================
+  SECTION A: happy path  (PREPARE all YES -> COMMIT -> all ACK)
+========================================================================
+A transaction spans 3 shards S0,S1,S2. All can commit.
+
+| step | from          | to            | message            | WAL write / note                         |
+|------|---------------|---------------|--------------------|------------------------------------------|
+| 1    | CLIENT        | COORD         | BEGIN tx           | coordinator takes the distributed transaction |
+| 2    | COORD         | S0            | PREPARE(tx)        | can you commit?                          |
+| 3    | S0            | COORD         | YES                | S0 WAL <- PREPARE (durable promise)      |
+| 4    | COORD         | S1            | PREPARE(tx)        | can you commit?                          |
+| 5    | S1            | COORD         | YES                | S1 WAL <- PREPARE (durable promise)      |
+| 6    | COORD         | S2            | PREPARE(tx)        | can you commit?                          |
+| 7    | S2            | COORD         | YES                | S2 WAL <- PREPARE (durable promise)      |
+| 8    | COORD         | (decision)    | DECISION=COMMIT    | COORD WAL <- DECISION (global commit point) |
+| 9    | COORD         | S0            | COMMIT(tx)         | S0 WAL <- COMMIT; applies, releases locks |
+| 10   | S0            | COORD         | ACK                | S0 done                                  |
+| 11   | COORD         | S1            | COMMIT(tx)         | S1 WAL <- COMMIT; applies, releases locks |
+| 12   | S1            | COORD         | ACK                | S1 done                                  |
+| 13   | COORD         | S2            | COMMIT(tx)         | S2 WAL <- COMMIT; applies, releases locks |
+| 14   | S2            | COORD         | ACK                | S2 done                                  |
+
+  decision      = COMMIT
+  final states  = ['COMMITTED', 'COMMITTED', 'COMMITTED']
+
+  WAL snapshots after the run:
+  COORD WAL : ['DECISION=COMMIT']
+  S0     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+  S1     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+  S2     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+
+Read the diagram as two vertical sweeps:
+  PREPARE down  -> YES up      (Phase 1: each shard durably promises)
+  COMMIT  down  -> ACK   up    (Phase 2: coordinator decides, shards apply)
+
+The single GLOBAL COMMIT POINT is step where COORD writes DECISION=COMMIT:
+  before it the txn could still abort; after it, commit is irrevocable.
+
+[check] all 3 shards COMMITTED and decision == COMMIT?  OK
+
+========================================================================
+  SECTION B: failure case  (S1 votes NO -> global ABORT to all)
+========================================================================
+Same 3 shards, but S1 cannot commit (e.g. a uniqueness constraint).
+
+| step | from          | to            | message            | WAL write / note                         |
+|------|---------------|---------------|--------------------|------------------------------------------|
+| 1    | CLIENT        | COORD         | BEGIN tx           | coordinator takes the distributed transaction |
+| 2    | COORD         | S0            | PREPARE(tx)        | can you commit?                          |
+| 3    | S0            | COORD         | YES                | S0 WAL <- PREPARE (durable promise)      |
+| 4    | COORD         | S1            | PREPARE(tx)        | can you commit?                          |
+| 5    | S1            | COORD         | NO                 | S1 cannot commit (constraint violation)  |
+| 6    | COORD         | S2            | PREPARE(tx)        | can you commit?                          |
+| 7    | S2            | COORD         | YES                | S2 WAL <- PREPARE (durable promise)      |
+| 8    | COORD         | (decision)    | DECISION=ABORT     | COORD WAL <- DECISION (global abort point) |
+| 9    | COORD         | S0            | ABORT(tx)          | S0 WAL <- ABORT; releases locks          |
+| 10   | S0            | COORD         | ACK                | S0 done                                  |
+| 11   | COORD         | S1            | ABORT(tx)          | S1 WAL <- ABORT; releases locks          |
+| 12   | S1            | COORD         | ACK                | S1 done                                  |
+| 13   | COORD         | S2            | ABORT(tx)          | S2 WAL <- ABORT; releases locks          |
+| 14   | S2            | COORD         | ACK                | S2 done                                  |
+
+  decision      = ABORT
+  final states  = ['ABORTED', 'ABORTED', 'ABORTED']
+
+  WAL snapshots after the run:
+  COORD WAL : ['DECISION=ABORT']
+  S0     WAL : ['PREPARE', 'ABORT']   state=ABORTED
+  S1     WAL : ['ABORT']   state=ABORTED
+  S2     WAL : ['PREPARE', 'ABORT']   state=ABORTED
+
+Key points:
+  * A single NO vetoes the whole transaction -> decision is ABORT.
+  * S0 and S2, which voted YES (PREPARE durable), are told ABORT and
+    release their locks. Their PREPARE record is superseded by ABORT.
+  * S1 voted NO and wrote nothing durable, so it simply stays INIT/ABORTED.
+
+[check] all 3 shards ABORTED and decision == ABORT?  OK
+
+========================================================================
+  SECTION C: coordinator crash after PREPARE acks -> participants BLOCKED
+========================================================================
+All 3 shards vote YES. The coordinator CRASHES right after collecting the
+acks but BEFORE writing DECISION to its WAL. This is the classic 2PC
+blocking failure.
+
+| step | from          | to            | message            | WAL write / note                         |
+|------|---------------|---------------|--------------------|------------------------------------------|
+| 1    | CLIENT        | COORD         | BEGIN tx           | coordinator takes the distributed transaction |
+| 2    | COORD         | S0            | PREPARE(tx)        | can you commit?                          |
+| 3    | S0            | COORD         | YES                | S0 WAL <- PREPARE (durable promise)      |
+| 4    | COORD         | S1            | PREPARE(tx)        | can you commit?                          |
+| 5    | S1            | COORD         | YES                | S1 WAL <- PREPARE (durable promise)      |
+| 6    | COORD         | S2            | PREPARE(tx)        | can you commit?                          |
+| 7    | S2            | COORD         | YES                | S2 WAL <- PREPARE (durable promise)      |
+| 8    | COORD         | (crash)       | *CRASH*            | coordinator dies BEFORE writing DECISION to its WAL |
+| 9    | (note)        | (note)        | participants are PREPARED & hold locks; wait for decision | cannot commit nor abort unilaterally -> BLOCKED (in-doubt) |
+| 10   | S0            | COORD         | poll (tick 1)      | no response -- still in-doubt            |
+| 11   | S1            | COORD         | poll (tick 1)      | no response -- still in-doubt            |
+| 12   | S2            | COORD         | poll (tick 1)      | no response -- still in-doubt            |
+| 13   | S0            | COORD         | poll (tick 2)      | no response -- still in-doubt            |
+| 14   | S1            | COORD         | poll (tick 2)      | no response -- still in-doubt            |
+| 15   | S2            | COORD         | poll (tick 2)      | no response -- still in-doubt            |
+| 16   | S0            | COORD         | poll (tick 3)      | no response -- still in-doubt            |
+| 17   | S1            | COORD         | poll (tick 3)      | no response -- still in-doubt            |
+| 18   | S2            | COORD         | poll (tick 3)      | no response -- still in-doubt            |
+| 19   | COORD         | (restart)     | *RESTART*          | coordinator reboots, replays its WAL     |
+| 20   | COORD         | (recovery)    | DECISION=ABORT     | presumed abort: no durable COMMIT -> ABORT is safe |
+| 21   | COORD         | S0            | ABORT(tx)          | S0 WAL <- ABORT; releases locks          |
+| 22   | S0            | COORD         | ACK                | aborted, unblocked                       |
+| 23   | COORD         | S1            | ABORT(tx)          | S1 WAL <- ABORT; releases locks          |
+| 24   | S1            | COORD         | ACK                | aborted, unblocked                       |
+| 25   | COORD         | S2            | ABORT(tx)          | S2 WAL <- ABORT; releases locks          |
+| 26   | S2            | COORD         | ACK                | aborted, unblocked                       |
+
+  decision                = ABORT
+  final states (recovered) = ['ABORTED', 'ABORTED', 'ABORTED']
+  blocked                 = True
+  resolved_by_recovery    = True
+
+  WAL snapshots after recovery:
+  COORD WAL : ['DECISION=ABORT']
+  S0     WAL : ['PREPARE', 'ABORT']   state=ABORTED
+  S1     WAL : ['PREPARE', 'ABORT']   state=ABORTED
+  S2     WAL : ['PREPARE', 'ABORT']   state=ABORTED
+
+WHY they block (the heart of 2PC's weakness):
+  After voting YES each shard is PREPARED and holds locks. It promised
+  to commit, so it may NOT abort unilaterally; but it does not know the
+  decision, so it may NOT commit either. It can only WAIT. With the
+  coordinator down it waits forever -- this is a LIVENESS failure.
+  (Safety still holds: no shard committed, so there is no disagreement.)
+
+Presumed-abort recovery unblocks them: the coordinator restarts, finds
+  NO durable DECISION in its WAL (a COMMIT would have been logged first),
+  so ABORT is safe. It broadcasts ABORT and everyone releases their locks.
+
+  WITHOUT recovery the shards would stay in-doubt forever:
+    final states = ['PREPARED', 'PREPARED', 'PREPARED']   (all PREPARED -- blocked)
+
+[check] recovery resolved the block via presumed abort?  OK
+
+========================================================================
+  SECTION D: participant crash after PREPARE -> recovery transaction
+========================================================================
+All 3 shards vote YES. S1 CRASHES right after writing its durable PREPARE
+record (a power loss). The coordinator still decides COMMIT and commits
+S0, S2. Later S1 restarts: its PREPARE survived on disk, so it can ask the
+coordinator for the decision and finish.
+
+| step | from          | to            | message            | WAL write / note                         |
+|------|---------------|---------------|--------------------|------------------------------------------|
+| 1    | CLIENT        | COORD         | BEGIN tx           | coordinator takes the distributed transaction |
+| 2    | COORD         | S0            | PREPARE(tx)        | can you commit?                          |
+| 3    | S0            | COORD         | YES                | S0 WAL <- PREPARE (durable promise)      |
+| 4    | COORD         | S1            | PREPARE(tx)        | can you commit?                          |
+| 5    | S1            | COORD         | YES                | S1 WAL <- PREPARE (durable promise)      |
+| 6    | S1            | (crash)       | *CRASH*            | S1 loses RAM; WAL (PREPARE) survives on disk |
+| 7    | COORD         | S2            | PREPARE(tx)        | can you commit?                          |
+| 8    | S2            | COORD         | YES                | S2 WAL <- PREPARE (durable promise)      |
+| 9    | COORD         | (decision)    | DECISION=COMMIT    | COORD WAL <- DECISION (global commit point) |
+| 10   | COORD         | S0            | COMMIT(tx)         | S0 WAL <- COMMIT; applies, releases locks |
+| 11   | S0            | COORD         | ACK                | S0 done                                  |
+| 12   | COORD         | S1            | COMMIT(tx)         | (participant down -- will recover later) |
+| 13   | COORD         | S2            | COMMIT(tx)         | S2 WAL <- COMMIT; applies, releases locks |
+| 14   | S2            | COORD         | ACK                | S2 done                                  |
+| 15   | S1            | (restart)     | *RESTART*          | S1 reboots, replays its WAL              |
+| 16   | S1            | (recovery)    | WAL replay -> state=PREPARED | PREPARE found, no decision -> in-doubt, ask coordinator |
+| 17   | S1            | COORD         | query decision     | S1 asks: did we commit or abort?         |
+| 18   | COORD         | S1            | DECISION=COMMIT    | COORD WAL has DECISION=COMMIT            |
+| 19   | S1            | (recovery)    | S1 WAL <- COMMIT   | applies the decision -> now COMMITTED    |
+| 20   | S1            | COORD         | ACK                | recovery complete                        |
+
+  decision      = COMMIT
+  final states  = ['COMMITTED', 'COMMITTED', 'COMMITTED']
+
+  WAL snapshots after recovery:
+  COORD WAL : ['DECISION=COMMIT']
+  S0     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+  S1     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+  S2     WAL : ['PREPARE', 'COMMIT']   state=COMMITTED
+
+The whole point of the PREPARE record: it is a DURABLE promise. Because
+  S1 wrote (and fsync'd) PREPARE before saying YES, the crash could NOT
+  make it forget its promise. On restart its WAL replay shows PREPARE with
+  no decision -> it is in-doubt -> it asks the coordinator, learns COMMIT,
+  and commits. Atomicity is preserved: all 3 shards end COMMITTED.
+
+  Contrast with a NO voter (Section B): it wrote nothing durable, so a
+  crash there is harmless -- there was never a promise to honour.
+
+[check] S1 recovered to COMMITTED and all 3 agree?  OK
+
+========================================================================
+  SECTION E: 2PC vs 3PC vs Saga  (blocking 2PC, non-blocking 3PC, Saga)
+========================================================================
+2PC is correct but BLOCKING and slow. Two well-known alternatives:
+
+  3PC (Skeen 1981): adds a PRE-COMMIT phase so a coordinator crash no
+    longer blocks (under a SYNCHRONOUS network and roughly-synchronised
+    clocks). Cost: an extra round-trip and it does NOT survive network
+    PARTITIONS (can violate safety under a partition + failures).
+
+  SAGA (Garcia-Molina & Salem 1987): abandon global atomicity. A long
+    transaction is a SEQUENCE of local sub-transactions, each with a
+    COMPENSATING action. On failure you run compensations backwards.
+    Eventually-consistent, no locks held, but NOT atomic (intermediate
+    states are visible). Used by microservices / orchestrators.
+
+| aspect             | 2PC                    | 3PC                       | Saga                       |
+|--------------------|------------------------|---------------------------|----------------------------|
+| phases / round-trips | 2 (PREPARE, COMMIT)    | 3 (CanCommit,PreCommit,DoCommit) | n local txns (+compensations) |
+| atomicity          | global ACID (all-or-nothing) | global ACID               | NO -- eventual, compensating |
+| blocking?          | YES (coord crash blocks) | NO (crash failures, sync net) | NO (no global locks)       |
+| survives partition? | yes (stays safe, blocks) | NO -- can lose safety     | yes (by design)            |
+| failure model      | crash + stable storage | crash + sync + clocks     | any (each step is local)   |
+| locks held         | for whole 2PC run      | for whole 3PC run         | only per local step        |
+| intermediate visible? | no                     | no                        | YES (each step commits)    |
+| latency            | 2 RTT + fsync          | 3 RTT + fsync             | n RTT, no cross-shard waits |
+| typical use        | XA, sharded DBs, MQ    | rare (partition risk)     | microservices, long flows  |
+| canonical paper    | Gray 1978              | Skeen 1981                | Garcia-Molina 1987         |
+
+3PC's extra phase: after everyone votes YES to CanCommit, the coordinator
+  sends PRE-COMMIT; only once a quorum ACK PRE-COMMIT does it send DoCommit.
+  If the coordinator crashes here, participants can FINISH on their own:
+  if anyone got PRE-COMMIT -> commit; if nobody did -> abort. No blocking.
+  BUT under a network PARTITION this self-healing can SPLIT DECISIONS, so
+  3PC is rarely deployed (Paxos-Commit / Google Spanner's Paxos group per
+  shard is the modern substitute -- it makes the DECISION itself fault-
+  tolerant via consensus rather than adding a phase). 🔗 PAXOS.md, RAFT.md
+
+Saga trades atomicity for availability: a flight+hotel+car booking saga
+  books each leg separately; if the car fails it runs a compensation that
+  cancels the flight and hotel. No locks, no coordinator, but the customer
+  can SEE 'flight booked, then cancelled' -- eventual, not atomic.
+
+  round-trips: 2PC = 2, 3PC = 3, Saga(n=3) = 3 (but no global wait)
+[check] 3PC adds exactly one phase vs 2PC (3 - 2 = 1)?  OK
+
+========================================================================
+  GOLD CHECK  (atomicity: all participants reach the SAME final decision)
+========================================================================
+  happy path          : decision=COMMIT final=['COMMITTED', 'COMMITTED', 'COMMITTED']
+  one NO vote         : decision=ABORT  final=['ABORTED', 'ABORTED', 'ABORTED']
+  participant recovery: decision=COMMIT final=['COMMITTED', 'COMMITTED', 'COMMITTED']
+  coord crash+recover : decision=ABORT  final=['ABORTED', 'ABORTED', 'ABORTED'] (blocked=True, resolved=True)
+  coord crash (stuck) : decision=None   final=['PREPARED', 'PREPARED', 'PREPARED'] (liveness FAIL, safety OK)
+
+  [check] happy_path             unanimous decision? distinct=['COMMITTED'] -> OK
+  [check] one_no_vote            unanimous decision? distinct=['ABORTED'] -> OK
+  [check] participant_recovery   unanimous decision? distinct=['COMMITTED'] -> OK
+  [check] coord_crash_recovered  unanimous decision? distinct=['ABORTED'] -> OK
+  [check] coord_crash_blocked    unanimous decision? distinct=['PREPARED'] -> OK
+
+GOLD scalars (pinned for two_phase_commit.html):
+  happy_path_terminal             = ['COMMITTED', 'COMMITTED', 'COMMITTED']
+  no_vote_terminal                = ['ABORTED', 'ABORTED', 'ABORTED']
+  participant_recovery_terminal   = ['COMMITTED', 'COMMITTED', 'COMMITTED']
+  coord_crash_recovered_terminal  = ['ABORTED', 'ABORTED', 'ABORTED']
+  coord_crash_blocked_terminal    = ['PREPARED', 'PREPARED', 'PREPARED']
+  all_scenarios_unanimous         = True
+  round_trips_2pc                 = 2
+  round_trips_3pc                 = 3
+
+[check] all gold identities reproduce from the protocol:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

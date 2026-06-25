@@ -1,0 +1,307 @@
+tcp_handshake.py - reference impl. All numbers below feed TCP_HANDSHAKE.md.
+python stdlib only (no external deps).
+constants: ISN_C=1000, ISN_S=5000, MSS=100, MSL=120s
+
+========================================================================
+  SECTION A: the 3-way handshake  (SYN, SYN-ACK, ACK)
+========================================================================
+Goal: before any data, BOTH sides must (1) agree the other is alive
+and (2) synchronize their starting sequence numbers (ISNs). Three
+segments do it. The ISNs exist so that a delayed segment from an OLD,
+dead connection (same IP/port 4-tuple) cannot be mistaken for data in
+the NEW connection. Picking a fresh random-ish ISN every time breaks
+that aliasing.
+
+Worked numbers: ISN_client (ISN_C) = 1000, ISN_server (ISN_S) = 5000, MSS = 100.
+
+Step 1 - CLIENT sends SYN (I want to talk; my seq starts at ISN_C):
+    C->S SYN       seq=1000  win=400   // client picks ISN_C
+      SYN consumes seq #1000, so server's ACK will expect 1001.
+
+Step 2 - SERVER sends SYN-ACK (yes; MY seq starts at ISN_S; I expect your 1001):
+    S->C SYN,ACK   seq=5000  ack=1001  win=400   // server picks ISN_S; confirms client SYN (ack=1001)
+      server's SYN consumes seq #5000, so client's ACK expects 5001.
+
+Step 3 - CLIENT sends ACK (I confirm your SYN; connection OPEN):
+    C->S ACK       seq=1001  ack=5001  win=400   // client confirms server SYN; no payload, no new flag-byte
+
+State after handshake (these are the NEXT seqs each side will use):
+    client: seq_next = 1001   (= ISN_C + 1, the SYN byte was consumed)
+    server: seq_next = 5001   (= ISN_S + 1, the SYN byte was consumed)
+
+Why 3 steps, not 2? Step 1 proves client->server works; step 2 proves
+BOTH server->client AND server received the SYN; step 3 proves the
+client received the server's SYN. Without step 3 the server could be
+talking to nobody (the client's SYN could have been a spoofed/spurious
+packet). Each direction is independently confirmed.
+
+Why random ISNs (not 0 every time)? Imagine a stray segment from a
+PREVIOUS connection (same 4-tuple) that wanders in 60s late. If every
+connection started at seq 0, that stale byte-stream would land EXACTLY
+on the new connection's sequence space and corrupt it. A fresh, hard-
+to-guess ISN shifts the window so old segments fall outside it.
+  - This is also why ISNs must be UNPREDICTABLE: predicting them enabled
+    the classic TCP sequence-number injection (Mitnick 1994). Modern
+    stacks use ISN randomizers / RFC 6528.
+
+[check] SYN acked with 1001 = ISN_C+1 = 1000+1; server SYN acked with 5001 = ISN_S+1 = 5000+1:  OK
+
+========================================================================
+  SECTION B: sliding window flow control  (receiver advertises, sender obeys)
+========================================================================
+Flow control keeps a fast sender from drowning a slow receiver. The
+receiver stamps every ACK with rwnd = its free buffer (bytes). The
+sender keeps a WINDOW of un-acked bytes; it may not let that window
+exceed rwnd. As ACKs arrive, the window SLIDES left-to-right: the left
+edge (send_base) jumps forward, opening room at the right edge to send
+new bytes. This is a byte-level sliding window (RFC 793, RFC 1122).
+
+Worked: after handshake client_seq=1001, rwnd=400 bytes (4 segments of 100 B).
+
+Round 1 - SEND until the window is full (4 segments in flight):
+    C->S ACK       seq=1001  ack=0  len=100  win=400   // segment 1
+    C->S ACK       seq=1101  ack=0  len=100  win=400   // segment 2
+    C->S ACK       seq=1201  ack=0  len=100  win=400   // segment 3
+    C->S ACK       seq=1301  ack=0  len=100  win=400   // segment 4
+      in_flight = send_next - send_base = 1401 - 1001 = 400 bytes  (== rwnd 400, window FULL)
+
+The sender is now BLOCKED: send_next - send_base == rwnd. It must
+wait for an ACK to slide the window.
+
+Round 2 - ACKs arrive one per segment; the window slides, one new
+segment leaves on each ACK:
+  ACK ack=1101 arrives (segment 1 at seq 1001 confirmed)
+      -> send_base slides to 1101, in_flight drops, room opens -> send segment 5 at seq 1401
+  ACK ack=1201 arrives (segment 2 at seq 1101 confirmed)
+      -> send_base slides to 1201, in_flight drops, room opens -> send segment 6 at seq 1501
+  ACK ack=1301 arrives (segment 3 at seq 1201 confirmed)
+      -> send_base slides to 1301, in_flight drops, room opens -> send segment 7 at seq 1601
+  ACK ack=1401 arrives (segment 4 at seq 1301 confirmed)
+      -> send_base slides to 1401, in_flight drops, room opens -> send segment 8 at seq 1701
+
+      after 4 ACKs: send_base=1401, send_next=1801, in_flight=400
+      The window moved right by 4 segments; 4 new segments left. The
+      pipeline stays FULL -- that is the whole point of the window: it
+      keeps the pipe stuffed instead of send-one-wait-one.
+
+Flow-control edge case: if the receiver advertises rwnd=0 (buffer
+full), the sender MUST stop. It then sends zero-window probes until
+the receiver re-advertises a non-zero window. A misbehaving receiver
+that shrinks the window abruptly can cause the sender to stall.
+
+[check] after sliding, send_base=1401 = 1001 + 400; window stayed full (in_flight=400 == rwnd 400):  OK
+
+========================================================================
+  SECTION C: congestion control  (slow start -> AIMD -> sawtooth)
+========================================================================
+Flow control (Section B) protects the RECEIVER. Congestion control
+protects the NETWORK. The sender keeps a SECOND window, cwnd, that it
+grows/cautiously probes based on success or loss. The real send window
+is min(rwnd, cwnd). Jacobson 1988 / RFC 5681 define the classic shape:
+
+  SLOW START         : cwnd starts at 1 MSS and DOUBLES each RTT
+                       (exponential) -- bandwidth is probed fast.
+  CONGESTION AVOID   : once cwnd >= ssthresh, grow LINEARLY (+1 MSS/RTT)
+                       (AIMD additive increase) -- probe gently.
+  LOSS (multiplicative decrease): ssthresh = cwnd/2; cwnd = 1 (restart
+                       slow start). Plot cwnd over RTTs and you get the
+                       famous SAWTOOTH: sharp drops, slow climbs.
+
+Deterministic run: cwnd0=1, ssthresh0=16, loss injected at RTT 7.
+
+| RTT | cwnd | ssthresh | phase                  | event                    |
+|-----|------|----------|------------------------|--------------------------|
+| 0   | 1    | 16       | slow-start             | growth                   |
+| 1   | 2    | 16       | slow-start             | growth                   |
+| 2   | 4    | 16       | slow-start             | growth                   |
+| 3   | 8    | 16       | slow-start             | growth                   |
+| 4   | 16   | 16       | congestion-avoidance (AIMD) | growth                   |
+| 5   | 17   | 16       | congestion-avoidance (AIMD) | growth                   |
+| 6   | 18   | 16       | congestion-avoidance (AIMD) | growth                   |
+| 7   | 19   | 9        | congestion-avoidance (AIMD) | LOSS -> ssthresh=cwnd/2, next cwnd=1 |
+| 8   | 1    | 9        | slow-start             | growth                   |
+| 9   | 2    | 9        | slow-start             | growth                   |
+| 10  | 4    | 9        | slow-start             | growth                   |
+| 11  | 8    | 9        | slow-start             | growth                   |
+| 12  | 16   | 9        | congestion-avoidance (AIMD) | growth                   |
+| 13  | 17   | 9        | congestion-avoidance (AIMD) | growth                   |
+| 14  | 18   | 9        | congestion-avoidance (AIMD) | growth                   |
+| 15  | 19   | 9        | congestion-avoidance (AIMD) | growth                   |
+
+Reading the trace:
+  RTTs 0-3: slow start. 1 -> 2 -> 4 -> 8 (doubling). Exponential.
+  RTT 4: cwnd hits 16 == ssthresh -> switch to AIMD (congestion avoid).
+  RTTs 5-7: linear climb 17 -> 18 -> 19 (additive increase, +1/RTT).
+  RTT 7 (loss): peak cwnd=19; ssthresh = 19//2 = 9; the NEXT RTT restarts
+         at cwnd=1 (the sawtooth DROP).
+  RTTs 8-11: slow start again 1 -> 2 -> 4 -> 8 (each < new ssthresh 9).
+  RTT 11->12: cwnd 8 (< 9) doubles to 16, OVERSHOOTING ssthresh (discrete
+          doubling cannot land on 9 exactly) -> back in AIMD.
+  RTTs 13-15: linear climb 17 -> 18 -> 19 (additive, +1/RTT).
+
+cwnd series (the sawtooth): [1, 2, 4, 8, 16, 17, 18, 19, 1, 2, 4, 8, 16, 17, 18, 19]
+The sawtooth is the signature of TCP congestion control: aggressive
+doubling to FIND capacity, then careful linear probing, then a halving
+drop on any sign of congestion. Over many cycles it converges toward
+the fair share of the bottleneck (the AIMD fairness property).
+
+[check] pre-loss peak cwnd=19, post-loss ssthresh=9; cwnd series length 16:  OK
+
+========================================================================
+  SECTION D: 4-way teardown + TIME_WAIT  (FIN, ACK, FIN, ACK, 2*MSL)
+========================================================================
+Closing is NOT symmetric: each direction closes INDEPENDENTLY (TCP is
+full-duplex). The side done sending issues FIN ('no more data from
+me'); the other ACKs and may keep sending (half-close). When BOTH are
+done, four segments have crossed: FIN, ACK, FIN, ACK.
+
+Then the side that sent the FIRST final-ACK enters TIME_WAIT for 2*MSL.
+Why? (1) if its final ACK was lost, the peer retransmits FIN and it can
+re-ACK; (2) to let any wandering duplicate segments from this 4-tuple
+die out BEFORE the port is reused, so they cannot corrupt a NEW
+connection. That lingering is what causes port exhaustion.
+
+Continuing the connection from Section A (client sent data, now closes):
+
+Step 1 - CLIENT sends FIN:
+    C->S FIN,ACK   seq=1801  ack=5001  win=400   // client: 'I have no more data'
+      FIN consumes seq #1801; server's ACK will expect 1802.
+
+Step 2 - SERVER sends ACK of FIN (half-close: client can no longer send):
+    S->C ACK       seq=5001  ack=1802  win=400   // server confirms FIN; client->server half is closed
+      (server MAY still send its own data here -- half-duplex close.)
+
+Step 3 - SERVER sends its FIN:
+    S->C FIN,ACK   seq=5001  ack=1802  win=400   // server: 'I have no more data either'
+      server's FIN consumes seq #5001; client's ACK expects 5002.
+
+Step 4 - CLIENT sends ACK of server FIN:
+    C->S ACK       seq=1802  ack=5002  win=400   // client confirms server FIN; server can close now
+      SERVER is now CLOSED. CLIENT enters TIME_WAIT.
+
+TIME_WAIT: client lingers 240s (= 2 * MSL = 2 * 120s) holding
+the 4-tuple (src_ip, src_port, dst_ip, dst_port). During that window:
+  - if the server's retransmitted FIN arrives (our step-4 ACK was lost),
+    the client re-sends the ACK so the server can finally close;
+  - any delayed duplicate segment bound for this OLD connection expires
+    before the port is freed, so it cannot poison a NEW connection.
+
+WHY THIS EXHAUSTS PORTS IN LOAD BALANCERS:
+A load balancer opening many SHORT-LIVED connections to backends keeps
+each closed one in TIME_WAIT for 4 minutes. The client ephemeral-port
+range is finite (~28232 ports on Linux, 32768-60999). Each live +
+TIME_WAIT 4-tuple holds one. Steady-state cap on new connections/sec:
+  ephemeral ports ~= 28232; TIME_WAIT = 240s
+  => max ~28232/240 = 117.6 new conn/s per src IP
+  (the classic 'Cannot assign requested address' under load.) Mitigations:
+  SO_REUSEADDR/SO_LINGER, longer keep-alive (fewer short conns), or a
+  connection pool. 🔗 This is a big reason HTTP/2 and connection pools
+  exist: amortize the handshake/teardown over many requests.
+
+[check] FIN acked with seq+1: client FIN 1801 -> ack 1802, server FIN 5001 -> ack 5002; TIME_WAIT = 2*MSL = 240s:  OK
+
+========================================================================
+  SECTION E: why distributed systems cannot trust TCP alone
+========================================================================
+TCP guarantees ordered, reliable, non-duplicated delivery -- but ONLY
+*within a single living connection*. Real distributed systems fail over,
+multiplex logical streams, and must survive crashes. Three cracks:
+
+(1) HEAD-OF-LINE BLOCKING (within one connection).
+TCP delivers a strictly ordered BYTE STREAM. If byte N is lost, bytes
+N+1, N+2, ... that ALREADY arrived are HELD in the kernel until N is
+retransmitted -- even if they belong to an independent logical request.
+HTTP/2 multiplexes many streams over ONE TCP connection, so a loss on
+stream A stalls streams B, C, D that have nothing to do with A. QUIC
+(RFC 9000) runs its own per-stream reliability over UDP precisely to
+remove this coupling.
+
+(2) CONNECTION RESET DURING FAILOVER (between connections).
+When a server crashes, a load balancer redirects the client to a NEW
+backend over a NEW TCP connection. The old connection is torn down with
+an RST -- any request still in flight is LOST, the app sees ECONNRESET.
+A naive retry can then DOUBLE-EXECUTE a non-idempotent operation.
+
+Concrete failover demo (idempotent op is safe; non-idempotent is NOT):
+  client -> node A: INCR counter   (op_id=7)   over TCP conn #1
+  node A applies it (counter: 0 -> 1) then CRASHES before replying
+  client times out, opens TCP conn #2 to node B (failover)
+  client retries:   INCR counter   (op_id=7)   over TCP conn #2
+  node B applies it (counter: 1 -> 2)  <- DOUBLE INCREMENT!
+  -> INCR is NOT idempotent, so the retry corrupted the count.
+
+  The fix: an IDEMPOTENCY KEY (op_id=7). Node B records op_id=7 was
+  already done (it propagated via replication) and returns the cached
+  result instead of re-executing. SET x=1 IS idempotent (retry is a
+  no-op); INCR / charge-$100 are NOT, and MUST carry a dedup key.
+
+(3) CONSENSUS DOES NOT TRUST TCP ORDERING.
+Raft/Paxos do NOT rely on 'whatever order TCP delivered the bytes' for
+correctness. Each log entry carries its OWN (term, index). If a leader's
+TCP connection is reset and a follower reconnects, the AppendEntries RPC
+re-specifies (term=3, index=7, entry=...). The follower de-duplicates /
+truncates by INDEX, not by arrival order. TCP is just the transport;
+the protocol's ordering is logical, application-level, and survives
+connection resets and reordering across connections. 🔗 RAFT.md,
+PAXOS.md, LAMPORT_TIMESTAMPS.md.
+
+BOTTOM LINE: TCP gives you a reliable ordered pipe. Distributed-system
+correctness needs MORE: idempotency keys for safe retries, application
+sequence numbers / logical clocks for ordering that spans connections,
+and consensus for agreement that survives failover. Trust TCP for the
+bytes; trust your protocol for the semantics.
+
+[check] TCP reliability is per-connection; failover = RST + in-flight
+        loss; consensus uses logical (term,index) not TCP order:  OK
+
+========================================================================
+  GOLD CHECK  (pinned values for tcp_handshake.html)
+========================================================================
+Capstone: the sequence/ack arithmetic across a connection's FULL life
+-- handshake, data, teardown -- plus the congestion sawtooth and the
+TIME_WAIT math. Every value is recomputed by the .html from the SAME
+constants (ISN_C=1000, ISN_S=5000, MSS=100, MSL=120).
+
+Handshake:
+  SYN        ack_value = 1001   (= ISN_C + 1 = 1001)
+  SYN-ACK    ack_value = 5001   (= ISN_S + 1 = 5001)
+  client seq_next after open = 1001
+  server seq_next after open = 5001
+
+Data (4 segments x 100 bytes):
+  segment acks = [1101, 1201, 1301, 1401]
+  final client seq_next = 1401  (= 1001 + 400)
+  cumulative ACK the server sends back = 1401  (= last_seg.seq + len)
+
+Teardown:
+  client FIN seq = 1401 -> server ACK = 1402
+  server FIN seq = 5001 -> client ACK = 5002
+  TIME_WAIT      = 2 * MSL = 240 s
+
+Congestion sawtooth cwnd series:
+  [1, 2, 4, 8, 16, 17, 18, 19, 1, 2, 4, 8, 16, 17, 18, 19]
+  pre-loss peak cwnd = 19; post-loss ssthresh = 9
+
+GOLD scalars (pinned for a compact .html check):
+  isn_client            = 1000
+  isn_server            = 5000
+  ack_of_syn            = 1001        (ISN_C + 1)
+  ack_of_syn_ack        = 5001        (ISN_S + 1)
+  client_seq_after_open = 1001
+  server_seq_after_open = 5001
+  data_ack_after_4_segs = 1401       (last seq + len)
+  ack_of_client_fin     = 1402       (FIN consumes 1)
+  ack_of_server_fin     = 5002       (FIN consumes 1)
+  time_wait_seconds     = 240     (2 * MSL)
+  cwnd_series           = [1, 2, 4, 8, 16, 17, 18, 19, 1, 2, 4, 8, 16, 17, 18, 19]
+  pre_loss_peak_cwnd    = 19
+  post_loss_ssthresh    = 9
+  ephemeral_ports       = 28232  (32768..60999)
+  port_rate_cap_per_sec = 117.6  (ephemeral / TIME_WAIT)
+
+[check] all seq/ack arithmetic reproduces from ISN_C/ISN_S/MSS, the
+        sawtooth is deterministic, and TIME_WAIT = 240s:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,224 @@
+distributed_locking.py - reference impl. All numbers below feed DISTRIBUTED_LOCKING.md.
+Pure Python stdlib. Approaches: ZK ephemeral, ZK sequential, Redis SETNX, Redlock, fencing tokens.
+
+========================================================================
+  SECTION A: ZooKeeper ephemeral lock (naive) - create /lock, watch
+========================================================================
+The naive ZK recipe: an EPHEMERAL node /lock. The first client to
+create it holds the lock. Everyone else FAILS to create it (it
+exists) and instead sets a WATCH on /lock. When the holder's session
+ends, ZK deletes the ephemeral node and fires the watch - on EVERY
+waiter at once.
+
+Scenario: clients C1, C2, C3. C1 grabs the lock; C2, C3 wait.
+
+  tick  event
+  ----  -----
+    0   C1 create_ephemeral('/lock') -> True  [C1 HOLDS]
+    1   C1 create_ephemeral('/lock') -> False (exists); C2 watches /lock
+    2   C1 create_ephemeral('/lock') -> False (exists); C3 watches /lock
+
+  watchers on /lock = {C2, C3}   (N-1 = 2 waiters)
+
+Now C1's session EXPIRES (crash / timeout). ZK auto-deletes the
+ephemeral /lock and fires the watch on EVERY registered waiter:
+
+  tick   3   C1 session expired -> /lock deleted
+  tick   3   watches fired on: {C2, C3}   (2 waiters woke up = the HERD EFFECT)
+
+All of them now race to re-create /lock. Exactly one wins; the rest
+go back to waiting. The problem: ONE release woke {N-1} clients, all
+hammering ZK at once. With 1000 waiters that is a thundering herd.
+
+[check] number of waiters woken by a single release = 2 (== N-1 == 3-1):  OK
+
+This is what Section B fixes: spread the waiters into a QUEUE so a
+release wakes exactly ONE of them.
+
+========================================================================
+  SECTION B: sequential nodes - the ordered queue (herd-free)
+========================================================================
+Fix: each waiter creates a SEQUENTIAL ephemeral node. The node with
+the LOWEST sequence number holds the lock. Each waiter watches ONLY
+its immediate predecessor, so a release wakes exactly ONE client.
+
+Scenario: C1, C2, C3 each create /lock-<seq>:
+
+  C1 create_sequential -> /lock-0000000001  [seq 1]  watches predecessor: (none - is lowest)
+  C2 create_sequential -> /lock-0000000002  [seq 2]  watches predecessor: /lock-0000000001
+  C3 create_sequential -> /lock-0000000003  [seq 3]  watches predecessor: /lock-0000000002
+
+  queue (sorted by seq): 0000000001(C1) -> 0000000002(C2) -> 0000000003(C3)
+  holder = argmin_seq = /lock-0000000001 on C1  (unique, so <= 1 holder by construction)
+
+C1 finishes and RELEASES (deletes its node). Only the watcher on
+that node wakes - C2, the immediate successor. C3 sleeps through it:
+
+  C1 releases 0000000001 -> wakes C2 only -> new holder = /lock-0000000002
+  C2 releases 0000000002 -> wakes C3 only -> new holder = /lock-0000000003
+
+  queue now: 0000000003(C3)
+
+HERD vs QUEUE, side by side (Section A vs Section B):
+  naive (A): 1 release -> 2 waiters woken (ALL of them)
+  queue (B): 2 releases -> 2 waiter woken (ONE per release, the immediate successor)
+The queue is O(1) wakeups per release regardless of how many clients
+are waiting. That is why ZooKeeper's lock recipe uses sequential nodes.
+
+[check] every release woke exactly 1 waiter (not the herd):  OK
+
+GOLD (pinned for distributed_locking.html):
+  herd_woken_per_release (naive, N=3) = 2
+  queue_woken_per_release (sequential) = 1
+  holder rule: argmin_seq(live nodes) -> unique -> mutual exclusion
+
+========================================================================
+  SECTION C: Redis SETNX lock - SET NX PX and the stale holder
+========================================================================
+Redis lock primitive:  SET key value NX PX ttl
+  NX  -> set ONLY if the key does not exist (atomic test-and-set)
+  PX  -> expire after ttl milliseconds (a CLOCK countdown)
+Returns 'OK' if you got it, nil if someone else holds it. The danger:
+the lock expires at now+ttl whether or not the holder is still alive.
+
+Scenario: TTL = 30 ticks. C1 acquires at tick 0, does work to
+tick 10, then FREEZES in a GC pause longer than the remaining TTL.
+
+  tick   0   C1 SET lock c1 NX PX 30 -> 'OK'   [C1 holds, expires at tick 30]
+  tick  10   C2 SET lock c2 NX PX 30 -> nil  (held; C1 still believes it holds)
+
+  tick  10   *** C1 enters a stop-the-world GC pause (frozen 25 ticks, until tick 35) ***
+  tick  30   TTL elapsed -> lock EXPIRED (is_expired=True). C1 is frozen and does NOT know.
+  tick  32   C2 SET lock c2 NX PX 30 -> 'OK'   [C2 holds]. C1 is STILL frozen.
+  tick  32   *** holders that BELIEVE they hold = {C1, C2}  -> |holders| = 2 ***
+
+  tick  35   C1 WAKES from GC. It never released, never saw
+          the expiry, so it STILL believes it holds the lock. It writes
+          to shared storage. Meanwhile C2 ALSO writes -> DATA CORRUPTION.
+
+This is the STALE LOCK HOLDER: the lock's lifetime is a clock
+countdown decoupled from the holder's liveness. A pause longer than
+the remaining TTL silently hands the lock to a second client while the
+first keeps writing. Mutual exclusion is VIOLATED.
+
+[check] mutual-exclusion invariant |holders| <= 1 under Redis+GC:  FAIL (2 holders)
+
+GOLD (pinned for distributed_locking.html):
+  TTL = 30 ticks, GC pause = 25 ticks (GC 35 > TTL 30 -> expiry during freeze)
+  max |holders| observed = 2  ->  a Redis lock CANNOT guarantee
+  mutual exclusion against a GC pause. (Motivates Section E.)
+
+========================================================================
+  SECTION D: Redlock - N masters, majority quorum, and why clocks break it
+========================================================================
+Redlock spreads the SET-NX-PX lock across N (here 5) INDEPENDENT Redis masters. A client SETs on all of them; it holds the lock iff a MAJORITY accepted. quorum = floor(N/2)+1 = 3 for N=5.
+
+The hope: any single master failing still leaves a majority that agrees. The reality (Kleppmann 2016): the TTL is still a CLOCK countdown on EACH master, and the algorithm assumes every clock is roughly correct. A clock jump (NTP step / VM suspend) defeats it.
+
+  N = 5 masters (M1..M5),  quorum = 3,  TTL = 10 ticks (per-master clock)
+
+  C1 acquire: M4,M5 slow/unreachable; SET on M1,M2,M3 -> got 3  (>= quorum 3?) -> LOCK ACQUIRED on {M1,M2,M3}
+             each acquired master's lock expires at its own clock 10.
+
+  Clock skew: M3's clock jumps to 12 (an NTP step) -> C1's lock on M3 EXPIRED. M1 (clock 0) and M2 (clock 0) still hold C1's lock.
+
+  C2 acquire: SET on all 5 -> got 3 on {M3,M4,M5}  (>= quorum 3?) -> LOCK ACQUIRED on {M3,M4,M5}
+
+  TWO VALID MAJORITIES: C1 holds {M1,M2,M3}, C2 holds {M3,M4,M5}.
+  They overlap only on {M3} - but M3's lock EXPIRED (clock jump), so it protects neither. Both got 3 >= quorum 3: both legitimately acquired. -> |holders| = 2.
+
+  Redlock's validity check (T2-T1 < TTL) is only at ACQUIRE time; a clock jump AFTER it is undetectable. The majority rule did NOT prevent the second acquisition, because quorums can be DISJOINT and clocks can lie. Quorum does not fix bad clocks.
+
+[check] Redlock mutual-exclusion under a clock jump:  FAIL (2 holders)
+
+Kleppmann's point: Redlock is correct ONLY IF you assume bounded clock skew and NO long pauses - i.e. it trades correctness for an environment assumption that NTP and GC routinely violate. For real mutual exclusion you need fencing tokens (Section E), not just a bigger quorum.
+
+GOLD (pinned for distributed_locking.html):
+  N = 5, quorum = 3, TTL = 10
+  C1 majority = {M1,M2,M3} (got 3);  C2 majority = {M3,M4,M5} (got 3)
+  intersection = {M3}  (the lock there had expired -> no protection)
+  max |holders| = 2  ->  Redlock VIOLATES mutual exclusion under
+  clock skew. Majority quorum does NOT make a clock-based lock safe.
+
+========================================================================
+  SECTION E: fencing tokens - monotonic tokens defeat the stale holder
+========================================================================
+The fix: every lock grant carries a fencing token that STRICTLY
+increases over time. The shared storage REFUSES any write whose token
+is not greater than the last one it accepted. So a stale holder that
+wakes up after expiry can be detected and rejected - by the storage.
+
+Replay of the Section C scenario, but now the lock service issues
+tokens and the storage checks them:
+
+  C1 acquire -> fencing token 33
+  *** C1 GC pause; lock EXPIRES ***
+  C2 acquire -> fencing token 34   (monotonic: 34 > 33)
+
+  C2 write(token=34, 'v34') -> last_token was 0 -> ACCEPTED  (store.last_token = 34)
+  C1 write(token=33, 'v33-stale') -> 33 <= 34 -> REJECTED
+
+  final storage data = ('C2', 'v34')   (C2's write, the correct one)
+
+The stale holder (C1) was still able to BELIEVE it held the lock -
+fencing cannot stop a client from being mistaken. But it stops the
+mistake from CORRUPTING anything: the storage gate-keeps on the token,
+so only the genuinely-newest holder's write survives. Mutual exclusion
+is enforced at the resource, not just at the lock service.
+
+[check] C2 accepted, C1 rejected, storage holds C2's data:  OK
+
+GOLD (pinned for distributed_locking.html):
+  token sequence: C1=33, C2=34  (strictly increasing)
+  storage.last_token after C2 write = 34
+  C1 stale write (token 33) -> REJECTED  (33 <= 34)
+  storage.data = ('C2', 'v34')  -> data integrity PRESERVED
+
+========================================================================
+  GOLD CHECK: consensus-based locking => <= 1 holder at every tick
+========================================================================
+The defining property of a lock: at most ONE client believes it holds
+it, at every instant. Brute-force this over a deterministic timeline.
+
+(1) ZooKeeper sequential lock (consensus-based, Section B):
+    holder == argmin_seq(live ephemeral nodes). Distinct sequences =>
+    argmin is unique => at most ONE holder at all times, by proof.
+
+    tick  op                live queue (holder *)          |holders|
+    ----  --                ------------------------------  --------
+       0   create  C1        0000000001(C1)                 1
+       1   create  C2        0000000001(C1) -> 0000000002(C2) 1
+       2   create  C3        0000000001(C1) -> 0000000002(C2) -> 0000000003(C3) 1
+       3   create  C4        0000000001(C1) -> 0000000002(C2) -> 0000000003(C3) -> 0000000004(C4) 1
+       4   release C1        0000000002(C2) -> 0000000003(C3) -> 0000000004(C4) 1
+       5   create  C5        0000000002(C2) -> 0000000003(C3) -> 0000000004(C4) -> 0000000005(C5) 1
+       6   release C2        0000000003(C3) -> 0000000004(C4) -> 0000000005(C5) 1
+       7   release C3        0000000004(C4) -> 0000000005(C5) 1
+       8   release C4        0000000005(C5)                 1
+       9   release C5        (empty)                        0
+
+    max |holders| over 10 ticks = 1.
+    [check] GOLD (consensus): |holders| <= 1 at EVERY tick:  OK
+
+(2) Counter-model: Redis SETNX (Section C) under a GC pause.
+    Same 'mutual exclusion' claim, but the lock's lifetime is a clock
+    countdown. A pause longer than the TTL silently creates a second
+    holder:
+
+    tick 0  C1 SET NX PX 10 -> OK     (C1 holds, expires tick 10)
+    tick 12 GC pause over, lock EXPIRED; C2 SET NX PX 10 -> OK
+    C1 woke and STILL believes it holds -> |holders| = 2
+    [check] Redis: mutual exclusion VIOLATED (|holders| = 2):  confirmed
+
+CONCLUSION: consensus-based locking (ZK sequential) satisfies mutual
+exclusion for free - the holder is the unique minimum, no clocks. Clock-
+based locking (Redis/Redlock) does NOT, because a frozen holder can't
+learn its lock expired. Fencing tokens (Section E) restore safety by
+making the storage itself reject stale holders.
+
+GOLD scalar: consensus max_holders = 1 (must be 1); redis max_holders = 2
+[check] gold scalars reproduce the invariant:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

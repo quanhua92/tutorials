@@ -1,0 +1,235 @@
+backpressure.py - reference impl. All numbers below feed BACKPRESSURE.md.
+python stdlib only. Deterministic. (P=100, C=50, K=1000, N=10, R=20, r=50)
+
+========================================================================
+  SECTION A: UNBOUNDED QUEUE  -- depth(t) = (P - C) * t  (linear -> OOM)
+========================================================================
+Producer P = 100 req/s, consumer C = 50 req/s. The consumer is
+the bottleneck, so the queue grows at the NET rate (P - C) = 50/s.
+
+With NO backpressure the queue is bottomless. Its depth at time t is:
+    depth(t) = (P - C) * t = 50 * t
+
+Growth curve (closed form) -- watch it run away:
+
+| elapsed     | queue depth | memory @ 1 KB/item |
+|-------------|--------------|---------------------|
+| 1 s         | 50           | 0.0        MiB     |
+| 10 s        | 500          | 0.5        MiB     |
+| 1 min       | 3,000        | 2.9        MiB     |
+| 10 min      | 30,000       | 29.3       MiB     |
+| 1 hour      | 180,000      | 175.8      MiB     |
+
+After 1 HOUR the backlog is 180,000 items = 176 MiB of heap -- and it
+never stops growing. Long before that you hit OOM, the GC thrashes on
+a 100k+ object heap, thread pools block on the queue's lock, and the
+caller's timeouts fire -- a CASCADING FAILURE that takes down services
+that were never even slow.
+
+Little's Law (L = lambda * W) says in-flight L grows with latency W.
+Here latency grows without bound (requests age in the queue forever),
+so L grows without bound. No finite RAM survives an unbounded queue.
+
+GOLD: unbounded growth rate = (P - C) = 50 items/s; depth at 1 h = 180,000.
+[check] depth(3600) = (P - C) * 3600 = 50 * 3600 = 180,000:  OK
+
+========================================================================
+  SECTION B: BOUNDED QUEUE  -- cap K, reject surplus, throughput = C
+========================================================================
+Give the queue a hard cap K = 1000. The fluid model says the backlog
+grows at (P - C) until it hits the wall, then the surplus is rejected:
+
+    depth(t)   = min(K, (P - C) * t)        saturates at K
+    goodput    = C                          (consumer-bound, always)
+    reject rate= P - C    once saturated
+
+  - below the wall: producer sends 100 req/s, all fit, none rejected.
+  - at the wall:    consumer frees C = 50 slots/s, producer refills
+    those 50 and the other (P - C) = 50 are REJECTED (HTTP 503 / drop / circuit-break).
+
+FILL PHASE (depth < K): grows at (P - C) = 50/s until the wall.
+Time to fill (fluid model):
+    t_fill = K / (P - C) = 1000 / 50 = 20 s
+
+SATURATED PHASE (depth = K): steady depth <= K = 1000 (BOUNDED), goodput = C = 50/s,
+reject (P - C) = 50/s (50% of arrivals).
+
+Timeline (fluid model, 1 s steps):
+| t (s) | queue depth | admitted/s | rejected/s | cumulative rejected |
+|-------|-------------|------------|------------|---------------------|
+| 1     | 50          | 100        | 0          | 0                   |
+| 5     | 250         | 100        | 0          | 0                   |
+| 10    | 500         | 100        | 0          | 0                   |
+| 15    | 750         | 100        | 0          | 0                   |
+| 20    | 1,000       | 100        | 0          | 0                   | <- wall saturated
+| 21    | 1,000       | 50         | 50         | 50                  | <- first rejection
+| 30    | 1,000       | 50         | 50         | 500                 |
+| 45    | 1,000       | 50         | 50         | 1,250               |
+| 60    | 1,000       | 50         | 50         | 2,000               |
+
+The queue saturated at t = 20 s, then STAYED at depth = 1000 forever. Goodput
+collapsed to exactly C = 50/s -- which is all
+the consumer could ever do anyway. The rejected 50/s were going to
+die of timeout regardless; rejecting them EARLY (at the boundary)
+fails fast and frees the caller to retry elsewhere instead of waiting
+an age for a slot that will never come.
+
+GOLD: steady depth <= K = 1000; goodput = C = 50/s; reject rate = (P-C)/P = 50%.
+[check] depth(60)==1000, processed(60)==C*60==3000, rejected(60)==2000:  OK
+
+========================================================================
+  SECTION C: REACTIVE STREAMS  -- request-N, in-flight <= N  (natural BP)
+========================================================================
+Instead of the producer PUSHING (and hoping the queue holds), let the
+consumer PULL. The consumer maintains DEMAND (credits): it requests N
+items, the producer may emit AT MOST N, then it must wait for the next
+request. The producer can NEVER outrun the consumer -- it is physically
+gated by outstanding demand.
+
+Reactive Streams / Project Reactor / RxJava / Java 9 Flow all use this
+contract. Here N = 10.
+
+Two pull cycles (phase, demand, in_flight):
+| phase                      | demand | in_flight |
+|----------------------------|--------|-----------|
+| consumer requests N        | 10     | 0         |
+| producer emits 10          | 0      | 10        |
+| consumer processes batch   | 0      | 0         |
+| consumer requests N        | 10     | 0         |
+| producer emits 10          | 0      | 10        |
+| consumer processes batch   | 0      | 0         |
+
+Each cycle: demand goes 10 -> 0, in_flight goes 0 -> 10 -> 0. The
+producer emitted EXACTLY what the consumer asked for. Crucially:
+
+    MAX in-flight items = demand cap N = 10.
+
+Throughput = the consumer's processing rate: it requests another N as
+soon as it finishes a batch, so it self-clocks at the speed it can
+digest. There is NO unbounded buffer to overflow -- backpressure is a
+property of the protocol, not a band-aid.
+
+Little's Law again: L = lambda * W. The demand cap N bounds L, so the
+consumer can trade throughput (lambda) against latency (W) by tuning N
+-- bigger N = more pipeline parallelism (higher throughput, more memory)
+smaller N = tighter bound (lower memory, maybe lower throughput).
+
+GOLD: max in-flight == demand cap N == 10; producer gated by demand.
+[check] max_in_flight (10) == N (10):  OK
+
+========================================================================
+  SECTION D: TOKEN BUCKET  -- burst cap R, sustained rate r  (rate limit)
+========================================================================
+A token bucket holds up to R tokens, refilled at r tokens/s. Each
+request CONSUMES 1 token; if the bucket is empty the request is
+REJECTED. Two dials: capacity R = 20 (burst size) and refill r = 50/s
+(long-term average allowed rate).
+
+BURST behaviour -- a sudden spike hitting a FULL bucket (tokens = R):
+| requests in burst | tokens before | admitted | tokens after | rejected |
+|-------------------|---------------|----------|--------------|----------|
+| 5                 | 20            | 5        | 15           | 0        |
+| 10                | 20            | 10       | 10           | 0        |
+| 15                | 20            | 15       | 5            | 0        |
+| 20                | 20            | 20       | 0            | 0        |
+| 25                | 20            | 20       | 0            | 5        |
+| 50                | 20            | 20       | 0            | 30       |
+
+At most R = 20 requests pass from a single burst; the rest are
+rejected instantly. That is the burst cap: it absorbs short spikes
+without dropping, but caps the spike height.
+
+SUSTAINED behaviour -- a steady stream at P = 100/s hitting a bucket
+refilling at r = 50/s. The bucket cannot sustain more than r/s, so:
+    sustained throughput = min(P, r) = min(100, 50) = 50/s
+    sustained reject rate = (P - r)/P = (100 - 50)/100 = 50%
+
+Token bucket vs the others:
+| mechanism     | what it bounds            | burst?        |
+|---------------|---------------------------|---------------|
+| bounded queue | buffer depth K = 1000      | buffers first |
+| token bucket  | RATE r = 50/s, burst 20   | burst 20 then 50/s |
+| reactive      | in-flight N = 10          | pull-gated    |
+| leaky bucket  | OUTPUT rate r/s exactly   | NO burst      |
+
+Leaky bucket is the strict cousin: it is a queue that drips OUT at
+exactly r/s, smoothing all bursts into a flat rate. Token bucket lets
+short bursts through (up to R); leaky bucket does not. APIs (Stripe,
+GitHub) usually pick token bucket so honest clients are not punished
+for a quick spike.
+
+GOLD: burst cap = R = 20; sustained throughput = min(P, r) = 50/s; reject rate = (P - r)/P = 50%.
+[check] burst(20) admits exactly 20, drains bucket to 0; sustained = 50/s:  OK
+
+========================================================================
+  SECTION E: LOAD SHEDDING  -- drop LOW priority, protect HIGH
+========================================================================
+When the system MUST drop work, drop the UNIMPORTANT work. Tag each
+request with a priority; under overload, serve HIGH first and SHED the
+LOW surplus. This keeps the critical path (payments, user-facing) green
+while gracefully degrading the rest (analytics, batch, prefetch).
+
+Service budget = consumer rate = 50/s. Arrivals total 100/s (overloaded 100/50).
+Policy: serve in priority order HIGH -> MEDIUM -> LOW; shed the rest.
+
+| class               | arrivals/s | served/s | shed/s | loss rate |
+|---------------------|------------|----------|--------|-----------|
+| HIGH (payments)     | 20         | 20       | 0      | 0.0%      |
+| MEDIUM (API)        | 40         | 30       | 10     | 25.0%     |
+| LOW (analytics)     | 40         | 0        | 40     | 100.0%    |
+| TOTAL               | 100        | 50       | 50     | 50.0%     |
+
+WITHOUT priority (FIFO / random drop under overload), every class
+loses the same fraction (~50%) -- so the
+PAYMENTS class would also be shed, exactly when it matters most.
+WITH priority load shedding the loss is GRADUATED: HIGH (payments)
+loses nothing, MEDIUM (API) loses a slice, and only LOW (analytics)
+is fully shed. Same total goodput (consumer-bound at 50/s),
+radically smaller BLAST RADIUS -- the critical path stays green while
+the cheap work degrades.
+
+GOLD: HIGH served = 20 (loss 0%); MEDIUM loss 25%; LOW served = 0 (loss 100%); total served = 50 = consumer.
+[check] HIGH loss == 0, MEDIUM loss > 0, LOW loss == 100%, total served == 50:  OK
+
+========================================================================
+  GOLD CHECK  (bounded vs unbounded over 1 hour -- pinned for backpressure.html)
+========================================================================
+Capstone: run BOTH regimes -- unbounded (no backpressure) and bounded
+(cap K = 1000) -- for a full hour (3600 s) at P = 100, C = 50, using the closed-form fluid model. The headline invariant:
+backpressure keeps the queue BOUNDED while the unbounded queue grows
+linearly -- for the SAME goodput (both process exactly what the
+consumer can handle).
+
+  metric                     unbounded    bounded (K=1000)
+  --------------------------------------------------------
+  max queue depth              180,000               1,000
+  depth at 1 hour              180,000               1,000
+  processed (goodput)          180,000             180,000
+  rejected                           0             179,000
+  depth ratio                     180x                    
+
+READ THIS TABLE: the two columns process the SAME number of requests
+(goodput = C * 1h = 180,000 in BOTH) because the consumer is
+the bottleneck either way. The ONLY difference is memory and honesty:
+  - unbounded hoards 180,000 items in RAM (OOM, GC thrash,
+    then cascading timeouts) and tells callers NOTHING.
+  - bounded caps RAM at <= 1000 items and FAILS FAST on the 179,000 it cannot serve, so callers retry elsewhere
+    instead of waiting.
+
+That is the whole deal backpressure makes: trade rejections for bounded
+memory and fast failure. Same useful goodput; survivable overload.
+
+GOLD scalars (pinned for backpressure.html):
+  unbounded_depth_1h    = 180000
+  unbounded_rejected    = 0
+  bounded_depth_1h      = 1000
+  bounded_rejected_1h   = 179000
+  goodput_both          = 180000   (C * 1h, IDENTICAL)
+  depth_ratio           = 180x
+  time_to_fill          = 20 s   (K / (P - C))
+
+[check] bounded depth <= 1000 while unbounded -> 180,000; goodput identical; ratio 180x:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

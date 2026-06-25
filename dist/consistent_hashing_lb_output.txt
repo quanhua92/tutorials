@@ -1,0 +1,166 @@
+consistent_hashing_lb.py - reference impl. All numbers feed CONSISTENT_HASHING_LB.md.
+Python stdlib only. ring = 2^32 = 4294967296. K = 1000 keys.
+hash = MD5[:4] 32-bit (deterministic across processes).
+
+========================================================================
+  SECTION A: mod-hash vs consistent hashing  (add a 5th node, count the carnage)
+========================================================================
+K = 1000 keys, start with N = 4 nodes (A, B, C, D). Add node E -> N = 5.
+
+Naive mod-hash:   owner(key) = hash(key) % N
+  remapped keys going 4 -> 5 nodes:  815 / 1000 =  81.5%   (expected ~ N/(N+1) =  80.0%)
+
+Consistent hash:  owner(key) = successor of hash(key) on ring
+  remapped keys going 4 -> 5 nodes:  179 / 1000 =  17.9%   (expected ~ 1/(N+1) =  20.0%)
+
+Side by side (bar = 10 keys):
+  mod-hash   [#################################################################################] 815
+  consistent [#################                                                               ] 179
+
+Consistent hashing remaps 4.6x FEWER keys. That is the whole reason it exists.
+
+[check] every remapped key moved ONTO the new node E (=179):  OK
+[check] mod-hash remap fraction 0.815 ~ N/(N+1)=0.800 and consistent 0.179 ~ 1/(N+1)=0.200:  OK
+
+========================================================================
+  SECTION B: ring construction  (hash each node at V positions; key -> first node clockwise)
+========================================================================
+Each physical node is hashed V times -> V virtual-node positions.
+Shown here with V = 3 (tiny, so the ring fits on a page).
+
+
+Ring has 12 entries (virtual nodes). Arcs (sorted clockwise):
+
+  #      position   node   arc / 2^32
+----------------------------------------
+  0    1761541434      B        11.5%
+  1    2255709714      D         1.4%
+  2    2313904738      B         5.2%
+  3    2538429283      C         1.9%
+  4    2617948611      D         0.2%
+  5    2627254927      A         8.0%
+  6    2969671659      B         3.1%
+  7    3103869100      A         7.2%
+  8    3414233331      C         8.9%
+  9    3796934404      D         5.6%
+ 10    4037693931      C         3.1%
+ 11    4169070134      A        43.9%
+----------------------------------------
+
+Walk a few sample keys to their owners (clockwise successor):
+
+      key     hash(key)  owner
+----------------------------------
+  key-000    3292498206      C
+  key-001     544643647      B
+  key-002    4052209398      A
+  key-042    1629219438      B
+  key-500     993819627      B
+  key-999    3818770834      C
+----------------------------------
+How to read it: from hash(key), walk the ring clockwise (positions
+increasing, wrapping past 2^32 to 0). The first virtual node you
+meet names the owning PHYSICAL node. More vnodes => finer arcs =>
+smoother load (Section E).
+
+GOLD (pinned for consistent_hashing_lb.html, V=3, nodes A B C D):
+  owner(key-000) = C
+  owner(key-001) = B
+  owner(key-002) = A
+  owner(key-042) = B
+  owner(key-500) = B
+  owner(key-999) = C
+[check] ring lookups deterministic across calls:  OK
+
+========================================================================
+  SECTION C: node join  (add E; only keys in E's arc remap -> ~K/N)
+========================================================================
+Before: nodes ['A', 'B', 'C', 'D']. After: + E. Remapped = 179 keys (expected K/(N+1) = 200).
+
+Sample of keys that moved to E (key: old_owner -> E):
+
+  key-008: B -> E   (hash 3906773263, now under E's arc)
+  key-011: A -> E   (hash 2043839365, now under E's arc)
+  key-012: C -> E   (hash 415444162, now under E's arc)
+  key-013: A -> E   (hash 1539233786, now under E's arc)
+  key-018: C -> E   (hash 727906717, now under E's arc)
+  key-019: A -> E   (hash 2651615623, now under E's arc)
+  key-020: A -> E   (hash 2676226571, now under E's arc)
+  key-026: B -> E   (hash 3919129105, now under E's arc)
+  key-027: C -> E   (hash 3811333958, now under E's arc)
+  key-031: D -> E   (hash 3417350994, now under E's arc)
+  ... and 169 more.
+
+Where the moved keys came from (donors to E):
+
+   donor  keys given   share
+       A          62   34.6%
+       C          50   27.9%
+       D          38   21.2%
+       B          29   16.2%
+
+Expected K/(N+1) = 200.0; observed = 179; band = [100, 300].
+[check] observed within +/-50% of K/N:  OK
+[check] every moved key's new owner == 'E' (a join only ever adds):  OK
+
+========================================================================
+  SECTION D: node departure  (remove B; B's keys move to their next clockwise owner)
+========================================================================
+Before: nodes ['A', 'B', 'C', 'D']. Remove B. B held 253 keys.
+
+After removal, exactly 253 keys moved (== B's old keys).
+
+Where B's keys went (each key's next clockwise survivor):
+
+   new owner    keys   share
+           A     106   41.9%
+           C      82   32.4%
+           D      65   25.7%
+
+Sample remap (key: B -> next survivor):
+
+  key-000: B -> A   (hash 3292498206)
+  key-007: B -> A   (hash 1395699225)
+  key-008: B -> C   (hash 3906773263)
+  key-009: B -> C   (hash 2444958315)
+  key-015: B -> C   (hash 628142114)
+  key-017: B -> C   (hash 626808211)
+  key-026: B -> C   (hash 3919129105)
+  key-028: B -> C   (hash 1756782065)
+  ... and 245 more.
+
+[check] moved set == keys formerly on B:  OK  (253 == 253)
+[check] B's load ~ K/N = 250 (observed 253, band [100, 400]):  OK
+
+========================================================================
+  SECTION E: virtual nodes cure the load skew  (V=1 vs V=150)
+========================================================================
+With V = 1 vnode per node, each node gets ONE random arc -- the
+arc lengths are wildly uneven (Dirichlet), so load is skewed.
+With V = 150, each node's total arc averages out by the law of
+large numbers, and load balances to within ~10%.
+
+V =   1 vnodes/node  ->  load by node: {'A': 25, 'B': 19, 'C': 384, 'D': 572}
+                 max/min = 30.11x,  CoV = 0.950  (CoV<0.10 ~ balanced within 10%)
+
+V =   3 vnodes/node  ->  load by node: {'A': 58, 'B': 561, 'C': 176, 'D': 205}
+                 max/min = 9.67x,  CoV = 0.751  (CoV<0.10 ~ balanced within 10%)
+
+V =  50 vnodes/node  ->  load by node: {'A': 261, 'B': 229, 'C': 289, 'D': 221}
+                 max/min = 1.31x,  CoV = 0.108  (CoV<0.10 ~ balanced within 10%)
+
+V = 150 vnodes/node  ->  load by node: {'A': 270, 'B': 253, 'C': 245, 'D': 232}
+                 max/min = 1.16x,  CoV = 0.055  (CoV<0.10 ~ balanced within 10%)
+
+Read the table: at V=1 a single random arc can starve a node
+(here the busiest holds ~30x the quietest); even V=3 is still
+badly skewed. By V=150 the max/min ratio is near 1.1 and CoV under
+0.10. That is why Cassandra defaults to 256 and Memcached to
+160-200 vnodes/node.
+
+GOLD @ V=150: max/min = 1.164, CoV = 0.0551
+[check] balanced within ~10% (CoV<0.12 and max/min<1.25):  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

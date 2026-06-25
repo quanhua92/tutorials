@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backpressure & Flow Control — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --teal:#16a085; --purple:#8e44ad;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.45rem;align-items:center}
+  input[type=range]{width:170px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:2.4ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.primary{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button:disabled{opacity:.4;cursor:default}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.6;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .gold{color:var(--gold)}
+  .readout .blue{color:#58a6ff}
+  .readout .or{color:var(--orange)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  code{background:#0a0e14;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:.8rem}
+  table.tbl{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.5rem}
+  table.tbl td,table.tbl th{border:1px solid #30363d;padding:4px 9px;text-align:center}
+  table.tbl th{color:var(--muted);font-weight:600}
+  table.tbl td.hi{background:#10241a;color:#7ee29a}
+  table.tbl td.lo{background:#3a1414;color:#ff9a8a}
+
+  /* the pipeline + queue */
+  .pipe{display:flex;align-items:flex-end;gap:0;margin:1.1rem 0 .6rem;justify-content:center}
+  .pcol{display:flex;flex-direction:column;align-items:center;gap:6px}
+  .pbox{width:96px;border-radius:10px;display:flex;flex-direction:column;align-items:center;
+        justify-content:center;font-family:ui-monospace,monospace;font-weight:700;border:2px solid #30363d;
+        background:#0a0e14;color:var(--muted);transition:.12s}
+  .pbox.prod{background:#10241a;border-color:var(--green);color:#7ee29a;height:64px}
+  .pbox.cons{background:#1c2a3a;border-color:#3a7bd5;color:#cfe2f3;height:64px}
+  .pbox .id{font-size:1rem}
+  .pbox .rt{font-size:.66rem;font-weight:600;opacity:.85;margin-top:2px}
+  .arrow{width:46px;height:3px;background:#30363d;align-self:center;position:relative}
+  .arrow.go{background:var(--green)}
+  .arrow .lbl{position:absolute;top:-15px;left:50%;transform:translateX(-50%);font-size:.7rem;
+     font-family:ui-monospace,monospace;color:var(--gold);white-space:nowrap}
+  /* the queue column (tall bar) */
+  .qwrap{display:flex;flex-direction:column-reverse;width:120px;height:220px;border:2px dashed #30363d;
+     border-radius:8px;background:#0a0e14;position:relative;overflow:hidden}
+  .qfill{width:100%;background:linear-gradient(180deg,#27ae60,#1e8449);transition:height .12s linear}
+  .qfill.warn{background:linear-gradient(180deg,#e67e22,#a04000)}
+  .qfill.over{background:linear-gradient(180deg,#c0392b,#7b241c)}
+  .qmark{position:absolute;left:0;width:100%;border-top:2px dashed var(--gold);height:0}
+  .qmark .tk{position:absolute;right:4px;top:-15px;font-size:.66rem;color:var(--gold);font-family:ui-monospace,monospace}
+  .qlab{font-size:.72rem;color:var(--muted);font-family:ui-monospace,monospace;text-align:center}
+  /* counters row */
+  .counters{display:flex;flex-wrap:wrap;gap:.7rem 1.3rem;margin-top:.7rem;font-family:ui-monospace,monospace;
+     font-size:.82rem;font-variant-numeric:tabular-nums}
+  .counters .c{background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.35rem .7rem}
+  .counters .c span{color:var(--muted);font-size:.72rem;display:block}
+  .counters .c b{font-size:1rem}
+
+  /* token bucket */
+  .bucket{display:flex;align-items:flex-end;justify-content:center;height:180px;margin:.8rem 0;position:relative}
+  .bwall{width:150px;height:160px;border:2px solid var(--gold);border-top:none;border-radius:0 0 14px 14px;
+     background:#0a0e14;position:relative;overflow:hidden;display:flex;align-items:flex-end}
+  .bfill{width:100%;background:linear-gradient(180deg,#f1c40f,#9a7d0a);transition:height .15s}
+  .btok{position:absolute;font-size:.7rem;color:var(--gold);font-family:ui-monospace,monospace}
+
+  /* latency-ish bars for load shedding */
+  .barwrap{display:flex;align-items:center;gap:.6rem;margin:.32rem 0}
+  .barwrap .lab{width:130px;color:var(--muted);font-size:.8rem}
+  .barwrap .track{flex:1;height:20px;background:#0a0e14;border-radius:5px;overflow:hidden;border:1px solid #30363d;display:flex}
+  .barwrap .seg{height:100%}
+  .barwrap .num{width:150px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Backpressure &amp; Flow Control — interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/dist/BACKPRESSURE.md">BACKPRESSURE.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/dist/backpressure.py">backpressure.py</a></h1>
+  <div class="sub">A <b style="color:var(--green)">producer</b> (P req/s) feeds a <b>queue</b>, which a <b style="color:#3a7bd5">consumer</b> (C req/s) drains.
+    When <b>P &gt; C</b> the backlog grows at <b>(P − C)</b> forever — until OOM and cascading timeouts. Backpressure stops that.
+    Toggle <b>unbounded</b> (runs away → red) vs <b>bounded</b> (rejects at K → stays put) vs <b>reactive</b> (consumer pulls N).
+    Defaults match <code>backpressure.py</code> Section A/B (P=100, C=50, K=1000).</div>
+
+  <!-- ===== PANEL 1: PIPELINE + QUEUE ===== -->
+  <h2>① The pipeline — watch the queue fill, saturate, or run away</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> pick a mode, set P / C / K, press <b>▶ run</b>. The queue bar grows at (P−C).
+      <b>Unbounded</b>: it never stops (turns red, "→ ∞"). <b>Bounded</b>: it hits the gold wall <b>K</b> and the surplus is <b>rejected</b> (gray) — depth stays put, goodput = C.
+      <b>Reactive</b>: the consumer pulls N items at a time; in-flight never exceeds N.</div>
+    <div class="controls" style="margin-bottom:.5rem">
+      <button class="active" id="mUnbounded">unbounded (no BP)</button>
+      <button id="mBounded">bounded queue (cap K)</button>
+      <button id="mReactive">reactive (request-N)</button>
+    </div>
+    <div class="controls" style="margin-bottom:.3rem">
+      <label>P (producer) <input type="range" id="P" min="20" max="200" value="100"><span class="val" id="Pv">100</span>/s</label>
+      <label>C (consumer) <input type="range" id="C" min="10" max="120" value="50"><span class="val" id="Cv">50</span>/s</label>
+      <label id="kLab">K (cap) <input type="range" id="K" min="100" max="3000" step="50" value="1000"><span class="val" id="Kv">1000</span></label>
+      <label id="nLab" style="display:none">N (demand) <input type="range" id="N" min="2" max="40" value="10"><span class="val" id="Nv">10</span></label>
+    </div>
+    <div class="controls" style="margin-bottom:.2rem">
+      <button class="primary" id="bPlay">▶ run</button>
+      <button id="bReset">↺ reset</button>
+      <span class="micro" id="simState">paused · t = 0 s</span>
+    </div>
+
+    <div class="pipe" id="pipe"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:#27ae60"></i>queued backlog</span>
+      <span><i class="sw" style="background:#e67e22"></i>near the wall</span>
+      <span><i class="sw" style="background:#c0392b"></i>overflow (unbounded)</span>
+      <span><i class="sw" style="background:var(--gold)"></i>cap K (the wall)</span>
+      <span><i class="sw" style="background:#3a3a3a"></i>rejected</span>
+    </div>
+    <div class="counters" id="counters"></div>
+    <div class="micro" style="margin-top:.6rem"><b>In words:</b> goodput (work actually done) is always <b>C</b> — the consumer is the bottleneck either way.
+      Backpressure changes nothing about goodput; it caps <b>memory</b> and <b>fails fast</b>. Formula: <code>depth(t) = (P−C)·t</code> (unbounded),
+      <code>min(K, (P−C)·t)</code> (bounded).</div>
+  </div>
+
+  <!-- ===== PANEL 2: TOKEN BUCKET ===== -->
+  <h2>② Token bucket — burst cap R, sustained rate r</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> a bucket of <b>R</b> tokens refilling at <b>r/s</b>. Each request costs 1 token; empty → reject.
+      A <b>burst</b> drains up to R instantly (the burst cap); a <b>sustained</b> stream at P&gt;r admits exactly r/s. Press <b>▶ hit burst</b> to drain the bucket.</div>
+    <div class="controls" style="margin-bottom:.3rem">
+      <label>R (capacity / burst) <input type="range" id="R" min="5" max="60" value="20"><span class="val" id="Rv">20</span></label>
+      <label>r (refill) <input type="range" id="rr" min="10" max="120" value="50"><span class="val" id="rrv">50</span>/s</label>
+      <label>P (incoming) <input type="range" id="Pt" min="20" max="200" value="100"><span class="val" id="Ptv">100</span>/s</label>
+      <button class="primary" id="bBurst">▶ hit burst of 25</button>
+    </div>
+    <div class="bucket"><div class="bwall"><div class="bfill" id="bfill" style="height:100%"></div></div></div>
+    <div class="micro" style="text-align:center;margin-top:-.3rem" id="bstat">tokens = 20 / 20  (full)</div>
+    <div style="overflow-x:auto;min-width:0;margin-top:.5rem"><table class="tbl" id="burstTbl"></table></div>
+    <div class="micro" style="margin-top:.5rem"><b>Sustained:</b> throughput = <code>min(P, r)</code>; reject rate = <code>(P − r)/P</code>.
+      Token bucket lets short bursts through (up to R); leaky bucket (the strict cousin) does not.</div>
+  </div>
+
+  <!-- ===== PANEL 3: LOAD SHEDDING ===== -->
+  <h2>③ Priority load shedding — drop LOW, protect HIGH</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> the service budget = C req/s. Serve HIGH first, then MEDIUM, then LOW; shed the rest.
+      The loss is <b>graduated</b> — payments lose nothing, analytics take the hit. Without priority every class loses the same fraction.</div>
+    <div class="controls" style="margin-bottom:.4rem">
+      <label>budget = C <input type="range" id="Cb" min="20" max="120" value="50"><span class="val" id="Cbv">50</span>/s</label>
+      <label>HIGH (payments) <input type="range" id="Ah" min="0" max="80" value="20"><span class="val" id="Ahv">20</span>/s</label>
+      <label>MEDIUM (API) <input type="range" id="Am" min="0" max="80" value="40"><span class="val" id="Amv">40</span>/s</label>
+      <label>LOW (analytics) <input type="range" id="Al" min="0" max="80" value="40"><span class="val" id="Alv">40</span>/s</label>
+    </div>
+    <div id="shedBars"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Same total goodput</b> (= C), but the <b>blast radius</b> is tiny: the critical path stays green while the cheap work degrades.
+      This is the bulkhead + graceful-degradation pattern (Hystrix / Resilience4j).</div>
+  </div>
+
+  <!-- ===== PANEL 4: GOLD CHECK ===== -->
+  <h2>④ Gold check — bounded vs unbounded over 1 hour, recomputed live in JS</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> the page re-runs the closed-form fluid model in your browser — <code>depth=(P−C)·t</code> vs
+      <code>min(K,(P−C)·t)</code> over a full hour — on the <i>identical</i> parameters (P=100, C=50, K=1000) as <code>backpressure.py</code> GOLD CHECK.
+      The green <span class="badge" style="padding:1px 6px">check: OK</span> below confirms the queue stays bounded with backpressure while goodput is identical.</div>
+    <div class="readout" id="goldReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS fluid recompute matches backpressure.py GOLD CHECK (unbounded→180000, bounded→1000, goodput both=180000, ratio=180×).
+  </div>
+
+<script>
+"use strict";
+/* =====================================================================
+   Ground-truth fluid model — copied verbatim from backpressure.py.
+   net = P - C ; depth(t) = min(cap, net*t) ; goodput = C*t ; rejected = P*t - C*t - depth.
+   ===================================================================== */
+function fluidDepth(t, P, C, cap){ const net=P-C; return Math.min(cap, Math.max(0, net*t)); }
+function fluidStats(t, P, C, cap){
+  const depth = fluidDepth(t,P,C,cap);
+  const processed = C*t;
+  const sent = P*t;
+  const rejected = Math.max(0, sent - processed - depth);
+  return {depth, processed, sent, rejected};
+}
+
+/* ===== PANEL 1: pipeline + queue ===== */
+let mode='unbounded';
+let sim={ t:0, running:false, depth:0, processed:0, admitted:0, rejected:0,
+         /* reactive cycle state */ inflight:0, demand:0, cyc:0 };
+let raf=null, lastTs=null;
+const SPEED=10;            // simulated seconds per real second
+const TCAP=120;            // stop the live sim at 120 s (the 1h extrapolation is Panel ④)
+
+function num(n){ return Math.round(n).toLocaleString(); }
+function gid(i){ return document.getElementById(i); }
+function P(){return +gid('P').value;} function C(){return +gid('C').value;}
+function K(){return +gid('K').value;} function N(){return +gid('N').value;}
+
+function renderPipe(){
+  const P_=P(), C_=C(), K_=K();
+  gid('Pv').textContent=P_; gid('Cv').textContent=C_; gid('Kv').textContent=K_; gid('Nv').textContent=N();
+  // visible controls per mode
+  gid('kLab').style.display = mode==='bounded'?'':'none';
+  gid('nLab').style.display = mode==='reactive'?'':'none';
+
+  const depth = mode==='reactive' ? sim.inflight : sim.depth;
+  // visual scale: full bar = max(K, depth, 1). bounded caps at K (bar stays 100%).
+  const barFull = Math.max( K_, depth, 1 );
+  const fillPct = Math.min(100, depth/barFull*100);
+  const kPct    = Math.min(100, K_/barFull*100);
+  const over    = mode==='unbounded' && depth > K_;
+  const near    = !over && depth > K_*0.85;
+
+  // build pipe DOM
+  const rejectSeg = mode==='bounded' ? Math.min(100, sim.rejected/Math.max(1,sim.admitted+sim.rejected)*100) : 0;
+  let qfillCls = over?'over':(near?'warn':'');
+  let html =
+    `<div class="pcol"><div class="pbox prod"><div class="id">PRODUCER</div><div class="rt">P = ${P_}/s</div></div></div>`+
+    `<div class="arrow ${sim.running?'go':''}"><span class="lbl">${mode==='reactive'?'emit ≤ N':'push'}</span></div>`+
+    `<div class="pcol">
+       <div class="qlab">${mode==='reactive'?'in-flight (≤ N)':'queue depth'}</div>
+       <div class="qwrap">
+         <div class="qfill ${qfillCls}" style="height:${fillPct}%"></div>
+         ${mode!=='reactive'?`<div class="qmark" style="height:${100-kPct}%"><span class="tk">K=${K_}</span></div>`:''}
+       </div>
+       <div class="qlab">${num(depth)}${over?' →∞':''}</div>
+     </div>`;
+  if(mode==='reactive'){
+    html += `<div class="arrow ${sim.running?'go':''}"><span class="lbl">request(N)</span></div>`;
+  } else {
+    html += `<div class="arrow ${sim.running?'go':''}"><span class="lbl">drain C</span></div>`;
+  }
+  html += `<div class="pcol"><div class="pbox cons"><div class="id">CONSUMER</div><div class="rt">C = ${C_}/s</div></div></div>`;
+  // rejected pile (bounded only)
+  if(mode==='bounded'){
+    html = `<div class="pcol"><div class="pbox prod"><div class="id">PRODUCER</div><div class="rt">P = ${P_}/s</div></div></div>`+
+    `<div class="arrow ${sim.running?'go':''}"><span class="lbl">push</span></div>`+
+    `<div class="pcol">
+       <div class="qlab">queue depth</div>
+       <div class="qwrap">
+         <div class="qfill ${qfillCls}" style="height:${fillPct}%"></div>
+         <div class="qmark" style="height:${100-kPct}%"><span class="tk">K=${K_}</span></div>
+       </div>
+       <div class="qlab">${num(depth)}</div>
+     </div>`+
+    `<div class="pcol"><div class="qlab">REJECTED</div>
+       <div class="qwrap" style="height:80px;border-style:solid;border-color:#444">
+         <div class="qfill" style="height:${rejectSeg}%;background:linear-gradient(180deg,#555,#333)"></div>
+       </div>
+       <div class="qlab">${num(sim.rejected)}</div></div>`+
+    `<div class="arrow ${sim.running?'go':''}"><span class="lbl">drain C</span></div>`+
+    `<div class="pcol"><div class="pbox cons"><div class="id">CONSUMER</div><div class="rt">C = ${C_}/s</div></div></div>`;
+  }
+  gid('pipe').innerHTML=html;
+
+  // counters
+  const memMiB = depth*1024/1048576;
+  const rejPct = sim.admitted+sim.rejected>0 ? sim.rejected/(sim.admitted+sim.rejected)*100 : 0;
+  let rows='';
+  const goodput = sim.processed;
+  if(mode==='reactive'){
+    rows = `<div class="c"><span>time</span><b>${sim.t.toFixed(1)} s</b></div>`+
+           `<div class="c"><span>in-flight (≤ N=${N()})</span><b>${num(sim.inflight)}</b></div>`+
+           `<div class="c"><span>demand (credits)</span><b>${num(sim.demand)}</b></div>`+
+           `<div class="c"><span>goodput (processed)</span><b>${num(goodput)}</b></div>`+
+           `<div class="c"><span>pull cycles</span><b>${num(sim.cyc)}</b></div>`;
+  } else {
+    rows = `<div class="c"><span>time</span><b>${sim.t.toFixed(1)} s</b></div>`+
+           `<div class="c"><span>queue depth</span><b>${num(depth)}</b></div>`+
+           `<div class="c"><span>memory @1KB</span><b>${memMiB.toFixed(1)} MiB</b></div>`+
+           `<div class="c"><span>goodput (processed)</span><b>${num(goodput)}</b></div>`+
+           `<div class="c"><span>admitted</span><b>${num(sim.admitted)}</b></div>`+
+           `<div class="c"><span>rejected</span><b>${num(sim.rejected)}</b></div>`+
+           `<div class="c"><span>reject rate</span><b>${rejPct.toFixed(0)}%</b></div>`;
+  }
+  gid('counters').innerHTML=rows;
+  gid('simState').textContent = (sim.running?'running':'paused')+' · t = '+sim.t.toFixed(1)+' s';
+}
+
+function stepSim(realDt){
+  const dt = realDt*SPEED;            // simulated seconds
+  sim.t += dt;
+  if(sim.t>TCAP){ sim.t=TCAP; sim.running=false; }
+  const P_=P(), C_=C(), K_=K();
+  if(mode==='reactive'){
+    // request-N cycle: request N -> emit N (in-flight 0->N) -> process N (->0).
+    // The consumer self-clocks, so cycles/s = C / N. Advance fractional cycles.
+    const cycRate = N()>0 ? C_/N() : 0;
+    sim.cycPhase = (sim.cycPhase||0) + cycRate*dt;
+    while(sim.cycPhase>=1){ sim.cycPhase-=1; sim.cyc++; sim.processed+=N(); }
+    // within [0,1): first half the producer emits (rise), second half consumer drains (fall)
+    const ph = sim.cycPhase;
+    sim.inflight = ph<0.5 ? Math.round(N()*(ph/0.5)) : Math.round(N()*((1-ph)/0.5));
+    sim.demand = N() - sim.inflight;     // outstanding credits (≤ N always)
+  } else {
+    const cap = mode==='bounded'?K_:Infinity;
+    const beforeDepth = sim.depth;
+    // arrivals
+    const space = cap-beforeDepth;
+    const admitted = Math.min(P_*dt, space);
+    sim.admitted += admitted;
+    sim.rejected += P_*dt - admitted;
+    sim.depth = beforeDepth + admitted;
+    // consume
+    const cons = Math.min(C_*dt, sim.depth);
+    sim.depth -= cons;
+    sim.processed += cons;
+  }
+}
+
+function tick(ts){
+  if(!sim.running) return;
+  if(lastTs==null) lastTs=ts;
+  const realDt=Math.min(0.05,(ts-lastTs)/1000); lastTs=ts;
+  stepSim(realDt);
+  renderPipe();
+  if(sim.running) raf=requestAnimationFrame(tick);
+}
+function play(){
+  if(sim.t>=TCAP) resetSim();
+  sim.running=true; lastTs=null;
+  gid('bPlay').textContent='⏸ pause';
+  raf=requestAnimationFrame(tick);
+}
+function pause(){ sim.running=false; gid('bPlay').textContent='▶ run'; if(raf) cancelAnimationFrame(raf); }
+function resetSim(){
+  pause(); sim={t:0,running:false,depth:0,processed:0,admitted:0,rejected:0,inflight:0,demand:0,cyc:0,cycPhase:0};
+  renderPipe();
+}
+gid('bPlay').addEventListener('click',()=>{ sim.running?pause():play(); });
+gid('bReset').addEventListener('click',resetSim);
+['P','C','K','N'].forEach(i=>gid(i).addEventListener('input',()=>{ resetSim(); }));
+function setMode(m){
+  mode=m; resetSim();
+  ['mUnbounded','mBounded','mReactive'].forEach(id=>gid(id).classList.remove('active'));
+  gid('m'+m.charAt(0).toUpperCase()+m.slice(1)).classList.add('active');
+}
+gid('mUnbounded').addEventListener('click',()=>setMode('unbounded'));
+gid('mBounded').addEventListener('click',()=>setMode('bounded'));
+gid('mReactive').addEventListener('click',()=>setMode('reactive'));
+
+/* ===== PANEL 2: token bucket ===== */
+let tokens=20;
+function bucketStat(){ const R=+gid('R').value; return {R, r:+gid('rr').value, P:+gid('Pt').value}; }
+function renderBucket(){
+  const {R}=bucketStat();
+  gid('Rv').textContent=R; gid('rrv').textContent=+gid('rr').value; gid('Ptv').textContent=+gid('Pt').value;
+  const pct=Math.max(0,Math.min(100, tokens/R*100));
+  gid('bfill').style.height=pct+'%';
+  gid('bstat').textContent = `tokens = ${tokens.toFixed(0)} / ${R}  ${tokens>=R-0.5?'(full)':tokens<0.5?'(EMPTY → reject)':''}`;
+  // burst table
+  const rows=[5,10,15,20,25,50];
+  let H='<tr><th>requests in burst</th><th>tokens before</th><th>admitted</th><th>tokens after</th><th>rejected</th></tr>';
+  rows.forEach(req=>{
+    const adm=Math.min(req,R), rej=req-adm;
+    H+=`<tr><td>${req}</td><td>${R}</td><td>${adm}</td><td>${R-adm}</td><td class="${rej>0?'lo':''}">${rej}</td></tr>`;
+  });
+  gid('burstTbl').innerHTML=H;
+}
+let burstRaf=null;
+gid('bBurst').addEventListener('click',function(){
+  if(burstRaf) return;
+  const {r,P}=bucketStat(); tokens-=25; if(tokens<0)tokens=0; renderBucket();
+  // refill over time
+  let last=null;
+  const refill=ts=>{
+    if(last==null)last=ts; const dt=(ts-last)/1000; last=ts;
+    const R=+gid('R').value;
+    tokens=Math.min(R, tokens + r*dt);
+    // incoming P/s would drain, but we just show refill of the spent bucket
+    renderBucket();
+    if(tokens<R-0.5) burstRaf=requestAnimationFrame(refill); else {burstRaf=null;}
+  };
+  burstRaf=requestAnimationFrame(refill);
+});
+['R','rr','Pt'].forEach(i=>gid(i).addEventListener('input',()=>{ tokens=+gid('R').value; renderBucket(); }));
+
+/* ===== PANEL 3: load shedding ===== */
+function renderShed(){
+  const budget=+gid('Cb').value;
+  const arr={HIGH:+gid('Ah').value, MEDIUM:+gid('Am').value, LOW:+gid('Al').value};
+  gid('Cbv').textContent=budget; gid('Ahv').textContent=arr.HIGH;
+  gid('Amv').textContent=arr.MEDIUM; gid('Alv').textContent=arr.LOW;
+  const order=['HIGH','MEDIUM','LOW']; const col={HIGH:'#27ae60',MEDIUM:'#e67e22',LOW:'#c0392b'};
+  let remaining=budget; const res={};
+  order.forEach(c=>{ const served=Math.min(arr[c],remaining); remaining-=served; res[c]={served, shed:arr[c]-served}; });
+  const totArr=order.reduce((s,c)=>s+arr[c],0);
+  const totServed=budget-remaining;
+  let html='';
+  order.forEach(c=>{
+    const servedPct=totArr>0?res[c].served/totArr*100:0;
+    const shedPct=totArr>0?res[c].shed/totArr*100:0;
+    const loss=arr[c]>0?res[c].shed/arr[c]*100:0;
+    const lossCls = c==='HIGH'?'hi':(c==='LOW'?'lo':'');
+    html+=`<div class="barwrap">
+      <span class="lab">${c} (${c==='HIGH'?'payments':c==='MEDIUM'?'API':'analytics'})</span>
+      <span class="track">
+        <span class="seg" style="width:${servedPct}%;background:${col[c]}"></span>
+        <span class="seg" style="width:${shedPct}%;background:#3a3a3a"></span>
+      </span>
+      <span class="num">${res[c].served}/${arr[c]} served · <span style="color:${loss>0?'#ff9a8a':'#7ee29a'}">loss ${loss.toFixed(0)}%</span></span>
+    </div>`;
+  });
+  html+=`<div class="micro" style="margin-top:.4rem">budget ${budget}/s · arrivals ${totArr}/s · served <b>${totServed}</b> (= C, consumer-bound) · shed <b style="color:#ff9a8a">${totArr-totServed}</b>.
+    HIGH is fully protected; LOW absorbs the overload.</div>`;
+  gid('shedBars').innerHTML=html;
+}
+['Cb','Ah','Am','Al'].forEach(i=>gid(i).addEventListener('input',renderShed));
+
+/* ===== PANEL 4 + global check: fluid recompute over 1 hour (mirrors backpressure.py gold_check) ===== */
+function goldFluid(){
+  const P_=100,C_=50,K_=1000,T=3600;
+  const u=fluidStats(T,P_,C_,Infinity);
+  const b=fluidStats(T,P_,C_,K_);
+  const ratio=u.depth/b.depth;
+  return {u,b,ratio,P_,C_,K_,T};
+}
+const G=goldFluid();
+const gold={ uDepth:180000, bDepth:1000, goodput:180000, bRejected:179000, ratio:180, tFill:20 };
+const jsOk =
+  G.u.depth===gold.uDepth &&
+  G.b.depth===gold.bDepth &&
+  G.u.processed===gold.goodput && G.b.processed===gold.goodput &&
+  G.b.rejected===gold.bRejected &&
+  G.ratio===gold.ratio &&
+  (G.K_/(G.P_-G.C_))===gold.tFill;
+
+gid('goldReadout').innerHTML =
+  `parameters: P=${G.P_}, C=${G.C_}, K=${G.K_}, T=1 hour (${G.T} s)\n\n`+
+  `  metric                     unbounded    bounded (K=${G.K_})\n`+
+  `  --------------------------------------------------------\n`+
+  `  depth at 1 hour           ${' '+num(G.u.depth).padStart(10)}   ${num(G.b.depth).padStart(14)}\n`+
+  `  processed (goodput)       ${' '+num(G.u.processed).padStart(10)}   ${num(G.b.processed).padStart(14)}\n`+
+  `  rejected                  ${' '+num(G.u.rejected).padStart(10)}   ${num(G.b.rejected).padStart(14)}\n`+
+  `  depth ratio                 ${G.ratio}x\n\n`+
+  `GOLD scalars (JS recompute vs backpressure.py):\n`+
+  `  unbounded_depth_1h    = ${num(G.u.depth)}   (py: ${gold.uDepth})\n`+
+  `  bounded_depth_1h      = ${num(G.b.depth)}   (py: ${gold.bDepth})\n`+
+  `  goodput_both          = ${num(G.b.processed)}   (py: ${gold.goodput}, IDENTICAL)\n`+
+  `  bounded_rejected_1h   = ${num(G.b.rejected)}   (py: ${gold.bRejected})\n`+
+  `  depth_ratio           = ${G.ratio}x   (py: ${gold.ratio}x)\n`+
+  `  time_to_fill          = ${G.K_/(G.P_-G.C_)} s   (K/(P-C))\n`+
+  `  bounded depth <= K while unbounded -> ${num(G.u.depth)}; goodput identical: <b>${jsOk}</b>`;
+
+const chk=gid('check');
+chk.textContent = jsOk
+  ? 'check: OK — JS fluid model matches backpressure.py GOLD CHECK (unbounded→180000, bounded→1000, goodput=180000, ratio=180×)'
+  : 'check: FAIL — mismatch!';
+chk.style.borderColor = jsOk?'#27ae60':'#c0392b';
+chk.style.color       = jsOk?'#27ae60':'#c0392b';
+chk.style.background  = jsOk?'#1c3a25':'#3a1414';
+
+/* ===== boot ===== */
+tokens=+gid('R').value;
+renderPipe(); renderBucket(); renderShed();
+</script>
+</body>
+</html>

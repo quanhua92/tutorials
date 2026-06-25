@@ -1,0 +1,244 @@
+three_phase_commit.py - reference impl. All numbers below feed THREE_PHASE_COMMIT.md.
+python stdlib only.
+
+========================================================================
+  SECTION A: the three phases  (CanCommit? -> PreCommit -> DoCommit)
+========================================================================
+N = 3 participants, all vote YES (a clean commit).
+
+  Coordinator -> P0: CanCommit?
+  P0 -> Coordinator: YES  (P now READY)
+  Coordinator -> P1: CanCommit?
+  P1 -> Coordinator: YES  (P now READY)
+  Coordinator -> P2: CanCommit?
+  P2 -> Coordinator: YES  (P now READY)
+  Phase 1 result: 3/3 YES -> UNANIMOUS, proceed to PreCommit
+  Coordinator -> P0: PreCommit
+  P0 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Coordinator -> P1: PreCommit
+  P1 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Coordinator -> P2: PreCommit
+  P2 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Phase 2 result: all PRECOMMITTED, proceed to DoCommit
+  Coordinator -> P0: DoCommit
+  P0 -> Coordinator: ACK  (P now COMMITTED)
+  Coordinator -> P1: DoCommit
+  P1 -> Coordinator: ACK  (P now COMMITTED)
+  Coordinator -> P2: DoCommit
+  P2 -> Coordinator: ACK  (P now COMMITTED)
+  Phase 3 result: all COMMITTED -> transaction committed
+
+Final states: P0=COMMITTED, P1=COMMITTED, P2=COMMITTED
+
+Read it as six vertical sweeps (3 phases x request+reply):
+  Phase 1: CanCommit down  -> YES up     (everyone -> READY)
+  Phase 2: PreCommit down  -> ACK up     (everyone -> PRECOMMITTED)
+  Phase 3: DoCommit down   -> ACK up     (everyone -> COMMITTED)
+
+Cost vs 2PC: 3PC adds the PreCommit round trip -> 3 round trips
+(2PC needs only 2). That extra round trip is the PRICE of
+non-blocking recovery (Sections B and C). With N=3 participants:
+  3PC messages = 6*N = 18   (CanCommit+vote, PreCommit+ACK, DoCommit+ACK)
+  3PC round trips = 3
+  2PC messages   = 4*N = 12   round trips = 2
+
+[check] all participants COMMITTED and agree?  OK
+
+========================================================================
+  SECTION B: coordinator crash AFTER PreCommit  -> participants commit autonomously
+========================================================================
+N = 3 participants, all vote YES. Coordinator crashes AFTER
+delivering PreCommit but BEFORE DoCommit.
+
+  Coordinator -> P0: CanCommit?
+  P0 -> Coordinator: YES  (P now READY)
+  Coordinator -> P1: CanCommit?
+  P1 -> Coordinator: YES  (P now READY)
+  Coordinator -> P2: CanCommit?
+  P2 -> Coordinator: YES  (P now READY)
+  Phase 1 result: 3/3 YES -> UNANIMOUS, proceed to PreCommit
+  Coordinator -> P0: PreCommit
+  P0 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Coordinator -> P1: PreCommit
+  P1 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Coordinator -> P2: PreCommit
+  P2 -> Coordinator: ACK  (P now PRECOMMITTED)
+  Phase 2 result: all PRECOMMITTED, proceed to DoCommit
+  *** COORDINATOR CRASHES after PreCommit (before sending DoCommit) ***
+
+States at crash: P0=PRECOMMITTED, P1=PRECOMMITTED, P2=PRECOMMITTED
+Every participant is PRECOMMITTED. The PreCommit message is a
+CERTIFICATE that the coordinator received YES from ALL participants
+(it only sends PreCommit after a unanimous YES). So the commit is
+already decided -- DoCommit was just the announcement. The
+participants run the TERMINATION PROTOCOL and finish on their own:
+
+  decision = COMMIT
+  reason   = ALL PRECOMMITTED -> everyone voted YES -> commit safe
+
+Final states: P0=COMMITTED, P1=COMMITTED, P2=COMMITTED
+
+This is the win 3PC buys over 2PC: the coordinator died, yet NO
+participant blocks -- they all reach COMMITTED without waiting for
+recovery. In 2PC this exact crash leaves everyone stuck (Section D).
+
+[check] non-blocking: all participants reached COMMITTED without the coordinator?  OK
+
+========================================================================
+  SECTION C: coordinator crash BEFORE PreCommit  -> participants abort safely
+========================================================================
+N = 3 participants, all vote YES. Coordinator crashes AFTER
+Phase 1 but BEFORE sending PreCommit.
+
+  Coordinator -> P0: CanCommit?
+  P0 -> Coordinator: YES  (P now READY)
+  Coordinator -> P1: CanCommit?
+  P1 -> Coordinator: YES  (P now READY)
+  Coordinator -> P2: CanCommit?
+  P2 -> Coordinator: YES  (P now READY)
+  Phase 1 result: 3/3 YES -> UNANIMOUS, proceed to PreCommit
+  *** COORDINATOR CRASHES after Phase 1 (before sending PreCommit) ***
+
+States at crash: P0=READY, P1=READY, P2=READY
+Every participant is READY (voted YES) but NONE received PreCommit.
+A READY participant CANNOT assume the commit will happen: maybe the
+coordinator crashed, or maybe it crashed BECAUSE some OTHER
+participant voted NO and the coordinator was about to abort. A
+READY participant has no way to tell. So the safe move is to ABORT.
+The termination protocol:
+
+  decision = ABORT
+  reason   = some participant still READY (uncertain) -> cannot guarantee a unanimous YES -> abort to be safe
+
+Final states: P0=ABORTED, P1=ABORTED, P2=ABORTED
+
+Note this is STILL non-blocking (nobody waits for the coordinator)
+-- they actively decide ABORT. It is just a conservative decision.
+Compare with 2PC: a READY participant after this same crash would
+BLOCK, because it cannot safely abort OR commit. 3PC's PreCommit
+phase is what splits 'uncertain' (READY) from 'safe to commit'
+(PRECOMMITTED), turning a block into a decision.
+
+[check] non-blocking: all participants reached a single final state (ABORTED)?  OK
+
+========================================================================
+  SECTION D: 2PC vs 3PC  (round trips, messages, and the blocking window)
+========================================================================
+Same transaction, N participants, clean commit (all vote YES).
+
+| protocol | phases | round trips | messages = sweeps*N | coordinator crash while READY |
+|----------|--------|-------------|---------------------|-----------------------------|
+| 2PC      | 2      | 2           | 4*N msgs       | BLOCKS (participant cannot decide) |
+| 3PC      | 3      | 3           | 6*N msgs       | NON-BLOCKING (PreCommit settles it) |
+
+DEMO (N=3, all vote YES): coordinator crashes right after Phase 1.
+  2PC path:
+    states after crash: P0=READY, P1=READY, P2=READY
+    can a participant decide COMMIT or ABORT on its own? NO -> BLOCK
+    (it does not know if a peer voted NO, or if the coordinator
+     already decided commit. It holds its locks and WAITS.)
+  3PC path:
+    states after crash: P0=READY, P1=READY, P2=READY
+    termination decision (without coordinator): ABORT
+    final states: P0=ABORTED, P1=ABORTED, P2=ABORTED
+    blocked? NO -- participants actively decided ABORT.
+
+Scaling messages & round trips with N participants (commit path):
+| N participants | 2PC msgs=4N | 2PC RT | 3PC msgs=6N | 3PC RT | 3PC latency overhead |
+|---------------|-------------|--------|-------------|--------|----------------------|
+| 1             | 4           | 2      | 6           | 3      | +2 msgs, +1 RT        |
+| 2             | 8           | 2      | 12          | 3      | +4 msgs, +1 RT        |
+| 3             | 12          | 2      | 18          | 3      | +6 msgs, +1 RT        |
+| 5             | 20          | 2      | 30          | 3      | +10 msgs, +1 RT        |
+| 10            | 40          | 2      | 60          | 3      | +20 msgs, +1 RT        |
+
+The trade in one line: 3PC pays 1 extra round trip (+50% messages)
+to convert 2PC's blocking crash window into a participant-decided one.
+Whether that is worth it depends on how often the coordinator crashes
+vs how much you hate the extra latency -- and, crucially, whether your
+network is synchronous enough for the assumption to hold (Section E).
+
+[check] 2PC blocks after phase-1 crash and 3PC does not?  OK
+
+========================================================================
+  SECTION E: why 3PC isn't used in practice  (synchrony assumption + FLP)
+========================================================================
+3PC's termination protocol (Section B/C) rests on one assumption:
+a participant can RELIABLY tell 'the coordinator crashed' from 'the
+coordinator is slow'. That requires a SYNCHRONOUS network -- bounded
+message delay AND bounded processor speed, so a timeout is PROOF of
+death. Real networks are ASYNCHRONOUS: a message can be arbitrarily
+delayed, and a 'slow' coordinator may simply be stuck behind GC or a
+network hiccup.
+
+The formal wall is the FLP impossibility result:
+  Fischer, Lynch, Paterson (1985), 'Impossibility of Distributed
+  Consensus with One Faulty Process', JACM.
+  -> In a truly asynchronous network, NO protocol can guarantee both
+     safety AND liveness if even ONE process may crash.
+3PC gets non-blocking liveness by ASSUMING synchrony; the moment you
+drop that assumption (i.e. the real world), a timeout can fire while
+the coordinator is merely delayed. Then two groups of participants
+can run the termination protocol on stale/contradictory views and
+SPLIT BRAIN: one group commits, the other aborts. Safety is gone.
+
+On top of that, 3PC costs 3 round trips vs 2PC's 2 -- 50% more latency
+on the happy path, for a crash that rarely happens. So even setting
+FLP aside, the price/benefit is poor for most workloads.
+
+What real systems use instead:
+| approach | idea | why it beats 3PC | used by |
+|----------|------|------------------|---------|
+| Paxos Commit (Gray & Lamport 2005) |
+|   idea: run consensus (Paxos/Raft) to agree the commit decision |
+|   edge: tolerates partial synchrony + leader failover; no split brain |
+|   used: Spanner, CockroachDB (Raft), FoundationDB |
+| Saga (Garcia-Molina & Salem 1987) |
+|   idea: sequence of local sub-transactions with compensations |
+|   edge: NO distributed commit at all; avoids 2PC/3PC entirely |
+|   used: microservices, event-driven workflows |
+| Coordinator recovery + timeouts (2PC) |
+|   idea: accept blocking, engineer fast coordinator recovery |
+|   edge: simple; blocking window is rare and short with HA coord |
+|   used: XA transactions in many RDBMS / message brokers |
+
+Bottom line: 3PC is the canonical proof that 'add a phase, remove the
+blocking window' is possible IN PRINCIPLE. FLP is the proof it is NOT
+possible in practice. The lesson the field took: don't build commit on
+timeouts alone -- build it on consensus (Paxos/Raft), which is what
+every modern transactional system does. 🔗 See PAXOS.md / RAFT.md.
+
+[check] 3PC is non-blocking under synchrony, unsafe under FLP:  OK
+
+========================================================================
+  GOLD CHECK  (safety + non-blocking: every crash -> one uniform final decision)
+========================================================================
+Canonical setup: N = 3 participants, deterministic votes.
+
+(1) crash AFTER  PreCommit: decision=COMMIT, agree=True, states=P0=COMMITTED, P1=COMMITTED, P2=COMMITTED
+(2) crash BEFORE PreCommit: decision=ABORT, agree=True, states=P0=ABORTED, P1=ABORTED, P2=ABORTED
+(3) crash mid-DoCommit (P0 COMMITTED, rest PRECOMMITTED): decision=COMMIT, agree=True, states=P0=COMMITTED, P1=COMMITTED, P2=COMMITTED
+(4) P1 votes NO: decision=ABORT, agree=True, states=P0=ABORTED, P1=ABORTED, P2=ABORTED
+(5) crash before PreCommit (all READY): decision=ABORT, agree=True, states=P0=ABORTED, P1=ABORTED, P2=ABORTED
+
+SAFETY invariant (every crash -> single uniform final state): True
+NON-BLOCKING (termination always returns a decision, never waits): True
+
+GOLD scalars (pinned for three_phase_commit.html):
+  phases_2pc                         = 2
+  phases_3pc                         = 3
+  round_trips_2pc                    = 2
+  round_trips_3pc                    = 3
+  messages_2pc(N=3) = 4*N          = 12
+  messages_3pc(N=3) = 6*N          = 18
+  crash_after_precommit -> decision  = COMMIT
+  crash_before_precommit -> decision = ABORT
+  crash_mid_docommit -> decision     = COMMIT
+  all_crash_cases_uniform            = True
+  never_blocks                       = True
+
+[check] all gold identities reproduce from the protocol:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

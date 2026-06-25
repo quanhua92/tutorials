@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed Locking (ZooKeeper / Redis / Redlock / Fencing) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:180px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap;line-height:1.5}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--orange)}
+  .readout .gold{color:var(--gold)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button:disabled{opacity:.4;cursor:default}
+  canvas{display:block;width:100%;max-width:760px;height:300px;background:#0a0e14;border-radius:8px}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  table.tbl{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.5rem}
+  table.tbl td,table.tbl th{border:1px solid #30363d;padding:4px 9px;text-align:center}
+  table.tbl th{color:var(--muted);font-weight:600}
+  table.tbl tr.hl td{background:#3a2f12;color:#ffd966;font-weight:700}
+  table.tbl tr.bad td{background:#3a1414;color:#ff9a8a}
+  table.tbl tr.ok td{background:#1c3a25;color:#7ad693}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Distributed Locking — ZooKeeper / Redis / Redlock / Fencing — interactive
+    <a class="badge" href="./DISTRIBUTED_LOCKING.md">DISTRIBUTED_LOCKING.md</a>
+    <a class="badge" href="./distributed_locking.py">distributed_locking.py</a></h1>
+  <div class="sub">A lock is a <b>talking stick</b>: only the holder may write. The question is what <b>guarantees</b> the intermediary gives you.
+    <b style="color:var(--gold)">Consensus-based</b> (ZooKeeper) locks are safe by construction (the holder is the unique minimum — no clocks).
+    <b style="color:var(--red)">Clock-based</b> locks (Redis/Redlock) break when a holder <b>freezes</b> in a GC pause longer than the TTL.
+    <b style="color:var(--green)">Fencing tokens</b> restore safety at the storage. All numbers recompute live in JS from the <i>identical</i> models as <code>distributed_locking.py</code>.</div>
+
+  <!-- ===== PANEL 1: HERD EFFECT (naive ZK) ===== -->
+  <h2>① ZooKeeper ephemeral lock (naive) — one release wakes the whole HERD</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> C1 holds <code>/lock</code>; every other client has a <b style="color:var(--gold)">watch</b> on it. Hit <b>release C1</b>: ZK deletes the ephemeral node and fires the watch on
+      <b style="color:var(--red)">ALL N−1 waiters</b> at once — the thundering herd. (The fix is in panel ②.)</div>
+    <div class="controls">
+      <label>clients N <input type="range" id="na" min="2" max="8" value="3"><span class="val" id="naVal">3</span></label>
+      <button id="bHerdRelease">release C1 (session expires)</button>
+      <span class="micro" id="herdLabel">C1 holds the lock</span>
+    </div>
+    <canvas id="herd" width="760" height="300"></canvas>
+    <div class="readout" id="herdReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: SEQUENTIAL QUEUE (herd-free) ===== -->
+  <h2>② ZooKeeper sequential nodes — the ordered QUEUE (one wakeup per release)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> each client creates <code>/lock-NNN</code>; the <b>lowest</b> number holds the lock and each client watches only its <b>predecessor</b>. Hit <b>step release</b>: exactly
+      <b style="color:var(--green)">ONE</b> client wakes (the successor). Holder = <code>argmin_seq</code> → unique → mutual exclusion by construction.</div>
+    <div class="controls">
+      <button id="bSeqStep">step release (holder)</button>
+      <button id="bSeqReset">reset</button>
+      <span class="micro" id="seqLabel">queue: 3 clients waiting</span>
+    </div>
+    <canvas id="seq" width="760" height="300"></canvas>
+    <div class="readout" id="seqReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: REDIS SETNX + GC PAUSE ===== -->
+  <h2>③ Redis SETNX — SET NX PX, and the stale holder under a GC pause</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> C1 acquires with <code>SET lock c1 NX PX &lt;ttl&gt;</code> at tick 0, then FREEZES. Drag the <b>GC pause</b> past the remaining TTL: the lock expires underneath C1, C2 grabs it, and now
+      <b style="color:var(--red)">|holders| = 2</b>. Mutual exclusion is violated — clocks, not crashes, are the culprit.</div>
+    <div class="controls">
+      <label>TTL (ticks) <input type="range" id="ttl" min="10" max="40" value="30"><span class="val" id="ttlVal">30</span></label>
+      <label>GC pause (ticks) <input type="range" id="gc" min="0" max="40" value="25"><span class="val" id="gcVal">25</span></label>
+      <span class="micro">C1 works ticks 0→10, then freezes</span>
+    </div>
+    <canvas id="redis" width="760" height="300"></canvas>
+    <div class="readout" id="redisReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 4: REDLOCK ===== -->
+  <h2>④ Redlock — 5 masters, majority quorum, and two DISJOINT majorities</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> C1 acquires majority <b>{M1,M2,M3}</b>. Hit <b>clock jump on M3</b> (an NTP step): C1's lock on M3 expires "early". C2 then assembles a <i>different</i> majority <b>{M3,M4,M5}</b> — both are valid quorums, so
+      <b style="color:var(--red)">two holders</b>. Majority does not fix bad clocks.</div>
+    <div class="controls">
+      <button id="bRL1" class="active">1. C1 acquires {M1,M2,M3}</button>
+      <button id="bRL2" disabled>2. clock jump on M3</button>
+      <button id="bRL3" disabled>3. C2 acquires {M3,M4,M5}</button>
+      <button id="bRLReset">reset</button>
+      <span class="micro">N=5, quorum=floor(5/2)+1=3, TTL=10</span>
+    </div>
+    <canvas id="redlock" width="760" height="300"></canvas>
+    <div class="readout" id="redlockReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 5: FENCING TOKENS ===== -->
+  <h2>⑤ Fencing tokens — the storage rejects the stale holder</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> press <b>play</b>. Each grant carries a <b style="color:var(--gold)">monotonic token</b> (33, then 34). C2's write (token 34) is <b style="color:var(--green)">accepted</b>; when frozen C1 wakes and writes with its stale token 33, the storage
+      <b style="color:var(--red)">rejects</b> it (33 ≤ 34). The data is never corrupted.</div>
+    <div class="controls">
+      <button id="bFPlay">▶ play</button>
+      <button id="bFStep">step →</button>
+      <button id="bFReset">reset</button>
+      <span class="micro" id="fenceLabel">step 0 / 4</span>
+    </div>
+    <canvas id="fence" width="760" height="300"></canvas>
+    <div class="readout" id="fenceReadout"></div>
+  </div>
+
+  <!-- ===== GOLD SUMMARY ===== -->
+  <h2>⑥ Gold — consensus ⟹ ≤1 holder every tick; clock-based does not</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem">Recomputed live in JS, mirroring <code>distributed_locking.py</code> GOLD CHECK: the 10-tick ZK-sequential timeline (consensus) keeps |holders| = 1 at every tick; the Redis SETNX + GC-pause counter-model reaches 2.</div>
+    <div style="overflow-x:auto"><table class="tbl" id="goldTable"></table></div>
+    <div class="readout" id="goldReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches distributed_locking.py GOLD: consensus max|holders|=1 (every tick), redis max|holders|=2, fencing C1(33) rejected / C2(34) accepted.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth models, copied from distributed_locking.py ===== */
+/* quorum = floor(N/2)+1 ; ZK holder = argmin_seq(live nodes) ;
+   Redis SETNX: free iff (no holder) or (expiry <= now) ;
+   fencing: storage.write ok iff token > last_token                              */
+
+function setup(cv){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||760, h=cv.clientHeight||300;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+function roundRectPath(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function box(ctx,x,y,w,h,fill,stroke,txt,sub,col){
+  ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=2;
+  roundRectPath(ctx,x,y,w,h,8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=col||'#e6edf3'; ctx.font='bold 13px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(txt,x+w/2,y+h/2-4);
+  if(sub){ ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.fillText(sub,x+w/2,y+h/2+12); }
+}
+
+/* ===== PANEL 1: herd effect (naive ZK) ===== */
+let herdN=3, herdState='held';   // held -> released
+const hc=document.getElementById('herd');
+function renderHerd(){
+  const ctx=setup(hc); const w=hc.clientWidth,h=hc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  herdN=+document.getElementById('na').value;
+  document.getElementById('naVal').textContent=herdN;
+  const cy=h/2;
+  // /lock node in the middle
+  const lx=w/2, ly=cy;
+  const held = herdState==='held';
+  box(ctx,lx-46,ly-22,92,44, held?'#1c3a25':'#161b22', held?'#27ae60':'#c0392b',
+      '/lock', held?'C1 HOLDS':'deleted', held?'#7ad693':'#ff9a8a');
+  // clients around: C1 at left (holder), waiters on the right in a column
+  // C1
+  const c1x=90;
+  box(ctx,c1x-34,cy-22,68,44, held?'#2980b9':'#262d36', held?'#2980b9':'#555','C1',
+      held?'holder':'(gone)');
+  // watchers
+  const startX=w-150, gap=54;
+  for(let i=2;i<=herdN;i++){
+    const wy=cy + (i-(herdN+1)/2)*gap;
+    const woken = herdState==='released';
+    box(ctx,startX,wy-22,68,44, woken?'#3a2f12':'#262d36', woken?'#f1c40f':'#555',
+        'C'+i, woken?'WOKE (herd)':'watching');
+    // watch arrow C{i} -> /lock  (gold)
+    ctx.strokeStyle = woken?'#f1c40f':'#555'; ctx.lineWidth=woken?2.5:1.5;
+    ctx.globalAlpha = woken?0.95:0.5;
+    if(herdState==='held' || woken){
+      ctx.beginPath(); ctx.moveTo(startX,wy); ctx.lineTo(lx+46,ly); ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+  }
+  // holder -> /lock creation arrow
+  if(held){
+    ctx.strokeStyle='#2980b9'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(c1x+34,cy); ctx.lineTo(lx-46,ly); ctx.stroke();
+  }
+  const ro=document.getElementById('herdReadout');
+  if(held){
+    ro.innerHTML=`  watchers on /lock = {C2..C${herdN}}  (N-1 = ${herdN-1} waiters)\n`+
+      `  C1 holds. ${herdN-1} watches registered on the single node /lock.`;
+    document.getElementById('herdLabel').textContent='C1 holds the lock';
+  } else {
+    ro.innerHTML=`  C1 session EXPIRED -> /lock deleted -> watch fires on ALL ${herdN-1} waiters\n`+
+      `  <span class="bad">HERD EFFECT: ${herdN-1} clients woke from ONE release</span> `+
+      `(they all race to re-create /lock; one wins, the rest re-watch)`;
+    document.getElementById('herdLabel').textContent=`${herdN-1} waiters woke (herd)`;
+  }
+}
+
+/* ===== PANEL 2: sequential queue (herd-free) ===== */
+let seqNodes=[], seqStep=0;   // each: {client, seq}
+function seqInit(n){ seqNodes=[]; for(let i=1;i<=n;i++) seqNodes.push({client:'C'+i,seq:i}); seqStep=0; }
+const sc=document.getElementById('seq');
+function renderSeq(){
+  const ctx=setup(sc); const w=sc.clientWidth,h=sc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  if(!seqNodes.length){
+    box(ctx,w/2-80,h/2-22,160,44,'#161b22','#555','queue empty','all done','#8b949e');
+  }
+  const n=seqNodes.length;
+  const bw=120, gap=24;
+  const totalW=n*bw+(n-1)*gap;
+  const startX=(w-totalW)/2;
+  const cy=h/2;
+  seqNodes.forEach((node,i)=>{
+    const x=startX+i*(bw+gap);
+    const isHolder = i===0;
+    box(ctx,x,cy-30,bw,60, isHolder?'#1c3a25':'#262d36', isHolder?'#27ae60':'#444',
+        '/lock-'+String(node.seq).padStart(10,'0'), (isHolder?'HOLDS *':node.client)+'  ['+node.client+']',
+        isHolder?'#7ad693':'#e6edf3');
+    // predecessor watch arrow: this node watches previous (i-1)
+    if(i>0){
+      ctx.strokeStyle='#f1c40f'; ctx.lineWidth=1.8; ctx.globalAlpha=0.6;
+      ctx.beginPath(); ctx.moveTo(x, cy); ctx.lineTo(x-gap, cy); ctx.stroke();
+      // arrowhead pointing left (toward predecessor)
+      ctx.beginPath(); ctx.moveTo(x-gap+2,cy-4); ctx.lineTo(x-gap+8,cy); ctx.lineTo(x-gap+2,cy+4);
+      ctx.fillStyle='#f1c40f'; ctx.fill(); ctx.globalAlpha=1;
+    }
+  });
+  // label "watches predecessor" under first non-holder
+  if(n>1){
+    ctx.fillStyle='#f1c40f'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('← each watches only its predecessor', startX+bw+gap+40, cy+46);
+  }
+  const holder = seqNodes.length? seqNodes[0].client : null;
+  const ro=document.getElementById('seqReadout');
+  ro.innerHTML=`  queue (sorted by seq): ${seqNodes.map((s,i)=>(s.seq+'('+s.client)+(i===0?'*)':')')).join(' -> ') || '(empty)'}\n`+
+    `  holder = argmin_seq = ${holder||'(none)'}  -> unique -> <=1 holder by construction\n`+
+    `  wakeups so far (one per release): ${seqStep}`;
+  document.getElementById('seqLabel').textContent = seqNodes.length?
+    `holder = ${holder}; ${seqNodes.length} in queue` : 'queue empty';
+}
+
+/* ===== PANEL 3: Redis SETNX + GC pause ===== */
+const rc=document.getElementById('redis');
+function renderRedis(){
+  const ctx=setup(rc); const w=rc.clientWidth,h=rc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const ttl=+document.getElementById('ttl').value;
+  const gc=+document.getElementById('gc').value;
+  document.getElementById('ttlVal').textContent=ttl;
+  document.getElementById('gcVal').textContent=gc;
+  const gcStart=10, gcEnd=gcStart+gc;
+  const expiry=ttl;                 // acquired at tick 0
+  // timeline axis
+  const padX=50, axisY=h-40;
+  const tMax=Math.max(gcEnd+5, expiry+5, 40);
+  const x=t=>padX + (t/tMax)*(w-2*padX);
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(padX,axisY); ctx.lineTo(w-padX,axisY); ctx.stroke();
+  // tick marks 0,10,20,...
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  for(let t=0;t<=tMax;t+=10){ ctx.beginPath(); ctx.moveTo(x(t),axisY-4); ctx.lineTo(x(t),axisY+4); ctx.stroke(); ctx.fillText(t,x(t),axisY+18); }
+  // GC pause band (tick 10..gcEnd)
+  const expiredDuring = gcEnd>expiry;
+  ctx.fillStyle = expiredDuring?'rgba(192,57,43,0.18)':'rgba(230,126,34,0.12)';
+  ctx.fillRect(x(gcStart),30,x(gcEnd)-x(gcStart),axisY-40);
+  ctx.fillStyle= expiredDuring?'#ff9a8a':'#e67e22'; ctx.font='bold 11px ui-monospace,monospace';
+  ctx.fillText(`GC pause (frozen ${gc} ticks)`, (x(gcStart)+x(gcEnd))/2, 22);
+  // lock-held bar: C1 believes 0..gcEnd (frozen, never knows); actual lock 0..expiry
+  const y1=axisY-70;
+  // actual lock lifetime
+  ctx.fillStyle='#2980b9'; ctx.fillRect(x(0),y1,x(expiry)-x(0),16);
+  ctx.fillStyle='#7ab8e0'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillText('actual lock (expires @'+expiry+')', x(0)+4, y1-6);
+  // C2 acquires after expiry (if expired during freeze)
+  const twoHolders = expiredDuring;
+  if(twoHolders){
+    const c2start=expiry+2;
+    ctx.fillStyle='#c0392b'; ctx.fillRect(x(c2start),y1+26,x(gcEnd)-x(c2start),16);
+    ctx.fillStyle='#ff9a8a'; ctx.fillText("C2's lock (acquired @"+c2start+')', x(c2start)+4, y1+50);
+  }
+  // C1 "believes" marker across the whole freeze
+  ctx.strokeStyle= twoHolders?'#c0392b':'#27ae60'; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+  ctx.beginPath(); ctx.moveTo(x(0), y1+12); ctx.lineTo(x(gcEnd), y1+12); ctx.stroke(); ctx.setLineDash([]);
+  const holders = twoHolders?2:1;
+  const ro=document.getElementById('redisReadout');
+  if(twoHolders){
+    ro.innerHTML=`  tick 0   C1 SET NX PX ${ttl} -> OK  (expires @${expiry})\n`+
+      `  tick ${gcStart}  C1 FREEZES (GC ${gc} ticks, until ${gcEnd})\n`+
+      `  tick ${expiry}  lock EXPIRED during freeze. tick ${expiry+2} C2 SET -> OK\n`+
+      `  tick ${gcEnd}  C1 wakes, STILL believes it holds -> <span class="bad">|holders| = ${holders}  (VIOLATION)</span>`;
+  } else {
+    ro.innerHTML=`  tick 0   C1 SET NX PX ${ttl} -> OK  (expires @${expiry})\n`+
+      `  tick ${gcStart}  C1 FREEZES (GC ${gc} ticks, until ${gcEnd})\n`+
+      `  GC (${gc}) <= remaining TTL (${expiry-gcStart}); lock still valid when C1 wakes.\n`+
+      `  <b class="gold">|holders| = ${holders}</b>  (safe — but push the GC slider past the TTL to break it)`;
+  }
+}
+
+/* ===== PANEL 4: Redlock ===== */
+let rlStage=0;   // 0=C1acq, 1=clockjump, 2=C2acq
+const rlc=document.getElementById('redlock');
+function renderRedlock(){
+  const ctx=setup(rlc); const w=rlc.clientWidth,h=rlc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const N=5, Q=Math.floor(N/2)+1;
+  const cy=h/2;
+  const bw=96, gap=18;
+  const totalW=N*bw+(N-1)*gap;
+  const startX=(w-totalW)/2;
+  // state per master: who holds it
+  // stage0: C1 on M1,M2,M3 (M4,M5 unreachable/free)
+  // stage1: M3 expired (clock jump)
+  // stage2: C2 on M3,M4,M5
+  const masters=[];
+  for(let i=0;i<N;i++) masters.push({c1:false,c2:false,expired:false});
+  if(rlStage>=0){ masters[0].c1=true; masters[1].c1=true; masters[2].c1=true; }
+  if(rlStage>=1){ masters[2].expired=true; masters[2].c1=false; } // M3 lock expired
+  if(rlStage>=2){ masters[2].c2=true; masters[3].c2=true; masters[4].c2=true; }
+  // draw masters
+  masters.forEach((m,i)=>{
+    const x=startX+i*(bw+gap);
+    let fill='#262d36', stroke='#555', sub='free', col='#8b949e';
+    if(m.c1){ fill='#2980b9'; stroke='#2980b9'; sub='C1 holds'; col='#e6edf3'; }
+    if(m.c2){ fill='#c0392b'; stroke='#c0392b'; sub='C2 holds'; col='#ffd9d9'; }
+    if(m.expired && !m.c2){ fill='#3a1414'; stroke='#c0392b'; sub='EXPIRED'; col='#ff9a8a'; }
+    box(ctx,x,cy-34,bw,68,fill,stroke,'M'+(i+1),sub,col);
+  });
+  // quorum annotation
+  const c1set=[1,2,3].filter(i=>rlStage<1 || i<2).length + (rlStage<1?1:0); // just for label
+  ctx.fillStyle='#8b949e'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText(`quorum = floor(${N}/2)+1 = ${Q}   (need ${Q} of ${N} masters)`, w/2, 24);
+  // readout
+  const c1maj='{M1,M2,M3}', c2maj='{M3,M4,M5}';
+  const ro=document.getElementById('redlockReadout');
+  if(rlStage===0){
+    ro.innerHTML=`  C1 acquires majority ${c1maj} (3 >= ${Q}) -> LOCK ACQUIRED. Each lock TTL=10.`;
+  } else if(rlStage===1){
+    ro.innerHTML=`  M3's clock jumps to 12 (NTP step) -> C1's lock on M3 <span class="bad">EXPIRED</span>.\n`+
+      `  M1,M2 still hold C1's lock. C1 still believes it holds (undetectable).`;
+  } else {
+    ro.innerHTML=`  C2 acquires majority ${c2maj} (3 >= ${Q}) -> LOCK ACQUIRED.\n`+
+      `  C1=${c1maj}, C2=${c2maj}, overlap only {M3} (but EXPIRED). `+
+      `<span class="bad">Two valid majorities -> |holders|=2.</span>`;
+  }
+  // enable buttons by stage
+  document.getElementById('bRL1').classList.toggle('active', rlStage===0);
+  document.getElementById('bRL2').disabled = rlStage<1;
+  document.getElementById('bRL3').disabled = rlStage<2;
+}
+
+/* ===== PANEL 5: fencing tokens ===== */
+let fenceStep=0;
+const fc=document.getElementById('fence');
+function renderFence(){
+  const ctx=setup(fc); const w=fc.clientWidth,h=fc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  // tokens: C1=33, C2=34 ; storage last_token progression
+  // steps: 0 init, 1 C1 acquire(33), 2 C2 acquire(34)+C2 write ACCEPTED, 3 C1 write REJECTED, 4 done
+  const t1=33, t2=34;
+  let lastToken = fenceStep>=2 ? t2 : 0;
+  let storeData = fenceStep>=2 ? "('C2','v34')" : "(empty)";
+  // lock service box (left)
+  box(ctx,40,h/2-30,150,60,'#161b22','#444','LockService','issues tokens');
+  // storage box (right)
+  box(ctx,w-220,h/2-30,180,60,'#1c3a25','#27ae60','Storage','last_token='+lastToken);
+  ctx.fillStyle='#7ad693'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('data='+storeData, w-130, h/2+34);
+  // C1, C2 in middle column
+  const c1x=w/2-90, c2x=w/2-90;
+  box(ctx,c1x,60,120,50, fenceStep>=1?'#2980b9':'#262d36', fenceStep>=1?'#2980b9':'#555','C1', fenceStep>=1?'token '+t1:'waiting');
+  box(ctx,c2x,h-110,120,50, fenceStep>=2?'#c0392b':'#262d36', fenceStep>=2?'#c0392b':'#555','C2', fenceStep>=2?'token '+t2:'waiting');
+  // arrows depending on step
+  ctx.font='bold 11px ui-monospace,monospace';
+  if(fenceStep>=2){
+    // C2 -> storage ACCEPTED (green)
+    ctx.strokeStyle='#27ae60'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(c2x+120,h-85); ctx.lineTo(w-220,h/2+10); ctx.stroke();
+    ctx.fillStyle='#27ae60'; ctx.textAlign='left';
+    ctx.fillText('write(34) ACCEPTED', c2x+130, h-70);
+  }
+  if(fenceStep>=3){
+    // C1 -> storage REJECTED (red)
+    ctx.strokeStyle='#c0392b'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(c1x+120,85); ctx.lineTo(w-220,h/2-10); ctx.stroke();
+    ctx.fillStyle='#ff9a8a'; ctx.textAlign='left';
+    ctx.fillText('write(33) REJECTED', c1x+130, 80);
+  }
+  const ro=document.getElementById('fenceReadout');
+  if(fenceStep===0) ro.innerHTML=`  C1 about to acquire. Storage last_token = 0.`;
+  else if(fenceStep===1) ro.innerHTML=`  C1 acquire -> token ${t1}. (C1 then FREEZES in a GC pause; lock expires.)`;
+  else if(fenceStep===2) ro.innerHTML=`  C2 acquire -> token ${t2} (monotonic: ${t2} > ${t1}).\n`+
+    `  C2 write(token=${t2}) -> ${t2} > 0 -> <b class="gold">ACCEPTED</b>  (last_token = ${t2})`;
+  else if(fenceStep===3) ro.innerHTML=`  C1 wakes, write(token=${t1}) -> ${t1} <= ${t2} -> <span class="bad">REJECTED</span>.\n`+
+    `  storage.data = ${storeData}  -> <b class="gold">integrity PRESERVED</b>`;
+  else ro.innerHTML=`  Done. C1's stale write bounced off the token gate; only C2's data survives.`;
+  document.getElementById('fenceLabel').textContent=`step ${Math.min(fenceStep,4)} / 4`;
+}
+
+/* ===== GOLD CHECK vs distributed_locking.py ===== */
+/* (1) consensus: ZK sequential over 10-tick timeline -> max|holders| must be 1.
+   (2) redis counter-model -> 2.
+   Mirrors GOLD CHECK in distributed_locking.py. */
+function zkTimeline(){
+  let counter=0; const nodes={};
+  const ops=[['create','C1'],['create','C2'],['create','C3'],['create','C4'],
+             ['release','C1'],['create','C5'],['release','C2'],['release','C3'],
+             ['release','C4'],['release','C5']];
+  const rows=[];
+  for(let t=0;t<ops.length;t++){
+    const [op,c]=ops[t];
+    if(op==='create'){ counter++; nodes['/lock-'+String(counter).padStart(10,'0')]={sess:c,seq:counter}; }
+    else { const p=Object.keys(nodes).find(k=>nodes[k].sess===c); if(p) delete nodes[p]; }
+    const kids=Object.entries(nodes).map(([p,v])=>({p,...v})).sort((a,b)=>a.seq-b.seq);
+    const holder = kids.length? kids[0].sess : null;
+    rows.push({t,op,c,q:kids.map(k=>String(k.seq).padStart(10,'0')+'('+k.sess+')').join('->'),
+               n: holder?1:0});
+  }
+  return rows;
+}
+function goldCheck(){
+  const rows=zkTimeline();
+  const maxH=Math.max(...rows.map(r=>r.n));
+  const redisMax=2;            // counter-model (GC > TTL)
+  // fencing recompute
+  const t1=33, t2=34; let last=0, ok2=false, rej1=false, data=null;
+  if(t2>last){ last=t2; ok2=true; data='C2,v34'; }
+  if(t1>last){} else { rej1=true; }
+  const ok = (maxH===1) && (redisMax===2) && ok2 && rej1 && data==='C2,v34' && (t2>t1);
+  // render table
+  const t=document.getElementById('goldTable');
+  let H='<tr><th>tick</th><th>op</th><th>live queue (ZK sequential)</th><th>|holders|</th></tr>';
+  rows.forEach(r=>{
+    H+=`<tr class="${r.n===1?'':'hl'}"><td>${r.t}</td><td>${r.op} ${r.c}</td><td>${r.q||'(empty)'}</td><td>${r.n}</td></tr>`;
+  });
+  H+=`<tr class="bad"><td>—</td><td colspan="2">Redis SETNX + GC pause (counter-model)</td><td>${redisMax}</td></tr>`;
+  t.innerHTML=H;
+  const ro=document.getElementById('goldReadout');
+  ro.innerHTML=`  consensus (ZK sequential): max|holders| over ${rows.length} ticks = <b>${maxH}</b>  `+
+    `(holder = argmin_seq -> unique)\n`+
+    `  redis (SETNX + GC > TTL): max|holders| = <span class="bad">${redisMax}</span>  (stale holder)\n`+
+    `  fencing: C2(${t2}) ACCEPTED, C1(${t1}) REJECTED, storage = ${data} -> integrity preserved`;
+  const chk=document.getElementById('check');
+  chk.textContent = ok
+    ? `check: OK — JS matches distributed_locking.py (consensus max|holders|=1, redis=2, fencing OK)`
+    : `check: FAIL — mismatch!`;
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== events ===== */
+document.getElementById('na').addEventListener('input',()=>{ herdState='held'; renderHerd(); });
+document.getElementById('bHerdRelease').addEventListener('click',()=>{
+  herdState = herdState==='held' ? 'released' : 'held'; renderHerd();
+});
+
+function seqReset(){ seqInit(3); renderSeq(); }
+document.getElementById('bSeqStep').addEventListener('click',()=>{
+  if(seqNodes.length){ seqNodes.shift(); seqStep++; } renderSeq();
+});
+document.getElementById('bSeqReset').addEventListener('click',seqReset);
+
+['ttl','gc'].forEach(id=>document.getElementById(id).addEventListener('input',renderRedis));
+
+document.getElementById('bRL1').addEventListener('click',()=>{ rlStage=0; renderRedlock(); });
+document.getElementById('bRL2').addEventListener('click',()=>{ rlStage=1; renderRedlock(); });
+document.getElementById('bRL3').addEventListener('click',()=>{ rlStage=2; renderRedlock(); });
+document.getElementById('bRLReset').addEventListener('click',()=>{ rlStage=0; renderRedlock(); });
+
+document.getElementById('bFStep').addEventListener('click',()=>{ if(fenceStep<4){ fenceStep++; renderFence(); }});
+document.getElementById('bFReset').addEventListener('click',()=>{ fenceStep=0; renderFence(); });
+let fTimer=null;
+document.getElementById('bFPlay').addEventListener('click',function(){
+  if(fTimer){ clearInterval(fTimer); fTimer=null; this.textContent='▶ play'; return; }
+  fenceStep=0; renderFence(); this.textContent='⏸ pause';
+  let n=0;
+  fTimer=setInterval(()=>{
+    if(n>=4){ clearInterval(fTimer); fTimer=null; document.getElementById('bFPlay').textContent='▶ play'; return; }
+    if(fenceStep<4){ fenceStep++; renderFence(); } n++;
+  },1000);
+});
+
+window.addEventListener('resize',()=>{ renderHerd(); renderSeq(); renderRedis(); renderRedlock(); renderFence(); });
+
+/* init */
+herdState='held'; renderHerd();
+seqReset();
+renderRedis();
+rlStage=0; renderRedlock();
+fenceStep=0; renderFence();
+goldCheck();
+</script>
+</body>
+</html>

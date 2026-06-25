@@ -1,0 +1,231 @@
+circuit_breaker.py - reference impl. All numbers below feed CIRCUIT_BREAKER.md.
+Pure Python stdlib (no deps). Traces are hard-coded & deterministic.
+Sources: Nygard 'Release It!' (2007); Fowler bliki (2014); Netflix Hystrix; Resilience4j.
+
+========================================================================
+  SECTION A: CLOSED -> OPEN  -  consecutive failures trip the breaker
+========================================================================
+The breaker starts CLOSED. Every request passes through to the
+downstream. We count CONSECUTIVE failures (a single success zeros the
+counter). At 3 in a row, the breaker TRIPS to OPEN.
+
+Config: failure_threshold = 3, reset_timeout = 5.0s, half_open_max = 2
+
+First 7 events of CANONICAL_TRACE (the trip happens at #4):
+| # | time (s) | downstream | allowed? | consec | state after |
+|---|----------|------------|----------|--------|-------------|
+|  0 |     1.00 |         ok |      yes |      0 |      CLOSED |
+|  1 |     2.00 |         ok |      yes |      0 |      CLOSED |
+|  2 |     3.00 |       fail |      yes |      1 |      CLOSED |
+|  3 |     4.00 |       fail |      yes |      2 |      CLOSED |
+|  4 |     5.00 |       fail |      yes |      3 |        OPEN |
+|  5 |     6.00 |         ok |   REJECT |      3 |        OPEN |
+|  6 |     7.00 |       fail |   REJECT |      3 |        OPEN |
+
+Events 0-1 succeed -> counter stays 0. Events 2,3,4 each fail:
+  after #2 consec=1, after #3 consec=2, after #4 consec=3 -> TRIP.
+The breaker is now OPEN at t=5.0s. The downstream is NOT contacted
+again until the breaker half-opens - even though events 5 and 6 claim
+'ok'/'fail', they are REJECTED before any call is made.
+
+[check] first CLOSED->OPEN trip at t=5.0s (trigger: 'failure threshold reached'):  OK
+[check] a success mid-burst resets the counter: after [fail,fail,ok,fail] state = CLOSED (stayed CLOSED, consec=1):  OK
+
+========================================================================
+  SECTION B: OPEN  -  fast-fail everything, then cool down to HALF_OPEN
+========================================================================
+In OPEN the breaker does NOT forward any request. It returns an error
+to the caller immediately, in the caller's own thread. No network call,
+no worker thread held. This is the fast-fail - the whole point.
+
+The breaker stays OPEN for reset_timeout = 5.0s. Crucially, the OPEN -> HALF_OPEN transition is LAZY: it is checked on
+the next incoming request, never on a wall-clock timer. A breaker that
+nobody calls stays OPEN forever (correct - probing costs a real call).
+
+OPEN-window verdicts (events after the first trip @t=5.0):
+| # | time (s) | since trip | >= 5.0s? | decision            |
+|---|----------|------------|-----------|---------------------|
+|  5 |     6.00 |       1.00 |        no | REJECT (fast-fail)  |
+|  6 |     7.00 |       2.00 |        no | REJECT (fast-fail)  |
+|  7 |    20.00 |      15.00 |       yes | HALF_OPEN (probe)   |
+
+Event 5 arrives 1s after the trip - still hot - REJECTED. Event 6
+likewise. Event 7 arrives 15s after the trip - well past the 5s
+cooling-off - so the breaker flips to HALF_OPEN and lets event 7
+through as the first PROBE. The downstream is finally contacted again
+ONLY at t=20.0, fifteen seconds after it last failed.
+
+[check] at t=100.0s with NO incoming request, breaker that tripped at t=2.0 is still OPEN (lazy: no request => no probe):  OK
+[check] event 7 (t=20.0) is the first admission after the trip:  OK
+
+========================================================================
+  SECTION C: HALF_OPEN  -  limited probes decide recovery
+========================================================================
+In HALF_OPEN the breaker admits at most 2 PROBE requests. Outcomes:
+  * ALL 2 succeed -> the downstream has recovered -> CLOSE.
+  * ANY one fails        -> still broken -> flip back to OPEN and
+                            restart the cooling-off clock.
+
+Two HALF_OPEN episodes in CANONICAL_TRACE - one succeeds, one fails:
+
+Episode 1 (events 7-8):
+| # | time (s) | decision        | probe result | succ | state after |
+|---|----------|-----------------|--------------|------|-------------|
+|  7 |    20.00 | half_open_probe |           ok |    1 |   HALF_OPEN |
+|  8 |    21.00 | half_open_probe |           ok |    2 |      CLOSED |
+  Two consecutive successful probes (2/2) -> CLOSED at t=21.0.
+
+Episode 2 (event 14) - a probe FAILS:
+| 14 |    40.00 | half_open_probe |         fail |   -  |        OPEN |
+  The downstream is STILL broken. One failed probe is enough: the
+  breaker flips straight back to OPEN at t=40.0 and the 5s
+  cooling-off starts over. It does NOT keep probing - that would hammer
+  a sick service. Event 15 (1s later) is therefore REJECTED.
+
+This asymmetry is deliberate and is the conservative core of the
+pattern: it is cheap to stay suspicious (OPEN) and expensive to trust
+a flaky downstream (CLOSED), so closing requires multiple positive
+signals while a single negative signal reopens immediately.
+
+[check] event 8 closes after 2 successful probes (state=CLOSED):  OK
+[check] event 14 reopens on a single failed probe (state=OPEN):  OK
+
+========================================================================
+  SECTION D: cascade prevention  -  with vs without a breaker
+========================================================================
+The scenario: a 4-thread worker pool calls a downstream that suddenly
+DEGRADES - every call now takes 2000ms and fails. Requests arrive every 200ms (the stream is 16 requests over 3.0s).
+
+WITHOUT a breaker, each slow call HOLDS a worker for 2000ms. 4 workers
+/ 2s-per-call => the pool saturates almost immediately and stays full.
+Every arriving caller then QUEUES waiting for a worker - their latency
+balloons, and the slowdown propagates to whoever calls THEM. That is the
+cascade.
+
+WITH a breaker (threshold=3), the first 3 failures trip it OPEN. From
+then on requests are REJECTED in ~1ms and use NO worker. Only the 3
+calls that were already in flight when it tripped ever occupy workers,
+so the pool never fully saturates and the service keeps answering fast.
+
+| metric                       | no breaker | with breaker |
+|------------------------------|------------|--------------|
+| peak workers busy            |          4 |            3 |
+| first thread-exhaustion      |      800ms |        never |
+| requests that found 0 free workers |         12 |            0 |
+| total caller latency (sum, ms) |      60800 |         6013 |
+| fast responses (<50ms)       |          0 |           13 |
+| calls admitted to downstream |         16 |            3 |
+| calls rejected (fast-fail)   |          0 |           13 |
+
+Read it: WITHOUT the breaker, the 4-worker pool hits exhaustion at
+t=800ms and 12 of 16 callers block on a worker. WITH the breaker, exhaustion NEVER happens and 13 of 16 callers get a sub-50ms answer. The downstream is contacted only 3 times (the 3 in-flight calls that tripped it), instead of all 16.
+
+That is the cascade prevented at the first hop: the slow downstream no
+longer drains our threads, so OUR callers never see us stall, and the
+failure stops propagating upstream. (Bonus: the sick downstream gets
+left alone for 5s - a chance to recover under reduced load.)
+
+[check] with-breaker peak_busy (3) == threshold (3):  OK
+[check] with-breaker exhaustion_count (0) < no-breaker exhaustion_count (12):  OK
+[check] no-breaker DID exhaust (12 > 0):  OK
+
+========================================================================
+  SECTION E: config trade-offs  -  sensitive vs balanced vs tolerant
+========================================================================
+The three knobs are a dial between SAFETY (isolate fast) and
+AVAILABILITY (avoid false trips). Run the same FLAP_TRACE - a 4-failure
+burst then recovery - under three configs:
+
+| config    | thr | timeout | hom | tripped? | trip time | rejected | HALF_OPEN episodes | recovered |
+|-----------|-----|---------|-----|----------|-----------|----------|--------------------|-----------|
+| sensitive |   2 |       2s |   1 |      yes |        5s |        2 |                  2 |       yes |
+| balanced  |   3 |       5s |   2 |      yes |        6s |        4 |                  1 |       yes |
+| tolerant  |   5 |      10s |   3 |       no |         - |        0 |                  0 |       yes |
+
+Read it as a spectrum:
+  * SENSITIVE (thr=2) trips after just 2 failures and recovers in 2s,
+    but it FALSE-TRIPS on short bursts and probes aggressively (2
+    half-open episodes). Good when failures are expensive; bad under
+    benign jitter.
+  * BALANCED (thr=3, 5s, 2 probes) trips once, isolates for 5s, then
+    needs 2 consecutive successes to trust the downstream again. The
+    Nygard / Hystrix-style default.
+  * TOLERANT (thr=5) NEVER trips on a 4-failure burst - so it offers
+    NO protection here. It avoids false alarms but a real outage would
+    drain your threads unchecked.
+
+Rules of thumb (Nygard 'Release It!'; Hystrix/Resilience4j defaults):
+  * threshold : high enough to ride out normal jitter, low enough to
+                trip before your thread pool drains. Tie it to pool
+                size and downstream latency, not to a guess.
+  * timeout   : longer than the typical recovery time of the downstream
+                (a restarted service, a cache warm-up), short enough
+                that you re-probe reasonably soon.
+  * half_open_max : 1 = fastest recovery but trusts a SINGLE success
+                (risky on flaky nets); higher = more confidence before
+                reopening the floodgates, at the cost of slower recovery.
+
+[check] sensitive trips but tolerant does not on the same burst (yes vs no):  OK
+[check] balanced rejects more than tolerant (4 > 0):  OK
+
+========================================================================
+  GOLD CHECK: state machine transitions for CANONICAL_TRACE
+========================================================================
+Config: threshold=3, reset_timeout=5.0s, half_open_max=2
+
+Full event-by-event verdict (the audit trail the .html must match):
+
+| # | time (s) | downstream | allowed? | state after |
+|---|----------|------------|----------|-------------|
+|  0 |     1.00 |         ok |      yes |      CLOSED |
+|  1 |     2.00 |         ok |      yes |      CLOSED |
+|  2 |     3.00 |       fail |      yes |      CLOSED |
+|  3 |     4.00 |       fail |      yes |      CLOSED |
+|  4 |     5.00 |       fail |      yes |        OPEN |
+|  5 |     6.00 |         ok |   REJECT |        OPEN |
+|  6 |     7.00 |       fail |   REJECT |        OPEN |
+|  7 |    20.00 |         ok |      yes |   HALF_OPEN |
+|  8 |    21.00 |         ok |      yes |      CLOSED |
+|  9 |    22.00 |         ok |      yes |      CLOSED |
+| 10 |    23.00 |       fail |      yes |      CLOSED |
+| 11 |    24.00 |       fail |      yes |      CLOSED |
+| 12 |    25.00 |       fail |      yes |        OPEN |
+| 13 |    26.00 |         ok |   REJECT |        OPEN |
+| 14 |    40.00 |       fail |      yes |        OPEN |
+| 15 |    41.00 |         ok |   REJECT |        OPEN |
+| 16 |    50.00 |         ok |      yes |   HALF_OPEN |
+| 17 |    51.00 |         ok |      yes |      CLOSED |
+
+State-after sequence (18 entries):
+  CLOSED, CLOSED, CLOSED, CLOSED, OPEN, OPEN, OPEN, HALF_OPEN, CLOSED, CLOSED, CLOSED, CLOSED, OPEN, OPEN, OPEN, OPEN, HALF_OPEN, CLOSED
+
+Transition log (every state change, with trigger):
+| time (s) | from     | to       | trigger                 |
+|----------|----------|----------|-------------------------|
+|     5.00 | CLOSED   | OPEN     | failure threshold reached |
+|    20.00 | OPEN     | HALF_OPEN | reset_timeout elapsed   |
+|    21.00 | HALF_OPEN | CLOSED   | probes succeeded        |
+|    25.00 | CLOSED   | OPEN     | failure threshold reached |
+|    40.00 | OPEN     | HALF_OPEN | reset_timeout elapsed   |
+|    40.00 | HALF_OPEN | OPEN     | half-open probe failed  |
+|    50.00 | OPEN     | HALF_OPEN | reset_timeout elapsed   |
+|    51.00 | HALF_OPEN | CLOSED   | probes succeeded        |
+
+Total state transitions: 8
+
+[check] state sequence matches pinned gold:  OK
+[check] allowed-sequence matches pinned gold:  OK
+[check] transition count == 8:  OK
+[check] final state == CLOSED (recovered):  OK
+
+GOLD (pinned for circuit_breaker.html):
+  state_after   = CLOSED,CLOSED,CLOSED,CLOSED,OPEN,OPEN,OPEN,HALF_OPEN,CLOSED,CLOSED,CLOSED,CLOSED,OPEN,OPEN,OPEN,OPEN,HALF_OPEN,CLOSED
+  allowed       = T,T,T,T,T,F,F,T,T,T,T,T,T,F,T,F,T,T
+  transitions   = CLOSED->OPEN,OPEN->HALF_OPEN,HALF_OPEN->CLOSED,CLOSED->OPEN,OPEN->HALF_OPEN,HALF_OPEN->OPEN,OPEN->HALF_OPEN,HALF_OPEN->CLOSED
+  n_transitions = 8
+
+[check] GOLD: state machine replay matches pinned transitions:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

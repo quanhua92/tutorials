@@ -1,0 +1,221 @@
+sequential_consistency.py - reference impl. All numbers below feed SEQUENTIAL_CONSISTENCY.md.
+Pure Python stdlib. Single register X, initial value 0. Lamport 1979.
+
+========================================================================
+  SECTION A: a sequentially consistent history - the stale-read script
+========================================================================
+Register X starts at 0. Two processes, four operations:
+
+  P1: .w=]r=].......   W1(write,1,ret=ok)[1-3] R2(read,,ret=1)[4-6]
+  P2: .......r=]r=].   R3(read,,ret=0)[7-9] R4(read,,ret=1)[10-12]
+
+  P1 writes X=1 (W1) then reads it back (R2 -> 1). P2 reads twice
+  (R3 -> 0, then R4 -> 1). The catch: P2's FIRST read returns 0 even
+  though W1 completed at t=3, long before R3 started at t=7.
+
+PROGRAM ORDER (the ONLY thing sequential consistency enforces):
+  R3 -> R4   (same process, invocation order)
+  W1 -> R2   (same process, invocation order)
+  (NO cross-process edges: P1's ops and P2's ops may be interleaved
+   however we like when building the script.)
+
+Checker: 6 program-order-preserving script(s); 2 legal register history(s):
+
+  W1 R2 R3 R4    :  [0] W1(->1) R2(=1 ok) R3(=0 MISMATCH ret=0) R4(=1 ok)   [illegal (read mismatch)]
+  W1 R3 R2 R4    :  [0] W1(->1) R3(=0 MISMATCH ret=0) R2(=1 ok) R4(=1 ok)   [illegal (read mismatch)]
+  W1 R3 R4 R2    :  [0] W1(->1) R3(=0 MISMATCH ret=0) R4(=1 ok) R2(=1 ok)   [illegal (read mismatch)]
+  R3 W1 R2 R4    :  [0] R3(=0 ok) W1(->1) R2(=1 ok) R4(=1 ok)   [LEGAL  -> valid script]
+  R3 W1 R4 R2    :  [0] R3(=0 ok) W1(->1) R4(=1 ok) R2(=1 ok)   [LEGAL  -> valid script]
+  R3 R4 W1 R2    :  [0] R3(=0 ok) R4(=1 MISMATCH ret=1) W1(->1) R2(=1 ok)   [illegal (read mismatch)]
+
+Verdict: HIST_A is sequentially consistent.
+Two valid scripts exist, both of the form R3, W1, ...: P2's stale read
+is placed FIRST in the script, so it correctly observes the initial 0;
+only THEN does W1 write 1. Each process's own order is intact
+(P1: W1<R2; P2: R3<R4). Real time is simply ignored.
+
+Canonical valid script:  R3 W1 R2 R4
+  replay: [0] R3(=0 ok) W1(->1) R2(=1 ok) R4(=1 ok)
+  R3 reads 0 (initial), W1 writes 1, R2 reads 1, R4 reads 1. Every
+  process sees its own ops in program order. THAT is sequential
+  consistency (Lamport 1979): there exists SOME sequential order.
+
+[check] HIST_A sequentially consistent?  OK
+
+========================================================================
+  SECTION B: vs linearizability - add the real-time clause, verdict flips
+========================================================================
+Same history HIST_A. Now ALSO require the script to respect real time
+(Herlihy & Wing 1990): if resp(A) <= inv(B) then A MUST precede B.
+
+Real-time partial order (resp(A) <= inv(B) => A before B):
+  R2 -> R3   (resp(R2)=6 <= inv(R3)=7)
+  R2 -> R4   (resp(R2)=6 <= inv(R4)=10)
+  R3 -> R4   (resp(R3)=9 <= inv(R4)=10)
+  W1 -> R2   (resp(W1)=3 <= inv(R2)=4)
+  W1 -> R3   (resp(W1)=3 <= inv(R3)=7)
+  W1 -> R4   (resp(W1)=3 <= inv(R4)=10)
+
+  Cross-process edge W1 -> R3 is forced: resp(W1)=3 <= inv(R3)=7.
+  Under linearizability R3 CANNOT be placed before W1 in the script.
+
+Linearizability checker: 1 real-time sort(s); 0 legal:
+
+  W1 R2 R3 R4    :  [0] W1(->1) R2(=1 ok) R3(=0 MISMATCH ret=0) R4(=1 ok)   [illegal (read mismatch)]
+
+Verdict: HIST_A is NOT linearizable.
+The ONLY real-time-consistent script starts with W1, so R3 must read 1.
+R3 read 0 -> no linearization exists.
+
+--- side-by-side ---
+  sequential consistency: 6 program-order sorts, 2 legal -> YES
+  linearizability      : 1 real-time sorts, 0 legal -> NO
+
+THE GAP: real-time edges are a SUPERSET of program-order edges
+(every same-process pair is also time-ordered), so linearizability
+permits FEWER scripts. Sequential consistency drops the cross-process
+real-time edges (like W1 -> R3) and the stale read becomes legal.
+
+Real-time edges minus program-order edges (the ones seq IGNORES): [('R2', 'R3'), ('R2', 'R4'), ('W1', 'R3'), ('W1', 'R4')]
+W1 -> R3 is exactly the edge that, once removed, lets R3 read 0.
+
+[check] HIST_A seq=True, linearizable=False (seq strictly weaker) -> OK
+[check] HIST_B (well-behaved) seq=True, linearizable=True -> OK
+
+========================================================================
+  SECTION C: program order is locked, cross-process order is free
+========================================================================
+Sequential consistency lets the script reorder operations ACROSS
+processes at will, but each process's OWN operations must stay in
+program order. HIST_C makes this vivid: both writes set 1, both reads
+see 1, so SEVERAL cross-process interleavings are legal.
+
+  P1: .w]w].....   W1(write,1,ret=ok)[1-2] W2(write,1,ret=ok)[3-4]
+  P2: .....r]r].   R3(read,,ret=1)[5-6] R4(read,,ret=1)[7-8]
+
+PROGRAM ORDER: [('R3', 'R4'), ('W1', 'W2')]
+  (W1 before W2 on P1; R3 before R4 on P2. Nothing else is locked.)
+
+There are 6 program-order-preserving scripts; 3 are LEGAL register histories:
+
+  W1 W2 R3 R4    :  [0] W1(->1) W2(->1) R3(=1 ok) R4(=1 ok)   [LEGAL  -> valid script]
+  W1 R3 W2 R4    :  [0] W1(->1) R3(=1 ok) W2(->1) R4(=1 ok)   [LEGAL  -> valid script]
+  W1 R3 R4 W2    :  [0] W1(->1) R3(=1 ok) R4(=1 ok) W2(->1)   [LEGAL  -> valid script]
+  R3 W1 W2 R4    :  [0] R3(=1 MISMATCH ret=1) W1(->1) W2(->1) R4(=1 ok)   [illegal (read mismatch)]
+  R3 W1 R4 W2    :  [0] R3(=1 MISMATCH ret=1) W1(->1) R4(=1 ok) W2(->1)   [illegal (read mismatch)]
+  R3 R4 W1 W2    :  [0] R3(=1 MISMATCH ret=1) R4(=1 MISMATCH ret=1) W1(->1) W2(->1)   [illegal (read mismatch)]
+
+Verdict: HIST_C is sequentially consistent (3 valid scripts).
+
+The 3 valid scripts all honor W1<W2 and R3<R4, yet interleave the
+cross-process operations differently:
+  W1 W2 R3 R4    : program order preserved? True  | trace [0] W1(->1) W2(->1) R3(=1 ok) R4(=1 ok)
+  W1 R3 W2 R4    : program order preserved? True  | trace [0] W1(->1) R3(=1 ok) W2(->1) R4(=1 ok)
+  W1 R3 R4 W2    : program order preserved? True  | trace [0] W1(->1) R3(=1 ok) R4(=1 ok) W2(->1)
+
+The 3 ILLEGAL scripts all start with R3 or R4 - a read of 1 before
+ANY write - so the register would return the initial 0, not 1. They
+still preserve program order; they just are not legal register traces.
+MORAL: 'preserves program order' is necessary but not sufficient - the
+script must ALSO read back values consistent with the writes.
+
+Rejected (program-order OK, but register-illegal):
+  R3 W1 W2 R4    : [0] R3(=1 MISMATCH ret=1) W1(->1) W2(->1) R4(=1 ok)
+  R3 W1 R4 W2    : [0] R3(=1 MISMATCH ret=1) W1(->1) R4(=1 ok) W2(->1)
+  R3 R4 W1 W2    : [0] R3(=1 MISMATCH ret=1) R4(=1 MISMATCH ret=1) W1(->1) W2(->1)
+
+[check] HIST_C sequentially consistent with 3 valid scripts?  OK
+
+========================================================================
+  SECTION D: an invalid history - same-process write then stale read
+========================================================================
+Sequential consistency can be VIOLATED within a SINGLE process. P1
+writes X=1, then on the SAME process reads X back and gets 0:
+
+  P1: .w]r].   W1(write,1,ret=ok)[1-2] R2(read,,ret=0)[3-4]
+
+  W1 and R2 are on process P1, so program order forces W1 before R2
+  in EVERY script. After W1 the register holds 1, so R2 must read >=1.
+  R2 returned 0 -> no legal script can exist.
+
+Checker: 1 program-order sort(s); 0 legal:
+
+  W1 R2          :  [0] W1(->1) R2(=0 MISMATCH ret=0)   [illegal (read mismatch)]
+
+Verdict: HIST_D is NOT sequentially consistent.
+The ONLY script is (W1, R2); replaying it writes 1 then reads back 0,
+which no register can produce. Program order has been violated by the
+EXECUTION itself - a process must always see its own writes.
+
+This is the deepest guarantee sequential consistency gives you: a
+process never observes its own past as 'not having happened yet'. The
+stale read of Section A was allowed precisely because the reader (P2)
+was a DIFFERENT process from the writer (P1). Same process? Forbidden.
+
+[check] HIST_D NOT sequentially consistent?  OK
+
+========================================================================
+  SECTION E: the consistency hierarchy (strict > linearizable > sequential > causal > eventual)
+========================================================================
+Each model is a constraint on the allowed scripts. Moving DOWN the
+hierarchy DROPS a constraint, so more histories become legal:
+
+| model            | what it requires of the script                  | stale read of a COMPLETED write? | real-world systems            |
+|------------------|------------------------------------------------|----------------------------------|------------------------------|
+| strict           | op appears to execute AT its invocation instant | FORBIDDEN (write is visible immediately) | idealized; needs global clock |
+| linearizable     | op atomic somewhere in [inv,resp], respects real time | FORBIDDEN (real-time forces write before read) | etcd, Spanner, ZooKeeper+sync |
+| sequential       | total order preserving program order (NO real time) | ALLOWED if reader is a different process | shared-memory multiprocessors |
+| causal           | preserves causally-related order; concurrent ops free | ALLOWED (read may be causally unrelated to write) | cooperative caches, some stores |
+| eventual         | no order guarantee; replicas converge eventually | ALLOWED, possibly for a long time | Dynamo, Cassandra (default)  |
+
+Applied to the stale-read scenario (P1 writes X=1 [completes], P2 reads X=0):
+  strict        -> P2 reads 1 (write visible the instant P1 invoked it)
+  linearizable  -> P2 reads 1 (write completed before P2's read started)
+  sequential    -> P2 MAY read 0 (real time ignored; reader != writer)
+  causal        -> P2 MAY read 0 (read not caused by the write)
+  eventual      -> P2 MAY read 0, and may keep reading 0 for a while
+
+Where sequential consistency sits:
+  - STRONGER than causal/eventual: it enforces a SINGLE global order,
+    so two processes always agree on the order of ALL operations (even
+    concurrent ones). Causal/eventual let different processes disagree
+    on the order of concurrent operations.
+  - WEAKER than linearizable/strict: it drops the real-time clause, so
+    a read can ignore a completed write. That is exactly the gap in
+    Section B, and it is why sequential consistency is CHEAP to provide
+    (a snooping cache suffices, Papamarcos & Patel 1984) while
+    linearizability needs consensus (CAP, Gilbert & Lynch 2002).
+
+Containment (every higher model implies every lower one):
+  strict  >  linearizable  >  sequential  >  causal  >  eventual
+  i.e. linearizable => sequentially consistent (always), but NOT back.
+  HIST_A proves the strictness: seq=YES but linearizable=NO.
+
+[check] hierarchy is a total chain of strict containments:  OK
+
+========================================================================
+  GOLD CHECK: seq. consistent iff a valid program-order script exists
+========================================================================
+Defining test: a history is sequentially consistent IFF some total
+order that preserves program order is a legal register history.
+
+  HIST_A (stale read across processes)           -> seq. consistent      (2 legal / 6 sorts)  [OK]
+  HIST_B (well-behaved reads)                    -> seq. consistent      (3 legal / 6 sorts)  [OK]
+  HIST_C (program-order freedom)                 -> seq. consistent      (3 legal / 6 sorts)  [OK]
+  HIST_D (same-process write then stale read)    -> NOT seq. consistent  (0 legal / 1 sorts)  [OK]
+
+[check] GOLD: all 4 sequential verdicts correct:  OK
+
+[check] HIST_A: sequentially_consistent=True, linearizable=False  (seq strictly weaker)  ->  OK
+  This is the exact gap: sequential consistency ignores real time,
+  linearizability enforces it. That clause is the whole definition.
+
+GOLD scalars (pinned for sequential_consistency.html):
+  is_seq_consistent(HIST_A) = True   (must be True)
+  #legal program-order scripts HIST_A = 2 / 6  (must be 2 / 6)
+  #legal program-order scripts HIST_C = 3 / 6  (must be 3 / 6)
+  is_seq_consistent(HIST_D) = False   (must be False)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,244 @@
+session_guarantees.py - reference impl. All numbers below feed
+SESSION_GUARANTEES.md. python3, stdlib only. Deterministic (no RNG).
+Scenario: replicas of keys X (and Y/Z); scripted states + arrival orders.
+Source: Terry et al. 1994/1995 (Bayou); DeCandia 2007 (Dynamo).
+
+==========================================================================
+  SECTION A: Read-Your-Writes (RYW) - see your own writes
+==========================================================================
+You WRITE X=1 @ v1 onto replica A. Gossip has not reached B or C,
+so they still hold X=0 @ v0. Your very next request is a READ of X.
+
+  states:  A=A{X=1@v1}, B=B{X=0@v0}, C=C{X=0@v0}
+  session: last_write_version[X] = 1  (you wrote X@v1)
+
+--- WITHOUT RYW (load balancer routes your read to B) ---
+  read X from B -> X=0@v0   RYW check: need>=1, have=0 -> VIOLATION
+  => you just wrote X=1 but you read X=0. The diary forgot what
+     you wrote. This is the signature RYW failure.
+
+--- WITH RYW (sticky session: route back to A) ---
+  read X from A -> X=1@v1   RYW check: need>=1, have=1 -> OK
+  => the sticky replica A still has your write. You read X=1.
+     Alternatively, block the read on B until gossip catches B up to
+     v1:
+  guarded_read(B, RYW on): blocked=True (caught B up to v1) -> X=1@v1
+
+RYW SPEC : read of k from r is ok  <=>  r.version(k) >= session.last_write_version[k]
+FIX      : (1) sticky session - route to the replica that took the
+               write;  OR  (2) send last_write_version in the request
+               and block until the chosen replica has caught up.
+
+[check] RYW: B violates (need 1 > have 0); A ok; blocked-read fixes -> v1:  OK
+GOLD (pinned for .html): RYW violation on B = (need=1, have=0); sticky A -> (1,1); blocked B -> (1,1).
+
+==========================================================================
+  SECTION B: Monotonic Reads (MR) - never see a value go backward
+==========================================================================
+Replicas are mid-convergence: A and C have the newer X=5 @ v5; B is
+lagging at X=3 @ v3. Your client reads X twice in a row.
+
+  states:  A=A{X=5@v5}, B=B{X=3@v3}, C=C{X=5@v5}
+--- read 1 from A (no guarantee needed yet) ---
+  read X from A -> X=5@v5   highest_read_version[X] now 5
+
+--- read 2 WITHOUT MR (load balancer routes to lagging B) ---
+  read X from B -> X=3@v3   MR check: need>=5, have=3 -> VIOLATION
+  => observed sequence 5 -> 3: the value went BACKWARD. You saw
+     v5 then v3; a newer read was followed by an older one.
+
+--- read 2 WITH MR (block B until it catches up to v5) ---
+  guarded_read(B, MR on): blocked=True (caught B up to v5) -> X=5@v5
+  => observed sequence 5 -> 5: monotonically non-decreasing. 
+     You never see a version older than the newest you've seen.
+
+MR SPEC  : read of k from r is ok  <=>  r.version(k) >= session.highest_read_version[k]
+           (updated to max(., r.version(k)) after each successful read)
+FIX      : client remembers the highest version it has ever read; on
+           each read, block the replica until it reaches that version.
+
+[check] MR: B violates (need 5 > have 3); blocked-read fixes -> v5:  OK
+GOLD (pinned for .html): MR violation on B = (need=5, have=3); backward seq 5->3; blocked B -> 5.
+
+==========================================================================
+  SECTION C: Monotonic Writes (MW) - a session's writes stay ordered
+==========================================================================
+Your session issues two writes in order:  W1: X=1 @ v1 (seq 1),
+then W2: X=2 @ v2 (seq 2). Every replica must apply W1 BEFORE W2.
+
+Network reordering hands a single replica R the writes as [W2, W1].
+
+  issued order : W1(seq1, X=1@v1) then W2(seq2, X=2@v2)
+  arrival @ R  : [X=2@v2(seq2), X=1@v1(seq1)]  <- REVERSED
+
+--- WITHOUT MW (apply in arrival order on a naive-overwrite store) ---
+  apply W2 -> R=R{X=1@v1}
+  apply W1 -> R=R{X=1@v1}   <- final X=1 (session wrote 1 then 2,
+                        expects 2; the older write clobbered the newer)
+  visible value sequence on R: 0 -> 2 -> 1  (non-monotonic: 0 -> 2 -> 1)
+
+--- WITH MW (buffer by session seq; apply in seq order) ---
+  W(seq2, X=2@v2) arrives: MW check applied_seq=0, want seq=1 -> BUFFER (got seq 2 out of order)
+  W(seq1, X=1@v1) applies -> R=R{X=2@v2}
+  flush: W(seq2) now in-order -> R=R{X=2@v2}   <- final X=2
+  visible value sequence on R: 0 -> 1 -> 2  (monotonic: 0 -> 1 -> 2)
+
+MW SPEC  : apply of write w (session seq s) at r is ok  <=>  s == r.applied_seq(session) + 1
+FIX      : replica buffers any write whose seq is out of order until
+           its predecessor (seq-1) is applied; flushes on each apply.
+NOTE     : on a last-writer-wins store the FINAL value is rescued by
+           the version rule, but the INTERMEDIATE state is still wrong
+           (0->2->1). For non-commutative updates (counters, appends,
+           RMW) MW is essential - without it the final state diverges.
+
+[check] MW: naive final X=1 (wrong, seq 0->2->1); buffered final X=2 (seq 0->1->2):  OK
+GOLD (pinned for .html): MW naive final=(1,1) seq [2,1]; buffered final=(2,2) seq [1,2].
+
+==========================================================================
+  SECTION D: Writes-Follow-Reads (WFR) - write carries its read context
+==========================================================================
+You READ X and get X=5 @ v5 (replica R0 is up to date). You then WRITE
+Y = 2*X = 10, which logically DEPENDS on the X you just read. Your
+write carries read_dep = {X: 5}: 'apply me only once you have X@v5'.
+
+Meanwhile replica R2 is lagging: it has X=3 @ v3 and has NOT yet seen
+the X=v5 your read returned. Your Y write arrives at R2.
+
+  states:  R0=R0{X=5@v5, Y=0@v0}, R2=R2{X=3@v3, Y=0@v0}
+  read X from R0 -> X=5@v5   session.last_read_version[X]=5
+  issue   W: Y=10@v7, read_dep={'X': 5}
+
+--- WITHOUT WFR (R2 applies Y even though it lacks X@v5) ---
+  WFR check on R2: VIOLATION ('X', 5, 3)   R2=R2{X=3@v3, Y=10@v7}
+  => R2 now reveals Y=10 (authored in the context X=5) while it
+     STILL shows X=3. A reader of R2 sees Y alongside an X that the
+     author never had in mind. The read context of the write is lost.
+
+--- WITH WFR (buffer Y on R2 until X catches up to v5) ---
+  W arrives at R2: WFR check -> BUFFER ('X', 5, 3)
+  anti-entropy advances R2 -> R2{X=5@v5, Y=0@v0}
+  re-check WFR -> OK -> APPLY Y   R2=R2{X=5@v5, Y=10@v7}
+  => Y is applied only once R2 has X@v5, i.e. AFTER the version your
+     read returned. The write correctly 'follows' the read.
+
+WFR SPEC : apply of write w with read_dep at r is ok  <=>  for all k:
+            r.version(k) >= w.read_dep[k]
+FIX      : replica buffers the write until, for every key in its
+           read_dep, the replica's version is >= the read's version.
+           Equivalent to a 1-hop causal dependency (read -> write).
+
+[check] WFR: R2 violates (X need 5 > have 3); after catch-up X=5 -> apply Y=(10,7):  OK
+GOLD (pinned for .html): WFR violation on R2 = (X,need=5,have=3); after catch-up Y=(10,7).
+
+==========================================================================
+  SECTION E: implementation - sticky sessions, version vectors, Dynamo/Cassandra
+==========================================================================
+Session guarantees are CLIENT-CENTRIC, so the bookkeeping lives in the
+SESSION TOKEN the client sends with every request. Three building
+blocks implement all four guarantees:
+
+  (1) STICKY SESSION  - a load-balancer route (cookie / token) that
+      sends every op of a session to the SAME replica. Because that
+      one replica sees your writes in order and never forgets them,
+      RYW and MR hold TRIVIALLY. Cost: lose the replica and you lose
+      stickiness (must fall back to version checks).
+
+  (2) CLIENT VERSION CACHE - the client remembers, per key, the
+      version of its last write (RYW) and the highest version it has
+      read (MR). It sends these on each read; the server blocks until
+      the chosen replica has caught up. This is the GENERAL fix and
+      works even without stickiness.
+
+  (3) SERVER-SIDE BUFFERING - for MW and WFR the replica buffers
+      out-of-order / context-lagging writes (Sections C, D). This is
+      exactly the dependency-check + pending-queue used for causal
+      consistency, scoped to ONE session. (See CAUSAL_CONSISTENCY.md.)
+
+How real systems expose these (verified against their docs/papers):
+
+| guarantee           | mechanism (session token)                                         | system / knob                                           |
+|---------------------|-------------------------------------------------------------------|--------------------------------------------------------|
+| Read-Your-Writes    | sticky session; OR client caches last-write version per key       | DynamoDB: session token + conditional write;
+    Riak: 'last_write_wins'=false + client vector clock |
+| Monotonic Reads     | client caches highest-read version per key; read blocks until met | Cassandra: read at QUORUM + read_repair;
+    DynamoDB: consistent read (R=QUORUM) per request |
+| Monotonic Writes    | replica buffers writes by per-session sequence number             | Cassandra LWT (Paxos, LOCAL_SERIAL) serializes a partition;
+    Bayou: ordered write-log per session |
+| Writes-Follow-Reads | write carries read-context version; replica buffers until present | DynamoDB ConditionExpression on a version attribute;
+    COPS 1-hop dependency tracking (cross-client generalization) |
+
+DynamoDB conditional writes implement RYW / WFR directly. Pattern:
+    # RYW: re-read only sees my write if the item's version attr >= mine
+    PutItem(... ConditionExpression='ver >= :myver', ...)
+    # WFR: my write applies only if the item still has the read-context
+    PutItem(... ConditionExpression='ver = :readver', ...)
+A failed ConditionExpression = the guarantee would be violated, so the
+write is rejected (the client retries - effectively a BLOCK).
+
+Cassandra consistency levels trade availability vs guarantee strength:
+| level            | what it does               | strength               | session guarantee            |
+|------------------|----------------------------|------------------------|--------------------------------|
+| ONE / LOCAL_ONE  | contact 1 replica          | weakest; stale reads likely | no session guarantee by default |
+| QUORUM           | contact majority (R + W > N) | R+W>N => strong per-op | RYW + MR if BOTH read & write at QUORUM |
+| LOCAL_SERIAL     | Paxos (Lightweight Transactions) | linearizable per key   | MW (serialized writes) for one partition |
+
+RULE OF THUMB: write at QUORUM and read at QUORUM => RYW + MR for the
+keys in the session (R+W > N guarantees the read quorum overlaps the
+write quorum). LWT (LOCAL_SERIAL) => MW on a partition. WFR needs the
+client to send the read-context version explicitly (a ConditionExpression).
+
+LADDER: where session guarantees sit among the models:
+  eventual  <  SESSION  <  causal  <  linearizable
+  (converge)   (per-client) (+cross-client) (+real-time/total order)
+Session guarantees are the SINGLE-CLIENT slice of causal consistency:
+they track program-order (RYW, MW) and read->write deps (WFR) but only
+for ONE client. Cross-client causality (COPS) is the generalization.
+
+[check] building blocks {sticky, version-cache, server-buffer} cover all 4 guarantees:  OK
+
+==========================================================================
+  GOLD CHECK: a session history - verify all four guarantees
+==========================================================================
+One client c5 against replicas A, B, C. The history below is the
+deterministic op stream; the session token carries the per-key
+last_write_version (RYW), highest_read_version (MR), write seq (MW),
+and last_read_version (WFR). We verify each guarantee in turn.
+
+(a) RYW   : c5 last_write_version[X]=1
+           read X@B -> need>=1, have=0 -> VIOLATION
+           read X@A -> need>=1, have=1 -> ok
+(b) MR    : c5 highest_read_version[X]=5 (after reading X@v5 from C)
+           read X@B -> need>=5, have=0 -> VIOLATION
+           read X@C -> need>=5, have=5 -> ok
+(c) MW    : writes W1(seq1), W2(seq2); arrival [W2, W1]
+           W2 first: applied_seq=0, got seq=2 -> VIOLATION (out of order)
+           W1 first: applied_seq=0, got seq=1 -> ok
+(d) WFR   : write Z@v8 read_dep={X:5} on replica Rd with X=3@v3
+           check -> VIOLATION ('X', 5, 3)
+
+With ALL guarantees ENFORCED (block/sticky/buffer on every op), every
+lagging read/write waits for anti-entropy, so the history has ZERO
+violations:
+
+  RYW (sticky A)         : ok
+  MR  (route to C, v5)   : ok
+  MW  (buffer by seq)    : applied_seq=2 (==2) -> ok
+  WFR (buffer until X=5) : ok
+
+Summary (violations appear when a guarantee is OFF; none when ON):
+  (a) RYW  off-read violates, sticky ok        : OK
+  (b) MR   off-read violates, route-to-C ok    : OK
+  (c) MW   out-of-order violates, buffered ok  : OK
+  (d) WFR  context-lag violates, buffered ok   : OK
+
+=> [check] GOLD: all 4 session guarantees verified; every violation is fixed by its enforcement mechanism: OK
+GOLD scalars (pinned for .html):
+  RYW violation (B)  = (need=1, have=0)
+  MR  violation (B)  = (need=5, have=3)
+  MW  violation      = (applied_seq=0, got seq=2)
+  WFR violation (Rd) = (X, need=5, have=3)
+  all enforced       = 0 violations
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

@@ -1,0 +1,207 @@
+cli_tooling.ts — Phase 8 bundle (web/).
+Every parsed option / dispatched subcommand / captured line below is
+produced by invoking a commander program IN-PROCESS with FIXED argv
+arrays (program.parse([...], { from: "user" })) + exitOverride().
+Nothing is hand-computed; no subprocess, no stdin, no Math.random.
+
+======================================================================
+SECTION A — process.argv + commander basics (name/version/option/action)
+======================================================================
+process.argv shape (representative; per Node docs):
+  argv[0] = process.execPath      (node binary)
+  argv[1] = entry script path     (your .js/.ts)
+  argv[2..] = user arguments       (--flags, values, subcmds)
+
+fixed representative argv (what a shell would pass):
+  argv[0] = "/usr/local/bin/node"
+  argv[1] = "/home/u/app/greet.js"
+  argv[2] = "--name"
+  argv[3] = "prod"
+  argv[4] = "--debug"
+[check] argv[0] is the node exec path (by spec): OK
+[check] argv[1] is the entry script path (by spec): OK
+[check] user args start at argv[2] (index 2): OK
+
+parsed by commander  (parse(["--name","prod","--debug"], { from: "user" }))
+    name      = prod
+    debug     = true
+    action ran = true
+[check] root action ran for the parsed argv: OK
+[check] --name <name> parsed the value 'prod': OK
+[check] -D/--debug boolean flag toggled to true: OK
+
+with no user args (defaults apply):
+    name  = world   (the declared default)
+    debug = undefined   (flag absent -> undefined)
+[check] default applies: --name defaults to 'world' when omitted: OK
+[check] boolean flag absent -> undefined (not false): OK
+[check] program.version() === "1.2.0" (registered version string): OK
+
+======================================================================
+SECTION B — subcommands (dispatch) + options/flags (bool, value, default, choices, variadic)
+======================================================================
+dispatch #1  argv: build main.ts --optimize --level O2 --mode prod
+    dispatched subcommand = build
+    positional <file>     = main.ts
+    --optimize (bool)     = true
+    --level (value)       = O2
+    --mode (choices)      = prod
+[check] "build" subcommand dispatched (argv[0] selected it): OK
+[check] positional <file> parsed to 'main.ts': OK
+[check] --optimize boolean flag is true: OK
+[check] --level value option parsed to 'O2': OK
+
+dispatch #2  argv: deploy --env staging --dry-run
+    dispatched subcommand = deploy
+    --env (required)      = staging
+    --dry-run (bool)      = true
+[check] "deploy" subcommand dispatched for a different argv: OK
+[check] --env required option parsed to 'staging': OK
+[check] --dry-run boolean flag is true: OK
+
+dispatch #3  argv: build a.ts   (options omitted -> defaults)
+    --optimize (absent)   = undefined   (undefined -> falsy)
+    --level default        = O1   (declared default)
+[check] --level default is 'O1' when not passed: OK
+[check] --optimize absent -> undefined (falsy): OK
+
+dispatch #4  argv: build a.ts --tag release --tag v1   (variadic)
+    --tag collected        = ["release","v1"]
+[check] variadic --tag collected ['release','v1'] into an array: OK
+[check] variadic tag array length is 2: OK
+
+dispatch #5  argv: build a.ts --mode staging   (invalid choice)
+    threw CommanderError   = true
+    error code             = commander.invalidArgument
+    stderr                 = error: option '--mode <mode>' argument 'staging' is invalid. Allowed choices are dev, prod.
+[check] choices() rejected '--mode staging' (not in [dev,prod]): OK
+[check] stderr mentions 'Allowed choices': OK
+
+dispatch #6  argv: deploy   (missing required --env)
+    threw CommanderError   = true
+    stderr                 = error: required option '-e, --env <env>' not specified
+[check] requiredOption '--env' missing -> error: OK
+[check] stderr mentions 'required option': OK
+
+======================================================================
+SECTION C — help (-h/--help) + version (-V) + error handling (exitOverride)
+======================================================================
+argv: --help   (auto-generated help, captured via configureOutput)
+--- help stdout ---
+Usage: deployer [options] [command]
+
+build & deploy
+
+Options:
+  -V, --version           output the version number
+  -h, --help              display help for command
+
+Commands:
+  build [options] <file>  build a project file
+  deploy [options]        deploy the current build
+  help [command]          display help for command
+--- end help ---
+[check] --help wrote to the stdout buffer: OK
+[check] help contains the program name "deployer": OK
+[check] help lists the "build" subcommand: OK
+[check] help lists the "deploy" subcommand: OK
+[check] help lists the -h, --help option: OK
+[check] --help threw via exitOverride (no process.exit): OK
+[check] help exit code is "commander.helpDisplayed": OK
+
+argv: help build   (subcommand-scoped help)
+    mentions --level <level> : true
+    mentions <file>          : true
+[check] subcommand help mentions "build": OK
+[check] subcommand help shows the <file> positional: OK
+
+argv: -V   (version)
+    version stdout = "1.2.0"
+[check] version output is "1.2.0": OK
+[check] version exit code is "commander.version": OK
+
+argv: bogus   (unknown command)
+    threw            = true
+    error code       = commander.unknownCommand
+    stderr           = error: unknown command 'bogus'
+[check] unknown command 'bogus' threw: OK
+[check] unknown command wrote to the stderr buffer: OK
+
+argv: build a.ts --nope   (unknown option)
+    threw            = true
+    error code       = commander.unknownOption
+    stderr           = error: unknown option '--nope'
+(Did you mean --mode?)
+[check] unknown option '--nope' threw: OK
+[check] unknown option exit code is "commander.unknownOption": OK
+[check] usage error (unknown option) suggests exit code 1: OK
+[check] --help suggests exit code 0: OK
+
+======================================================================
+SECTION D — package.json bin + shebang (publish) + prompts/spinners (documented)
+======================================================================
+A published CLI = a package.json `bin` mapping + a shebanged entry:
+  package.json:
+    name    = deployer
+    version = 1.2.0
+    type    = module
+    bin     = {"deployer":"./dist/cli.js"}
+  entry ./dist/cli.js starts with:
+    #!/usr/bin/env node
+  then: import { Command } from 'commander'; ... program.parse();
+
+  publish & install:
+    npm publish            # uploads the package
+    npm i -g deployer      # symlinks `deployer` onto PATH
+    deployer build a.ts    # runs anywhere
+[check] bin field maps the command name "deployer": OK
+[check] shebang is "#!/usr/bin/env node" (POSIX kernel dispatch to node): OK
+[check] only ONE bin key registered (command name == "deployer"): OK
+
+Interactive UX (DOCUMENTED — NOT executed here; they block stdin):
+  // @inquirer/prompts  (async; await inside an async action)
+    import { select, input, confirm } from "@inquirer/prompts";
+    const env = await select({
+      message: "Environment",
+      choices: [{ value: "dev" }, { value: "prod" }],
+    });
+    const tag = await input({ message: "Release tag" });
+    const ok  = await confirm({ message: "Deploy now?" });
+  // ora  (spinner for long-running work)
+    import ora from "ora";
+    const spin = ora("building...").start();
+    await build(); spin.succeed('built');
+[check] @inquirer select/input/confirm are async (return Promises, block stdin): OK
+[check] ora is a spinner for long-running sync/async work: OK
+[check] prompts/spinners documented, NOT awaited in this deterministic bundle: OK
+
+======================================================================
+SECTION E — alternatives (yargs / clipanion) + cross-language (Go cobra, Rust clap)
+======================================================================
+TS CLI framework landscape (each parses argv -> subcommand + options):
+  tool        | style              | used by            | signature
+  ------------|--------------------|--------------------|---------------------------
+  commander   | chainable builder  | npm, vite, ts-node | new Command().command("build").option(...).action(...)
+  yargs       | config-object driven | webpack, cypress   | yargs.options({ port: { type: "number" } }).parse()
+  clipanion   | typed, class-based | yarn (berry)       | class BuildCmd extends Command { async execute() {} }
+[check] 3 TS frameworks compared (commander, yargs, clipanion): OK
+[check] commander is chainable-builder style: OK
+[check] clipanion is typed class-based (used by yarn): OK
+
+Cross-language CLI parsing (the cross-language curriculum):
+  Go    : cobra (subcommands) + pflag (flags). The model commander
+          mirrors. cobra also generates shell completions.
+          🔗 ../go/CLI_COBRA.md
+  Rust  : clap — the strongest. #[derive(Parser)] generates the
+          entire CLI from struct fields, validated at COMPILE time.
+          🔗 ../rust (clap)
+  JS/TS : commander — runtime parsing, runtime dispatch. Types are
+          erased (tsx/esbuild), so validation is at RUNTIME, not
+          compile time (unlike clap's derive).
+[check] Go's cobra + pflag is the model commander mirrors: OK
+[check] Rust's clap validates the CLI at COMPILE time via derive (strongest): OK
+[check] commander validates at RUNTIME (TS types are erased): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

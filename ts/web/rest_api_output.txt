@@ -1,0 +1,155 @@
+rest_api.ts — Phase 8 bundle (Web, DB & Production).
+Every value below is produced by spinning up a Hono app on an
+EPHEMERAL port (0) via @hono/node-server, firing self-requests,
+asserting status / headers / body, then server.close(). Nothing is
+hand-computed; the ephemeral port + wall-clock are NEVER printed.
+
+Reminder: Hono is a web-standard (Request)=>Response framework.
+@hono/node-server only adapts it to node:http (🔗 NODE_HTTP_SERVER);
+the client side is the global fetch (🔗 FETCH_HTTP_CLIENT); typed
+body validation slots in as a middleware (🔗 ZOD_VALIDATION).
+
+======================================================================
+SECTION A — new Hono + routes + path params + c.json/text + serve(port 0)
+======================================================================
+GET / ->
+  status : 200
+  body   : {"hello":"world"}
+  ctype  : application/json
+[check] GET / -> 200: OK
+[check] GET / body === {"hello":"world"}: OK
+[check] content-type includes application/json (c.json sets it): OK
+
+GET /users/42  (path param :id) ->
+  status : 200
+  body   : {"id":"42"}
+[check] GET /users/:id echoes the path param: id === "42": OK
+
+GET /text ->
+  status : 200
+  body   : "plain body"
+  ctype  : text/plain; charset=UTF-8
+[check] GET /text -> 200: OK
+[check] c.text body === "plain body": OK
+[check] content-type is text/plain (c.text sets it): OK
+
+@hono/node-server's serve({fetch: app.fetch, port: 0}) bridges the
+web-standard app.fetch onto node:http — the SAME app.fetch that
+Cloudflare Workers / Bun / Deno invoke directly (no adapter).
+
+======================================================================
+SECTION B — c.req (query/header/body) + status (201) + grouping (route) + 404
+======================================================================
+GET /search?q=hono&n=7  (c.req.query) ->
+  status : 200
+  body   : {"q":"hono","n":7}
+[check] c.req.query("q") === "hono": OK
+[check] c.req.query("n") parsed to number -> 7: OK
+
+GET /header  (X-Custom: abc — header read is case-insensitive) ->
+  body   : {"custom":"abc"}
+[check] c.req.header("x-custom") read X-Custom (case-insensitive) === "abc": OK
+
+POST /items  (await c.req.json + c.json(data, 201)) ->
+  status : 201   (2nd arg of c.json is the status)
+  body   : {"created":true,"name":"widget"}
+[check] POST /items -> 201 (c.json(body, 201)): OK
+[check] POST body parsed via c.req.json: name === "widget": OK
+
+GET /api/version  (sub-app mounted via app.route) ->
+  status : 200
+  body   : {"version":"v1"}
+[check] app.route(/api, subApp) mounts the sub-app: status 200: OK
+[check] grouped route body version === "v1": OK
+
+GET /nope  (no route matches) ->
+  status : 404
+[check] unknown route -> 404 (default not-found): OK
+
+======================================================================
+SECTION C — middleware (use/next, onion order) + onError (500) + notFound
+======================================================================
+GET /chain  (two app.use middlewares + handler) ->
+  status      : 200
+  body        : "MW1>MW2>|handler"
+  x-mw1-exit  : ran   (set AFTER next() — outer layer exits last)
+  x-mw2-exit  : ran   (set AFTER next() — inner layer exits first)
+[check] before-next order MW1>MW2>|handler (onion: registration order): OK
+[check] middleware ran AFTER next (x-mw2-exit present): OK
+[check] middleware ran AFTER next (x-mw1-exit present, outermost exit): OK
+
+Middleware early-exit (returns a Response, skips next):
+  no token    -> 401   (guard returned 401; handler never ran)
+  with token  -> 200   (guard called next(); handler ran)
+[check] guard middleware short-circuits: missing token -> 401: OK
+[check] guard passes with token -> 200: OK
+
+GET /boom  (handler throws) -> app.onError:
+  status : 500
+  body   : {"error":"caught","message":"kaboom"}
+[check] thrown error -> 500 (app.onError): OK
+[check] onError shaped the body: error === "caught": OK
+[check] onError preserved the message: message === "kaboom": OK
+
+GET /missing-route -> app.notFound:
+  status : 404
+  body   : {"error":"not found"}
+[check] unknown route -> 404 (custom app.notFound): OK
+[check] notFound shaped the body: error === "not found": OK
+
+======================================================================
+SECTION D — web-standard app.fetch (Request)=>Response + validator-middleware slot
+======================================================================
+app.fetch(new Request(...)) — IN-PROCESS, NO server:
+  r1.status === 200
+  r1.body   === {"pong":true}
+[check] app.fetch works with no server at all: status 200: OK
+[check] app.fetch in-process body === {"pong":true}: OK
+  /double/21 -> {"doubled":42}
+[check] app.fetch path param works in-process: doubled === 42: OK
+
+Validator middleware (the @hono/zod-validator slot), in-process:
+  POST {name:"valid"}    -> 201 {"ok":true,"validated":true}
+[check] valid body passes the validator -> 201: OK
+[check] validator called next(): handler ran, validated === true: OK
+  POST {name:42}         -> 400 {"error":"name (non-empty string) required"}
+[check] wrong type (name is number) short-circuits -> 400: OK
+[check] validator 400 body has an error string: OK
+  POST {}                -> 400   (missing field)
+[check] missing required field short-circuits -> 400: OK
+  POST (malformed json)  -> 400   (c.req.json rejected -> caught)
+[check] malformed JSON short-circuits -> 400: OK
+
+======================================================================
+SECTION E — graceful shutdown (server.close) + cross-language
+======================================================================
+Server up, GET / ->
+  status : 200
+  body   : {"up":true}
+[check] server answered while up: 200: OK
+[check] body up === true: OK
+
+Graceful shutdown (server.close + closeAllConnections)...
+  stopHono(server) resolved -> didClose === true
+[check] server.close() resolved (graceful shutdown complete): OK
+  fetch after close -> connection refused === true   (network error, not an HTTP status)
+[check] after close(), new connections are refused (fetch rejects): OK
+
+Cross-language (the same REST/routing+middleware model elsewhere):
+  Go     net/http : a Handler(w, r) fn + a ServeMux (Go 1.22 method+
+                    path patterns) + func-chained middleware. A goroutine
+                    is spawned PER request. (🔗 ../go/MIDDLEWARE_ROUTING.md)
+  Rust   axum     : Router::new().route(...) + typed extractors
+                    (FromRequest/FromRequestParts) — the strongest-typed
+                    model; handlers take typed args. (🔗 ../rust axum basics)
+  Python FastAPI  : @app.get('/x') decorator routing + Depends() for the
+                    middleware/validator slot (pydantic validates the body).
+                    (🔗 ../python fastapi routing)
+  Node   Hono     : a Router + a composable middleware chain on top of
+                    node:http; app.fetch is web-standard (Request)=>Response,
+                    portable to Workers/Bun/Deno unchanged.
+[check] cross-language REST model summarized: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

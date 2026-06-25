@@ -1,0 +1,161 @@
+auth_sessions.ts — Phase 8 bundle (member: db; jose + node:crypto).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Determinism: FIXED salt (scrypt) + FIXED secret + PINNED iat/exp (JWT)
+=> output is byte-identical across `just out auth_sessions` runs.
+(Real code uses randomBytes(16) salt per user + rotating secrets.)
+
+======================================================================
+SECTION A — Password hashing: scrypt + FIXED salt + timingSafeEqual
+======================================================================
+scrypt('hunter2', FIXED_SALT, 64) ->
+  stored length : 80 bytes  (16 salt + 64 hash)
+  salt (hex)    : 0123456789abcdef0123456789abcdef
+  hash (hex)    : e9374ba623f86ce9282d8973e008d359cb75adb23526506ba3083306fb93c2e2337064868158822c122943224b937bbe184d07cfa89f87726b168feb893d257e
+[check] scrypt is deterministic: same pw+salt -> same 80-byte stored hash: OK
+
+scrypt('hunter3', same salt) -> different hash
+  hash (hex)    : 37ebfd201ed71478d6c3fb7ac1368aa61ff661161d769832ce9abaa9f6d4a1fc0491ce6f9f989cea67e5fce7a88119da24a566c99562073c9a24f492d319451d
+[check] different password -> different hash: OK
+
+verifyPassword results:
+  verify('hunter2')        -> true
+  verify('wrong-password') -> false
+[check] correct password verifies: OK
+[check] wrong password fails (no match): OK
+[check] timingSafeEqual is used (constant-time, equal-length only): OK
+[check] real salt via randomBytes(16) is 16 bytes: OK
+  (real code: randomBytes(16) salt per user; demo uses FIXED salt for determinism)
+
+======================================================================
+SECTION B — JWT sign & verify: claims, 3-part structure, decode
+======================================================================
+signed JWT (HS256, iss=tutorials-app, sub=user-1, role=admin):
+  eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJpc3MiOiJ0dXRvcmlhbHMtYXBwIiwic3ViIjoidXNlci0xIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.6Ga9tdEIAtW6adahKIawFf6_iMll8Orn43IbULoP-4c
+
+structure: header.payload.signature  (3 base64url parts, 2 dots)
+  parts.length === 3
+[check] JWT has exactly 3 dot-separated parts: OK
+
+decoded header (decodeProtectedHeader, NO signature check):
+  alg = HS256
+
+decoded payload (decodeJwt, NO signature check):
+  iss = tutorials-app
+  sub = user-1
+  role = admin
+  iat = 1700000000   (pinned -> deterministic token)
+  exp = 9999999999
+[check] decoded header alg === "HS256": OK
+[check] decoded claim iss === "tutorials-app": OK
+[check] decoded claim sub === "user-1": OK
+[check] decoded custom claim role === "admin": OK
+[check] decoded claim iat === FIXED_IAT (pinned): OK
+[check] decoded claim exp === FIXED_EXP_VALID (pinned): OK
+
+jwtVerify(token, SECRET, {issuer}) -> TRUSTED payload:
+  sub = user-1
+  role = admin
+[check] verified token sub === user-1: OK
+[check] verified token role === admin: OK
+[check] JWT is deterministic: pinned secret+claims+iat -> same string: OK
+
+======================================================================
+SECTION C — JWT failure modes + the stateless tradeoff
+======================================================================
+FAILURE 1 — tampered signature:
+  tampered token : eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJpc3MiOiJ0dXRvcmlhbHMtYXBwIiwic3ViIjoidXNlci0xIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.6Ga9tdEIAtW6adahKIawFf6_iMll8Orn43IbULoAAAA
+  -> threw JWSSignatureVerificationFailed (code: ERR_JWS_SIGNATURE_VERIFICATION_FAILED)
+[check] tampered token throws JWSSignatureVerificationFailed: OK
+[check] tampered token -> HTTP 401 (signature invalid): OK
+
+FAILURE 2 — expired token (exp pinned to the past):
+  expired token  : eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJpc3MiOiJ0dXRvcmlhbHMtYXBwIiwic3ViIjoidXNlci0xIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDAwMDF9.YQWDP7-Rw4Oj6vJtdk-mAcPKhwKkHGrkz-KDeA3BwVs
+  -> threw JWTExpired (code: ERR_JWT_EXPIRED)
+[check] expired token throws JWTExpired: OK
+[check] expired token -> HTTP 401 (trigger refresh flow): OK
+
+FAILURE 3 — wrong issuer (signature valid, claim mismatch):
+  token (iss=some-other-app) : eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJpc3MiOiJzb21lLW90aGVyLWFwcCIsInN1YiI6InVzZXItMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo5OTk5OTk5OTk5fQ.skbbxAatP5OoqcPLwqRfEO3N8FvcCVl1r5CCPXF3lM0
+  -> threw JWTClaimValidationFailed (code: ERR_JWT_CLAIM_VALIDATION_FAILED)
+[check] wrong-issuer token throws JWTClaimValidationFailed: OK
+[check] wrong-issuer token -> HTTP 401: OK
+
+STATELESS TRADEOFF:
+  verify(token) needs ONLY the HMAC secret — no DB/store lookup.
+  => fast, scales horizontally. BUT: cannot revoke a minted token
+     before its exp without a server-side denylist (blocklist).
+
+REFRESH-TOKEN FLOW (access + refresh):
+  access token  : eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJ0eXAiOiJhY2Nlc3MiLCJpc3MiOiJ0dXRvcmlhbHMtYXBwIiwic3ViIjoidXNlci0xIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.xQ8tZx7xbDflXzU6rsSXK_yoNAeaLRqEd4XnJL2HBLo
+  refresh token : eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYWRtaW4iLCJ0eXAiOiJyZWZyZXNoIiwiaXNzIjoidHV0b3JpYWxzLWFwcCIsInN1YiI6InVzZXItMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo5OTk5OTk5OTk5OX0.qnlou4BYGWjVH_CL9NpSqWN4yehHkZCF-VaCgCI8yM8
+  access.typ=access  refresh.typ=refresh
+[check] access token has typ=access: OK
+[check] refresh token has typ=refresh (longer-lived): OK
+[check] refresh token exp >= access token exp: OK
+[check] jose error subclasses extend JOSEError (typed, .code present): OK
+
+======================================================================
+SECTION D — Stateful sessions: opaque cookie ID -> server store + cookie flags
+======================================================================
+STATEFUL session store (Map: opaqueId -> Session):
+  set('sess_4f8a7c2b9e1d6053a0cb2def78193456', {userId, role, createdAt})
+  get('sess_4f8a7c2b9e1d6053a0cb2def78193456') -> userId=user-1, role=admin
+[check] session set -> get returns the stored userId: OK
+[check] session set -> get returns the stored role: OK
+[check] stateful session is revocable: delete -> get returns undefined: OK
+
+production session id via randomBytes(32).toString('hex'):
+  id length = 69  (prefix 'sess_' + 64 hex chars)
+[check] production session id is 'sess_' + 64 hex chars: OK
+[check] production session id is hex after prefix: OK
+
+Set-Cookie header (hardened):
+  session=sess_4f8a7c2b9e1d6053a0cb2def78193456; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Strict
+[check] Set-Cookie has HttpOnly (blocks XSS document.cookie theft): OK
+[check] Set-Cookie has Secure (HTTPS only): OK
+[check] Set-Cookie has SameSite=Strict (blocks CSRF): OK
+[check] Set-Cookie has Path=/: OK
+[check] Set-Cookie carries the opaque session value: OK
+
+======================================================================
+SECTION E — OAuth2/OIDC (documented) + cross-language + 3 failure modes
+======================================================================
+OAuth2/OIDC Authorization Code flow (documented — not executed):
+  1. client -> redirect to provider /authorize?client_id=...&redirect_uri=...
+  2. user authenticates AT the provider (you never see the password)
+  3. provider redirects to your /callback?code=XYZ
+  4. server POSTs code+client_secret to provider /token -> access+id tokens
+  5. server verifies provider-signed ID token (JWT, RS256, via JWKS)
+  6. server mints its OWN session/JWT from the verified identity
+  KEY DIFF: provider signs with an ASYMMETRIC key (RS256/ES256); you
+  verify with the public key. This bundle uses SYMMETRIC HS256.
+[check] OAuth2 model documented (provider authenticates, not your server): OK
+
+The 3 auth failure modes (all -> HTTP 401):
+  1. wrong password  -> scrypt compare fails            (Section A)
+  2. tampered token  -> HMAC signature verify fails     (Section C F1)
+  3. expired token   -> exp in the past -> refresh flow (Section C F2)
+[check] the 3 auth failure modes are documented (all 401): OK
+
+CROSS-LANGUAGE (same models, different libraries):
+  Go     : golang-jwt/jwt/v5 + golang.org/x/crypto/bcrypt
+  Python : FastAPI OAuth2PasswordBearer + passlib[bcrypt]
+  Node   : jose + node:crypto scrypt  (THIS bundle)
+  bcrypt vs scrypt: both slow + salted; scrypt is MEMORY-HARD.
+  argon2 (PHC winner) is the current pick but needs a native dep in Node.
+[check] cross-language parallels documented (Go/Python/Node): OK
+
+PRIMITIVE -> JOB map (the whole bundle in one table):
+  scrypt (slow+salted hash)   : store passwords safely (never plaintext)
+  timingSafeEqual             : constant-time hash compare (no timing leak)
+  jose SignJWT / jwtVerify    : stateless signed assertions (no DB lookup)
+  opaque cookie ID + store    : stateful revocable sessions (DB lookup)
+  HttpOnly/Secure/SameSite    : harden the cookie (XSS/sniff/CSRF)
+  OAuth2/OIDC code flow       : delegate auth to a provider (no pw stored)
+[check] primitive->job map documented: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,171 @@
+deployment.ts — Phase 8 bundle (web/).
+This bundle CANNOT build/deploy (no network, no subprocess, no Docker).
+Instead it is DETERMINISTIC: it READS static config files (the repo's
+package.json via node:fs) and asserts the STRUCTURE of hand-written
+deployment artifacts (a multi-stage Dockerfile, an edge Worker).
+No Math.random, no Date.now, no subprocess, no network.
+
+Reminder: DEV runs `tsx` (type-erase, no bundle); PROD bundles to dist/
+(esbuild/tsup), sets NODE_ENV=production, and runs `node dist/server.js`.
+
+======================================================================
+SECTION A — Dev (tsx erase) vs Prod (bundle to dist/) + NODE_ENV
+======================================================================
+repo root package.json (READ via node:fs, cwd-independent):
+  name             = "tutorials-ts"
+  packageManager   = "pnpm@10.13.1"
+  engines.node     = ">=20.0.0"
+  engines.pnpm     = ">=10.0.0"
+  parsed Node major = 20
+[check] repo pins engines.node (present): OK
+[check] repo requires Node >= 20 (LTS): OK
+[check] repo packageManager starts with "pnpm": OK
+  devDependencies  = ["@types/node","tsx","typescript"]
+[check] devDependencies includes tsx (the dev runner): OK
+[check] devDependencies includes typescript (the type-check vet): OK
+[check] devDependencies includes @types/node (Node stdlib types): OK
+
+sample deployable package.json (the dev/prod script split):
+  scripts.dev   = "tsx watch src/server.ts"
+  scripts.build = "tsup src/server.ts --format esm --dts"
+  scripts.start = "node dist/server.js"
+[check] dev script runs tsx (esbuild type-erase, NO bundle): OK
+[check] build script runs a bundler (tsup) that emits dist/: OK
+[check] start script runs node on dist/ (not tsx, not src/): OK
+[check] start script does NOT invoke tsx (prod runs the bundle): OK
+
+NODE_ENV detection (isProduction over FIXED env maps):
+  isProduction({})                       = false
+  isProduction({NODE_ENV:"development"}) = false
+  isProduction({NODE_ENV:"production"})  = true
+[check] isProduction({}) is false (default): OK
+[check] isProduction({NODE_ENV:"development"}) is false: OK
+[check] isProduction({NODE_ENV:"production"}) is true: OK
+
+======================================================================
+SECTION B — Docker multi-stage (build -> distroless) + image hierarchy
+======================================================================
+multi-stage Dockerfile FROM directives (the stages):
+    FROM node:20-bookworm-slim AS build
+    FROM gcr.io/distroless/nodejs22-debian12
+[check] Dockerfile has exactly 2 FROM stages (multi-stage build): OK
+[check] build stage base is "node" (full toolchain for tsx/tsup): OK
+[check] build stage is named "AS build": OK
+[check] run stage base is distroless (no shell, smallest surface): OK
+
+  build RUN lines: ["RUN npm ci --omit=dev && npm run build   # install prod deps + bundle -> dist/"]
+[check] build stage installs prod deps only (npm ci --omit=dev): OK
+[check] build stage bundles to dist/ (npm run build): OK
+  COPY --from=build lines: ["COPY --from=build /app/node_modules ./node_modules","COPY --from=build /app/dist ./dist"]
+[check] run stage copies dist/ from the build stage: OK
+[check] run stage copies node_modules from the build stage: OK
+[check] run stage sets ENV NODE_ENV=production: OK
+[check] run stage runs as a non-root USER: OK
+[check] Dockerfile declares an EXPOSE port: OK
+
+  image-size hierarchy (documented, smallest first):
+    Go       : scratch        + ONE static binary (CGO=0)         ~ 10-20 MB
+    Rust     : scratch/distroless + ONE musl static binary       ~ 10-30 MB
+    Node     : distroless     + node runtime + node_modules      ~ 100-200 MB
+    Node     : node:slim      (full distro, has a shell)         ~ 200-400 MB
+    Node     : node:bookworm  (full Debian + build toolchain)    ~ 1 GB
+[check] documented: Go/Rust ship a SINGLE static binary (smallest): OK
+[check] documented: Node must carry the runtime + node_modules (largest): OK
+[check] documented: distroless has NO shell (smaller attack surface than slim): OK
+
+======================================================================
+SECTION C — 12-factor config + health checks + graceful SIGTERM + stdout
+======================================================================
+12-factor config (loadConfig over FIXED env maps):
+  defaults  : {"port":3000,"databaseUrl":"postgres://localhost:5432/app","logLevel":"info"}
+  overrides : {"port":8080,"databaseUrl":"postgres://prod:5432/app","logLevel":"debug"}
+[check] default port === 3000 (when PORT unset): OK
+[check] default databaseUrl is a localhost placeholder: OK
+[check] default logLevel === "info": OK
+[check] override PORT=8080 is honored: OK
+[check] override DATABASE_URL is honored (NEVER baked in the image): OK
+[check] override LOG_LEVEL=debug is honored: OK
+[check] secrets come from env, never from the bundled dist/ image: OK
+
+  health checks (documented; the orchestrator probe model):
+    /healthz (liveness) -> 200 once the process is up; 503 => restart me
+    /readyz  (readiness)-> 200 once deps (DB) are warm;  503 => stop sending traffic
+[check] documented: liveness probes restart, readiness probes shed traffic: OK
+
+  graceful SIGTERM shutdown (documented; full dance in NODE_HTTP_SERVER):
+    1. process.on('SIGTERM') -> server.close() (stop NEW conns)
+    2. server.closeAllConnections() -> drain in-flight (Node >=18.2)
+    3. await drain -> process.exit(0) within the grace period
+[check] documented: SIGTERM -> server.close() -> drain -> exit 0: OK
+
+  logging (documented; the container sink model):
+    app -> pino -> STDOUT -> container runtime -> collector -> backend
+    (logging to a file is LOST on container restart)
+[check] documented: production logs go to stdout (containers capture it): OK
+
+======================================================================
+SECTION D — Serverless (cold-start) + edge (V8 isolate, web-standard fetch)
+======================================================================
+  serverless functions (documented; Lambda/Vercel Node):
+    - package a handler; the platform invokes it on demand
+    - cold-start dominates: bundle SMALL (one dist/ file)
+    - lazy-load heavy deps (don't pay their init cost until used)
+    - instances are EPHEMERAL: no in-memory state across requests
+[check] documented: serverless cold-start favors a small bundled artifact: OK
+
+  edge Worker snippet (hand-written; STRUCTURE asserted, NOT run):
+    export default {
+    async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/") {
+    return new Response("hello from the edge", {
+    headers: { "content-type": "text/plain" },
+    });
+    }
+    return new Response("not found", { status: 404 });
+    },
+    };
+[check] Worker exports a default handler (export default): OK
+[check] Worker registers a fetch handler (fetch(request, env, ctx)): OK
+[check] Worker reads the standard Request (new URL(request.url)): OK
+[check] Worker returns a standard Response (new Response): OK
+[check] Worker sets a status via the Response init ({ status: 404 }): OK
+[check] Worker reads request.method (the HTTP verb): OK
+[check] Worker does NOT use node:fs (no Node file API on edge): OK
+[check] Worker does NOT use child_process (no process spawn on edge): OK
+[check] Worker does NOT use require() (ESM only on the isolate): OK
+[check] Worker does NOT use process.env directly (uses the `env` binding arg): OK
+
+  deployment model contrast:
+    long-lived container : one process, your scaling, SIGTERM shutdown
+    serverless function  : handler invoked on demand; pays cold-start
+    edge Worker          : V8 isolate, global, ~ms cold-start, web APIs only
+[check] documented: edge runs a V8 isolate (sub-ms cold-start vs container): OK
+[check] documented: edge exposes web-standard APIs (Request/Response/fetch): OK
+
+======================================================================
+SECTION E — Cross-language image/deploy model (Go/Rust vs Node)
+======================================================================
+  cross-language deploy model (the headline contrast):
+    Go   : CGO_ENABLED=0 -> ONE static binary -> FROM scratch
+           (no runtime in the image; ~10-20 MB; THE smallest, simplest)
+    Rust : target x86_64-unknown-linux-musl -> ONE static binary -> scratch
+           (same single-binary advantage as Go; ~10-30 MB)
+    Node : must ship V8 + libuv + node_modules in the image
+           (distroless helps, but cannot reach scratch; ~100-200 MB)
+
+  TS's compensating EDGE advantage (the place Node/TS wins):
+    - the SAME TS fetch(Request)=>Response code runs on a V8 isolate
+      globally (Cloudflare Workers/Vercel Edge) with ~ms cold-start;
+    - Go/Rust edge runtimes exist but TS/JS is the native edge citizen
+      (the V8 isolate IS the JS engine; no compile step to ship).
+[check] documented: Go compiles to a single static binary (CGO=0): OK
+[check] documented: Rust compiles to a single static binary (musl target): OK
+[check] documented: both Go and Rust run FROM scratch (no runtime in image): OK
+[check] documented: Node cannot reach scratch (must carry V8 + libuv + deps): OK
+[check] documented: Go/Rust images are ~1 order of magnitude smaller than Node: OK
+[check] documented: TS's edge advantage is zero-compile, web-standard, global V8: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

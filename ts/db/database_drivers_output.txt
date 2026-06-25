@@ -1,0 +1,86 @@
+database_drivers.ts — Phase 8 bundle (db/ member).
+Every value below is computed against a FRESH in-memory SQLite database;
+the .md guide pastes it verbatim. Nothing is hand-computed.
+
+Two layers: the raw DRIVER (better-sqlite3, sync, native) and the ORM
+(drizzle-orm, schema-first, type-safe). Same connection; fresh :memory:.
+
+======================================================================
+SECTION A — better-sqlite3 raw: :memory:, exec, prepare/run/all/get
+======================================================================
+insert.run('a')  -> changes=1 lastInsertRowid=1
+[check] insert.run() reports exactly 1 change: OK
+select.get('a') -> {"id":1,"name":"a"}
+select.all('a') -> [{"id":1,"name":"a"}]
+[check] round-trip: inserted 'a' is selectable by name: OK
+[check] .get() row id is 1 (first insert): OK
+[check] .all() returns the single matching row: OK
+[check] INTEGER column maps to JS number: OK
+[check] TEXT column maps to JS string: OK
+
+======================================================================
+SECTION B — parameterized queries (injection payoff) + transactions
+======================================================================
+DANGEROUS interpolated SQL: SELECT id, name FROM users WHERE name = 'x' OR '1'='1'
+  -> returned 1 row(s)  (injection SUCCEEDED: OR '1'='1' is always true)
+[check] interpolated query leaks rows (injection succeeded): OK
+SAFE parameterized .get('x' OR '1'='1') -> undefined
+[check] parameterized query returns no row for the payload (injection PREVENTED): OK
+transaction (commit) returned 42; row present? true
+[check] transaction returns the wrapped function's value: OK
+[check] transaction COMMITTED on normal return (row present): OK
+transaction (throw) re-threw? true; rolled-back row present? false
+[check] throwing transaction re-throws the error (propagates): OK
+[check] throwing transaction ROLLED BACK (row absent): OK
+
+======================================================================
+SECTION C — drizzle-orm: schema + type-safe CRUD (inferred row types)
+======================================================================
+drizzle insert: 2 accounts (ann, bob)
+drizzle select().from(accounts) -> [{"id":1,"email":"ann@example.com"},{"id":2,"email":"bob@example.com"}]
+[check] drizzle select returns 2 typed rows: OK
+drizzle select.where(eq(email,'ann@example.com')) -> [{"id":1,"email":"ann@example.com"}]
+[check] drizzle where(eq) finds ann by email: OK
+drizzle update.set(email).where(id=1).returning() -> [{"id":1,"email":"ann2@example.com"}]
+[check] drizzle update.returning() yields the updated row: OK
+drizzle delete.where(id=2).returning() -> [{"id":2,"email":"bob@example.com"}]
+[check] drizzle delete.returning() yields the deleted row: OK
+drizzle select (after delete) -> [{"id":1,"email":"ann2@example.com"}]
+[check] exactly one account remains after delete: OK
+[check] remaining account is the updated ann2: OK
+
+======================================================================
+SECTION D — relations (db.query) + the N+1 problem (and the JOIN fix)
+======================================================================
+seeded: authors {Ann(1), Bob(2)}; posts {P1,P2 -> Ann; P3 -> Bob}
+relational findMany({with:{posts:true}}) -> [{"id":1,"name":"Ann","posts":[{"id":10,"title":"P1"},{"id":11,"title":"P2"}]},{"id":2,"name":"Bob","posts":[{"id":12,"title":"P3"}]}]
+[check] relational query returns 2 authors: OK
+[check] Ann has 2 posts via relational API: OK
+[check] Bob has 1 post via relational API: OK
+N+1 (BAD): 3 queries for 2 authors (1 + N)
+[check] N+1 fires 1+N queries (1 parents + 2 children): OK
+JOIN (GOOD): 1 query -> [{"authorName":"Ann","title":"P1"},{"authorName":"Ann","title":"P2"},{"authorName":"Bob","title":"P3"}]
+[check] single JOIN is 1 query (fixes N+1): OK
+[check] JOIN returns 3 author/post pairs: OK
+
+======================================================================
+SECTION E — migrations (drizzle-kit) + raw vs drizzle vs Prisma + cross-language
+======================================================================
+drizzle-kit generate  -> emits versioned SQL migrations from the TS schema
+drizzle-kit migrate   -> applies pending migrations (idempotent)
+
+  layer                 | pros                                   | cons
+  ----------------------|----------------------------------------|----------------------------------------
+  raw better-sqlite3    | full control, max perf, zero deps-overhead | no type safety; hand-written SQL
+  drizzle-orm           | type-safe, SQL-like, lightweight (no engine) | schema + builder to learn
+  Prisma                | heavy ORM, migrations + codegen, great DX | runtime query engine; heaviest abstraction
+[check] three DB-access layers compared: OK
+
+  SQLite is embedded -> db.memory = true (no connection pool needed)
+[check] SQLite is embedded/in-memory (no pool): OK
+  cross-language: Go sqlx(light)/gorm(heavy); Rust sqlx(compile-time-checked)
+[check] database closed before exit: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

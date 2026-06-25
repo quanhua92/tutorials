@@ -1,0 +1,105 @@
+websockets_sse.ts — Phase 7 bundle (web/).
+Two realtime server->client mechanisms, run on self-contained port-0 servers:
+WebSockets (full-duplex, binary-safe, RFC 6455 via `ws`) vs Server-Sent Events
+(one-way, long-lived text/event-stream over node:http). Every value below is
+computed by this file; the .md guide pastes it verbatim. Nothing is hand-computed.
+
+Determinism: a fixed message set is exchanged, collected, and SORTED before any
+value is printed or asserted; client+server are closed before each section returns.
+
+======================================================================
+SECTION A — WebSocket: connect, text round-trip, server push (bidirectional)
+======================================================================
+[check] WS server bound to an ephemeral port (> 0): OK
+  WS server listening on ws://127.0.0.1 (ephemeral port 0)
+  WebSocket readyState constants (ws API / RFC 6455):
+    CONNECTING = 0
+    OPEN       = 1
+    CLOSING    = 2
+    CLOSED     = 3
+[check] readyState CONNECTING === 0: OK
+[check] readyState OPEN === 1: OK
+[check] client readyState === OPEN (1) after handshake: OK
+  client received text messages (sorted): ["ping","welcome"]
+[check] WS text round-trip set === ["ping","welcome"]: OK
+[check] WS is bidirectional: server pushed "welcome" with no prior client message: OK
+[check] WS echo: client sent "ping" and received it back: OK
+[check] section A teardown: client + server closed: OK
+
+======================================================================
+SECTION B — WebSocket: binary round-trip + close codes
+======================================================================
+  WS server listening on ws://127.0.0.1 (ephemeral port 0)
+  sent binary   : [1, 2, 3, 254, 255]
+  echoed binary : [1, 2, 3, 254, 255]
+[check] WS binary round-trip: bytes identical (Buffer.compare === 0): OK
+[check] WS is binary-safe: 0xFE/0xFF survived (not UTF-8 boundaries): OK
+  Common WebSocket close codes (RFC 6455 §7.4):
+    1000 Normal Closure
+    1001 Going Away (endpoint leaving)
+    1006 Abnormal Closure (NO close frame received — e.g. dropped link)
+    1011 Internal Error (server)
+    4000-4999 Reserved for application-defined codes
+  client close code observed: 1000
+  server close code observed: 1000
+[check] client clean close code === 1000 (Normal Closure): OK
+[check] server observed the same close code === 1000: OK
+[check] section B teardown: server closed: OK
+
+======================================================================
+SECTION C — Server-Sent Events: text/event-stream endpoint + frame parsing
+======================================================================
+  SSE server listening on http://127.0.0.1 (ephemeral port 0)
+[check] SSE Content-Type === text/event-stream: OK
+[check] SSE Connection === keep-alive: OK
+[check] SSE server never called res.end (long-lived stream): OK
+  client collected SSE events (sorted by data):
+    data="hello" id=null event=null
+    data="line1\nline2" id=null event=null
+    data="with-id" id="42" event="tick"
+[check] SSE collected exactly 3 data frames: OK
+[check] SSE frame "hello" present: OK
+[check] SSE multi-line data joined with "\n" (line1\nline2): OK
+[check] SSE id:42 frame: data "with-id", named event "tick": OK
+
+======================================================================
+SECTION D — WebSocket vs SSE: the decision
+======================================================================
+  criterion          | WebSocket              | Server-Sent Events
+  -------------------+------------------------+---------------------------
+  direction          | full-duplex (both)     | one-way (server -> client)
+  transport          | ws:// (HTTP Upgrade)   | http:// (text/event-stream)
+  data types         | text + binary          | text only (UTF-8)
+  auto-reconnect     | NO (you implement)     | YES (EventSource built-in)
+  resume after drop  | you replay state       | Last-Event-ID header
+  backpressure       | ws.bufferedAmount      | TCP via the HTTP stream
+  framing            | RFC 6455 frames        | blank-line (\n\n) blocks
+  best for           | chat, games, collab    | feeds, notifications, ticks
+[check] WS is bidirectional (derived from Section A: client<->server): OK
+[check] SSE is one-way (derived from Section C: client sends no app data): OK
+[check] SSE Content-Type was text/event-stream (derived from Section C): OK
+[check] SSE parser extracts id field ("7"): OK
+[check] SSE parser extracts named event ("update"): OK
+[check] SSE parser surfaces only data ("payload"); retry is an EventSource hint, not data: OK
+
+======================================================================
+SECTION E — Backpressure, use cases, and cross-language parallels
+======================================================================
+  ws client.bufferedAmount after a round-trip: 0
+[check] ws WebSocket.bufferedAmount is a non-negative number (backpressure signal): OK
+[check] SSE res.write() returns a boolean (Node stream backpressure contract): OK
+[check] SSE response stays open (writableEnded === false) — long-lived: OK
+
+  Use WebSocket  : bidirectional + low-latency (chat, games, collab, binary).
+  Use SSE        : one-way push + auto-reconnect (feeds, notifications, tickers).
+  WS reconnect   : you implement it (close -> wait -> new WebSocket).
+  SSE reconnect  : automatic; browser resends Last-Event-ID to resume.
+
+  Cross-language:
+    Go   : nhooyr.io/websocket (or golang.org/x/net/websocket) -> ../go/STREAMING_WEBSOCKETS.md
+    Rust : axum::extract::ws::WebSocket (typed, over tungstenite) -> ../rust/
+[check] section E: WS + SSE backpressure signals observed at runtime: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

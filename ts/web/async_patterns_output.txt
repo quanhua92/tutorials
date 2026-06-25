@@ -1,0 +1,103 @@
+async_patterns.ts — Phase 7 bundle (async runtime patterns).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. All output is deterministic: step-counts not ms,
+parallel results sorted, all async settled + listeners removed
+before exit (process exits 0).
+
+======================================================================
+SECTION A — AsyncLocalStorage: request-scoped context across awaits
+======================================================================
+AsyncLocalStorage — the store propagates across awaits, isolates outside run():
+  in run():       reqId=r-1
+  after await #1: reqId=r-1
+  after await #2: reqId=r-1
+  after run ret'd: reqId=undefined
+[check] ALS store is visible INSIDE run() (reqId === r-1): OK
+[check] ...and SURVIVES the first await (still r-1): OK
+[check] ...and SURVIVES the second await (still r-1): OK
+[check] ...and is undefined OUTSIDE run() (context exited): OK
+
+The LOST-CONTEXT problem — a plain GLOBAL is clobbered under concurrency:
+  request A saw globalReqId=B
+  request B saw globalReqId=B
+[check] GLOBAL context is UNSAFE: request A saw request B's id (clobbered at the await): OK
+
+AsyncLocalStorage FIX — each request sees its OWN id (no clobbering):
+  request A saw ALS store=A
+  request B saw ALS store=B
+[check] ALS is SAFE: request A saw its OWN id (A): OK
+[check] ...and request B saw its OWN id (B): OK
+
+======================================================================
+SECTION B — Bounded queue with BACKPRESSURE + async iterables as streams
+======================================================================
+for-await over an async generator (async function*):
+  for await (v of numberStream(4)) -> [10,20,30,40]
+[check] async generator yields values via for-await ([10,20,30,40]): OK
+
+duck-typed async iterable ([Symbol.asyncIterator]() -> .next()):
+  for await (v of rangeAsync(5,7)) -> [5,6,7]
+[check] custom async iterable yields [5,6,7]: OK
+
+Bounded queue (capacity 2) — producer SUSPENDS when the buffer is full:
+  push('a'), push('b') buffer it; push('c') on a FULL queue -> promise PENDING (backpressure)
+[check] push() on a FULL bounded queue is BLOCKED (promise still pending): OK
+[check] ...buffer held at capacity 2 while the producer waits: OK
+[check] next() returns the head FIFO ('a'): OK
+[check] ...freeing a slot RESOLVES the blocked producer: OK
+[check] consumer receives items IN ORDER [a,b,c]: OK
+  consumed in order -> [a,b,c]
+
+======================================================================
+SECTION C — EventEmitter fan-out (recap) + bounded worker pool draining a queue
+======================================================================
+EventEmitter fan-out — one emit, all listeners fire SYNCHRONOUSLY:
+  on('evt',L1); on('evt',L2); on('evt',L3); emit('evt') -> [L1,L2,L3]
+[check] EventEmitter fan-out: 3 listeners fire on one emit: OK
+[check] ...listeners fire in REGISTRATION order (L1,L2,L3): OK
+[check] emit() is synchronous — hits filled BEFORE the next line: OK
+[check] once() fires exactly once across two emits: OK
+[check] once() auto-removes its listener (listenerCount === 0 after firing): OK
+[check] removeAllListeners() clears every event (listenerCount('evt') === 0): OK
+
+Bounded worker pool (limit 2) draining a 6-item queue:
+  consumed (sorted) -> [a,b,c,d,e,f]
+  max in-flight     -> 2
+[check] pool drained all 6 items: OK
+[check] pool respected the concurrency limit (max in-flight === 2): OK
+[check] ...and consumed every item exactly once (no drops, no dups): OK
+
+======================================================================
+SECTION D — Debounce/throttle (coalesce/rate-limit) + async mutex
+======================================================================
+[check] debounce: a burst fires NOTHING before the quiet window elapses: OK
+[check] debounce: after the quiet window, exactly ONE call fires (coalesced): OK
+[check] ...and it fires with the LAST argument (3): OK
+Debounce (wait 100) — a burst of 3 coalesces into 1 trailing call:
+  d(1);d(2);d(3); advance(99) -> 0 call(s); advance(1) -> fired with 3 (total 1)
+[check] throttle: leading edge fired immediately (1 call so far, arg 1): OK
+[check] throttle: after the window, a trailing call fires (total 2): OK
+[check] ...trailing fires with the LAST argument of the burst (4): OK
+
+Throttle (window 100) — leading + trailing: a burst of 4 -> 2 calls:
+  t(1)@0 [leading]; t(2)@10; t(3)@20; t(4)@30; advance(100) -> fired [1,4]
+
+Async mutex — two async sections run NON-overlapping (serialized):
+  trace -> [A-enter,A-exit,B-enter,B-exit]
+[check] mutex serializes: A finishes before B starts (no overlap): OK
+
+======================================================================
+SECTION E — Composing the patterns: ALS context across a concurrent pool
+======================================================================
+ALS store visible inside concurrent pool workers (no parameter threading):
+  worker t1:req-7
+  worker t2:req-7
+  worker t3:req-7
+  worker t4:req-7
+  worker t5:req-7
+[check] every pool worker saw the request-scoped ALS id (req-7): OK
+[check] ALS store is undefined OUTSIDE run() (context isolated): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

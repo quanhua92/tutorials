@@ -1,0 +1,158 @@
+observability.ts — Phase 7 bundle (web/).
+Every log line below is emitted by this file via pino; the .md guide
+pastes it verbatim. Nothing is hand-computed.
+
+DETERMINISM: pino is configured with base:null and a FIXED timestamp
+('timestamp: () => ","time":0'), so every JSON log line is byte-stable
+across runs. We assert STRUCTURE (level/msg/bound fields), never wall-clock.
+
+======================================================================
+SECTION A — pino structured logging: JSON line, levels, child loggers
+======================================================================
+  raw line : {"level":30,"time":0,"userId":42,"msg":"user logged in"}
+  parsed   : {"level":30,"time":0,"userId":42,"msg":"user logged in"}
+[check] log line is valid JSON: OK
+[check] level === 30 (info): OK
+[check] msg === "user logged in": OK
+[check] bound field userId === 42: OK
+[check] time === 0 (FIXED timestamp -> byte-stable): OK
+[check] no pid/hostname (base: null): OK
+
+  pino log levels (severity integers; higher = more severe):
+    trace    -> 10
+[check] levels.values["trace"] === 10: OK
+    debug    -> 20
+[check] levels.values["debug"] === 20: OK
+    info     -> 30
+[check] levels.values["info"] === 30: OK
+    warn     -> 40
+[check] levels.values["warn"] === 40: OK
+    error    -> 50
+[check] levels.values["error"] === 50: OK
+    fatal    -> 60
+[check] levels.values["fatal"] === 60: OK
+
+  threshold demo (logger level = 'info'):
+    lines emitted by debug call: 0
+[check] debug below info threshold is suppressed (0 lines): OK
+    lines emitted at debug threshold: 1 (level=20)
+[check] debug at debug threshold is emitted (1 line, level 20): OK
+
+  child logger (bound reqId='r-1', svc='api'):
+    {"level":30,"time":0,"reqId":"r-1","svc":"api","msg":"handling request"}
+    {"level":40,"time":0,"reqId":"r-1","svc":"api","ms":12,"msg":"slow query"}
+[check] child line 0 carries bound reqId: OK
+[check] child line 0 carries bound svc: OK
+[check] child line 1 ALSO carries bound reqId (every line): OK
+[check] child line 1 level === 40 (warn): OK
+[check] child line 1 carries per-call field ms === 12: OK
+
+======================================================================
+SECTION B — AsyncLocalStorage: correlation ID survives an await
+======================================================================
+  captured log lines (reqId from getStore(), never an argument):
+    {"level":30,"time":0,"reqId":"r-1","msg":"request start"}
+    {"level":30,"time":0,"reqId":"r-1","msg":"request end"}
+    {"level":30,"time":0,"reqId":"r-2","msg":"request start"}
+    {"level":30,"time":0,"reqId":"r-2","msg":"request end"}
+  getStore() outside als.run: undefined
+[check] 4 log lines captured (2 contexts x 2 calls): OK
+[check] context r-1: reqId visible BEFORE the await: OK
+[check] context r-1: reqId STILL visible AFTER the await (propagated): OK
+[check] context r-2: reqId is r-2 (independent store): OK
+[check] context r-2: reqId survives the await: OK
+[check] the two contexts are isolated (r-1 !== r-2): OK
+[check] als.getStore() is undefined outside als.run: OK
+[check] every line in context r-1 shares reqId (correlation): OK
+
+======================================================================
+SECTION C — The three pillars: logs, metrics, and a span tree
+======================================================================
+  PILLAR 1 - LOGS    : discrete events; one JSON object per event
+                       (level/time/msg + bound fields). Searchable.
+  PILLAR 2 - METRICS : aggregates over many events.
+    counter  req_count -> 1024
+    histogram latency  -> count=7 sum=79 mean=11.285714285714286 p50=9 p99=25
+[check] counter aggregated 1024 increments to value 1024: OK
+[check] histogram count === 7 (number of recorded samples): OK
+[check] histogram sum === 79 (3+12+8+25+7+15+9): OK
+[check] histogram mean === 79/7: OK
+[check] histogram p50 === 9 (middle of sorted [3,7,8,9,12,15,25]): OK
+  PILLAR 3 - TRACES  : a span tree (parent/child share a traceId).
+    root  {"name":"GET /api/order","traceId":"00000000000000000000000000000001","spanId":"0000000000000001","parentId":null}
+    child {"name":"db.query orders","traceId":"00000000000000000000000000000001","spanId":"0000000000000002","parentId":"0000000000000001"}
+    child {"name":"http.call payment","traceId":"00000000000000000000000000000001","spanId":"0000000000000003","parentId":"0000000000000001"}
+[check] root span has no parent (parentId === null): OK
+[check] root span carries the fixed traceId: OK
+[check] db child shares the root traceId: OK
+[check] http child shares the root traceId: OK
+[check] db child's parent is the root span: OK
+[check] http child's parent is the root span: OK
+[check] siblings have distinct spanIds: OK
+[check] child spanId differs from root spanId: OK
+[check] whole tree shares ONE traceId (the definition of a trace): OK
+
+======================================================================
+SECTION D — OpenTelemetry (documented) + log<->trace correlation
+======================================================================
+  OpenTelemetry API surface (documented; no SDK instantiated here):
+    TracerProvider  -> factory for Tracers (one per app lifecycle).
+    Tracer          -> tracer.startSpan(name) returns a Span.
+    Span            -> name + spanContext{traceId,spanId,flags,state}
+                       + parentId + attributes + events + status + kind.
+    Context/Propagation -> carries spanContext across processes
+                       via W3C TraceContext (the 'traceparent' header).
+    Exporter        -> sends spans to a backend (Collector/Jaeger/...).
+    Semantic Conventions -> standard attribute names (http.method,
+                       http.route, db.system, net.peer.name, ...).
+[check] documented: TracerProvider is the factory (concept): OK
+[check] documented: tracer.startSpan(name) creates a span (concept): OK
+
+  log lines tagged with the active span's traceId/spanId:
+    {"level":30,"time":0,"traceId":"00000000000000000000000000000001","spanId":"0000000000000001","msg":"checkout started"}
+    {"level":30,"time":0,"traceId":"00000000000000000000000000000001","spanId":"0000000000000002","msg":"payment captured"}
+[check] log line carries the span's traceId: OK
+[check] two log lines in one trace share the SAME traceId: OK
+[check] log line's spanId matches the span that produced it: OK
+[check] child log line's spanId differs from root: OK
+[check] a backend can JOIN log <-> trace on traceId (the correlation key): OK
+
+  W3C traceparent header (context propagation across services):
+    00-00000000000000000000000000000001-0000000000000001-01
+    version=00  traceId=00000000000000000000000000000001  spanId=0000000000000001  flags=01 (sampled)
+[check] traceparent length === 55 (W3C fixed width): OK
+[check] traceparent has 4 dash-separated fields: OK
+[check] traceparent carries the span's traceId: OK
+[check] traceparent carries the span's spanId: OK
+[check] traceparent sampled flag === '01' (will be recorded): OK
+
+======================================================================
+SECTION E — pino performance, transports/sinks, cross-language model
+======================================================================
+  pino performance model (documented):
+    - synchronous JSON line build in the caller (minimal allocation)
+    - SonicBoom destination batches stdout writes (non-blocking)
+    - below-threshold levels short-circuit before any serialization
+    - rule: log PROCESSING belongs in a worker, never inline
+[check] documented: pino builds the JSON line synchronously (concept): OK
+[check] proof: a custom Writable destination received the line immediately: OK
+
+  transports / sinks (documented API surface):
+    pino.transport()  -> worker-thread log processor (pino-pretty, custom)
+    pino.destination()-> SonicBoom sink (file or fd; stdout default)
+    container sink    -> stdout -> docker/k8s logs -> collector -> backend
+    aggregators       -> Loki, ELK (Elasticsearch), Datadog, Splunk, ...
+[check] documented: pino.transport is a function (API surface): OK
+[check] documented: pino.destination is a function (API surface): OK
+
+  cross-language parallels (the same three pillars):
+    Go     : log/slog (structured, context-bound attrs) + OTel-Go
+    Rust   : tracing crate (spans+events+subscriber)    + OTel-Rust
+    Python : logging/structlog + FastAPI structured     + OTel-Python
+    JS/TS  : pino (this bundle) + AsyncLocalStorage     + OTel-JS
+[check] documented: the three-pillar model is cross-language (concept): OK
+[check] AsyncLocalStorage is the JS analog of Go context / Rust tracing span context: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

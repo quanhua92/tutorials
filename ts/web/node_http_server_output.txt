@@ -1,0 +1,132 @@
+node_http_server.ts — Phase 7 bundle (Async Runtime, HTTP & Realtime).
+Every value below is produced by spinning up a real `node:http`
+server on an EPHEMERAL port (0), firing self-requests, asserting
+status / headers / body, then closing. Nothing is hand-computed;
+the ephemeral port + wall-clock time are NEVER printed.
+
+Reminder: node:http ships NO router and NO body parser — routing is
+a switch on req.method + req.url, and the body is a Readable stream.
+That is precisely what Express / Hono / Fastify add on top (REST_API).
+
+======================================================================
+SECTION A — createServer: IncomingMessage (req) + ServerResponse (res)
+======================================================================
+http.createServer((req, res) => {...}) -> an http.Server;
+server.listen(0) bound to an EPHEMERAL port (the number is
+OS-assigned and intentionally NOT printed, for determinism).
+
+What the HANDLER saw (IncomingMessage):
+  req.method                          = "GET"
+  req.url                             = "/"
+  req.headers["x-demo"]               = "hello"
+
+What the CLIENT saw (the Response we built with ServerResponse):
+  res.statusCode  -> response.status  = 200
+  res.setHeader("Content-Type"...)    = "text/plain"
+  res.end(body)    -> response.text() = "hello-from-server"
+[check] req.method === "GET": OK
+[check] req.url === "/": OK
+[check] req.headers["x-demo"] === "hello" (header round-trips): OK
+[check] res.statusCode 200 round-trips to response.status: OK
+[check] setHeader("Content-Type") round-trips: OK
+[check] res.end(body) round-trips verbatim: OK
+[check] server closed (section A teardown): OK
+
+======================================================================
+SECTION B — Hand routing (method + url switch) + status codes
+======================================================================
+No built-in router: a switch on req.method + req.url is the
+whole routing layer. Each branch sets res.statusCode + body.
+
+route                   -> status  body
+-----------------------   ------   -----------
+GET  /users             ->   200     "users-list"
+GET  /posts             ->   200     "posts-list"
+POST /users             ->   201     "created"
+GET  /nope (fallthrough)->   404     "not-found"
+[check] GET /users -> 200 "users-list": OK
+[check] GET /posts -> 200 "posts-list" (different route, different body): OK
+[check] POST /users -> 201 "created" (method distinguishes from GET /users): OK
+[check] GET /nope -> 404 "not-found" (no match -> fallthrough): OK
+[check] server closed (section B teardown): OK
+
+======================================================================
+SECTION C — Request body (req is a Readable stream) + streaming response
+======================================================================
+req is a Readable STREAM: the POST body arrives as `data` chunks,
+assembled on `end`. res is a Writable STREAM: res.write() can be
+called many times before res.end() — that is response streaming.
+
+POST /echo with body "ping" -> streamed response:
+  full response body = "chunk1\nchunk2\nechoed:ping"
+  split on "\n"      = ["chunk1", "chunk2", "echoed:ping"]
+  (chunk1 and chunk2 were two separate res.write() calls; the
+   final line is res.end() with the echoed request body.)
+[check] request body read from the req stream and echoed: OK
+[check] response was STREAMED (>=2 res.write() chunks before end): OK
+[check] streamed response reassembles to the exact bytes: OK
+[check] server closed (section C teardown): OK
+
+======================================================================
+SECTION D — Headers (case-insensitive) + graceful server.close() + errors
+======================================================================
+Header NAMES are lowercased by Node: a client's `X-Mixed-Case`
+is read as req.headers["x-mixed-case"]; the original-case key
+is absent. HTTP field names are case-insensitive (RFC 9110).
+
+  sent header "X-Mixed-Case: works":
+    req.headers["x-mixed-case"]   = "works"
+    req.headers["X-Mixed-Case"]   = "absent" (original case NOT stored)
+    res.setHeader round-trip      = "resp"
+[check] incoming header name lowercased: "x-mixed-case" === "works": OK
+[check] original-case key "X-Mixed-Case" is absent (Node lowercases): OK
+[check] outgoing res.setHeader round-trips to the client: OK
+
+  GET /broken (handler throws, caught -> 500):
+    status = 500  body = "error-caught"
+[check] caught throw in handler -> 500 (recommended pattern): OK
+[check] server still serves after an in-handler error (no crash): OK
+
+  graceful close: server.close() + closeAllConnections() + await
+    server.listening before close = true
+    server.listening after  close = false
+[check] server.listening === false after graceful close: OK
+
+======================================================================
+SECTION E — http2 (brief) + the non-blocking one-thread-scales model
+======================================================================
+http2 — the binary-framed, multiplexed sibling of node:http:
+  typeof http2.createServer       = function
+  typeof http2.createSecureServer = function
+  (h2 runs over TLS in production via createSecureServer; a single
+   TCP connection multiplexes many concurrent streams.)
+[check] typeof http2.createServer === "function": OK
+[check] typeof http2.createSecureServer === "function": OK
+
+Non-blocking I/O on ONE thread: fire 3 requests CONCURRENTLY
+(Promise.all). The single-threaded loop interleaves them; none
+blocks another. (Contrast: Go spawns a goroutine per request.)
+
+3 concurrent requests, response bodies (sorted):
+  "r:/0"
+  "r:/1"
+  "r:/2"
+[check] all 3 concurrent requests resolved: OK
+[check] every concurrent request got 200: OK
+[check] concurrent bodies are exactly {r:/0, r:/1, r:/2}: OK
+
+Cross-language (the model Node's http approximates):
+  Go     net/http : a Handler(w, r) fn + a ServeMux you register
+                    patterns on — the CLEANEST stdlib HTTP model.
+                    Each request runs on its own goroutine.
+  Rust   hyper/axum: axum builds on hyper — a typed, extractive
+                    model (handlers take typed extractors) far
+                    richer than node:http's raw req/res streams.
+  Node   node:http: one (req,res) callback per request, dispatched
+                    on the single-threaded event loop (no goroutine).
+[check] cross-language HTTP model summarized: OK
+[check] server closed (section E teardown): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

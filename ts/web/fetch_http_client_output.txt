@@ -1,0 +1,167 @@
+fetch_http_client.ts — Phase 7 bundle (the modern HTTP client).
+Every value below is computed against a self-contained ephemeral
+node:http server (port 0); the .md guide pastes it verbatim.
+
+Node's global fetch() is backed by undici (stable since Node 21).
+It returns a Promise<Response> — promise-based, streaming-aware,
+
+======================================================================
+SECTION A — fetch basics: Response + reading the body (one read only)
+======================================================================
+Response meta (headers arrived; body NOT yet read):
+  res.status     : 200
+  res.ok         : true        (ok === status in 200-299)
+  res.statusText : OK
+  res.type       : basic            (basic = same-origin / non-CORS)
+  res.url (path) : /hello
+  content-type   : text/plain
+[check] GET 200 -> res.status === 200: OK
+[check] GET 200 -> res.ok === true: OK
+[check] GET 200 -> res.statusText === "OK": OK
+[check] res.type === "basic" (non-CORS): OK
+[check] headers.get("content-type") === "text/plain": OK
+
+  await res.text() === "hello, world"
+[check] await res.text() === the server's body: OK
+[check] after .text(), res.bodyUsed === true: OK
+[check] second res.text() throws (body already consumed): OK
+
+  await res.json() round-trips an object:
+    data.msg === "hi"
+    data.n   === 42
+[check] await res.json().msg === "hi": OK
+[check] await res.json().n === 42: OK
+
+======================================================================
+SECTION B — Request + Headers (case-insensitive) + POST JSON round-trip
+======================================================================
+Headers (case-insensitive keys; .append joins with ', '):
+  h.get("content-type")  -> application/json
+  h.get("CONTENT-TYPE")  -> application/json   (same value, case-insensitive)
+  h.get("x-custom")      -> "one, two"   (.append joined both)
+  h.has("X-CUSTOM")      -> true
+[check] Headers keys are case-insensitive: get("content-type") === get("CONTENT-TYPE"): OK
+[check] h.get("content-type") === "application/json": OK
+[check] h.get("x-custom") === "one, two" (.append joined): OK
+[check] h.has("X-CUSTOM") === true (case-insensitive): OK
+
+Request object (url + method + headers + body):
+  req.method : POST
+  req.url (path) : /echo
+[check] req.method === "POST": OK
+[check] req.url endsWith '/echo': OK
+
+POST JSON round-trip (server echoed the body back):
+  echoed.x === 1
+[check] POST status 200: OK
+[check] POST JSON body round-trips: echoed.x === 1: OK
+
+Methods (RequestInit.method):
+  GET     -> req.method === GET   (default; no body)
+[check] new Request(base,{method:"GET"}).method === "GET": OK
+  POST    -> req.method === POST   (create; has body)
+[check] new Request(base,{method:"POST"}).method === "POST": OK
+  PUT     -> req.method === PUT   (replace; has body)
+[check] new Request(base,{method:"PUT"}).method === "PUT": OK
+  PATCH   -> req.method === PATCH   (partial update; has body)
+[check] new Request(base,{method:"PATCH"}).method === "PATCH": OK
+  DELETE  -> req.method === DELETE   (remove; body allowed)
+[check] new Request(base,{method:"DELETE"}).method === "DELETE": OK
+
+======================================================================
+SECTION C — HTTP errors are NOT rejections; network failures ARE (TypeError)
+======================================================================
+404 (a real HTTP error):
+  r404.status : 404
+  r404.ok     : false
+  -> the await RESOLVED (fetch did NOT throw on 404)
+[check] 404 -> res.status === 404: OK
+[check] 404 -> res.ok === false: OK
+[check] 404 resolves (NOT a rejection — we reached this line): OK
+
+500 (server error):
+  r500.status : 500
+  r500.ok     : false
+  -> also RESOLVES (check res.ok, do not rely on try/catch)
+[check] 500 -> res.status === 500: OK
+[check] 500 -> res.ok === false: OK
+
+Network failure (ECONNREFUSED on a closed port):
+  throws          : TypeError
+  err.name        : TypeError
+  err.cause.code  : ECONNREFUSED
+[check] network failure rejects with a TypeError: OK
+[check] network failure err.name === "TypeError": OK
+[check] err.cause.code === "ECONNREFUSED": OK
+
+=> THE RULE: fetch rejects ONLY on network/permission failure.
+   ALWAYS check res.ok (or res.status) for HTTP errors.
+
+======================================================================
+SECTION D — AbortController (AbortError) + AbortSignal.timeout (TimeoutError) + redirects
+======================================================================
+Manual abort (controller.abort()):
+  throws       : DOMException
+  err.name     : AbortError
+[check] manual abort -> fetch rejects: OK
+[check] manual abort -> err.name === "AbortError": OK
+[check] manual abort err is a DOMException: OK
+
+AbortSignal.timeout(50) (auto-deadline):
+  throws       : DOMException
+  err.name     : TimeoutError   <-- NOT "AbortError"
+[check] AbortSignal.timeout -> fetch rejects: OK
+[check] AbortSignal.timeout -> err.name === "TimeoutError": OK
+[check] AbortSignal.timeout err is a DOMException: OK
+
+redirect: "follow" (the DEFAULT):
+  res.status    : 200   (followed to /target)
+  res.redirected: true
+  res.url (path): /target
+  await text()  : "final"
+[check] redirect:"follow" -> res.status === 200 (followed): OK
+[check] redirect:"follow" -> res.redirected === true: OK
+[check] redirect:"follow" -> final body === "final": OK
+
+redirect: "manual" (hand back the 3xx):
+  res.status                : 302
+  res.ok                    : false
+  res.redirected            : false
+  headers.get("location")   : /target
+[check] redirect:"manual" -> res.status === 302: OK
+[check] redirect:"manual" -> res.ok === false: OK
+[check] redirect:"manual" -> res.redirected === false: OK
+[check] redirect:"manual" -> location === "/target": OK
+
+redirect: "error" (reject on redirect):
+  throws       : TypeError
+  err.name     : TypeError
+[check] redirect:"error" -> fetch rejects on redirect: OK
+[check] redirect:"error" -> err.name === "TypeError": OK
+
+======================================================================
+SECTION E — Response.body is a ReadableStream (stream chunks)
+======================================================================
+Response.body (a lazy, chunked stream):
+  res.body === null            : false
+  res.body instanceof ReadableStream : true
+[check] res.body is not null: OK
+[check] res.body instanceof ReadableStream: OK
+
+Consumed chunk-by-chunk via reader.read():
+  chunks read            : 1   (framing-dependent; NOT asserted)
+  every chunk is Uint8Array : true
+  total bytes            : 20
+  reassembled === STREAM_BODY : true
+[check] at least one chunk was read: OK
+[check] every chunk is a Uint8Array: OK
+[check] total bytes === STREAM_BODY byte length: OK
+[check] reassembled chunks === STREAM_BODY: OK
+
+Cross-language (same client shape elsewhere):
+  Rust: reqwest::Client -> .send(req).await?.text().await?  (🔗 ../rust/REQWEST_CLIENT.md)
+  Go  : http.Client.Do(req) -> *http.Response -> io.ReadAll(body)  (🔗 ../go/NET_HTTP.md)
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,227 @@
+open_addressing.py - reference impl. All numbers below feed
+OPEN_ADDRESSING.md. python stdlib only.
+
+
+========================================================================
+  SECTION A: linear probing - insert / search / delete  (m=13, alpha->0.75)
+========================================================================
+Home slot h1(k) = k % m, with m = 13 (prime). Linear probing probes
+home, home+1, home+2, ... until an EMPTY slot. Tombstones (~~) are left
+on delete so search keeps probing past them.
+
+| step | key  | h1(k) | probe sequence        | lands | probes | note |
+|------|------|-------|-----------------------|-------|--------|------|
+| 1    | 10   | 10    | 10                    | 10    | 1      | home free |
+| 2    | 22   | 9     | 9                     | 9     | 1      | home free |
+| 3    | 31   | 5     | 5                     | 5     | 1      | home free |
+| 4    | 4    | 4     | 4                     | 4     | 1      | home free |
+| 5    | 15   | 2     | 2                     | 2     | 1      | home free |
+| 6    | 28   | 2     | 2 -> 3                | 3     | 2      | collision |
+| 7    | 17   | 4     | 4 -> 5 -> 6           | 6     | 3      | collision |
+| 8    | 88   | 10    | 10 -> 11              | 11    | 2      | collision |
+| 9    | 59   | 7     | 7                     | 7     | 1      | home free |
+| 10   | 36   | 10    | 10 -> 11 -> 12        | 12    | 3      | collision |
+
+  table after 10 inserts (alpha = 10/13 = 0.769):
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   --   15   28    4   31   17   59   --   22   10   88   36 
+
+  total probes to build = 16  (avg 1.60 per insert)
+
+  SEARCHES (a successful + an unsuccessful one):
+    search  36: h1=10, seq 10 -> 11 -> 12 -> FOUND at slot 12 in 3 probe(s)
+    search   8: h1= 8, seq 8 -> NOT PRESENT in 1 probe(s)
+    (search 8 is cheap: its home slot 8 is EMPTY, so it stops at once.
+     A search for a missing key whose home is INSIDE the big cluster
+     2..7 would walk all 6 slots before hitting EMPTY at 8 -- the
+     primary-cluster tax. See Section B.)
+
+  DELETE with tombstones (lazy deletion):
+    delete 31: slot 5 marked TOMB (~~) after 1 probe(s).
+    table now:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   --   15   28    4  [~~]  17   59   --   22   10   88   36 
+    search 17 again: probes 4 -> 5(~~, keep going) -> 6(FOUND) = 3 probes.
+      the tombstone at 5 does NOT stop the search; 17 sits past it.
+    insert 44: h1=5 -> 5(~~, remember) -> 6 -> 7 -> 8(EMPTY, stop) = 4 probes, then fills the tombstone at slot 5.
+      tombstones keep search correct (probe through them) AND let a
+      later insert reclaim the dead slot instead of fragmenting the row.
+    table now:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   --   15   28    4  [44]  17   59   --   22   10   88   36 
+
+[check] build probes == 16? OK ; 17 still at slot 6 after delete? OK ; 44 reused tomb at slot 5 after 4 probes? OK
+
+========================================================================
+  SECTION B: primary clustering - linear probing builds a wall
+========================================================================
+Insert 6 keys that ALL hash to slot 5 (18,31,44,57,70,83; each is 5 mod 13).
+Linear probing packs them CONTIGUOUSLY: 5,6,7,8,9,10. Each insert walks one step further:
+
+| insert# | key | home | probes | walks through        | lands |
+|---------|-----|------|--------|----------------------|-------|
+| 1       | 18  | 5    | 1      | 5                    | 5     |
+| 2       | 31  | 5    | 2      | 5 -> 6               | 6     |
+| 3       | 44  | 5    | 3      | 5 -> 6 -> 7          | 7     |
+| 4       | 57  | 5    | 4      | 5 -> 6 -> 7 -> 8     | 8     |
+| 5       | 70  | 5    | 5      | 5 -> 6 -> 7 -> 8 -> 9 | 9     |
+| 6       | 83  | 5    | 6      | 5 -> 6 -> 7 -> 8 -> 9 -> 10 | 10    |
+
+  table after the 6 inserts:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   --   --   --   --   18   31   44   57   70   83   --   -- 
+
+  slots 5..10 are a CONTIGUOUS block of 6 (the primary cluster).
+  total probes = 1+2+3+4+5+6 = 21   (vs 6 if no clustering!).
+
+  THE TAX - now insert a NEW key whose home is INSIDE the cluster:
+    insert 6: h1 = 6. The walk is 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> lands at 11.
+    => 6 probes, walking PAST the whole cluster (6,7,8,9,10,11).
+    THIS is primary clustering: one nearby home pays for the whole run.
+
+  table after inserting 6:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   --   --   --   --   18   31   44   57   70   83  [ 6]  -- 
+
+[check] 6 clustered inserts == 21 probes? OK ; victim pays 6 probes? OK
+
+========================================================================
+  SECTION C: quadratic probing - scatter keys, dodge the cluster
+========================================================================
+Same 6 keys as Section B, but probe with h(k,i) = (home + i^2) mod m.
+The keys now SCATTER instead of stacking contiguously, so no primary
+cluster forms:
+
+| insert# | key | home | probe sequence (i^2 steps)        | lands | probes |
+|---------|-----|------|-----------------------------------|-------|--------|
+| 1       | 18  | 5    | 5                                 | 5     | 1      |
+| 2       | 31  | 5    | 5 -> 6                            | 6     | 2      |
+| 3       | 44  | 5    | 5 -> 6 -> 9                       | 9     | 3      |
+| 4       | 57  | 5    | 5 -> 6 -> 9 -> 1                  | 1     | 4      |
+| 5       | 70  | 5    | 5 -> 6 -> 9 -> 1 -> 8             | 8     | 5      |
+| 6       | 83  | 5    | 5 -> 6 -> 9 -> 1 -> 8 -> 4        | 4     | 6      |
+
+  table after the 6 inserts (note: NOT contiguous):
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   57   --   --   83   18   31   --   70   44   --   --   -- 
+
+  occupied slots = [1, 4, 5, 6, 8, 9]  (scattered: 1,4,5,6,8,9)
+  Probe COUNTS are still 1,2,3,4,5,6 (== Section B): keys with the
+  SAME home still share one probe sequence -> SECONDARY clustering.
+  But the keys are spread out, so a NEARBY home no longer pays the tax:
+
+  THE SAME VICTIM, now cheap (no wall to climb):
+    insert 6: home = 6, probe seq 6 -> 7 -> lands at 7 in 2 probe(s).
+    => 2 probes, vs 6 for linear probing (Section B).
+    The cluster does not CONTIGUOUSLY block slot 7, so home+1 is free.
+
+  table after inserting 6:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  --   57   --   --   83   18   31  [ 6]  70   44   --   --   -- 
+
+[check] quadratic victim pays 2 probes (vs 6 linear)? OK ; keys scatter to {1,4,5,6,8,9} (not contiguous)? OK
+
+========================================================================
+  SECTION D: double hashing - a per-key step kills secondary clustering
+========================================================================
+Take 4 keys that all share home h1 = 5, but differ in the second hash
+h2(k) = 1 + (k mod (m-1)) = 1 + (k mod 12). Because each key's STEP is
+different, their probe sequences DIVERGE after the home slot -> no
+secondary clustering:
+
+| key | h1 | h2 = step | probe sequence        | lands | probes |
+|-----|----|-----------|-----------------------|-------|--------|
+| 5   | 5  | 6         | 5                     | 5     | 1      |
+| 18  | 5  | 7         | 5 -> 12               | 12    | 2      |
+| 31  | 5  | 8         | 5 -> 0                | 0     | 2      |
+| 44  | 5  | 9         | 5 -> 1                | 1     | 2      |
+
+  table after the 4 inserts:
+  slot :    0    1    2    3    4    5    6    7    8    9   10   11   12
+  key  :  31   44   --   --   --    5   --   --   --   --   --   --   18 
+
+  total probes = 7  (vs 10 for linear AND 10 for quadratic on the
+  same 4 colliding keys: 1+2+3+4. Double hashing pays 1+2+2+2 = 7 because
+  each colliding key jumps to a DIFFERENT second slot.)
+
+  WHY it works: same home, different steps ->
+    key   5: h1=5, h2=6 -> seq 5 -> 11 -> 4, ...
+    key  18: h1=5, h2=7 -> seq 5 -> 12 -> 6, ...
+    key  31: h1=5, h2=8 -> seq 5 -> 0 -> 8, ...
+    key  44: h1=5, h2=9 -> seq 5 -> 1 -> 10, ...
+
+[check] double hashing == 7 probes (vs linear 10, quadratic 10)? OK
+
+========================================================================
+  SECTION E: the probe-count formula - and which strategy hits it
+========================================================================
+Uniform-hashing probe bound (CLRS Theorem 11.6), exact only under the
+idealized uniform-hashing assumption:
+    unsuccessful:   1 / (1 - alpha)
+    successful  :   (1/alpha) * ln( 1/(1-alpha) )
+
+Linear probing has its OWN (tighter, worse) cost model:
+    unsuccessful:   (1/2)(1 + 1/(1-alpha)^2)
+    successful  :   (1/2)(1 + 1/(1-alpha)  )
+
+Empirical study: table size m = 1009 (prime), keys from the deterministic
+LCG. For each strategy we measure actual average probes.
+
+UNSUCCESSFUL search - mean probes (lower is better):
+| alpha | formula 1/(1-a) | linear ~1/2(1+..) | linear (sim) | quadratic (sim) | double (sim) |
+|-------|----------------|-------------------|--------------|-----------------|--------------|
+| 0.10  | 1.111          | 1.117             | 1.109        | 1.099           | 1.119        |
+| 0.25  | 1.333          | 1.389             | 1.372        | 1.316           | 1.300        |
+| 0.50  | 2.000          | 2.500             | 2.273        | 2.099           | 1.873        |
+| 0.75  | 4.000          | 8.500             | 7.399        | 4.215           | 3.704        |
+| 0.90  | 10.000         | 50.500            | 33.607       | 11.151          | 9.722        |
+
+SUCCESSFUL search - mean probes:
+| alpha | formula (1/a)ln.. | linear ~1/2(1+..) | linear (sim) | quadratic (sim) | double (sim) |
+|-------|-------------------|-------------------|--------------|-----------------|--------------|
+| 0.10  | 1.054             | 1.056             | 1.069        | 1.069           | 1.079        |
+| 0.25  | 1.151             | 1.167             | 1.221        | 1.213           | 1.206        |
+| 0.50  | 1.386             | 1.500             | 1.503        | 1.430           | 1.418        |
+| 0.75  | 1.848             | 2.500             | 2.501        | 1.955           | 1.950        |
+| 0.90  | 2.558             | 5.500             | 4.627        | 2.794           | 2.471        |
+
+HOW TO READ IT:
+  * DOUBLE hashing tracks the uniform-hashing formula closely at every
+    alpha - it is the best real approximation to uniform hashing.
+  * LINEAR probing overshoots, and its overshoot matches its OWN model
+    (1/2)(1+1/(1-a)^2): primary clustering makes it the worst.
+  * QUADRATIC sits between the two: no primary cluster, but secondary
+    clustering keeps it above double hashing as alpha grows.
+
+GOLD at alpha = 0.75 (the canonical resize threshold):
+  formula  unsuccessful = 1/(1-0.75)              = 4.000000  (= 4.0)
+  formula  successful   = (1/0.75)*ln(1/0.25)     = 1.848392
+  double-hashing (sim)  unsuccessful              = 3.704  (within 7.4% of formula)
+  double-hashing (sim)  successful                = 1.950  (within 5.5% of formula)
+
+[check] 1/(1-0.75)==4.0 exact? OK ; double hashing within 12% of formula at alpha=0.75? OK ; clustering order linear(7.4) > quad(4.2) > double(3.7)? OK
+
+========================================================================
+  GOLD VALUES (pinned for open_addressing.html)
+========================================================================
+alpha = 0.75
+
+  formula  unsuccessful  1/(1-a)            = 4.000000
+  formula  successful    (1/a)ln(1/(1-a))   = 1.848392
+  linear   unsuccessful  (1/2)(1+1/(1-a)^2) = 8.500000
+  linear   successful    (1/2)(1+1/(1-a))   = 2.500000
+
+  worked example (m=13, linear probing):
+    build probes (10 inserts) = 16
+    search 36 -> slot 12 in 3 probes
+    search  8 (miss)  -> 1 probe
+    6 clustered inserts: linear = 21 probes
+    victim key 6      : linear = 6, quadratic = 2 probes
+    4 double-hash keys: double = 7 probes
+
+  GOLD scalars for .html: formula_unsucc@0.75 = 4.0, formula_succ@0.75 = 1.848392, build_probes = 16, cluster = 21.
+[check] GOLD reproduces from the reference functions? OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

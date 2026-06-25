@@ -1,0 +1,146 @@
+trie.py - reference impl. All numbers below feed TRIE.md.
+python stdlib only; deterministic.
+
+========================================================================
+  SECTION A: insert [cat, car, card, care, dog] and draw the tree
+========================================================================
+Insert one word at a time; each char walks/creates one edge. The last
+node of each word is marked `*` (a complete key ends there).
+
+  insert("cat")  -> O(L=3)
+  insert("car")  -> O(L=3)
+  insert("card")  -> O(L=4)
+  insert("care")  -> O(L=4)
+  insert("dog")  -> O(L=3)
+
+The full standard trie (one node per character; `*` = key ends here):
+└─ (root)
+   ├─ "c"
+   │  └─ "a"
+   │     ├─ "r" *
+   │     │  ├─ "d" *
+   │     │  └─ "e" *
+   │     └─ "t" *
+   └─ "d"
+      └─ "o"
+         └─ "g" *
+
+Node count = 10 (incl. root). Edges = 9.
+Sum of key lengths = 17; nodes <= that because of SHARING.
+  Shared prefix 'ca' (cat, car, card, care) collapses 2 chars x 4 words
+  = 8 char-slots into just 2 nodes (c, a). That is the whole win.
+  Without sharing we would need 17 nodes; we use 10.
+
+========================================================================
+  SECTION B: search "card" -> O(L=4), vs hash table O(L) hash + O(1)
+========================================================================
+Lookup "card" in the trie: walk one edge per character.
+
+  (root)
+  --"c"--> node
+  --"a"--> node
+  --"r"--> node
+  --"d"--> node
+
+  steps (edge walks) = 4 = L = len("card") = 4
+  node.end = True  ->  "card" is PRESENT
+
+Negative case search("cab"): False (walks c,a, then finds no "b" child -> None, still O(L=3)).
+
+Compare with a HASH TABLE (Python dict):
+  hash table: must hash the WHOLE key first (O(L) to read all chars),
+              then O(1) bucket probe. Total = O(L) too.
+  trie      : O(L) with NO hashing, and the walk SHARED with prefix work.
+  => For EXACT lookup both are O(L). The trie's edge is PREFIX queries,
+     which a hash table simply cannot do without scanning every key.
+
+[check] dict["card"] == trie.search("card") == True:  OK
+
+========================================================================
+  SECTION C: prefix search "ca" -> all words starting with "ca"
+========================================================================
+starts_with("ca"): walk to the "ca" node, then harvest
+every `end` node in its subtree (depth-first).
+
+  walk "ca" -> node reached: True
+
+  matches = ['car', 'card', 'care', 'cat']
+  (brute-force [w for w in WORDS if w.startswith("ca")] = ['car', 'card', 'care', 'cat'])
+
+  cost = O(L=2) to reach the node + O(M=4) to harvest
+  = O(L + M). A hash table would need O(K*L) to scan all K keys.
+
+Other prefixes:
+  starts_with("c") = ['car', 'card', 'care', 'cat']
+  starts_with("car") = ['car', 'card', 'care']
+  starts_with("do") = ['dog']
+  starts_with("x") = []
+
+========================================================================
+  SECTION D: space - naive trie vs radix tree (Patricia) compression
+========================================================================
+A standard trie wastes nodes on single-child CHAINS. "dog" has no
+siblings anywhere along d->o->g, so those 3 chars live in 3 separate
+nodes. A RADIX TREE (Patricia trie) collapses any maximal chain of
+single-child nodes into ONE edge labelled by the whole substring.
+
+Radix tree (same keys; edges now carry substrings; `*` = key ends):
+└─ (root)
+   ├─ "ca"
+   │  ├─ "t" *
+   │  └─ "r" *
+   │     ├─ "d" *
+   │     └─ "e" *
+   └─ "dog" *
+
+| structure     | nodes | edges | note                         |
+|---------------|-------|-------|------------------------------|
+| standard trie | 10    | 9     | one node per character       |
+| radix tree    | 7     | 6     | single-child chains compressed|
+
+The chain d->o->g (3 trie nodes) collapses to one edge "dog".
+Both still O(L) lookup; radix just touches fewer pointers. This is
+why IP routers and the Linux page cache use COMPRESSED tries: the
+node count (and thus cache misses) drops sharply on sparse keys.
+
+[check] trie.search == radix_search for all keys + a miss:  OK
+
+========================================================================
+  SECTION E: applications - autocomplete & IP longest-prefix match
+========================================================================
+Autocomplete: the user has typed a prefix; return every completion.
+
+corpus = ['cat', 'car', 'card', 'care', 'careful', 'dog', 'do', 'dot']
+
+  autocomplete("ca") -> ['car', 'card', 'care', 'careful', 'cat']
+  autocomplete("car") -> ['car', 'card', 'care', 'careful']
+  autocomplete("care") -> ['care', 'careful']
+  autocomplete("do") -> ['do', 'dog', 'dot']
+  autocomplete((empty = all)) -> ['car', 'card', 'care', 'careful', 'cat', 'do', 'dog', 'dot']
+
+IP routing - LONGEST PREFIX MATCH. A router holds prefix -> next-hop
+rules. For a destination IP it must pick the rule with the LONGEST
+matching prefix. A trie over the bits walks the address one bit at a
+time, remembering the last `end` (rule) node it passed:
+
+  dst=10101100  longest matching prefix =    10101  ->  hop D (10101/5 = nets 168..175)
+  dst=10101001  longest matching prefix =    10101  ->  hop D (10101/5 = nets 168..175)
+  dst=00110011  longest matching prefix =        0  ->  hop A (0/1     = everything starting 0)
+  dst=10101  longest matching prefix =    10101  ->  hop D (10101/5 = nets 168..175)
+
+DNS uses the same idea: a name like 'api.example.com' is walked from
+the TLD down, so the resolver can answer 'example.com' records for any
+subdomain without storing each one explicitly.
+
+  [OK] starts_with("ca"  ) = ['car', 'card', 'care', 'careful', 'cat']
+  [OK] starts_with("car" ) = ['car', 'card', 'care', 'careful']
+  [OK] starts_with("care") = ['care', 'careful']
+  [OK] starts_with("do"  ) = ['do', 'dog', 'dot']
+  [OK] starts_with(""    ) = ['car', 'card', 'care', 'careful', 'cat', 'do', 'dog', 'dot']
+
+GOLD CHECK: OK - all prefix queries match brute force
+(trie.html re-runs starts_with() in JS and re-checks these exact lists.)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

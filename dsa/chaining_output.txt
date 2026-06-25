@@ -1,0 +1,272 @@
+chaining.py - reference impl. All numbers below feed CHAINING.md.
+python stdlib only (math, random with fixed seed).
+
+
+========================================================================
+  SECTION A: build 8-bucket table, insert 12 keys (alpha=1.5)
+========================================================================
+Hash function: h(k) = k mod m   (division method, CLRS 11.3.1)
+m = 8 buckets, inserting n = 12 keys: [10, 22, 31, 4, 15, 28, 17, 88, 59, 26, 43, 27]
+
+| step | key  | h(k)=k mod 8 | bucket | chain after insert |
+|------|------|--------------|--------|--------------------|
+| 1    | 10   | 2            | 2      | [10] |
+| 2    | 22   | 6            | 6      | [22] |
+| 3    | 31   | 7            | 7      | [31] |
+| 4    | 4    | 4            | 4      | [4] |
+| 5    | 15   | 7            | 7      | [15, 31] |
+| 6    | 28   | 4            | 4      | [28, 4] |
+| 7    | 17   | 1            | 1      | [17] |
+| 8    | 88   | 0            | 0      | [88] |
+| 9    | 59   | 3            | 3      | [59] |
+| 10   | 26   | 2            | 2      | [26, 10] |
+| 11   | 43   | 3            | 3      | [43, 59] |
+| 12   | 27   | 3            | 3      | [27, 43, 59] |
+
+After all 12 inserts:  alpha = n/m = 12/8 = 1.5000
+Chain lengths per bucket = [1, 1, 2, 3, 2, 0, 1, 2]
+  sum = 12  (= n = 12)
+  average = 1.5000  (= alpha = 1.5000)
+  longest chain = 3 (bucket 3)
+  empty buckets = 1 of 8
+
+Chain contents (head -> tail, newest at head since we prepend):
+  bucket 0: [88]
+  bucket 1: [17]
+  bucket 2: [26, 10]
+  bucket 3: [27, 43, 59]
+  bucket 4: [28, 4]
+  bucket 5: (empty)
+  bucket 6: [22]
+  bucket 7: [15, 31]
+
+Even at alpha = 1.5, no chain exceeds 3 and one bucket is empty. The
+keys spread out because h(k)=k mod 8 distributes residues roughly evenly.
+KEY PROPERTY: chaining NEVER refuses an insert - a bucket just grows a
+longer chain. Contrast with open addressing, which is FULL at alpha = 1.
+
+[check] average chain length (1.5000) == alpha (1.5000)? OK
+[check] sum of chain lengths (12) == n (12)? OK
+
+========================================================================
+  SECTION B: search - hash to bucket, walk the chain
+========================================================================
+Search = (1) compute bucket h(k), (2) walk the chain comparing keys.
+Cost = 1 (hash) + number of nodes walked. Worst case = full chain.
+
+Successful searches (key is present):
+| key | bucket h(k) | chain (head->tail) | position | comparisons |
+|-----|-------------|---------------------|----------|-------------|
+| 10  | 2           | [26, 10]            | 2        | 2           |
+| 22  | 6           | [22]                | 1        | 1           |
+| 31  | 7           | [15, 31]            | 2        | 2           |
+| 4   | 4           | [28, 4]             | 2        | 2           |
+| 15  | 7           | [15, 31]            | 1        | 1           |
+| 28  | 4           | [28, 4]             | 1        | 1           |
+| 17  | 1           | [17]                | 1        | 1           |
+| 88  | 0           | [88]                | 1        | 1           |
+| 59  | 3           | [27, 43, 59]        | 3        | 3           |
+| 26  | 2           | [26, 10]            | 1        | 1           |
+| 43  | 3           | [27, 43, 59]        | 2        | 2           |
+| 27  | 3           | [27, 43, 59]        | 1        | 1           |
+
+Unsuccessful searches (key is absent - walk the WHOLE chain):
+| key | bucket h(k) | chain length | comparisons |
+|-----|-------------|--------------|-------------|
+| 1   | 1           | 1            | 1           |
+| 2   | 2           | 2            | 2           |
+| 3   | 3           | 3            | 3           |
+| 5   | 5           | 0            | 0           |
+| 6   | 6           | 1            | 1           |
+| 7   | 7           | 2            | 2           |
+| 8   | 0           | 1            | 1           |
+| 9   | 1           | 1            | 1           |
+| 11  | 3           | 3            | 3           |
+| 12  | 4           | 2            | 2           |
+| 13  | 5           | 0            | 0           |
+| 14  | 6           | 1            | 1           |
+
+alpha = 1.5000
+Average successful search comparisons   = 18/12 = 1.5000   (theory ~ 1 + alpha/2 = 1.7500)
+Average unsuccessful search comparisons = 17/12 = 1.4167   (theory ~ alpha = 1.5000)
+
+Worst case: an absent key hashing to bucket 3 (chain length 3) costs 3 comparisons - walk the whole chain.
+Best  case: an absent key hashing to an empty bucket costs 0 comparisons.
+=> Search is Theta(1 + alpha): the chain walk is bounded by alpha on
+   average, so a small alpha keeps every operation fast. (CLRS Thm 11.2)
+
+[check] worst successful search (59) costs 3 == longest chain (3)? OK
+
+========================================================================
+  SECTION C: resize + rehash when alpha > 0.75 (double m, rehash all)
+========================================================================
+Start m = 8, resize threshold = 0.75.
+Rule: BEFORE an insert, if (n+1)/m > 0.75, DOUBLE m and rehash every
+key (recompute h(k) = k mod new_m, rebuild all chains). The rehash is
+O(n) on the day it happens, but rare - so O(1) amortized insert.
+
+| step | key  | n+1 | (n+1)/m | resize?    | m after | alpha after |
+|------|------|-----|---------|------------|---------|-------------|
+| 1    | 10   | 1   | 0.1250  | no         | 8       | 0.1250      |
+| 2    | 22   | 2   | 0.2500  | no         | 8       | 0.2500      |
+| 3    | 31   | 3   | 0.3750  | no         | 8       | 0.3750      |
+| 4    | 4    | 4   | 0.5000  | no         | 8       | 0.5000      |
+| 5    | 15   | 5   | 0.6250  | no         | 8       | 0.6250      |
+| 6    | 28   | 6   | 0.7500  | no         | 8       | 0.7500      |
+| 7    | 17   | 7   | 0.8750  | YES x2 ->16 | 16      | 0.4375      |
+| 8    | 88   | 8   | 0.5000  | no         | 16      | 0.5000      |
+| 9    | 59   | 9   | 0.5625  | no         | 16      | 0.5625      |
+| 10   | 26   | 10  | 0.6250  | no         | 16      | 0.6250      |
+| 11   | 43   | 11  | 0.6875  | no         | 16      | 0.6875      |
+| 12   | 27   | 12  | 0.7500  | no         | 16      | 0.7500      |
+
+The resize fired once: at step 7, (6+1)/8 = 0.875 > 0.75, so m doubled
+8 -> 16 and all 6 keys were rehashed BEFORE inserting key 17.
+
+Rehash detail - the 6 keys re-hashed into m = 16:
+  trigger at n = 6, old m = 8 -> new m = 16
+    key  10: h = 10 mod 8 = 2   ->  10 mod 16 = 10
+    key  22: h = 22 mod 8 = 6   ->  22 mod 16 = 6 
+    key  31: h = 31 mod 8 = 7   ->  31 mod 16 = 15
+    key   4: h = 4 mod 8 = 4   ->  4 mod 16 = 4 
+    key  15: h = 15 mod 8 = 7   ->  15 mod 16 = 15
+    key  28: h = 28 mod 8 = 4   ->  28 mod 16 = 12
+
+Final table: m = 16, n = 12, alpha = 0.7500
+Chain lengths (m=16) = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 2, 3, 1, 0, 0, 2]
+Chain contents:
+  bucket 1: [17]
+  bucket 4: [4]
+  bucket 6: [22]
+  bucket 8: [88]
+  bucket 10: [26, 10]
+  bucket 11: [27, 43, 59]
+  bucket 12: [28]
+  bucket 15: [31, 15]
+
+Resizing cut alpha from 1.5 (had we stayed at m=8) to 0.7500. Collisions still happen (bucket 11 has a chain of 3) - rehashing only
+REDISTRIBUTES keys; it does not guarantee zero collisions. But average
+chain length is now 0.7500 = alpha, so search stays fast.
+
+[check] exactly 1 resize (n=6, m 8->16)? OK
+[check] final m=16, n=12, alpha=0.75? OK
+
+========================================================================
+  SECTION D: chaining vs open addressing (linear probing)
+========================================================================
+Same 12 keys into m = 16 buckets (alpha = 0.7500).
+Build a chaining table and a linear-probing table, measure search cost.
+
+Chaining:       m=16, n=12, alpha=0.7500, max chain=3
+Linear probing: m=16, n=12, alpha=0.7500, max insert probes=8
+
+| metric | chaining (empirical) | linear probing (empirical) |
+|--------|----------------------|-----------------------------|
+| avg successful search   | 1.4167               | 2.1667                      |
+| avg unsuccessful search | 0.5833               | 3.5833                      |
+| worst successful search | 3                    | 8                           |
+| worst unsuccessful      | 3                    | 9                           |
+
+THEORY (CLRS 11.2 vs 11.4) - cost as a function of alpha:
+  chaining, unsuccessful : 1 + alpha               (linear, graceful)
+  chaining, successful   : 1 + alpha/2
+  open addr (uniform), unsuccessful : 1/(1-alpha)  (blows up as alpha->1)
+  open addr (uniform), successful   : (1/alpha) ln(1/(1-alpha))
+  (linear probing is even WORSE - primary clustering. Knuth: unsuccessful
+   ~= (1/2)(1 + 1/(1-alpha)^2).)
+
+| alpha | chain unsucc 1+alpha | chain succ 1+a/2 | open-addr unsucc 1/(1-a) | open-addr succ (1/a)ln(1/(1-a)) |
+|-------|----------------------|------------------|-------------------------|--------------------------------|
+| 0.50  | 1.500                | 1.250            | 2.000                   | 1.386                          |
+| 0.75  | 1.750                | 1.375            | 4.000                   | 1.848                          |
+| 0.90  | 1.900                | 1.450            | 10.000                  | 2.558                          |
+| 0.99  | 1.990                | 1.495            | 100.000                 | 4.652                          |
+
+Read it: at alpha = 0.75 chaining's unsuccessful search costs ~1.75
+probes but open addressing costs ~4. Push alpha to 0.99 and chaining is
+still ~1.99 while open addressing explodes to ~100. Chaining degrades
+LINEARLY (never catastrophic); open addressing has a VERTICAL asymptote
+at alpha = 1 (it cannot go past 1 - the table is FULL). That asymmetry is
+the whole argument for chaining in production HashMaps.
+
+[check] at alpha=0.75: chain=1.75, open-addr=4.0? OK
+[check] chaining has no hard full point (n=12 in m=16); open addressing caps at n<=m (12<=16)? OK
+
+========================================================================
+  SECTION E: load factor analysis - balls-into-bins (avg chain = alpha)
+========================================================================
+Model: n = 12 keys (balls) thrown uniformly into m = 8 buckets (bins).
+alpha = n/m = 1.5000. Under simple uniform hashing, each bucket's
+chain length X_j ~ Binomial(n, 1/m).
+
+OBSERVED (Section A table):
+  chain lengths      = [1, 1, 2, 3, 2, 0, 1, 2]
+  sample mean        = 1.5000    (theory E[X] = alpha = 1.5000)
+  sample variance    = 0.7500    (theory Var[X] = alpha(1-1/m) = 1.3125)
+  empty buckets      = 1  (theory E[empty] = m*(1-1/m)^n = 1.6113)
+  longest chain      = 3
+
+EXACT distribution of a single bucket's chain length, X ~ Binomial(12, 1/8):
+| k | P(X=k)            | P(X>=k)          |
+|---|-------------------|------------------|
+| 0 | 0.201417          | 1.000000         |
+| 1 | 0.345287          | 0.798583         |
+| 2 | 0.271297          | 0.453296         |
+| 3 | 0.129189          | 0.181999         |
+| 4 | 0.041525          | 0.052810         |
+| 5 | 0.009491          | 0.011285         |
+| 6 | 0.001582          | 0.001794         |
+| 7 | 0.000194          | 0.000212         |
+| 8 | 0.000017          | 0.000018         |
+| 9 | 0.000001          | 0.000001         |
+| 10 | 0.000000          | 0.000000         |
+| 11 | 0.000000          | 0.000000         |
+| 12 | 0.000000          | 0.000000         |
+
+P(chain >= 3) = 0.181999
+P(chain >= 4) = 0.052810
+Long chains are POSSIBLE but exponentially rare - the tail of the
+binomial dies fast, so a well-chosen alpha keeps chains short.
+
+MAX LOAD - the longest chain when n = m balls into m bins:
+  Theory (w.h.p.): max chain = Theta(ln m / ln ln m)
+  Simulation: 1000 trials, throwing n=m balls each:
+
+| m     | alpha | ln m / ln ln m | mean max chain (sim) |
+|-------|-------|----------------|----------------------|
+| 64    | 1.00  | 2.918          | 3.934                |
+| 256   | 1.00  | 3.237          | 4.788                |
+| 1024  | 1.00  | 3.580          | 5.500                |
+| 4096  | 1.00  | 3.926          | 6.209                |
+
+The max chain grows only ~logarithmically (3-5 even for thousands of
+buckets), which is why a modest alpha like 0.75 keeps worst-case search
+tiny. The asymptotic ln m / ln ln m converges slowly, so the sim runs a
+bit above the formula - but both stay flat as m grows.
+
+[check] sample mean chain length (1.5000) == alpha (1.5000)? OK
+[check] sum(chain lengths) (12) == n (12)? OK
+
+========================================================================
+  GOLD VALUES (pinned for chaining.html)
+========================================================================
+Section A: m=8, n=12, alpha=1.5000
+  chain lengths = [1, 1, 2, 3, 2, 0, 1, 2]
+  average       = 1.5000  (== alpha)
+  longest chain = 3 (bucket 3)
+  empty buckets = 1
+  search 59 (tail of bucket 3) comparisons = 3
+Section C: after resize to m=16, alpha=0.7500
+  chain lengths = [0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 2, 3, 1, 0, 0, 2]
+  resizes fired = [(6, 8, 16)]
+Section D theory at alpha=0.75:
+  chaining unsuccessful  = 1 + 0.75 = 1.75
+  open-addr unsuccessful = 1/(1-0.75) = 4.0
+
+GOLD scalars for .html: lengths8=[1,1,2,3,2,0,1,2], avg=1.5, search(59)=3,
+  lengths16 has a chain of 3 at bucket 11, theory@0.75: chain=1.75, oa=4.0.
+[check] GOLD reproduces from the implementations? OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

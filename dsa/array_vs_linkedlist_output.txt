@@ -1,0 +1,159 @@
+array_vs_linkedlist.py - reference impl. All numbers below feed ARRAY_VS_LINKEDLIST.md.
+INT_SIZE=4B  PTR_SIZE=8B  NODE_SIZE=16B  LINE_SIZE=64B (16 ints/line)
+
+========================================================================
+  SECTION A: memory layout  (contiguous array vs scattered linked list)
+========================================================================
+Store the same four ints [10, 20, 30, 40] two ways. INT_SIZE=4B, PTR_SIZE=8B, NODE_SIZE=16B (padded).
+
+ARRAY  — one contiguous block. address of cell i = base + i*INT_SIZE:
+  base = 0x1000
+  a[0] =  10  @ 0x1000   (next cell +4B = 0x1004)
+  a[1] =  20  @ 0x1004   (next cell +4B = 0x1008)
+  a[2] =  30  @ 0x1008   (next cell +4B = 0x100c)
+  a[3] =  40  @ 0x100c   (next cell +4B = 0x1010)
+  whole array spans 16 contiguous bytes [0x1000 .. 0x100f]. Zero gaps. Zero pointers.
+
+LINKED LIST — four NODES scattered across memory, glued by pointers:
+  node 0: value  10 @ 0x2000  |  next @ 0x2004 -> 0x3000
+  node 1: value  20 @ 0x3000  |  next @ 0x3004 -> 0x4000
+  node 2: value  30 @ 0x4000  |  next @ 0x4004 -> 0x5000
+  node 3: value  40 @ 0x5000  |  next @ 0x5004 -> NULL
+  head @ 0x2000  (points at node 0). Nodes are 0x3000-0x2000 = 4096B apart — NOT contiguous.
+
+Read it side by side:
+  ARRAY      cells: 0x1000 0x1004 0x1008 0x100c   (stride +4B, touching)
+  LIST  node addrs: 0x2000 0x3000 0x4000 0x5000   (stride +4096B, far)
+Same data, totally different footprint. The array's contiguity is the
+seed of every advantage that follows.
+
+========================================================================
+  SECTION B: access  (array O(1) indexing vs linked list O(N) traversal)
+========================================================================
+Fetch element at index i = 2 (value = 30) from each structure.
+
+ARRAY  — compute the address arithmetically, touch ONE cell:
+  addr = base + i*INT_SIZE = 0x1000 + 2*4 = 0x1008
+  pointer follows: 0     arithmetic ops: 1 add + 1 mul
+  memory accesses: 1     => O(1)
+
+LINKED LIST — cannot compute a node address; CHASE pointers from head:
+  start at head @ 0x2000 (node 0)
+  follow next @ 0x2004 -> node 1 @ 0x3000   (pointer follow #1)
+  follow next @ 0x3004 -> node 2 @ 0x4000   (pointer follow #2)
+  pointer follows: 2   memory accesses: 3 (each follow reads a next pointer; +1 to read the value)
+  => O(N). To reach index i you ALWAYS do i pointer follows.
+
+Summary of access cost (N elements, fetching index i):
+| structure   | cost         | why                                   |
+|-------------|--------------|---------------------------------------|
+| array       | O(1)         | address is computed: base + i*size    |
+| linked list | O(N) worst   | must chase i next-pointers from head  |
+[check] array fetches index 2 in 1 access; list needs 2 follows = 2 fetches: OK
+
+========================================================================
+  SECTION C: insert / delete  (array shift O(N) vs linked list pointer swap O(1))
+========================================================================
+Insert a NEW value (99) at index 1 of an N=4 element structure.
+
+ARRAY — make room by shifting every cell from idx..N-1 one slot RIGHT:
+  before: [10, 20, 30, 40]
+  shift cell 3 (40) right -> [10,20,30,_,40]   move #1
+  shift cell 2 (30) right -> [10,20,_,30,40]   move #2
+  shift cell 1 (20) right -> [10,_,20,30,40]   move #3
+  write 99 into slot 1    -> [10,99,20,30,40]
+  cells moved: 3  (right-to-left so we do not clobber)  => O(N)
+  worst case insert at front (idx=0): shift all N=4 cells.
+
+LINKED LIST — we ALREADY hold a pointer to node 0 (the predecessor).
+  before: node0(10) -> node1(20) -> node2(30) -> node3(40) -> NULL
+  step 1: new.next      = node0.next          (1 pointer read)
+  step 2: node0.next    = &new                (1 pointer write)
+  after:  node0(10) -> new(99) -> node1(20) -> node2(30) -> node3(40)
+  cells moved: 0   pointer ops: 2  => O(1)  (NO data ever shifts)
+
+Delete is the mirror image (shift LEFT for array; rewire 1-2 pointers for list):
+
+| operation (at index/pos i) | array            | linked list (given pred) |
+|----------------------------|------------------|---------------------------|
+| insert                     | O(N) shift right | O(1) pointer swap         |
+| delete                     | O(N) shift left  | O(1) pointer swap         |
+
+THE CATCH (CLRS 10.2): the O(1) is only for insert/delete at a KNOWN
+node. Finding that node is the O(N) traversal from Section B. So a
+"linked-list insert at index i" is still O(N) end-to-end unless you
+already hold the predecessor pointer. Arrays pay at insert time;
+lists pay at search time. Pick your poison — then add cache effects.
+
+========================================================================
+  SECTION D: cache simulation  (array hits L1, linked list misses every access)
+========================================================================
+Sequentially READ all N=32 elements of each structure and count L1 cache hits/misses.
+
+Cache model: line_size=64B (16 ints/line), capacity=8 lines, LRU eviction.
+
+ARRAY addresses: 0x1000 .. 0x107c (contiguous, stride +4B).
+  line tags touched: [64, 65]
+  result: hits=30, misses=2  (= ceil(32/16) = 2 cold misses)
+  why: reading int 0 drags ints 1..15 into L1 for FREE (spatial locality). One miss feeds 16 reads.
+
+LINKED LIST node addresses: 0x10000, 0x10080, ... (scattered, stride +128B).
+  distinct line tags touched: 32 (one per node)
+  result: hits=0, misses=32  (= N = 32 — every node is a fresh miss)
+  why: node i+1 lives in a DIFFERENT line from node i. The line we just
+  loaded is useless for the next read. This is POINTER CHASING: each
+  hop pays a full RAM round-trip (~100x slower than an L1 hit).
+
+Side-by-side (N=32, 8-line L1, 64B lines):
+| structure   | cache hits | cache misses | misses / element |
+|-------------|------------|--------------|------------------|
+| array       |         30 |            2 |            0.062 |
+| linked list |          0 |           32 |            1.000 |
+
+So even a 'cheap' O(1) linked-list hop can be ~100x slower than an
+array access once the cache enters the picture. Big-O hides constants;
+the cache IS the constant that dominates in practice.
+
+GOLD values (pinned for array_vs_linkedlist.html):
+  array       N=32: hits=30, misses=2
+  linked list N=32: hits=0, misses=32
+[check] array misses == ceil(N/16) == 2: OK
+[check] list  misses == N           == 32: OK
+
+========================================================================
+  SECTION E: the big-O comparison  (+ the cache reality check)
+========================================================================
+| operation            | array       | linked list | notes                    |
+|----------------------|-------------|-------------|--------------------------|
+| random access a[i]   | O(1)        | O(N)        | array computes addr      |
+| search (unsorted)    | O(N)        | O(N)        | linear scan either way   |
+| search (sorted)      | O(log N)    | O(N)        | binary search needs O(1) |
+|                      |             |             |   random access -> array |
+| insert at FRONT      | O(N)        | O(1)        | array shifts all N       |
+| insert at TAIL       | O(1) amort* | O(N) or O(1)** | *dynamic array       |
+|                      |             |             |   **if you keep a tail ptr|
+| insert in MIDDLE     | O(N)        | O(1)**      | **given predecessor ptr  |
+| delete at FRONT      | O(N)        | O(1)        | mirror of insert         |
+| delete in MIDDLE     | O(N)        | O(1)**      | **given predecessor ptr  |
+| memory overhead      | 0 extra     | 1 ptr/node  | list pays PTR_SIZE*N     |
+| cache locality       | EXCELLENT   | POOR        | the deciding factor      |
+| prefetch friendly    | YES         | NO          | HW prefetcher loves stride|
+
+WHEN TO USE WHICH (engineer's cheat sheet):
+  * Need random access / binary search / indexing?         -> ARRAY.
+  * Need to iterate over everything, in order?             -> ARRAY.
+  * Need O(1) insert/delete at BOTH ends?                  -> ARRAY
+      (a deque / ring buffer beats a linked list here too).
+  * Need O(1) splice of WHOLE sub-chains, unknown sizes,   -> LINKED LIST
+      and you already hold the node pointers?                 (rare).
+  * Implementing an LRU cache / free list / adjacency list? -> LINKED LIST
+      (often combined with a hash map for O(1) node lookup).
+
+THE PUNCHLINE: in modern code the linked list almost never wins on
+raw speed, because traversal cost is dominated by cache misses, not by
+instruction count. Big-O calls list insert O(1); the cache calls it
+~32/2x = 16x the memory stalls of the array. Measure, do not assume.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

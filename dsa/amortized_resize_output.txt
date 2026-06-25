@@ -1,0 +1,203 @@
+amortized_resize.py - reference impl. All numbers below feed
+AMORTIZED_RESIZE.md. python stdlib only.
+
+
+========================================================================
+  SECTION A: doubling strategy - append 16 into a capacity-1 array
+========================================================================
+Rule: start capacity = 1; before each append, if FULL (size == cap)
+DOUBLE the capacity and copy every element over. Then write the new
+element. This is the AGGREGATE METHOD: just add up every cost.
+
+| append# | size | capacity | resize? | copies | write | step cost |
+|---------|------|----------|---------|--------|-------|-----------|
+| 1       | 1    | 1        | no      | 0      | 1     | 1         |
+| 2       | 2    | 2        | YES x2  | 1      | 1     | 2         |   <-- RESIZE (O(N) day)
+| 3       | 3    | 4        | YES x2  | 2      | 1     | 3         |   <-- RESIZE (O(N) day)
+| 4       | 4    | 4        | no      | 0      | 1     | 1         |
+| 5       | 5    | 8        | YES x2  | 4      | 1     | 5         |   <-- RESIZE (O(N) day)
+| 6       | 6    | 8        | no      | 0      | 1     | 1         |
+| 7       | 7    | 8        | no      | 0      | 1     | 1         |
+| 8       | 8    | 8        | no      | 0      | 1     | 1         |
+| 9       | 9    | 16       | YES x2  | 8      | 1     | 9         |   <-- RESIZE (O(N) day)
+| 10      | 10   | 16       | no      | 0      | 1     | 1         |
+| 11      | 11   | 16       | no      | 0      | 1     | 1         |
+| 12      | 12   | 16       | no      | 0      | 1     | 1         |
+| 13      | 13   | 16       | no      | 0      | 1     | 1         |
+| 14      | 14   | 16       | no      | 0      | 1     | 1         |
+| 15      | 15   | 16       | no      | 0      | 1     | 1         |
+| 16      | 16   | 16       | no      | 0      | 1     | 1         |
+
+Capacity over time: 1, 2, 4, 4, 8, 8, 8, 8, 16, 16 x8
+Resizes happen at append# 2,3,5,9 -> copy costs 1,2,4,8.
+
+Total copies = 1 + 2 + 4 + 8 = 15
+             = N - 1 = 15   (exact, because N = 16 is a power of 2)
+Total writes = 16
+Total ops    = copies + writes = 15 + 16 = 31
+Amortized    = total / N      = 31 / 16 = 1.9375  ->  O(1)
+
+The worst SINGLE step costs 8 (the i=9 copy of the full 8-slot array).
+But resizes are RARE and get 2x rarer as the array grows (only 4 of them
+for 16 appends). Spread the rare pain across all 16 appends and the
+AVERAGE is ~2 - a constant, independent of N. That is amortized O(1).
+
+[check] copies == N-1 (15)? OK ; total ops == 2N-1 (31)? OK
+
+========================================================================
+  SECTION B: accounting method - charge $3 per append, watch the bank
+========================================================================
+Charge a flat $3 for EVERY append, cheap or expensive:
+   $1 pays the immediate write of the new element
+   $2 is BANKED as credit to fund a future resize copy.
+Actual cost of an append = (copies if resize) + 1 write.
+Bank balance = sum(charges) - sum(actual costs). The proof is that the
+bank balance NEVER goes negative.
+
+| append# | actual cost | charge | d bank | bank balance | note |
+|---------|-------------|--------|--------|--------------|------|
+| 1       | 1           | 3      | +2 | 2            | cheap: bank += $2 |
+| 2       | 2           | 3      | +1 | 3            | RESIZE paid from credit |
+| 3       | 3           | 3      | +0 | 3            | RESIZE paid from credit |
+| 4       | 1           | 3      | +2 | 5            | cheap: bank += $2 |
+| 5       | 5           | 3      | -2 | 3            | RESIZE paid from credit |
+| 6       | 1           | 3      | +2 | 5            | cheap: bank += $2 |
+| 7       | 1           | 3      | +2 | 7            | cheap: bank += $2 |
+| 8       | 1           | 3      | +2 | 9            | cheap: bank += $2 |
+| 9       | 9           | 3      | -6 | 3            | RESIZE paid from credit |
+| 10      | 1           | 3      | +2 | 5            | cheap: bank += $2 |
+| 11      | 1           | 3      | +2 | 7            | cheap: bank += $2 |
+| 12      | 1           | 3      | +2 | 9            | cheap: bank += $2 |
+| 13      | 1           | 3      | +2 | 11           | cheap: bank += $2 |
+| 14      | 1           | 3      | +2 | 13           | cheap: bank += $2 |
+| 15      | 1           | 3      | +2 | 15           | cheap: bank += $2 |
+| 16      | 1           | 3      | +2 | 17           | cheap: bank += $2 |
+
+Bank balance is ALWAYS >= 0 (minimum observed = $2).
+=> the $3 charge per append fully funds every resize.
+=> amortized cost per append <= 3  ->  O(1).
+
+WHY $3 is exactly enough: right before a resize that copies m elements,
+the m/2 MOST-recently inserted elements each still hold their $2 of
+banked credit = $m total - precisely the m copies owed. The older m/2
+elements' credit already paid the PREVIOUS resize, so the bank never
+runs dry. (The leftover slack is why the minimum balance is $2, not $0.)
+
+[check] min bank balance ($2) >= 0? OK
+
+========================================================================
+  SECTION C: potential method - Phi = 2*num - capacity, amortized <= 3
+========================================================================
+Define the potential of a table state:   Phi(D) = 2*num - capacity.
+Set Phi(empty) = 0. The amortized cost of append i is then
+   a_i = actual_cost_i + Phi_i - Phi_{i-1}.
+We show (1) Phi >= 0 always so the bound is valid, and (2) a_i <= 3
+for every step, so sum(actual) <= 3*N -> O(1) amortized.
+
+| append# | num | cap | Phi_prev | actual | Phi_curr |  dPhi | a=actual+dPhi |
+|---------|-----|-----|----------|--------|----------|-------|---------------|
+| 1       | 1   | 1   | 0        | 1      | 1        |    +1 | 2             |
+| 2       | 2   | 2   | 1        | 2      | 2        |    +1 | 3             |
+| 3       | 3   | 4   | 2        | 3      | 2        |    +0 | 3             |
+| 4       | 4   | 4   | 2        | 1      | 4        |    +2 | 3             |
+| 5       | 5   | 8   | 4        | 5      | 2        |    -2 | 3             |
+| 6       | 6   | 8   | 2        | 1      | 4        |    +2 | 3             |
+| 7       | 7   | 8   | 4        | 1      | 6        |    +2 | 3             |
+| 8       | 8   | 8   | 6        | 1      | 8        |    +2 | 3             |
+| 9       | 9   | 16  | 8        | 9      | 2        |    -6 | 3             |
+| 10      | 10  | 16  | 2        | 1      | 4        |    +2 | 3             |
+| 11      | 11  | 16  | 4        | 1      | 6        |    +2 | 3             |
+| 12      | 12  | 16  | 6        | 1      | 8        |    +2 | 3             |
+| 13      | 13  | 16  | 8        | 1      | 10       |    +2 | 3             |
+| 14      | 14  | 16  | 10       | 1      | 12       |    +2 | 3             |
+| 15      | 15  | 16  | 12       | 1      | 14       |    +2 | 3             |
+| 16      | 16  | 16  | 14       | 1      | 16       |    +2 | 3             |
+
+Phi is ALWAYS >= 0 (minimum = 0, at the empty table Phi = 0).
+Every amortized cost a_i <= 3. In fact:
+   * cheap step  (no resize): actual = 1,  dPhi = +2  -> a = 3
+   * resize step (copy k)   : actual = k+1, dPhi = 2-k -> a = 3
+   (the very first append has a = 2 because Phi(empty) = 0, not -1)
+=> sum(actual) = sum(a) - (Phi_N - Phi_0) <= 3*N - Phi_N + Phi_0 <= 3*N
+=> O(1) amortized. The potential 'stored up' on cheap steps pays the bill
+   on resize steps: a resize SPIKES actual cost but dPhi is large and
+   NEGATIVE, cancelling the spike exactly.
+
+[check] Phi >= 0 (min 0)? OK ; a_i <= 3 (max 3)? OK
+
+========================================================================
+  SECTION D: growth factor - 2x vs 1.5x vs 1.25x (all O(1) amortized)
+========================================================================
+Simulate 1024 appends for each factor. Theory: copy work is a geometric
+series summing to ~N/(g-1), so amortized ops/append = 1 + 1/(g-1) = g/(g-1).
+Space: just after a resize the array is ~1/g full, then grows to full,
+so the fill ratio ranges [1/g, 1.0] and max wasted space = 1 - 1/g.
+
+| factor g | resizes | total copies | total ops | amortized (sim) | amortized g/(g-1) | max waste | fill range  |
+|----------|---------|--------------|-----------|-----------------|-------------------|-----------|-------------|
+| 2.0      | 10      | 1023         | 2047      | 1.999           | 2.000             |   50.0%  | 0.500-1.000   |
+| 1.5      | 16      | 2120         | 3144      | 3.070           | 3.000             |   33.3%  | 0.667-1.000   |
+| 1.25     | 27      | 4402         | 5426      | 5.299           | 5.000             |   20.0%  | 0.800-1.000   |
+
+Read the table three ways:
+  * Bigger g  -> FEWER resizes, but MORE wasted space on average.
+    g=2.0 wastes up to 50% (half the array can sit empty).
+    g=1.5 wastes up to 33%; g=1.25 only 20%.
+  * Smaller g -> MORE frequent resizes, so a HIGHER amortized constant,
+    but it is still a CONSTANT (g/(g-1)). O(1) for ANY g > 1.
+  * g=2.0 keeps pointers/indices valid-ish in low bits and gives the
+    lowest amortized constant (2). g=1.5 wastes less memory. Most
+    production allocators (Java ArrayList, C++ vector, Python list) use
+    ~1.5x-2x as the engineering sweet spot.
+
+[check] simulated amortized within 0.5 of g/(g-1) for all factors? OK
+
+========================================================================
+  SECTION E: shrink threshold - halving at 25% beats 50% (no thrashing)
+========================================================================
+Build the array up with 16 appends (size=16, cap=16). Then hammer it
+with 8 (add, del) pairs right at the full boundary - the worst case for
+thrashing. Compare shrinking at 50% fill vs the safe 25% hysteresis.
+
+| shrink at | build copies | build resizes | alternating copies | alt resizes | total copies | total ops | verdict
+|-----------|--------------|---------------|--------------------|-------------|--------------|-----------|--------
+| 50% (cap/2) | 15           | 4             | 256                | 16          | 271          | 303       | THRASH: O(N)/op
+| 25% (cap/4) | 15           | 4             | 16                 | 1           | 31           | 63        | SAFE: O(1)/op
+
+WHAT HAPPENS (shrink at 50%):
+  size=16, cap=16 -> add: grow to cap=32, copy 16.
+                 -> del: size=16 = cap/2 -> shrink to cap=16, copy 16.
+  Every (add, del) pair costs 32 copies. 8 pairs = 256 copies. Each op is
+  O(N) here, so N such ops cost O(N^2). This is THRASHING.
+
+WHAT HAPPENS (shrink at 25%):
+  size=16, cap=16 -> add: grow to cap=32, copy 16 (the only resize). Now
+  cap/4 = 8.
+                 -> del: size=16, way above 8 -> NO shrink.
+  After that one grow, add/del oscillates between size 16 and 17 with
+  cap=32: ZERO further resizes. The 25% rule leaves a HYSTERESIS GAP
+  (25%..100%): a single add or del cannot cross BOTH thresholds, so the
+  table never ping-pongs. CLRS 17.4 proves add+del are then both O(1).
+
+[check] 50%: 256 alt copies + 8 shrinks (thrash)? OK
+[check] 25%: 16 alt copies + 0 shrinks (safe)? OK
+
+========================================================================
+  GOLD VALUES (pinned for amortized_resize.html)
+========================================================================
+N = 16 appends, growth factor = 2.0 (doubling)
+
+capacity trace  = [1, 2, 4, 4, 8, 8, 8, 8, 16, 16, 16, 16, 16, 16, 16, 16]
+copy cost trace = [0, 1, 2, 0, 4, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0]
+resize steps    = append# [2, 3, 5, 9]
+total copies    = 15    (== N-1 = 15)
+total writes    = 16
+total ops       = 31   (== 2N-1 = 31)
+amortized/append= 1.9375  (-> 2)
+
+GOLD scalar for .html: total_copies = 15, total_ops = 31.
+[check] GOLD reproduces from simulate_appends(16, 2.0)? OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

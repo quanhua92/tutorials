@@ -1,0 +1,180 @@
+hash_distribution.py - reference impl. All numbers below feed HASH_DISTRIBUTION.md.
+
+========================================================================
+  SECTION A: 1000 keys -> 16 buckets  (uniform line = 62.5 each)
+========================================================================
+N = 1000 keys, M = 16 buckets, expected per bucket = 62.5
+
+| bucket |   mod_prime |  knuth_mult |       fnv1a |     murmur3 |
+|----------------------------------------------------------------|
+|      0 |          60 |          51 |          62 |          58 |
+|      1 |          55 |          56 |          56 |          61 |
+|      2 |          66 |          63 |          57 |          53 |
+|      3 |          60 |          74 |          58 |          65 |
+|      4 |          54 |          58 |          60 |          52 |
+|      5 |          76 |          63 |          62 |          69 |
+|      6 |          61 |          61 |          63 |          64 |
+|      7 |          74 |          53 |          60 |          66 |
+|      8 |          54 |          71 |          59 |          71 |
+|      9 |          60 |          68 |          59 |          59 |
+|     10 |          64 |          64 |          61 |          72 |
+|     11 |          68 |          79 |          72 |          52 |
+|     12 |          67 |          66 |          72 |          59 |
+|     13 |          66 |          48 |          70 |          75 |
+|     14 |          60 |          59 |          70 |          64 |
+|     15 |          55 |          66 |          59 |          60 |
+|----------------------------------------------------------------|
+|    min |          54 |          48 |          56 |          52 |
+|    max |          76 |          79 |          72 |          75 |
+|  range |          22 |          31 |          16 |          23 |
+
+Read it: random keys -> every hash lands near 62.5. The differences
+show up only on STRUCTURED input (Section E). The spread (max-min)
+should be small for all four; chi-squared (Section D) scores it.
+
+GOLD (pinned for hash_distribution.html) - murmur3 bucket counts:
+  [58, 61, 53, 65, 52, 69, 64, 66, 71, 59, 72, 52, 59, 75, 64, 60]
+
+========================================================================
+  SECTION B: avalanche - flip 1 INPUT bit, count flipped OUTPUT bits
+========================================================================
+Strict Avalanche Criterion: flipping any single input bit should
+flip ~half of the 32 output bits. Ideal ratio = 0.500 (16/32).
+
+averaged over 2000 base keys x 32 bit-flips = 64000 comparisons per hash
+
+| hash       | avg bits flipped | avalanche ratio | verdict        |
+|------------|------------------|-----------------|----------------|
+| mod_prime  |            5.212 |          0.1629 | weak           |
+| knuth_mult |            8.653 |          0.2704 | weak           |
+| fnv1a      |           12.770 |          0.3991 | fair           |
+| murmur3    |           16.000 |          0.5000 | excellent      |
+
+Why mod_prime is weak: its output is key % PRIME, which stays in [0, 1000003) ~= [0, 2^20). The top ~12 output bits are ALWAYS zero, so
+they can never flip -- it wastes a third of the output space.
+
+Why knuth_mult is weak at avalanche: it is LINEAR. Flipping input bit
+i changes the product by exactly 2^i * KNUTH (mod 2^32); for HIGH i
+that shift gets truncated, so a high input bit flips only ~1-3 output
+bits. (Its DISTRIBUTION is still good -- see Section A/D.)
+
+fnv1a is 'fair': 4 bytes of input is not quite enough for its
+xor-multiply loop to fully randomize the word. murmur3 hits 0.500
+because its fmix32 finalizer exists ONLY to guarantee avalanche.
+GOLD (pinned) - avalanche ratios:
+  mod_prime  ratio = 0.1629
+  knuth_mult ratio = 0.2704
+  fnv1a      ratio = 0.3991
+  murmur3    ratio = 0.5000
+
+========================================================================
+  SECTION C: the birthday paradox - P(collision) = 1 - exp(-N^2/(2M))
+========================================================================
+With N keys thrown into M buckets, the chance at least two share a
+bucket climbs FAST. 50% odds arrive at N ~= 1.177 * sqrt(M).
+
+(a) how many keys N give a 50% chance of a collision, per M:
+| M (buckets) | sqrt(M) | N at 50% (exact) | N ~= 1.177*sqrt(M) |
+|-------------|---------|-------------------|---------------------|
+|          16 |    4.00 |                 5 |                4.71 |
+|         100 |   10.00 |                13 |               11.77 |
+|         365 |   19.10 |                23 |               22.49 |
+|       1,000 |   31.62 |                38 |               37.22 |
+|      10,000 |  100.00 |               119 |              117.70 |
+|      65,536 |  256.00 |               302 |              301.31 |
+|   1,000,003 | 1000.00 |              1178 |             1177.00 |
+
+(b) for M = 16 buckets, P(collision) vs N (exact vs approx):
+| N  | exact P(collision) | approx 1-exp(-N^2/2M) | expected colls N^2/2M |
+|----|--------------------|-----------------------|------------------------|
+|  2 |             0.0625 |                0.1175 |                   0.12 |
+|  4 |             0.3335 |                0.3935 |                   0.50 |
+|  5 |             0.5001 |                0.5422 |                   0.78 |
+|  6 |             0.6563 |                0.6753 |                   1.12 |
+|  8 |             0.8792 |                0.8647 |                   2.00 |
+| 10 |             0.9736 |                0.9561 |                   3.12 |
+| 16 |             1.0000 |                0.9997 |                   8.00 |
+| 20 |             1.0000 |                1.0000 |                  12.50 |
+| 32 |             1.0000 |                1.0000 |                  32.00 |
+| 50 |             1.0000 |                1.0000 |                  78.12 |
+
+Read it: at N=6 you already have a ~50/50 shot of a collision in
+just 16 buckets. The Poisson approx 1-exp(-N^2/2M) tracks the exact
+product formula tightly once N is more than a handful.
+
+GOLD (pinned) - P(collision) for N=10, M=16:
+  exact  = 0.973571
+  approx = 0.956063
+
+========================================================================
+  SECTION D: chi-squared test - deviation from uniform (lower = flatter)
+========================================================================
+chi^2 = sum (observed - N/M)^2 / (N/M);  N/M = 1000/16 = 62.5;  degrees of freedom = 15
+
+A perfect fill scores 0. The MEAN of chi^2 with 15 dof is 15; a
+uniform random hash lands in roughly [5, 25] on any given trial.
+
+| hash       | chi-squared | vs mean(15) |
+|------------|-------------|-------------|
+| mod_prime  |      10.816 | low-ish     |
+| knuth_mult |      16.704 | at the mean |
+| fnv1a      |       7.008 | low-ish     |
+| murmur3    |      11.968 | low-ish     |
+
+On RANDOM input all four score near the mean -- nobody is broken
+yet. chi-squared only separates them once the input has structure
+(Section E).
+
+GOLD (pinned) - chi-squared per hash:
+  mod_prime  chi^2 = 10.816
+  knuth_mult chi^2 = 16.704
+  fnv1a      chi^2 = 7.008
+  murmur3    chi^2 = 11.968
+
+========================================================================
+  SECTION E: structured input - where naive modulo hash collapses
+========================================================================
+Now feed STRUCTURED keys: an arithmetic sequence whose step equals
+the prime used by mod_prime (step = 1000003). For those keys,
+key % PRIME == 0 for EVERY key, so mod_prime sends all 1000 to ONE
+bucket. The real hashes mix the bits, so structure vanishes.
+
+--- random keys (baseline) ---
+| hash       | chi-squared | max bucket | collisions | birthday N^2/2M = 31250 |
+|------------|-------------|------------|------------|----------------|
+| mod_prime  |        10.8 |         76 |      31088 |                |
+| knuth_mult |        16.7 |         79 |      31272 |                |
+| fnv1a      |         7.0 |         72 |      30969 |  matches birthday|
+| murmur3    |        12.0 |         75 |      31124 |  matches birthday|
+
+--- step = 1000003 (adversarial) ---
+| hash       | chi-squared | max bucket | collisions | birthday N^2/2M = 31250 |
+|------------|-------------|------------|------------|----------------|
+| mod_prime  |     15000.0 |       1000 |     499500 |                |
+| knuth_mult |         0.7 |         65 |      30773 |                |
+| fnv1a      |         4.8 |         69 |      30899 |                |
+| murmur3    |        17.2 |         74 |      31286 |                |
+
+--- sequential 0..999 ---
+| hash       | chi-squared | max bucket | collisions | birthday N^2/2M = 31250 |
+|------------|-------------|------------|------------|----------------|
+| mod_prime  |         0.1 |         63 |      30752 |                |
+| knuth_mult |         0.2 |         63 |      30755 |                |
+| fnv1a      |         0.1 |         63 |      30752 |                |
+| murmur3    |        26.8 |         82 |      31588 |                |
+
+GOLD CHECK: on RANDOM keys, the good hashes' collision count should
+match the birthday prediction N^2/(2M) = 31250.0.
+
+| hash       | observed collisions | birthday N^2/2M | ratio (ideal ~1.0) | match |
+|------------|---------------------|------------------|---------------------|-------|
+| mod_prime  |               31088 |          31250.0 |               0.995 | OK    |
+| knuth_mult |               31272 |          31250.0 |               1.001 | OK    |
+| fnv1a      |               30969 |          31250.0 |               0.991 | OK    |
+| murmur3    |               31124 |          31250.0 |               0.996 | OK    |
+
+[check] good hashes (knuth/fnv1a/murmur3) collision count within 20% of birthday N^2/2M = 31250.0: OK
+
+========================================================================
+  DONE - all sections printed; birthday gold-check: OK
+========================================================================

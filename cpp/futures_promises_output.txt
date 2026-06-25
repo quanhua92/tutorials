@@ -1,0 +1,152 @@
+futures_promises.cpp — Phase 4 bundle (Concurrency & the Memory Model).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free AND race-free (just sanitize clean;
+the shared state IS the sync — no raw shared memory is touched).
+
+======================================================================
+SECTION A — std::async + future::get (blocks, returns value, rethrows)
+======================================================================
+std::async(policy, fn, args...) runs fn and returns a future<T>.
+future::get() BLOCKS until the result is ready, then returns it.
+After get(), valid() == false. A second get() is UNDEFINED BEHAVIOR.
+If fn threw, get() RETHROWS that exception.
+
+(1) std::async(launch::async, fn) -> future; get() returns the value.
+    before get(): f1.valid() = true
+[check] future from async is valid() before get(): OK
+    f1.get() = 55; after get(): f1.valid() = false
+[check] async get() returns the computed value (7*7+6 == 55): OK
+[check] after get(), valid() == false (the result was consumed): OK
+
+(2) future<void>: get() just waits (no value carried).
+    after fv.get(): worker set side = true
+[check] future<void>: get() synchronized the worker's write (side == true): OK
+
+(3) EXCEPTION PROPAGATION: if the async fn THROWS, get() RETHROWS.
+    caught at get(): runtime_error("async boom")
+[check] an exception thrown in the async fn is rethrown by get(): OK
+[check] the rethrown exception carries the original message ("async boom"): OK
+[check] after a get() that rethrew, valid() == false (still consumed): OK
+
+(4) get() TWICE is UB (documented; NOT run here).
+    After get(), valid() == false. A second get() is undefined behavior:
+    "If valid() is false before the call to this function, the behavior
+     is undefined." (cppreference, std::future::get).
+    // WHAT NOT TO DO (compiled only with -DDEMO_UB):
+    //   auto f = std::async(std::launch::async, []{ return 7; });
+    //   (void)f.get();
+    //   (void)f.get();   // <-- UB: valid() == false
+[check] the get()-twice-is-UB trap is documented (not executed): OK
+
+======================================================================
+SECTION B — std::promise (writer) / std::future (reader) across threads
+======================================================================
+std::promise<T> is the WRITER; its get_future() returns the paired
+std::future<T> (the READER). set_value(x) / set_exception(e) fulfill it;
+future.get() receives it, BLOCKING until the shared state is ready.
+The shared state IS the sync: set_value synchronizes-with get().
+
+(1) promise -> worker thread -> set_value -> main's get().
+    worker set 9*9+10; main got f1.get() = 91
+[check] promise->worker->set_value -> paired future.get() delivers 91 across threads: OK
+[check] after get(), the reader future is invalid (one-shot): OK
+
+(2) set_exception: the worker stores an exception; get() rethrows.
+    caught at get(): runtime_error("promise boom")
+[check] promise::set_exception -> paired future.get() rethrows across threads: OK
+[check] the rethrown exception carries the original message ("promise boom"): OK
+
+(3) promise<void> as a one-shot SIGNAL: set_value() with no value.
+    main unblocked at bf.get(); worker reached = true
+[check] promise<void> set_value -> future.get() unblocks (one-shot signal): OK
+
+(4) THE BROKEN-PROMISE trap (documented; the safe path is shown).
+    A promise destroyed WITHOUT set_value/set_exception ABANDONS the
+    shared state: it stores std::future_error{broken_promise}, makes it
+    ready, and the paired future.get() THROWS. (Demonstrated safely below.)
+    caught future_error: The associated promise has been destructed prior to the associated state becoming ready.
+[check] a promise destroyed without set_value -> get() throws future_error{broken_promise}: OK
+
+======================================================================
+SECTION C — launch-policy footgun + get-twice UB + destructor-blocks
+======================================================================
+THE launch-policy FOOTGUN: the default policy (async|deferred) is
+implementation-defined which runs. launch::deferred is LAZY: it runs in
+the CALLING thread on the first wait()/get() — NOT concurrent. Proven
+below by thread::id == / != (the calling thread is main).
+
+(1) launch::async: DEFINITELY a new thread.
+[check] launch::async get() returns the computed value (111): OK
+    worker thread id != main's id (ran in a NEW thread)
+[check] launch::async ran in a DIFFERENT thread (id != main): OK
+
+(2) launch::deferred: LAZY — runs in the CALLING thread on get()/wait().
+[check] launch::deferred get() returns the computed value (222): OK
+    deferred fn thread id == main's id (ran in the CALLING thread)
+[check] launch::deferred ran in the CALLING thread (id == main) — NOT concurrent: OK
+
+(3) DEFAULT policy (async|deferred): impl-defined which runs.
+    Assert ONLY the value here (the policy is not portable).
+[check] default policy get() returns the computed value (333): OK
+
+(4) THE DESTRUCTOR-BLOCKS GOTCHA (documented; NOT timed here).
+    A future OBTAINED FROM std::async whose shared state is still held at
+    destruction BLOCKS until the op finishes. Futures from promise /
+    packaged_task NEVER block. So this is effectively sequential:
+    //   std::async(std::launch::async, []{ f(); });  // temp dtor WAITS
+    //   std::async(std::launch::async, []{ g(); });  // ...then g starts
+    Fix: hold the future (bind to a name), or std::launch::deferred, or
+    std::jthread / a real thread pool for fan-out.
+[check] the destructor-blocks gotcha is documented (not executed): OK
+
+(5) get() TWICE is UB (recap; #ifdef DEMO_UB gate, never compiled).
+[check] get()-twice UB is documented (valid()==false before the 2nd call -> UB): OK
+
+======================================================================
+SECTION D — std::packaged_task + std::shared_future + wait()/wait_for()
+======================================================================
+std::packaged_task wraps a Callable; invoking it (operator()) fulfills
+the paired future. std::shared_future<T> is the MULTI-READER future.
+wait() blocks WITHOUT consuming (valid() stays true; get() consumes).
+
+(1) packaged_task invoked directly.
+    task(6,7) fulfilled the future; get() = 43
+[check] packaged_task: invoking it fulfills the paired future (6*6+7 == 43): OK
+
+(2) packaged_task MOVED into a std::thread (common pattern).
+    task2(8) ran on a worker; get() = 72
+[check] packaged_task moved into a thread: get() delivers 8*8+8 == 72 across threads: OK
+
+(3) shared_future: future::share() -> MANY readers can get().
+[check] after share(), the original future is invalid (state moved to shared_future): OK
+    sf.get() x3 = 42, 42, 42 (all the same value)
+[check] shared_future allows MULTIPLE get() (a regular future does not): OK
+[check] shared_future is still valid() after several gets: OK
+
+(4) wait() blocks WITHOUT consuming; wait_for() returns a status.
+[check] after wait(), valid() is STILL true (wait does not consume): OK
+    wf.wait() then wf.get() = 5
+[check] wait() then get() returns the computed value (5): OK
+
+======================================================================
+SECTION E — COLLECT + SORT + JOIN: deterministic parallel fan-out
+======================================================================
+Launch 6 tasks with std::async(launch::async); each computes n*n+n.
+COMPLETION ORDER is nondeterministic; the RESULT SET is not. We get()
+each future, pair {n, n*n+n}, SORT, and print -> byte-identical output.
+
+    sorted results (n, n*n+n):
+      n=1  ->  2
+      n=2  ->  6
+      n=3  ->  12
+      n=4  ->  20
+      n=5  ->  30
+      n=6  ->  42
+[check] collected exactly N results after all get()s: OK
+[check] the sorted set is the deterministic {n, n*n+n} for n=1..6 (NOT arrival order): OK
+[check] pinned value: n=2 -> 2*2+2 == 6: OK
+[check] pinned value: n=6 -> 6*6+6 == 42: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

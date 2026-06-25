@@ -1,0 +1,116 @@
+std_thread.cpp — Phase 4 bundle #1 (Concurrency & the Memory Model).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free AND race-free (just sanitize clean;
+TSan-clean too — all sharing is mutex/join-synchronized).
+
+======================================================================
+SECTION A — spawn + join; joinable(); the destruct-terminate trap
+======================================================================
+std::thread t(fn, args...); spawns a 1:1 OS thread running fn(args...).
+t.join() blocks until t finishes; join SYNCHRONIZES (main then sees the
+thread's writes — a happens-before edge). joinable() is true until join/detach.
+
+(1) spawned a worker; before join: t.joinable() = true
+[check] a spawned std::thread is joinable() before join/detach: OK
+    after  join: t.joinable() = false  (results.size = 1)
+[check] after join, t.joinable() == false: OK
+
+(2) main reads the worker's result AFTER join (join = happens-before):
+    squarePlusOffset(7, 100) = 7*7 + 100 = 149
+[check] the worker ran and pushed 7*7+100 == 149: OK
+[check] join synchronizes: main safely reads the worker's write after join: OK
+
+(3) THE destruct-terminate TRAP (documented, NOT run):
+    a joinable std::thread destroyed -> std::terminate -> std::abort.
+    No exception. Always join() or detach() before end-of-scope, OR use
+    std::jthread (C++20), which joins on destruction (the RAII fix).
+    // WHAT NOT TO DO (compiled only with -DDEMO_UB):
+    //   { std::thread t2([]{}); }  // <- ~thread sees joinable -> terminate
+[check] the destruct-terminate trap is documented (not executed): OK
+
+======================================================================
+SECTION B — detach; passing args (decay+move, std::ref)
+======================================================================
+t.detach() releases the thread to run INDEPENDENTLY; t is no longer joinable
+and no longer has an id. The thread keeps running until it returns or the
+program exits. LIFETIME PERIL: a detached thread must not touch state that
+has been destroyed (automatics of the spawning scope, statics at shutdown).
+
+(1) detached worker writes a mutex-protected result + done flag;
+    main busy-waits (lock-check-unlock-yield) until done -> safe sync.
+    before detach: t.joinable() = true
+    after  detach: t.joinable() = false, get_id() == default id = true
+[check] after detach, t.joinable() == false: OK
+[check] after detach, t.get_id() == thread::id{} (no associated thread): OK
+    main observed done==true; detachedResult = 128
+[check] the detached thread ran; main observed its result via mutex-sync: OK
+
+(2) PASSING ARGS: by default DECAYED + MOVED into the thread.
+    To pass a reference (so the worker can mutate the caller's variable),
+    wrap it in std::ref / std::cref — otherwise it is copied/moved.
+    (2a) caller_msg = "hello"; worker appended " from worker" to ITS copy.
+         caller's string unchanged (size 5); worker's local size = 17
+[check] by-value std::string arg: caller's string unchanged (worker got a copy): OK
+[check] worker's local copy was "hello from worker" (size 17): OK
+    (2b) int counter = 0; worker did r += 100 with std::ref(counter);
+         caller's counter = 100  (std::ref passed a reference)
+[check] std::ref passes a reference: worker mutated the caller's counter to 100: OK
+
+(3) LIFETIME PERIL of a detached thread (documented, not run):
+    If the spawning scope returns before the detached thread finishes, any
+    reference/pointer to its automatics dangles -> use-after-free (UB).
+    Rule: a detached thread must touch ONLY state whose lifetime it does
+    NOT depend on (heap that outlives it, statics, copied-in values).
+[check] the detached-thread lifetime peril is documented (not executed): OK
+
+======================================================================
+SECTION C — thread::id/get_id, hardware_concurrency, collect+sort+join
+======================================================================
+thread::id is the opaque identifier of a thread; get_id() returns it.
+Two ids compare equal iff they identify the same thread. The default-
+constructed thread::id{} identifies NO thread (a joined/detached thread).
+Streaming with operator<< is allowed but impl-defined — we DON'T print the
+value here (it varies across runs); we rely on == / != only.
+[check] a joined thread's get_id() == thread::id{} (no associated thread): OK
+
+(1) main's get_id() and the worker's get_id() differ (ids NOT shown;
+    streamed representation is impl-defined and varies across runs).
+[check] main's thread::id != worker's thread::id (two distinct threads): OK
+
+(2) std::thread::hardware_concurrency() = 10  (hint; may be 0; not asserted)
+
+(3) COLLECT + SORT + JOIN: spawn 6 workers; each pushes {n, n*n+n}
+    into a mutex-protected vector; main joins all, SORTS, prints.
+    sorted results (n, n*n+n):
+      n=1  ->  2
+      n=2  ->  6
+      n=3  ->  12
+      n=4  ->  20
+      n=5  ->  30
+      n=6  ->  42
+[check] collected exactly N results after all joined: OK
+[check] the sorted set is the deterministic {n, n*n+n} for n=1..6 (NOT arrival order): OK
+
+======================================================================
+SECTION D — the data-race-is-UB link (preview; ATOMICS_MEMORY_ORDER owns it)
+======================================================================
+A DATA RACE: two+ threads access the SAME memory location, at least one is a
+WRITE, and they are NOT synchronized (no mutex, no atomic, no join/happens-
+before edge). The C++ standard makes this UNDEFINED BEHAVIOR (§4.2 rule 5).
+ASan/UBSan do NOT catch data races — ThreadSanitizer (-fsanitize=thread) does.
+This bundle keeps ALL sharing mutex/join-synchronized so even TSan is clean.
+
+    // WHAT NOT TO DO (compiled only with -DDEMO_RACE):
+    //   int counter = 0;
+    //   std::thread t1([&]{ for (int i=0;i<100000;++i) ++counter; });  // UB!
+    //   std::thread t2([&]{ for (int i=0;i<100000;++i) ++counter; });  // UB!
+    //   t1.join(); t2.join();  // counter < 200000 (lost updates) AND UB.
+    // Fix: std::mutex + lock_guard, OR std::atomic<int> (acquire/release).
+[check] the data-race-is-UB preview is documented (not executed): OK
+
+The SAFE version (mutex-protected increment): 4 threads * 1000 = 4000
+[check] mutex-protected increment is race-free: 4*1000 == 4000: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

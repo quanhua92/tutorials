@@ -1,0 +1,110 @@
+coroutines.cpp — Phase 4 bundle.
+C++20 stackless coroutines: co_await/co_yield/co_return + promise_type.
+Single-threaded, deterministic resume order; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — co_return + the promise_type (compiler-invoked controller)
+======================================================================
+A coroutine's return type must expose a nested `promise_type`.
+The compiler generates code that calls its members in a fixed order:
+  get_return_object() -> initial_suspend() -> <body> ->
+  return_value(v)/return_void() -> final_suspend()
+
+calling returns_seven() (initial_suspend == suspend_always -> LAZY)...
+  [after call, before resume] t.done() == 0  (body has NOT run)
+[check] lazy Task: body did NOT run during construction (done() still false): OK
+calling t.resume()...
+    [body of returns_seven] about to co_return 7
+  [after resume] t.done() == 1  (body ran to co_return)
+[check] after resume, coroutine reached final_suspend (done() == true): OK
+[check] co_return 7 delivered 7 via promise.return_value(int): OK
+  result captured in promise = 7
+
+======================================================================
+SECTION B — co_yield Generator + the coroutine FRAME (state persists)
+======================================================================
+count_up(5) yields 0..4 in resume order:
+  collected: 0 1 2 3 4 
+[check] count_up(5) yielded exactly 0 1 2 3 4: OK
+
+fibonacci(8) — locals a,b live in the FRAME across each yield:
+  collected: 0 1 1 2 3 5 8 13 
+[check] fibonacci(8) yielded 0 1 1 2 3 5 8 13 (frame kept a,b alive): OK
+[check] frame persists across yields: a,b were NOT reset between resumes: OK
+[check] Generator is now done() (suspended at final_suspend): OK
+
+======================================================================
+SECTION C — suspend_always/suspend_never + the awaiter protocol
+======================================================================
+initial_suspend controls LAZY vs EAGER start:
+  constructing eager_body() (initial_suspend == suspend_never)...
+    [eager_body ran DURING construction — before caller continues]
+  [after construction] e.ran() == 1  (body already ran: EAGER)
+[check] suspend_never initial_suspend: body ran DURING construction (eager): OK
+
+The awaiter protocol — await_ready short-circuits suspension:
+  demo 1: co_await ReadyAwaiter{42} (await_ready == true)
+  before resume: t1.done() == 0
+    [await_ready_demo body] co_await ReadyAwaiter{42}...
+    [await_ready_demo body] x = 42 (no suspension happened)
+[check] ReadyAwaiter (await_ready=true): one resume sufficed, no suspension: OK
+
+  demo 2: co_await SuspendingAwaiter{} (await_ready == false)
+    [await_suspending_demo body] co_await SuspendingAwaiter{}...
+  after first resume: t2.done() == 0  (suspended inside co_await)
+[check] SuspendingAwaiter: coroutine SUSPENDED at co_await after first resume: OK
+    [await_suspending_demo body] resumed! x = 99
+  after second resume: t2.done() == 1
+[check] SuspendingAwaiter: after second resume, await_resume() returned 99: OK
+
+======================================================================
+SECTION D — the LIFETIME trap (handle-outlives-frame = UB) + no runtime
+======================================================================
+std::coroutine_handle is a NON-OWNING pointer to the heap frame.
+The owning wrapper (Task/Generator) destroys the frame in its dtor.
+Safe pattern: ONE owner, frame destroyed exactly once (RAII).
+
+SAFE: Generator owns its frame; we resume within its lifetime.
+  sum of count_up(3) = 3
+[check] safe RAII: frame alive across all resumes, destroyed once at scope end: OK
+
+by-REF param is read (not copied) on each resume — safe if alive:
+  count_via_ref(cap=4) collected: 0 1 2 3 
+[check] count_via_ref(cap=4) yielded 0 1 2 3 (ref alive across resumes): OK
+
+TRAP (documented, not triggered): resuming a by-ref coroutine
+  after the referent's lifetime ends is a dangling reference (UB).
+[check] by-reference dangling trap documented (verified path does not trigger it): OK
+
+WHAT NOT TO DO (compiled only with -DDEMO_UB; running it is UB):
+  grab the raw handle, let the owner go out of scope, then resume()
+  the dangling handle — use-after-free on the frame.
+  (DEMO_UB not defined: the UB resume is correctly omitted from this build.)
+[check] lifetime trap documented; verified path never resumes a destroyed frame: OK
+
+C++20 ships the LANGUAGE (co_await/yield/return + promise_type
+machinery + <coroutine>); it does NOT ship a task type or scheduler.
+YOU write the Task/Generator (as this bundle does), or use a library:
+  - CppCoro (lewissbaker) — the de-facto pre-standard coroutine lib.
+  - C++23 std::generator — the standardized synchronous generator.
+  - C++23 std::execution (P2300) — the async sender/receiver runtime.
+[check] no-runtime fact documented (you/CppCoro/C++23 std::generator provide task+driver): OK
+
+======================================================================
+SECTION E — deterministic resume order (interleaved generators)
+======================================================================
+Two generators, resumed alternately in ONE thread -> fixed order:
+  interleave(a, b one step each, x3): 0 0 1 1 2 2 
+[check] interleaved resume order is a0 b0 a1 b1 a2 b2 (deterministic): OK
+[check] a still suspended at its last yield after 3 resumes (not yet done()): OK
+[check] after a 4th resume each, both generators reached final_suspend (done): OK
+
+The three coroutine keywords:
+  co_return expr;  -> promise.return_value(expr) / return_void(); ends coro
+  co_yield expr;   -> co_await promise.yield_value(expr); produces + suspends
+  co_await expr;   -> awaiter protocol (await_ready / await_suspend / await_resume)
+[check] three-keyword summary printed (co_return / co_yield / co_await): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

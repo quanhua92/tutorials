@@ -1,0 +1,75 @@
+mutex_lock_guard.cpp — Phase 4 bundle #24.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean; the racy
+increment is DEMO_UB-gated off the verified path).
+
+======================================================================
+SECTION A — std::mutex + std::lock_guard (RAII lock/unlock)
+======================================================================
+std::mutex: exclusive ownership. Manual m.lock()/m.unlock() is
+EXCEPTION-UNSAFE (a throw/early-return between them leaks the lock).
+Rule: NEVER call lock/unlock directly — wrap in an RAII guard.
+  inside { lock_guard<std::mutex> lk(m); } : mutex HELD (RAII acquire)
+[check] lock_guard constructed — mutex owned for the scope: OK
+  after scope exit: re-acquired via lock_guard lk2(m) — no deadlock,
+    so lk's dtor ran m.unlock(). lock_guard is non-copyable (= deleted).
+[check] lock_guard lk2 re-acquired after lk's scope (RAII unlock ran; no deadlock): OK
+  TRAP (documented, not executed): `lock_guard(mtx);` is a NAMED variable
+  `mtx`; `lock_guard{mtx};` is destroyed immediately. Always name the
+  guard: `std::lock_guard<std::mutex> lk(m);`.
+[check] guard variable `lk` is named (the unnamed forms are a silent bug): OK
+
+======================================================================
+SECTION B — data race (UB, documented) vs mutex-protected (exact count)
+======================================================================
+mutex-protected: 8 threads x 100000 iters = expected 800000
+  actual counter = 800000
+  threads reported (sorted): 0 1 2 3 4 5 6 7 (collect+sort+join for deterministic stdout)
+[check] mutex-protected counter == N*ITERS (no lost updates): OK
+[check] exactly N_THREADS workers reported (all joined): OK
+  (DEMO_UB not defined: the racy increment is correctly omitted from
+   this build — running it would be a data race = undefined behavior.)
+
+======================================================================
+SECTION C — std::scoped_lock (C++17): multi-mutex, deadlock-free
+======================================================================
+scoped_lock(ma, mb): 8 threads x 50000 transfers, mixed A<->B directions
+  balance_a=1000  balance_b=1000  total=2000 (initial total=2000)
+  (scoped_lock acquired BOTH mutexes per transfer; NO deadlock occurred)
+[check] scoped_lock multi-mutex: total balance conserved (no lost money): OK
+[check] scoped_lock completed all transfers without deadlock (program reached here): OK
+  DEADLOCK trap (documented, not run): thread X locks ma THEN mb,
+  thread Y locks mb THEN ma -> circular wait -> HANG. Fix: lock BOTH
+  mutexes in a GLOBAL order, OR use scoped_lock(ma, mb) (deadlock avoidance).
+[check] deadlock trap understood (opposite-order locking -> circular wait): OK
+
+======================================================================
+SECTION D — std::unique_lock (movable) + std::call_once (one-shot)
+======================================================================
+[check] unique_lock with defer_lock does not own the lock: OK
+[check] unique_lock owns the lock after .lock(): OK
+[check] moved-from unique_lock no longer owns the lock: OK
+[check] moved-to unique_lock in the vector still owns the lock: OK
+[check] mutex re-acquired after unique_lock vector cleared (RAII unlock ran): OK
+call_once across 8 threads: init ran 1 time(s) (exactly once)
+[check] call_once ran the init exactly once across N threads: OK
+
+======================================================================
+SECTION E — mutex vs std::atomic (atomic for simple counters)
+======================================================================
+std::atomic<int>: 8 threads x 100000 iters = expected 800000; actual = 800000
+[check] atomic counter == N*ITERS (data-race-free; no mutex needed): OK
+Rule of thumb: std::atomic<T> for a single shared word/counter;
+  std::mutex for a critical section (several shared variables, or an
+  invariant that must hold as a whole). A mutex is heavier — on heavy
+  contention the runtime may enter the kernel to park/wake the thread.
+[check] mutex-vs-atomic trade-off documented (atomic=counter; mutex=critical section): OK
+Cross-language: Go sync.Mutex + `defer Unlock` is per-FUNCTION RAII;
+  C++ lock_guard is per-SCOPE. Rust Mutex<T> returns a GUARD that IS a
+  borrow -> you access the data THROUGH the lock; C++ separates the lock
+  from the data it guards. TS is single-threaded -> no mutex (the event
+  loop + async patterns replace it).
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

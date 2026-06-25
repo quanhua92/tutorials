@@ -1,0 +1,119 @@
+atomics_memory_order.cpp — Phase 4 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean); data-race-free.
+
+======================================================================
+SECTION A — std::atomic: store/load/fetch_add; the exact counter
+======================================================================
+a.store(42); a.load() = 42
+a.exchange(7) -> returned old = 42; a.load() now = 7
+[check] store then load round-trips the value: OK
+[check] exchange returned the previous value (42): OK
+[check] exchange wrote the new value (a == 7): OK
+
+8 threads x 100000 fetch_add(1, relaxed) -> counter = 800000 (expected 800000)
+[check] fetch_add counter reached EXACTLY N*ITERS (no lost updates, no mutex): OK
+[check] no overflow / exact value: N*ITERS == 800000: OK
+
+======================================================================
+SECTION B — memory_order: relaxed / acquire-release / seq_cst
+======================================================================
+(1) relaxed: atomicity only, NO ordering. (Section A's counter
+    used relaxed and was still exact: atomicity != ordering.)
+    r.store(5, relaxed); r.load(relaxed) = 5
+[check] relaxed store/load still atomically round-trips the value: OK
+
+(2) acquire/release handoff (the happens-before edge):
+    producer: payload.a=42; payload.b=100; ready.store(RELEASE)
+    consumer: while(!ready.load(ACQUIRE)); read payload -> {42, 100}
+[check] acquire-load sees the release's prior writes: consumer_a == 42: OK
+[check] acquire-load sees the release's prior writes: consumer_b == 100: OK
+[check] the handoff outcome is deterministic (release/acquire guarantee it): OK
+
+(3) seq_cst (the DEFAULT): a single global total order.
+    a.store(x) with NO order arg == a.store(x, memory_order_seq_cst).
+    Strongest; small perf cost. The store-buffer litmus (both threads
+    read 0) is IMPOSSIBLE under seq_cst, POSSIBLE under relaxed — but a
+    single run can't deterministically show it, so we DOCUMENT it.
+    s.store(9); s.load() = 9  (both default-seq_cst)
+[check] seq_cst (default) store/load round-trips the value: OK
+
+======================================================================
+SECTION C — compare_exchange (CAS): success, fail, and the loop
+======================================================================
+(1) a=5; expected=5; desired=10; CAS_strong -> true/success (a=10, expected=5)
+[check] CAS success: returned true: OK
+[check] CAS success: a was set to desired (a == 10): OK
+[check] CAS success: expected UNCHANGED on success (expected == 5): OK
+(2) a=10; expected=5(stale); desired=20; CAS_strong -> false/fail (a=10, expected=10)
+[check] CAS fail: returned false: OK
+[check] CAS fail: a UNCHANGED (a == 10): OK
+[check] CAS fail: expected UPDATED to current value (5 -> 10): OK
+(3) CAS loop: m=1; f(x)=2x+1; one iteration -> m=3 (d was 3)
+[check] CAS loop computed f(1) = 2*1+1 = 3: OK
+[check] CAS loop: expected still equals the loaded value (1): OK
+
+(4) lock-free MAX via CAS loop, 8 threads -> max = 56 (expected 56)
+[check] lock-free CAS-loop max equals the global max (N_THREADS*7 == 56): OK
+
+======================================================================
+SECTION D — RMW family + is_lock_free + atomic_flag spinlock
+======================================================================
+(1) a=10; fetch_add(5)=10; fetch_sub(7)=15; exchange(100)=8; a=100
+[check] fetch_add returned previous (10): OK
+[check] fetch_sub returned previous (15): OK
+[check] exchange returned previous (8): OK
+[check] a is now 100 after the three RMWs: OK
+    bits=0b1100; fetch_and(0b1010)=12; fetch_or(0b0011)=8; fetch_xor(0b0011)=11; bits=8
+[check] fetch_and(0b1010) returned previous (12): OK
+[check] fetch_or(0b0011) returned previous (8): OK
+[check] fetch_xor(0b0011) returned previous (11): OK
+[check] bits is now 8 (0b1000): OK
+
+(2) std::atomic<int>.is_lock_free() = true
+    ATOMIC_INT_LOCK_FREE macro = 2  (0=never, 1=sometimes, 2=always)
+[check] ATOMIC_INT_LOCK_FREE == 2 (always lock-free on this platform): OK
+
+(3) atomic_flag: test_and_set()=false (was clear); test()=true; clear(); test()=false
+[check] atomic_flag.test_and_set() first returns false (it was clear): OK
+[check] after test_and_set, test() is true: OK
+[check] after clear(), test() is false: OK
+
+(4) atomic_flag spinlock: 8 threads x 50000 ++ -> plain_counter = 400000 (expected 400000)
+[check] atomic_flag spinlock: non-atomic counter reached EXACTLY N*ITERS (race-free): OK
+
+======================================================================
+SECTION E — data-race-on-a-non-atomic IS UB (documented; DEMO_UB-gated)
+======================================================================
+THE RULE: a NON-atomic variable read+written by 2+ threads with NO
+synchronization is UNDEFINED BEHAVIOR — even if atomics are used
+elsewhere. (Atomics make the ATOMIC accesses well-defined; they do
+nothing for a neighboring plain variable without a happens-before edge.)
+
+CORRECT (this bundle, verified): make the shared state ATOMIC
+  (fetch_add counter, Section A) or protect a plain variable with a
+  lock/handoff (atomic_flag spinlock, Section D; acquire/release
+  handoff, Section B). Each establishes the happens-before edge that
+  makes the access race-free.
+
+WRONG (NEVER in the verified path — gated behind -DDEMO_UB):
+  long bad = 0;
+  // thread A: bad++;   thread B: print(bad);   // <-- DATA RACE -> UB
+Reading/writing `bad` from two threads with no synchronization is a
+data race -> UB. ThreadSanitizer (TSan, -fsanitize=thread) reports it;
+ASan/UBSan catch different classes and may miss a plain race. Worse,
+the compiler is entitled to ASSUME no race and may delete or
+miscompile surrounding code.
+
+(DEMO_UB not defined: the UB race is correctly omitted from this build.)
+[check] the verified path contains NO data race (all shared state atomic or locked): OK
+
+CROSS-LANGUAGE: this is THE memory model. Rust `std::atomic` +
+`Ordering::{Relaxed,Acquire,Release,AcqRel,SeqCst}` is IDENTICAL
+(Rust makes you state the Ordering per-op; C++ defaults to seq_cst).
+Go `sync/atomic` (Load/Store/Add/CompareAndSwap/atomic.Pointer) and
+TS `Atomics` (on a SharedArrayBuffer) are the same model.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

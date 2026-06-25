@@ -1,0 +1,106 @@
+condition_variables.cpp — Phase 4 bundle #26 (Concurrency & the Memory Model).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free AND race-free (just sanitize clean;
+TSan-clean too — the predicate + queue are mutex-protected, wait under unique_lock).
+
+======================================================================
+SECTION A — wait(unique_lock, predicate) + notify_one / notify_all
+======================================================================
+cv.wait(unique_lock, pred): atomically unlock + block; on a notify or
+spurious wake, re-lock + re-check pred; loop until pred()==true.
+notify_one wakes ONE waiter; notify_all wakes ALL waiters.
+
+(1) one waiter: cv.wait(lk, []{return ready;}) + notify_one
+    waiter woke: ready=true, data=42 (predicate true on return)
+[check] the woken waiter observed ready==true: OK
+[check] the woken waiter saw the producer's payload data==42 (under the re-lock): OK
+[check] wait() returned with the mutex RE-LOCKED (predicate read under the lock): OK
+
+(2) notify_all wakes MULTIPLE waiters (NW=3); hand-shake so all are
+    blocked before notify_all, then assert every one woke.
+    notify_all fired with all 3 waiters blocked; woke=3
+[check] notify_all woke every waiter (woke == NW): OK
+[check] no waiter lost or duplicated (exactly NW woke): OK
+
+======================================================================
+SECTION B — Spurious wakeups + the PREDICATE form (always use it)
+======================================================================
+A bare cv.wait(lk) can return WITHOUT a real notify (a spurious wakeup)
+or on a notify that fired while the predicate was still false. The fix is
+MANDATORY: use the predicate form  cv.wait(lk, pred)  ==  while(!pred()) wait(lk);
+it re-checks pred under the lock on every wake and returns only when true.
+
+A 'false notify' (notify while predicate still false) is absorbed by the
+predicate form: the waiter re-checks and loops back until i==1.
+    waiter proceeded only after i==1: saw_i=1, finished=true
+[check] predicate form: waiter proceeded only when the predicate (i==1) was true: OK
+[check] a 'false notify' (predicate false) did NOT let the waiter proceed early: OK
+
+THE BARE-WAIT TRAP (documented, NOT run):  cv.wait(lk);   // no predicate
+  returns on a spurious wake OR a notify-while-predicate-false, with the
+  predicate NOT guaranteed true -> proceeds incorrectly (the bug). Fix:
+  cv.wait(lk, []{return cond;});  // or hand-roll  while(!cond) cv.wait(lk);
+[check] the bare-wait (no predicate) trap is documented (not executed): OK
+
+======================================================================
+SECTION C — Producer / consumer queue: mutex + queue + condvar
+======================================================================
+Producer pushes N items (notify_one each), then sets done + notify_all.
+Consumers wait on predicate (!q.empty() || done), then pop. The predicate
+form absorbs the 'woken-but-queue-already-emptied' race -> no lost/double.
+producer pushed N=100 items across 4 consumers
+  total consumed = 100 (expected 100)
+  sum of consumed = 5050 (expected 5050)
+  sorted consumed set is exactly {1..100}: true
+  (per-consumer distribution VARIES across runs -> not printed; TOTAL asserted)
+[check] producer/consumer: N produced == N consumed (no lost, no duplicate): OK
+[check] sum of consumed == N(N+1)/2 (no lost, no duplicate, no corruption): OK
+[check] sorted consumed set == {1..N} exactly (each value consumed once): OK
+[check] queue drained: q.empty() after all consumers joined: OK
+
+======================================================================
+SECTION D — unique_lock requirement + lost-wakeup fix + wait_for
+======================================================================
+(1) wait() REQUIRES std::unique_lock<std::mutex> (NOT lock_guard):
+    it unlocks while blocked and re-locks on wake — only unique_lock can.
+    cv works ONLY with unique_lock<mutex> (condition_variable_any for others).
+    // WHAT NOT TO DO (a compile error, documented):
+    //   std::lock_guard<std::mutex> lk(m);  cv.wait(lk, ...);  // won't compile
+[check] the unique_lock requirement is documented (wait needs it; lock_guard won't compile): OK
+
+(2) lost-wakeup / predicate-fix: notify_all fires BEFORE any waiter;
+    bare wait would deadlock (notify lost). Predicate form checks rd on
+    entry -> already true -> returns immediately (no deadlock).
+    waiter returned without blocking (predicate-fix): true
+[check] lost-wakeup: predicate form did NOT deadlock (notify-before-wait handled): OK
+[check] lost-wakeup: predicate true on entry -> wait returned immediately: OK
+
+(3) wait_for (timeout variants). Never notified -> cv_status::timeout;
+    predicate overload returns bool. Outcome asserted, NOT wall-clock.
+    wait_for(50ms) with no notify -> cv_status::timeout: true
+[check] wait_for with no notify returns cv_status::timeout: OK
+    wait_for(50ms, pred=false) -> returns false: true
+[check] wait_for with a never-true predicate returns false (within the timeout): OK
+
+======================================================================
+SECTION E — When NOT to reach for a condvar (cross-language)
+======================================================================
+A condvar is C++'s LOW-LEVEL sync primitive. Before writing one, check
+whether a higher-level stdlib tool fits:
+  - std::counting_semaphore / binary_semaphore (C++20): counted permits,
+    no hand-rolled predicate. Often the right tool for 'N slots'.
+  - std::latch (C++20): one-shot countdown; std::barrier (C++20): reusable.
+  - coroutines (co_await, C++20): async/await over a single thread.
+  - and, idiomatic since C++11: std::future/promise for a one-shot result.
+[check] higher-level stdlib alternatives documented (semaphore/latch/barrier/future): OK
+
+Cross-language contrast (the headline):
+  C++   : mutex + queue + condition_variable (manual, low-level).
+  Go    : a typed CHANNEL replaces all three (close, range, select).
+  Rust  : std::sync::Mutex + Condvar — same low-level model as C++.
+  TS/JS : no condvar — single-threaded event loop + Promises/async.
+[check] cross-language parallels documented (Go channels; Rust Condvar; TS async): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

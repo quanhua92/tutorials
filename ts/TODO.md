@@ -28,13 +28,31 @@
 | 1 | Language Foundations | core | 8 | ✅ done (8/8, 460 checks) |
 | 2 | Type System & Generics | core | 8 | ✅ done (8/8, 318 checks) |
 | 3 | Memory & Object Semantics | core | 6 | ✅ done (6/6, 240 checks) |
-| 4 | Concurrency & the Event Loop | core | 7 | ⬜ pending |
+| 4 | Concurrency & the Event Loop | core | 7 | ◑ in progress (2/7: event_loop + promises, 45 checks) |
 | 5 | Standard Library Essentials | core | 7 | ⬜ pending |
 | 6 | Serialization, Validation & Metaprogramming | metaprog | 5 | ⬜ pending |
 | 7 | Async Runtime, HTTP & Realtime | web | 5 | ⬜ pending |
 | 8 | Web, DB & Production | web + db | 6 | ⬜ pending |
 | — | Companion walkthroughs | hono/drizzle/ioredis | 22 | ⬜ pending |
-| | **Total** | | **52 + 22** | **16/52 built** |
+| | **Total** | | **52 + 22** | **24/52 built** |
+
+> ### 🔖 RESUME POINT (coordinator handoff)
+> **State:** Phases 1–3 ✅ done (committed `c8e7661`→`d4fa0c4`); Phase 4 ◑ — `event_loop`
+> + `promises` done (commit `74ecd34`). Working tree clean. `pnpm exec tsc --noEmit -p
+> core/tsconfig.json` exits 0; `just sweep` green.
+> **Next batch (launch 4 parallel subagents):** `async_await`, `timers_io`,
+> `concurrency_patterns`, `worker_threads` (all `core/`). Then `shared_memory_atomics`
+> to finish Phase 4, then Phase 5 (7), 6 (5, add `metaprog/` + zod), 7 (5, add `web/`),
+> 8 (6, add `web/`+hono, `db/`+drizzle), then the 22 walkthroughs (hono/drizzle/ioredis),
+> then `ts/index.html` dashboard + root `TS →` pill.
+> **How to build (unchanged):** read `HOW_TO_RESEARCH.md` + `SUBAGENTS_GUIDE.md`; copy
+> the style anchor `core/values_types_coercion.ts` + `VALUES_TYPES_COERCION.md`; each
+> bundle = `core/<stem>.ts` + `core/<stem>_output.txt` + **`<STEM>.md` at the ts/ ROOT**
+> (NOT in core/). Verify: isolated `tsc` (the long strict command), `just out` twice for
+> byte-identical determinism, mirror every `[check]` in the `.md`. The prior session's
+> detailed per-bundle briefs are reconstructable from each Phase-4 list item below + the
+> `SUBAGENTS_GUIDE.md` §2 worker-prompt template.
+
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3's
 value/reference leans on Phase 1's primitives; Phase 4's event loop leans on
@@ -141,10 +159,10 @@ ahead.
 > **Cross-language:** THE cross-compare — Go goroutines ⟷ Rust threads+async ⟷
 > Python GIL+asyncio ⟷ JS event loop.
 
-- [ ] **23. `event_loop`** — the call stack, task (macrotask) queue, microtask
+- [x] **23. `event_loop`** — the call stack, task (macrotask) queue, microtask
   queue, `queueMicrotask`, why `Promise.then` runs before `setTimeout`, the
   Node.js (libuv) vs browser loop, starvation.
-- [ ] **24. `promises`** — Promise states (pending/fulfilled/rejected),
+- [x] **24. `promises`** — Promise states (pending/fulfilled/rejected),
   `.then`/`.catch`/`.finally`, chaining, `Promise.all`/`race`/`allSettled`/`any`,
   unhandled rejections.
 - [ ] **25. `async_await`** — `async`/`await`, desugar to promises, top-level

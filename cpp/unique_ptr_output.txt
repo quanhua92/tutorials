@@ -1,0 +1,142 @@
+unique_ptr.cpp — Phase 3 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — make_unique + exclusive ownership + RAII dtor
+======================================================================
+make_unique<Tracked>(42) created ONE owner:
+    p->value           = 42   (*p dereferences the owned object)
+    (*p).value         = 42   (equivalent dot form)
+    p.get() == nullptr = false   (.get() borrows the raw ptr; no transfer)
+    bool(p)            = true   (operator bool: owns an object)
+    sizeof(p)          = 8 bytes (= sizeof(T*); zero overhead)
+[check] make_unique produced a non-null owner: OK
+[check] operator bool is true for a non-empty unique_ptr: OK
+[check] *p / p-> access the owned object (value == 42): OK
+[check] Tracked ctor ran exactly once for this make_unique: OK
+[check] Tracked dtor has NOT run yet (owner still alive in scope): OK
+[check] exactly one Tracked is now live (exclusive ownership: ONE owner): OK
+
+After the inner scope closed (p destroyed):
+    Tracked dtor ran exactly once at scope exit (RAII)
+    Tracked::ctor_calls delta = 1
+    Tracked::dtor_calls delta = 1
+    Tracked::live delta       = 0   (back to where we started)
+[check] RAII: dtor ran exactly once when the unique_ptr left scope: OK
+[check] RAII: no net live objects left (no leak): OK
+[check] ctor and dtor call counts balance (1 each, no double-delete): OK
+
+======================================================================
+SECTION B — MOVE-ONLY (copy is a compile error; move transfers)
+======================================================================
+(1) Compile-time traits (the copy ban is enforced by the type system):
+    is_copy_constructible<unique_ptr<T>> = false   (copy ctor is DELETED)
+    is_move_constructible<unique_ptr<T>> = true   (move ctor is fine)
+[check] unique_ptr is NOT copy-constructible (copy is a compile error): OK
+[check] unique_ptr IS move-constructible: OK
+
+(2) std::move TRANSFERS ownership (source becomes empty):
+    before move: src.get() != nullptr = true
+    after  move: src.get() == nullptr = true   (source is now EMPTY)
+    after  move: bool(src)            = false   (operator bool false)
+    after  move: dst->value           = 100   (destination owns it)
+    after  move: dst.get() == raw     = true   (SAME address; no copy made)
+    ctor/dtor deltas across the move  = 0 / 0   (ZERO — move is free)
+[check] after move, the source is empty (.get() == nullptr): OK
+[check] after move, operator bool on the source is false: OK
+[check] after move, the destination owns the object (value == 100): OK
+[check] move did NOT copy: destination holds the SAME address: OK
+[check] move did NOT construct or destroy the Tracked (no ctor/dtor delta): OK
+
+======================================================================
+SECTION C — .get/.reset/.release + custom deleters
+======================================================================
+(1) reset(new Tracked(2)):
+    p->value = 2   (old object deleted, new one owned)
+    Tracked dtor delta across reset = 1   (the old(1) was deleted)
+[check] reset replaced the owned object (value now 2): OK
+[check] reset deleted the previous object (dtor ran once): OK
+    p.reset() (no arg): p.get() == nullptr = true   (emptied, dtor ran again)
+[check] reset() with no argument empties the unique_ptr: OK
+
+(2) release():
+    q.get() == nullptr = true   (q released ownership)
+    raw->value = 3   (caller now owns `raw`; must delete it)
+[check] release emptied the unique_ptr: OK
+[check] release handed back a valid raw pointer (value == 3): OK
+    caller deleted `raw`: Tracked dtor delta = 1   (no leak)
+[check] the released pointer was manually deleted (no leak): OK
+
+(3) Custom deleter (unique_ptr<T, Deleter>):
+    sizeof(unique_ptr<T, default_delete>)     = 8 bytes (== raw ptr)
+    sizeof(unique_ptr<T, CountingDeleter>)    = 8 bytes (stateless fn-obj: EBO -> free)
+    sizeof(unique_ptr<T, void(*)(T*)>)        = 16 bytes (fn-ptr deleter: +1 ptr)
+[check] a stateless function-object deleter adds ZERO bytes over the raw pointer: OK
+[check] a function-pointer deleter makes the unique_ptr larger than a raw pointer: OK
+    inside scope: cp->value = 7, custom_deleter_calls = 0
+[check] custom-deleter unique_ptr owns the object: OK
+[check] custom deleter has NOT run yet (still in scope): OK
+    after scope:  custom_deleter_calls = 1   (OUR fn ran at exit)
+[check] custom deleter ran exactly once at scope exit: OK
+    fn-ptr-deleter unique_ptr: fp->value = 9
+[check] function-pointer-deleter unique_ptr owns the object: OK
+    after scope: Tracked dtor delta via fp_deleter = 1
+[check] the function-pointer deleter ran (dtor fired once via the hook): OK
+
+======================================================================
+SECTION D — containers of unique_ptr + Derived->Base move
+======================================================================
+(1) vector<unique_ptr<Tracked>> (move-only elements):
+    v.size() = 3
+    v[0]->value = 10, v[1]->value = 20, v[2]->value = 30
+    source p after move into vector: p.get() == nullptr = true
+[check] vector holds 3 unique_ptr elements: OK
+[check] the moved-from source is empty after push_back(std::move(p)): OK
+[check] the vector now owns the moved object (same address): OK
+    sum of all owned values = 60
+[check] range-for over the vector reads each owned object: OK
+    after v.clear(): Tracked dtor delta = 3   (all 3 freed)
+[check] clearing the vector deleted all 3 owned objects (RAII through the container): OK
+
+(2) Polymorphism (vector<unique_ptr<Base>>):
+    zoo.size() = 2
+    animal->legs() = 8   (virtual dispatch through Base*)
+    animal->legs() = 6   (virtual dispatch through Base*)
+    total legs = 14
+[check] zoo holds 2 polymorphic animals: OK
+[check] virtual dispatch works through unique_ptr<Base> (8 + 6 == 14): OK
+
+(3) unique_ptr<Derived> -> unique_ptr<Base> move conversion:
+    source sp.get() == nullptr = true
+    target ap->legs() = 8
+[check] Derived->Base move emptied the source: OK
+[check] the Base unique_ptr now owns the Derived object (legs == 8): OK
+
+======================================================================
+SECTION E — unique vs shared + zero overhead + cross-language
+======================================================================
+(1) Size: unique_ptr is zero-overhead vs a raw pointer:
+    sizeof(Tracked*)                  = 8
+    sizeof(unique_ptr<Tracked>)       = 8   (== raw ptr; default deleter)
+    sizeof(shared_ptr<Tracked>)       = 16   (2 ptrs: object + control block)
+[check] default-deleter unique_ptr is the same size as a raw pointer: OK
+[check] shared_ptr is strictly larger than unique_ptr (control-block pointer): OK
+
+(2) Prefer unique by default (one-way upgrade to shared):
+    unique->shared move: sp->value = 5, sp.use_count() = 1
+    source up after move: up.get() == nullptr = true
+    Tracked ctor delta across the upgrade = 0   (NO new object; same one)
+[check] unique_ptr moves INTO shared_ptr (ownership transferred): OK
+[check] after the upgrade the source unique_ptr is empty: OK
+[check] the upgrade did NOT construct a new Tracked (same object, new owner type): OK
+
+(3) make_unique exception-safety (documented; not executed):
+    f(unique_ptr<T>(new T), may_throw());  // CAN leak (unsequenced news)
+    f(make_unique<T>(),     may_throw());  // SAFE  (one bundled op)
+    => always prefer make_unique over `unique_ptr<T>(new T)`.
+[check] make_unique is the exception-safe factory (documented, not run): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

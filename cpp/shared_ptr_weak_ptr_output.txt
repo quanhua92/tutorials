@@ -1,0 +1,168 @@
+shared_ptr_weak_ptr.cpp — Phase 3 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free & leak-free (just sanitize clean).
+
+======================================================================
+SECTION A — make_shared, shared ownership, use_count, dtor-at-zero
+======================================================================
+(1) make_shared<Traced>("A", 42) — born with use_count == 1
+    [ctor] Traced("A", 42)   live=1
+    sp.use_count() = 1
+[check] make_shared produced use_count == 1: OK
+[check] exactly one Traced is alive after make_shared: OK
+[check] dereference: sp->value == 42: OK
+[check] sp.get() != nullptr: OK
+
+(2) COPY a shared_ptr: auto sp2 = sp  -> use_count == 2 (both)
+    sp.use_count() = 2   sp2.use_count() = 2 (same control block)
+[check] after copy, sp.use_count() == 2: OK
+[check] after copy, sp2.use_count() == 2 (same control block): OK
+[check] sp.get() == sp2.get() (they alias the SAME object): OK
+[check] still exactly one Traced alive (a copy, not a second object): OK
+
+(3) Pass BY VALUE into a function: bumps to 3 inside, back to 2 after
+    use_count inside use_count_inside(sp) = 3
+[check] use_count == 3 while the by-value parameter is alive: OK
+[check] back to use_count == 2 after the parameter died: OK
+
+(4) Reset one owner: sp2.reset()  -> use_count back to 1
+    sp.use_count() = 1
+[check] after sp2.reset(), sp.use_count() == 1: OK
+[check] object still alive (the last owner has NOT died yet): OK
+
+(5) Reset the LAST owner: sp.reset()  -> use_count 0 -> DTOR runs
+    [dtor] ~Traced("A")       live=0
+    sp.use_count() = 0   Traced::live = 0
+[check] after last owner reset, sp.use_count() == 0: OK
+[check] dtor-at-zero: the Traced object was destroyed (live == 0): OK
+[check] sp is now empty (operator bool == false): OK
+
+======================================================================
+SECTION B — the control block; make_shared (1) vs shared_ptr(new T) (2)
+======================================================================
+Measuring heap allocations via a counting global operator new.
+    [ctor] Traced("MS", 1)   live=1
+    [dtor] ~Traced("MS")       live=0
+    make_shared<Traced>("MS", 1)  -> allocations = 1
+[check] make_shared uses exactly 1 heap allocation: OK
+    [ctor] Traced("NEW", 2)   live=1
+    [dtor] ~Traced("NEW")       live=0
+    shared_ptr<Traced>(new Traced("NEW", 2)) -> allocations = 2
+[check] shared_ptr(new T) uses 2 heap allocations (object + control block): OK
+[check] make_shared (1) < shared_ptr(new T) (2): OK
+
+The control block holds: strong count, weak count, deleter, allocator.
+make_shared fuses the object INTO the control block (1 alloc, 1 cache
+line). Caveat: the object's memory is freed only when BOTH counts hit 0,
+so a large object + a lingering weak_ptr can delay its memory release.
+[check] make_shared is the preferred factory for shared ownership: OK
+
+When the last shared_ptr dies, the object dies even if a weak remains:
+    [ctor] Traced("CB", 3)   live=1
+    inside scope: Traced::live=1  wp.expired()=0  wp.use_count()=1
+[check] while shared alive: weak is not expired: OK
+[check] weak does not bump the strong count (use_count == 1): OK
+    [dtor] ~Traced("CB")       live=0
+    after scope: Traced::live=0  wp.expired()=1 (object dead, CB alive)
+[check] after last shared dies, the OBJECT is destroyed (live == 0): OK
+[check] after last shared dies, weak is EXPIRED: OK
+
+======================================================================
+SECTION C — weak_ptr: non-owning observer, .lock(), .expired()
+======================================================================
+(1) A weak_ptr observes a shared_ptr WITHOUT bumping the strong count
+    [ctor] Traced("W", 99)   live=1
+    sp.use_count() = 1   wp.expired() = 0   wp.use_count() = 1
+[check] weak_ptr did NOT bump the strong count (sp.use_count == 1): OK
+[check] weak_ptr is not expired while a shared owns it: OK
+[check] weak_ptr's use_count() reflects the strong count (1): OK
+
+(2) .lock() -> a shared_ptr (or nullptr if the object already died)
+    locked.get() != nullptr   *locked->value = 99   sp.use_count() = 2
+[check] wp.lock() returned a non-null shared_ptr (object was alive): OK
+[check] after lock, sp.use_count() == 2 (sp + locked): OK
+[check] locked aliases the same object: OK
+
+(3) Release the shared_ptrs -> object dies -> weak EXPIRES
+    [dtor] ~Traced("W")       live=0
+    wp.expired() = 1   wp.use_count() = 0
+[check] after all shared_ptrs die, weak is EXPIRED: OK
+[check] expired weak's use_count() == 0: OK
+
+(4) .lock() on an EXPIRED weak_ptr returns an EMPTY shared_ptr
+    locked2.get() == nullptr   (bool)locked2 = 0
+[check] locking an expired weak_ptr yields an empty (null) shared_ptr: OK
+[check] weak_ptr cannot keep the object alive (it died despite wp existing): OK
+
+======================================================================
+SECTION D — the cycle-leak trap, the weak_ptr fix, enable_shared_from_this
+======================================================================
+(D1) THE CYCLE: A.next = shared(B); B.next = shared(A)
+    [ctor] Node('A') live=1
+    [ctor] Node('B') live=2
+    a.use_count()=2  b.use_count()=2  (each held by the other)
+[check] cycle: a.use_count() == 2 (local + b->next): OK
+[check] cycle: b.use_count() == 2 (local + a->next): OK
+[check] both Nodes are alive (live == 2): OK
+    (breaking the cycle explicitly so this path does not leak)
+    after break: a.use_count()=1  b.use_count()=1
+[check] after breaking the cycle, a.use_count() == 1: OK
+[check] after breaking the cycle, b.use_count() == 1: OK
+    [dtor] ~Node('B') live=1
+    [dtor] ~Node('A') live=0
+[check] after the cycle was broken, both Nodes destructed (live == 0): OK
+
+(D2) THE FIX: parent owns child (shared); child->parent is WEAK
+    [ctor] Parent live=1
+    [ctor] Child live=1
+    p.use_count()=1  child.use_count()=1  child->parent.expired()=0
+[check] weak child->parent did NOT bump parent's strong count (use_count == 1): OK
+[check] parent owns child (child.use_count == 1): OK
+[check] child can still OBSERVE the parent (not expired): OK
+[check] both Parent and Child alive (live == 1 each): OK
+    [dtor] ~Parent live=0
+    [dtor] ~Child live=0
+[check] the weak_ptr fix destructed cleanly: Parent::live == 0: OK
+[check] the weak_ptr fix destructed cleanly: Child::live == 0: OK
+
+(D3) enable_shared_from_this::shared_from_this() reuses the control block
+    [ctor] Widget(7) live=1
+    sp.use_count()=2  self.get()==sp.get(): 1  wself.expired()=0
+[check] shared_from_this() returned a shared_ptr to the SAME object: OK
+[check] shared_from_this() bumped use_count to 2 (reused control block): OK
+[check] weak_from_this() is not expired: OK
+    [dtor] ~Widget live=0
+[check] enable_shared_from_this path destructed cleanly (live == 0): OK
+
+======================================================================
+SECTION E — copyable shared_ptr; atomic refcount; unique-by-default
+======================================================================
+(1) shared_ptr is COPYABLE — copy ctor & copy assign both share ownership
+    [ctor] Traced("S", 5)   live=1
+    s1.use_count()=4  s2.use_count()=4  (4 owners, 1 object)
+[check] 4 shared_ptr owners -> use_count == 4: OK
+[check] one object, four owners (live == 1): OK
+[check] after 3 reset, use_count back to 1: OK
+
+(2) unique_ptr is MOVE-ONLY (the opposite end of the spectrum)
+    after std::move: u1 == nullptr, *u2 = 7
+[check] after move, the source unique_ptr is empty (u1 == nullptr): OK
+[check] the destination unique_ptr owns the value (*u2 == 7): OK
+[check] unique_ptr is move-only — it has NO copy constructor: OK
+
+(3) Atomic refcount: thread-safe COUNT, NOT thread-safe OBJECT
+    - The strong/weak counts are mutated atomically (fetch_add-style).
+    - Different threads MAY copy/destroy DIFFERENT shared_ptrs that share
+      ownership, with NO extra synchronization.
+    - Different threads mutating the SAME shared_ptr object -> DATA RACE
+      (use std::atomic<std::shared_ptr<T>>, C++20, for that).
+    - Concurrent access to the POINTED-TO object is STILL a data race
+      unless you synchronize it (mutex / atomic fields).
+[check] refcount operations are atomic (thread-safe counts): OK
+[check] the pointed-to object is NOT made thread-safe by sharing it: OK
+    [dtor] ~Traced("S")       live=0
+[check] end of section E: Traced destructed (live == 0): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,186 @@
+move_semantics.cpp — Phase 3 bundle (Memory, Ownership & Move — the heart).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — Value categories: lvalue / prvalue / xvalue + rvalue ref T&&
+======================================================================
+expression              decltype((expr))   category
+-----------------------  ----------------   --------
+42                        int               prvalue
+x                         int&              lvalue 
+lref  (int& lref = x)     int&              lvalue 
+rref  (int&& rref = ...)  int&              lvalue 
+std::move(x)              int&&             xvalue 
+x + 1                     int               prvalue
+[check] 42 is a prvalue (a temporary literal): OK
+[check] x (a named variable) is an lvalue: OK
+[check] a NAMED rvalue reference is an LVALUE (the #1 gotcha): OK
+[check] std::move(x) is an xvalue (an expiring value): OK
+[check] x + 1 (arithmetic) is a prvalue: OK
+
+rvalue reference T&& binding rules:
+    int&& r = 10;             // OK: prvalue binds to T&&
+    int&& r = std::move(x);   // OK: xvalue binds to T&&
+    const int& r = 10;        // OK: const T& also binds to rvalues
+    // int&& r = x;           // ERROR: lvalue does NOT bind to T&&
+[check] int&& binds to a prvalue (10): OK
+[check] int&& binds to an xvalue (std::move(x) refers to x): OK
+[check] const int& binds to an rvalue (lifetime-extended): OK
+
+=> When both T&& and const T& overloads exist, an rvalue selects T&&.
+   This is how std::move ENABLES the move: it casts to T&& so the move
+   ctor/assign is selected. std::move itself does NOT move anything.
+
+======================================================================
+SECTION B — std::move IS A CAST (not a move) + move ctor steals O(1)
+======================================================================
+(1) std::move is a CAST — the object is unchanged immediately after:
+    int n = 42;  int&& alias = std::move(n);
+    &alias == &n      = true   (same object — std::move created no copy)
+    n (unchanged)     = 42   (std::move did NOT move anything)
+[check] std::move is a cast: alias refers to the SAME object as n: OK
+[check] std::move did NOT change n (it's just a cast): n == 42: OK
+[check] std::move is noexcept (a cast cannot throw): OK
+
+(2) The MOVE happens at the assignment (auto u = std::move(t)):
+    Tracked t(100);  auto u = std::move(t);
+    move_ctor delta = 1, copy_ctor delta = 0
+    u.value = 100   (destination owns the value)
+[check] the move ctor ran exactly once (auto u = std::move(t)): OK
+[check] the move ctor was selected, NOT the copy ctor (copy delta == 0): OK
+[check] the destination received the value (u.value == 100): OK
+[check] the moved-FROM Tracked is still USABLE: reassigned to 200: OK
+    moved-from t reassigned to Tracked(200): t.value = 200 (valid state)
+
+(3) Copy vs move — copy bumps copy_ctor, move bumps move_ctor:
+    Tracked cpy = orig;            -> copy_ctor delta = 1
+    Tracked mov = std::move(orig); -> move_ctor delta  = 1
+[check] copying an lvalue bumps copy_ctor (exactly 1): OK
+[check] moving an xvalue bumps move_ctor (exactly 1): OK
+[check] the copy received the value (cpy.value == 7): OK
+[check] the move received the value (mov.value == 7): OK
+[check] moved-from orig is still valid (reassigned cleanly): OK
+
+(4) Moved-FROM state: valid-but-unspecified (never read the value):
+    before move: v.size() = 3
+    after  move: v.size() = 0  (valid query; standard doesn't pin the value)
+                 w.size() = 3  (destination received the data)
+    v reassigned: v.size() = 1, v[0] = "fresh"  (valid state, reusable)
+[check] moved-from vector is still a VALID object (queryable: .size() ran): OK
+[check] moved-from vector is REUSABLE: reassigned and holds the fresh value: OK
+[check] the destination received the original data (w.size() == 3, w[0] == alpha): OK
+
+    RULE: after std::move(x), x is valid-but-unspecified. You may:
+      - destroy it (its dtor runs cleanly)
+      - assign to it (x = fresh_value)
+      - call queries with NO preconditions (.size(), .empty())
+    You must NOT read its VALUE (it could be anything). Don't: x[0], x.back()
+    (those have a precondition !empty() — UB if the moved-from object is empty).
+
+======================================================================
+SECTION C — RVO/NRVO: return-by-value is FREE (zero copies, zero moves)
+======================================================================
+(1) Prvalue return — C++17 GUARANTEED copy elision (zero copy, zero move):
+    Tracked make_prvalue(int v) { return Tracked(v); }
+    auto a = make_prvalue(11);
+    -> value_ctor delta = 1, copy_ctor delta = 0, move_ctor delta = 0
+    a.value = 11  (constructed in place — no copy, no move)
+[check] prvalue return: exactly ONE value_ctor (the Tracked(v) ran once): OK
+[check] prvalue return: ZERO copies (guaranteed C++17 copy elision): OK
+[check] prvalue return: ZERO moves (the prvalue was constructed in place): OK
+
+(2) NRVO — Named Return Value Optimization (applied at -O2):
+    Tracked make_named_nrvo(int v) { Tracked t(v); return t; }
+    auto b = make_named_nrvo(22);
+    -> value_ctor delta = 1, copy_ctor delta = 0, move_ctor delta = 0
+    b.value = 22  (NRVO: t was constructed directly in b)
+[check] NRVO return: exactly ONE value_ctor (the Tracked t(v) ran once): OK
+[check] NRVO return: ZERO copies (NRVO applied): OK
+[check] NRVO return: ZERO moves (NRVO applied): OK
+
+(3) Contrast — no elision possible (pass-by-value into a sink):
+    void sink_by_value(Tracked param);  // takes by value
+    Tracked src(33);
+    sink_by_value(src);            // lvalue  -> COPY ctor
+      copy_ctor delta = 1
+[check] lvalue argument -> COPY ctor (exactly 1): OK
+    sink_by_value(std::move(src)); // xvalue  -> MOVE ctor
+      move_ctor delta = 1
+[check] xvalue argument (std::move) -> MOVE ctor (exactly 1): OK
+[check] value_ctor count is stable across the sink calls (just Tracked src(33)): OK
+
+=> Return by value is FREE (RVO/NRVO). The compiler constructs the object
+   directly in the caller's storage — no copy, no move, not even a move ctor
+   call. You NEVER need to return a pointer or reference to avoid a copy.
+   (NRVO is optional per the standard but applied by clang/gcc at -O2.)
+
+======================================================================
+SECTION D — noexcept move (vector realloc) + perfect forwarding
+======================================================================
+(1) vector reallocation: MOVE iff move ctor is noexcept, else COPY:
+    MoveNoThrow: is_nothrow_move_constructible = true
+    MoveThrows:  is_nothrow_move_constructible = false
+
+    MoveNoThrow (noexcept move) — 3rd push_back (triggers realloc):
+      copies delta = 0  (ZERO — vector MOVED the 2 existing elements)
+      moves  delta = 3  (2 relocated + 1 new element moved in)
+[check] noexcept move: vector reallocated via MOVE (copies delta == 0): OK
+[check] noexcept move: vector used moves for relocation (moves delta >= 2): OK
+
+    MoveThrows (throwing move) — 3rd push_back (triggers realloc):
+      copies delta = 2  (vector COPIED the 2 existing elements)
+      moves  delta = 1  (only the 1 new element was moved in)
+[check] throwing move: vector reallocated via COPY (copies delta == 2): OK
+[check] throwing move: only the new element was moved (moves delta == 1): OK
+
+    => Mark your move ctor/assign `noexcept` — or vector will COPY on realloc.
+       (This is the #1 perf surprise: a missing noexcept can turn O(N) moves
+        into O(N) deep copies.)
+
+(2) Perfect forwarding (preview): T&& in a template + std::forward:
+    int val = 5;
+    relay(val);              // lvalue  -> T = int&  -> forward -> lvalue
+    relay(T&&): T deduced as T&  (lvalue) -> forward -> lvalue  (copy path)
+    relay(std::move(val));   // xvalue  -> T = int   -> forward -> rvalue
+    relay(T&&): T deduced as T   (rvalue) -> forward -> rvalue  (move path)
+    relay(42);               // prvalue -> T = int   -> forward -> rvalue
+    relay(T&&): T deduced as T   (rvalue) -> forward -> rvalue  (move path)
+[check] std::move(val) is an xvalue (forwarded as rvalue by std::forward): OK
+[check] val was NOT moved (relay only inspected the category): val == 5: OK
+
+======================================================================
+SECTION E — Perf payoff: move vector<string> is O(1), copy is O(N*size)
+======================================================================
+std::vector<std::string> of N=100 strings, each 1000 chars (= 100000 total chars):
+
+(1) COPY (vector<string> = original):
+    copied[0].data() == original[0].data() = false   (DIFFERENT buffers — deep copy)
+[check] copy deep-copied the strings (different data() address): OK
+[check] copy left the source intact (original.size() still == N): OK
+[check] copy duplicated all N strings (copied.size() == N): OK
+
+(2) MOVE (vector<string> = std::move(original)):
+    sizeof(vector<string>) = 24 bytes (3 pointers: begin/end/cap)
+    moved[0].data() == original's original data() = true   (SAME buffer — stolen)
+    &moved[0] == original's original &          = true   (same storage — stolen)
+[check] move stole the SAME buffer (data() address unchanged — zero char copies): OK
+[check] move stole the vector storage (same first-string address): OK
+[check] move preserved all N strings (moved.size() == N): OK
+    original.size() after move = 0  (valid query; value unspecified — don't assert)
+[check] moved-from original is a valid object (.size() ran without precondition breach): OK
+[check] moved-from original is reusable (reassigned cleanly): OK
+
+    => Copying vector<string> of 100 strings x 1000 chars = 100000 char copies.
+       Moving  vector<string> of 100 strings x 1000 chars = 0 char copies (O(1) steal).
+
+(3) Cross-language headline (Rust vs C++ move):
+    C++ move  = RUNTIME ownership transfer. Moved-from = valid-but-unspecified.
+                You CAN keep using the moved-from object (dangerously).
+    Rust move = COMPILE-TIME ownership transfer. Moved-from = INVALID.
+                The compiler REJECTS any use of the moved-from binding.
+    Same idea (cheap ownership transfer); C++ trusts you, Rust enforces.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

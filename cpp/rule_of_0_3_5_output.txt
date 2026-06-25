@@ -1,0 +1,247 @@
+rule_of_0_3_5.cpp — Phase 3 bundle #22.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — The 5 special members & implicit-declaration rules
+======================================================================
+A class has up to FIVE SPECIAL MEMBER FUNCTIONS the compiler
+can generate for you:
+
+  1. destructor           ~T()                  / ~T() = default
+  2. copy constructor     T(const T&)           / T(const T&) = default
+  3. copy assignment      T& operator=(const T&)/ ... = default
+  4. move constructor     T(T&&)  [C++11]       / T(T&&) = default
+  5. move assignment      T& operator=(T&&)     / ... = default
+
+(default constructor is also 'special' but is NOT part of the 0/3/5 rules.)
+
+The implicit-declaration matrix (what the compiler AUTO-generates,
+given what YOU wrote). 'Y'=implicitly defaulted; '-'=NOT generated;
+'!'=generated but DEPRECATED (P0641, removed the deprecation in C++17
+for the copy-pair-after-dtor case).
+
+  You write...                     | dtor | copy ctor | copy assign | move ctor | move assign
+  ---------------------------------+------+-----------+-------------+-----------+------------
+  (nothing)                        |  Y   |    Y      |     Y       |    Y      |     Y
+  destructor                       | user |    Y(!)   |     Y(!)    |    -      |     -
+  copy ctor                        |  Y   |   user    |     Y(!)    |    -      |     -
+  copy assign                      |  Y   |    Y(!)   |    user     |    -      |     -
+  move ctor                        |  Y   |    -      |     -       |   user    |     -
+  move assign                      |  Y   |    -      |     -       |    -      |    user
+
+The single most important row for experts: writing ANY of {dtor, copy ctor,
+copy assign} SUPPRESSES both implicit move ops. That is the gotcha that turns
+an O(1) move into an O(n) copy without a single warning (see Section D).
+
+Compile-time check of the matrix on the classes defined in this file:
+  RuleOfZero  (wrote none):           copy+move all generated.
+[check] RuleOfZero is copy-constructible (compiler-generated): OK
+[check] RuleOfZero is move-constructible (compiler-generated): OK
+[check] RuleOfZero is copy-assignable (compiler-generated): OK
+[check] RuleOfZero is move-assignable (compiler-generated): OK
+  RuleOfThree (dtor+copy pair):       copy present, MOVE absent.
+[check] RuleOfThree is copy-constructible (user-declared): OK
+[check] RuleOfThree is move-constructible (falls back to copy, so still 'true'): OK
+  RuleOfFive  (all five user-written): all five present.
+[check] RuleOfFive is copy-constructible (user-declared): OK
+[check] RuleOfFive is move-constructible (user-declared): OK
+  MoveOnly    (copy=delete, move=user): move-only, like unique_ptr.
+[check] MoveOnly is NOT copy-constructible (= delete): OK
+[check] MoveOnly IS move-constructible (user-declared): OK
+[check] MoveOnly is NOT copy-assignable (= delete): OK
+[check] MoveOnly IS move-assignable (user-declared): OK
+
+======================================================================
+SECTION B — Rule of 0: write none; RAII members do the right thing
+======================================================================
+RULE OF 0 (the modern preference, C++ Core Guidelines C.20):
+  write NONE of the five. Give your class RAII members (std::string,
+  std::vector, std::unique_ptr, ...). The compiler-generated defaults
+  member-wise copy/move/destroy those members, which is correct because
+  each member manages its OWN resource. No raw pointer -> no leak,
+  no double-free, no shallow copy. The Rule of 0 class below has a
+  std::string + a Tracked member; we OBSERVE the defaults delegating.
+
+(1) Construct one RuleOfZero a("alpha", 11):
+    [ops:after ctor a ] allocs=0 frees=0  copies=0 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] RuleOfZero ctor did not copy/move the member (direct-init): OK
+
+(2) RuleOfZero b = a;  (COPY -> compiler delegates to members)
+    [ops:after copy b=a] allocs=0 frees=0  copies=1 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] copy of RuleOfZero ran exactly ONE member copy (the Tracked): OK
+[check] deep copy: b has its own name 'alpha' independent of a: OK
+[check] deep copy: b has its own value 11 independent of a: OK
+
+(3) RuleOfZero c = std::move(a);  (MOVE -> compiler delegates)
+    [ops:after move c=std::move(a)] allocs=0 frees=0  copies=0 copy_assigns=0  moves=1 move_assigns=0  dtors=0
+[check] move of RuleOfZero ran exactly ONE member move (the Tracked), zero copies: OK
+[check] move transferred the payload to c (c.value == 11): OK
+[check] move left a in a valid-but-unspecified state (we do NOT assert a.value): OK
+
+(4) b = c;  (COPY ASSIGN -> compiler delegates)
+    [ops:after b=c    ] allocs=0 frees=0  copies=0 copy_assigns=1  moves=0 move_assigns=0  dtors=0
+[check] copy-assign of RuleOfZero ran one member copy-assign (the Tracked): OK
+
+(5) b = std::move(c);  (MOVE ASSIGN -> compiler delegates)
+    [ops:after b=std::move(c)] allocs=0 frees=0  copies=0 copy_assigns=0  moves=0 move_assigns=1  dtors=0
+[check] move-assign of RuleOfZero ran one member move-assign (the Tracked): OK
+
+(6) scope ends -> 3 RuleOfZero objects destroyed (a, b, c)
+    [ops:after scope  ] allocs=0 frees=0  copies=0 copy_assigns=0  moves=0 move_assigns=1  dtors=3
+[check] 3 RuleOfZero destructors ran (compiler-generated ~RuleOfZero delegates): OK
+
+======================================================================
+SECTION C — Rule of 3: dtor + copy pair, DEEP copy (shallow = double-free)
+======================================================================
+RULE OF 3 (the pre-C++11 discipline, still required for raw resources):
+  if you write ANY of {destructor, copy ctor, copy assign}, write ALL
+  THREE. You are managing a resource whose handle is a non-class type
+  (raw pointer, FILE*, fd, ...). The compiler's implicit copies would
+  SHALLOW-copy the handle -> two objects point at the same resource ->
+  BOTH destructors release it -> DOUBLE-FREE (UB). The copy ctor must
+  DEEP-copy: allocate a NEW buffer and copy the contents.
+
+(1) RuleOfThree a("hello");  -> one allocation
+    [ops:after ctor a ] allocs=1 frees=0  copies=0 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] RuleOfThree ctor allocated exactly once: OK
+
+(2) RuleOfThree b = a;  (DEEP copy -> a SECOND allocation)
+    [ops:after copy b=a] allocs=1 frees=0  copies=1 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] the copy ctor made a SECOND, independent allocation (deep copy): OK
+[check] both a and b hold 'hello' (same contents, different buffers): OK
+
+(3) RuleOfThree c("world"); c = a;  (DEEP copy assign)
+    [ops:after c=a    ] allocs=1 frees=1  copies=0 copy_assigns=1  moves=0 move_assigns=0  dtors=0
+[check] copy-assign freed c's old 'world' buffer (1 free) and allocated a new one (1 alloc): OK
+[check] after assign, c holds 'hello' (deep-copied from a): OK
+[check] after assign, a is still 'hello' (deep copy did not steal): OK
+
+(4) scope ends -> 3 destructors, 3 frees (one per object; deep copy
+    guaranteed every buf_ was UNIQUE, so every delete[] is well-formed)
+    [ops:after scope  ] allocs=0 frees=3  copies=0 copy_assigns=0  moves=0 move_assigns=0  dtors=3
+[check] Rule of 3: 3 destructors freed exactly 3 buffers (no double-free): OK
+
+── THE TRAP: what the COMPILER-GENERATED copy would do ──────────────
+If RuleOfThree had ONLY the destructor (no copy pair), the compiler's
+implicit copy ctor would member-wise copy the char* buf_ — i.e. copy the
+POINTER, not the buffer. Two objects would share one buffer:
+  a.buf_ == b.buf_   (same address, two owners)
+When both a and b are destroyed, ~RuleOfThree calls delete[] on that SAME
+address TWICE -> DOUBLE-FREE -> undefined behavior (heap corruption,
+crash, or silent memory corruption that ASan catches as
+'heap-use-after-free' on the second delete). The #ifdef DEMO_UB block
+below contains exactly that broken class; it is NEVER compiled by
+`just run` / `just out` / `just check` / `just sanitize`, so the default
+and sanitizer builds stay UB-free.
+[check] the verified path does NOT run the shallow-copy double-free (DEMO_UB gated): OK
+    (DEMO_UB not defined: the double-free demo is correctly omitted.)
+
+======================================================================
+SECTION D — Rule of 5: + move pair (steal O(1)); copy suppresses move
+======================================================================
+RULE OF 5 (C++11): extend the Rule of 3 with the MOVE pair. Writing any
+of {dtor, copy ctor, copy assign} SUPPRESSES the implicit move ctor/assign,
+so if you want move semantics (and you do — moves are O(1) where copies
+are O(n)) you must declare all FIVE. The move ops STEAL the resource
+(pointer-copy + null the source) instead of deep-copying.
+
+(1) RuleOfThree b = std::move(a);  (NO move ctor -> falls back to COPY)
+    [ops:after std::move] allocs=1 frees=0  copies=1 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] RuleOfThree 'move' actually COPIED (copies==1, moves==0) — the gotcha: OK
+[check] the fallback copy ALLOCATED a new buffer (allocs==1) — O(n), not O(1): OK
+[check] despite std::move, a still holds 'grid' (the copy ctor read it): OK
+[check] b holds 'grid' too (the copy succeeded): OK
+
+(2) RuleOfFive b = std::move(a);  (MOVE ctor -> STEAL, O(1))
+    [ops:after std::move] allocs=0 frees=0  copies=0 copy_assigns=0  moves=1 move_assigns=0  dtors=0
+[check] RuleOfFive move did NOT copy (copies==0): OK
+[check] RuleOfFive move ran the move ctor (moves==1): OK
+[check] the move did NOT allocate (allocs==0) — O(1), stole the buffer: OK
+[check] after the steal, b holds 'grid': OK
+[check] after the steal, a is empty (the source was nulled): OK
+
+(3) RuleOfFive c("temp"); c = std::move(b);  (MOVE assign -> STEAL)
+    [ops:after move-assign] allocs=0 frees=1  copies=0 copy_assigns=0  moves=0 move_assigns=1  dtors=0
+[check] move-assign freed c's old 'temp' buffer (frees==1): OK
+[check] move-assign stole b's buffer (moves==0, move_assigns==1, allocs==0): OK
+[check] after the steal, c holds 'grid': OK
+[check] after the steal, b is empty: OK
+
+(4) CopyOnly (only a user copy ctor) dst = std::move(src);
+    -> std::move is just a cast; with no move ctor, the COPY ctor runs.
+    [ops:after std::move on CopyOnly] allocs=0 frees=0  copies=1 copy_assigns=0  moves=0 move_assigns=0  dtors=0
+[check] CopyOnly 'move' actually COPIED (copies==1, moves==0): OK
+[check] dst.payload == 99 (the copy ran): OK
+
+── = default / = delete ────────────────────────────────────────────
+  = default  -> "compiler, generate this for me" (use when the implicit
+                version IS correct but you need to re-state it, e.g. after
+                declaring a virtual ~ which suppresses the move pair).
+  = delete   -> "forbid this" (a hard compile error if anyone calls it).
+                The canonical use: copy ops = delete makes a move-only type
+                (the unique_ptr idiom).
+
+(5) MoveOnly a(7); MoveOnly b = std::move(a);  (move-only, copy = delete)
+    [ops:after move   ] allocs=1 frees=0  copies=0 copy_assigns=0  moves=1 move_assigns=0  dtors=0
+[check] MoveOnly move ctor ran (moves==1), no copy possible: OK
+[check] after the steal, *b.data == 7: OK
+[check] after the steal, a.data is nullptr: OK
+
+(6) MoveOnly c(0); c = std::move(b);  (move assign)
+    [ops:after move-assign] allocs=0 frees=1  copies=0 copy_assigns=0  moves=0 move_assigns=1  dtors=0
+[check] MoveOnly move-assign freed c's old int (frees==1) and stole b's (move_assigns==1): OK
+[check] after the steal, *c.data == 7: OK
+
+    (the copy ctor `MoveOnly bad = a;` and copy assign `c = a;` are
+     HARD COMPILE ERRORS because those ops are = delete — documented
+     here, not executed; a file containing them would not build.)
+[check] MoveOnly copy ops are = delete (compile-time guarantee, verified via traits): OK
+
+======================================================================
+SECTION E — Virtual ~Base for polymorphic bases + cross-language
+======================================================================
+POLYMORPHIC BASE CLASSES need a VIRTUAL destructor (C++ Core Guidelines
+C.35): if you `delete` a Derived through a Base*, the ~Base must be virtual
+so the call dispatches to ~Derived first (then ~Base). A non-virtual ~Base
+makes that `delete` UNDEFINED BEHAVIOR: ~Derived is skipped, and any
+resources Derived owns LEAK. (The deep UB dive lives in the UNDEFINED_
+BEHAVIOR bundle, Phase 7; this is the rule-of-5 preview.)
+
+Catch: a user-declared destructor (even `virtual ~Base() = default;`)
+SUPPRESSES the implicit move pair — so a polymorphic base that wants move
+semantics must =default all five (C.21: define or =delete them all). And
+because copying a polymorphic base SLICES off the derived part, the Core
+Guidelines (C.67) say a polymorphic class should usually =delete copy/move.
+
+(1) PolyBase* p = new PolyDerived(42);  (virtual ~Base = default)
+    delete p;  -> SAFE: ~PolyDerived ran first (virtual dispatch), no leak.
+[check] polymorphic delete through Base* with virtual ~ is well-formed (ran, returned): OK
+
+(2) The UB case is documented, NOT executed:
+    class BadBase { public: ~BadBase() = default; };   // NON-virtual ~
+    BadBase* p = new BadDerived;  delete p;            // UB: ~Derived skipped
+[check] verified path does NOT run the non-virtual-~ delete (UB; documented only): OK
+
+── CROSS-LANGUAGE: the 5 special members in 5 languages ─────────────
+  C++     (this): FIVE user-writable special members; the compiler can
+          implicitly generate any of them; getting it wrong = UB (double-
+          free, leak, shallow copy). The 0/3/5 discipline exists ONLY here.
+  Rust:   NO copy constructors at all. Copying is opt-in via #[derive(Copy,Clone)]
+          (and only for types that are bit-trivially-copyable); otherwise
+          you must call .clone() EXPLICITLY. There is no user move ctor — a
+          move is a bitwise copy of the bytes + a static borrow-check that the
+          source is dead. Drop (= the destructor) can be #[derive]'d or hand-
+          written. The WHOLE bug class C++ still has via raw resources is
+          impossible in Rust by construction.
+  Go:     value-copy semantics (the whole struct is copied byte-for-byte) + a
+          garbage collector. No user copy ctors; no destructors at all.
+  TS/JS:  GC'd; objects are reference-typed; assignment aliases. No special
+          members; no RAII; cleanup is finalizers (unreliable) or explicit.
+  Python: GC'd + refcounted; __del__ is a finalizer (unreliable timing);
+          copy.deepcopy is explicit; no move semantics.
+[check] cross-language table printed (C++ is the only one with the 0/3/5 problem): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

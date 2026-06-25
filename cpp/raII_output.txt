@@ -1,0 +1,93 @@
+raII.cpp — Phase 3 bundle (RAII: Resource Acquisition Is Initialization).
+Every value below is computed by this file. Compiled -std=c++23 -O2
+-Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — acquire in ctor, release in dtor (dtor runs at scope exit)
+======================================================================
+before scope: g.live=0  file_opens=0  file_closes=0
+[check] before scope: no live RAII owners: OK
+  inside scope: f.is_open()=true  g.live=1  opens=1  closes=0
+[check] ctor acquired the resource: f.is_open(): OK
+[check] resource availability is a class invariant: g.live == 1: OK
+[check] ctor counted exactly one open (and zero closes): OK
+after scope:  g.live=0  file_opens=1  file_closes=1  (dtor ran at })
+[check] dtor released at scope exit: g.live back to 0: OK
+[check] dtor counted exactly one close (symmetric with the open): OK
+
+======================================================================
+SECTION B — exception safety: dtor runs on throw (unwinding) + early return
+======================================================================
+(1) early return: the dtor still runs at the return
+  early_return_demo: f open, returning now (dtor still runs)
+[check] early-return cleanup: opens +1 AND closes +1 (no leak): OK
+(2) throw between acquire and release: dtor runs during unwinding
+  throwing_demo: f acquired, about to throw
+  caught: kaboom (f's dtor already ran during unwinding)
+[check] the exception was caught: OK
+[check] no leak on throw: opens +1 AND closes +1 (dtor ran during unwinding): OK
+[check] after throw+catch: g.live back to 0: OK
+
+======================================================================
+SECTION C — RAII for resources: Lock (lock_guard), File, Memory (unique_ptr preview)
+======================================================================
+(1) Lock wrapper (the std::lock_guard pattern):
+[check] mutex starts unlocked: OK
+  inside { Lock lk(m); }: m.is_locked()=true  locks=1  unlocks=0
+[check] Lock acquired in ctor: mutex is locked: OK
+[check] lock counted exactly one lock (and zero unlocks so far): OK
+  after scope: m.is_locked()=false  locks=1  unlocks=1
+[check] Lock released at scope exit: mutex unlocked: OK
+[check] lock/unlock symmetric: locks == unlocks == 1: OK
+[check] File wrapper owns its handle: f.is_open(): OK
+(3) Memory wrapper (new in ctor, delete in dtor = unique_ptr preview):
+  OwnedInt box(42): box.value()=42  box.owns()=true  allocs=1  frees=0
+[check] OwnedInt acquired (new) in ctor: box.value() == 42: OK
+[check] OwnedInt owns its heap allocation: box.owns(): OK
+[check] heap counted exactly one alloc (and zero frees so far): OK
+  after scope: allocs=1  frees=1  (delete ran in dtor)
+[check] OwnedInt released (delete) at scope exit: allocs == frees == 1: OK
+[check] after Section C: g.live back to 0 (File f + OwnedInt both released): OK
+
+======================================================================
+SECTION D — acquire-in-ctor-or-throw + RAII+move (moved-from dtor is safe)
+======================================================================
+  (1) ctor threw: BadConnection: negative id -> object never constructed, no resource leaked
+[check] ctor throw was caught: OK
+[check] throwing ctor leaked NOTHING (opens unchanged): no half-built object: OK
+  (2) Session ctor body threw: Session: init failed -> File member's dtor unwound
+[check] Session ctor throw was caught: OK
+[check] RAII member unwound on ctor throw: opens +1 AND closes +1 (no leak): OK
+  (3) move: b.value()=7  a.owns()=false  (allocs=2, move added no alloc)
+[check] move transferred the resource: b.value() == 7: OK
+[check] moved-from a no longer owns: a.owns() == false: OK
+[check] move did NOT allocate (pointer stolen, not copied): allocs == before + 1: OK
+[check] after move scope: allocs == frees (b freed; a's moved-from dtor was a safe no-op): OK
+
+======================================================================
+SECTION E — RAII vs GC vs manual vs Go defer (the cross-language view)
+======================================================================
+model                          deterministic leak-free     per-object?
+------------------------------ ------------- ------------- ----------
+C++ RAII (this bundle)         yes           yes           yes       
+C++ new/delete (manual)        yes           NO            yes       
+Rust Drop (compile-enforced)   yes           yes           yes       
+Go defer                       yes           yes           NO        
+TS / Python (GC)               NO            NO            NO        
+[check] C++ RAII is deterministic (cleanup timing is known): OK
+[check] C++ RAII is leak-free by construction: OK
+[check] C++ RAII is per-object (bound to the object, not the scope line): OK
+[check] manual new/delete is NOT leak-free (you can forget delete): OK
+[check] Go defer is scope-exit, NOT per-object: OK
+[check] GC (TS/Python) is neither deterministic nor leak-free-by-construction: OK
+
+THE headline: RAII is C++'s answer to a GC. You KNOW when cleanup runs
+(deterministic: at scope exit / during unwinding), leaks are impossible by
+construction (the dtor ALWAYS runs), and it is per-object (each owner cleans
+its own resource). Rust's Drop is the closest sibling — but the compiler
+FORCES it; C++ trusts you to write the dtor.
+[check] GLOBAL: no resource leaked across the whole program (g.live == 0): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

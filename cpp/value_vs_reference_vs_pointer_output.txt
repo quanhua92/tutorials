@@ -1,0 +1,123 @@
+value_vs_reference_vs_pointer.cpp — Phase 3 bundle.
+The full pass/return decision matrix: value / & / const& / * / &&. Compiled
+-std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — By VALUE (a copy): mutation invisible; safe to return
+======================================================================
+A by-VALUE parameter is an INDEPENDENT COPY of the argument. Mutating it
+NEVER reaches the caller — the whole point for cheap types, ownership, and
+thread-safe local state. The cost: each by-value pass runs the copy ctor.
+
+int original = 10;  mutate(original) -> 999;  original still 10 (copy mutated)
+[check] by-value: mutating the param left the caller's original at 10: OK
+Tracker::copies after by_value(t)   = 1  (copy ctor ran once)
+[check] by_value invoked the copy constructor exactly once (copies == 1): OK
+
+a lambda returns Tracker(7) BY VALUE; caller receives value = 7 (no dangle)
+[check] return-by-value gives the caller a safe, owning copy (value == 7): OK
+
+sizeof(int)=4  sizeof(void*)=8  sizeof(Tracker)=4  sizeof(Large)=64
+[check] int and pointer are 'cheap': sizeof <= 2 words: OK
+[check] Large is 'expensive' to copy: sizeof(Large) == 64: OK
+
+======================================================================
+SECTION B — T& (in-out mutate) + const T& (cheap read-only, binds temps)
+======================================================================
+A non-const T& is an ALIAS the callee mutates THROUGH (an out-parameter). A
+const T& is a cheap READ-ONLY alias: NO copy, and it can bind a TEMPORARY
+(binding a const T& to a temporary EXTENDS the temporary's lifetime).
+
+Tracker t(42);  by_lvalue_ref_mut(t) -> 142;  t.value now 142; copies = 0
+[check] non-const T& mutated the caller's object THROUGH the alias (t.value == 142): OK
+[check] non-const T& performed ZERO copies (it is an alias): OK
+
+Large big (sizeof 64 bytes) read via const Large& -> header = 5 (NO 64-byte copy)
+[check] const T& read a large object with no copy (header == 5): OK
+
+const std::string& bound = std::string("temp-literal");  -> "temp-literal" (len 12)
+[check] const T& binds a temporary AND extends its lifetime (bound intact): OK
+[check] the lifetime-extended temporary is readable (length == 12): OK
+
+Tracker::copies after by_ref(tt) = 0  (const T& is an alias, no copy)
+[check] const T& on an lvalue performed ZERO copies: OK
+
+======================================================================
+SECTION C — T*/const T* (nullable, reseatable) + T&& (rvalue-ref sink)
+======================================================================
+A POINTER expresses what a reference cannot: NULLABLE ("maybe no object") and
+RESEATABLE (point it at a different object). An rvalue reference T&& expresses
+"I will take ownership / move from this" — the move-semantics sink (preview).
+
+maybe_find(true,...)  -> non-null (value 100)
+maybe_find(false,...) -> nullptr
+[check] T* is nullable: a 'miss' is represented by nullptr: OK
+[check] caller MUST check: a hit yields a readable object (value == 100): OK
+
+Tracker* cursor = &pool_a; cursor->value = 100; cursor = &pool_b; cursor->value = 200
+[check] pointer is reseatable: same variable, two referents (100 then 200): OK
+
+by_rvalue_ref(Tracker(55))         copies = 0 (binds a temporary, no copy)
+by_rvalue_ref(std::move(src))       copies = 0 (std::move -> rvalue, no copy)
+[check] T&& binds a temporary rvalue with ZERO copies: OK
+[check] std::move(lvalue) is an rvalue: T&& binds it with ZERO copies: OK
+
+======================================================================
+SECTION D — SLICING + lifetime-extension boundaries + dangling-return UB
+======================================================================
+Three silent traps that turn a wrong choice into a bug: SLICING (a Derived
+passed by-value to a Base loses the Derived part); lifetime extension that
+does NOT survive storing into a container/member; and RETURNING a reference
+to a local/temp (dangling — UB, documented, never executed here).
+
+Derived obj; describe_by_value(obj) -> "Base" (SLICED: dynamic type is Base)
+                  describe_by_ref(obj) -> "Derived" (no slicing: dynamic type is Derived)
+[check] SLICING: Derived passed by-value to Base loses its dynamic type (== "Base"): OK
+[check] const Base& AVOIDS slicing: virtual dispatch sees Derived (== "Derived"): OK
+sizeof(Base) = 24, sizeof(Derived) = 32 (the Derived-only field `d` is 8 bytes)
+[check] Derived is strictly larger than Base (it adds the `d` field): OK
+
+(Lifetime extension applies to LOCAL const T& only. Storing a const T& into
+ a container/member from a temporary DANGLS — read is UB; documented, not run.)
+const std::string& view bound to an owning local: "alive" (safe — local outlives ref)
+[check] a reference to a long-lived local is safe to read (== "alive"): OK
+
+return_by_value(21) -> 42   (returning a VALUE is always safe: no alias to a local)
+[check] return-by-value is dangling-free (== 42): OK
+second_of(p) returns a const int& to p.b (caller-owned lifetime) -> 99
+[check] returning a member ref of a caller-owned object is safe (== 99): OK
+
+(DANGLING-RETURN: `const T& f(){ int x=5; return x; }` is UB to read. The
+ verified path returns by value or a member-ref of caller-owned storage only.)
+[check] verified path never returns a ref to a local/temp (dangling UB): OK
+
+======================================================================
+SECTION E — The F-call decision matrix (Core Guidelines F.15-F.21)
+======================================================================
+The C++ Core Guidelines (F.call: F.15-F.21) collapse the whole bundle into one
+decision per PARAMETER and per RETURN, keyed on INTENT (in / in-out / sink /
+forward / out). Pick the intent, get the signature:
+
+  intent   | signature        | when / why
+  ---------|------------------|--------------------------------------------
+  in       | T  (by value)    | cheap-to-copy (int, ptr, small POD); or you
+           |                  | WANT a local copy / ownership (F.16)
+  in       | const T&         | read-only pass of a LARGE/expensive object;
+           |                  | binds temporaries via lifetime extension (F.16)
+  in-out   | T&               | the callee MUTATES the caller's object (F.17)
+  sink/own | T&& (+ std::move)| take/move ownership of the argument (F.18);
+           | unique_ptr       | the full story is MOVE_SEMANTICS
+  nullable | T* / const T*    | "maybe no object" (nullptr) OR reseatable;
+           |                  | caller MUST check for null (F.7/F.22)
+  out      | return T (value) | ONE result — always safe (no dangle) (F.20)
+  out-many | return struct/   | several results — prefer a struct/tuple over
+           | tuple            | multiple out-params (F.21)
+
+pipeline(5, io, big, true) -> 8; io.value now 45; Tracker copies = 0
+[check] F-call matrix: cheap `in` passed by value; large `in` by const T& (no Tracker copy): OK
+[check] F-call matrix: in-out via T& mutated the caller's object (io.value == 45): OK
+[check] F-call matrix: out via return-by-value is safe (result == 5+2+1): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

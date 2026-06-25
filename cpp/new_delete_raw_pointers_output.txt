@@ -1,0 +1,152 @@
+new_delete_raw_pointers.cpp — Phase 3 bundle #17.
+Every value below is computed by this file. Compiled -std=c++23 -O2
+-Wall -Wextra -Wpedantic; UB-free (just sanitize clean — every `new`
+matched by a `delete`; leak/double-delete/UAF traps are DEMO_UB-gated).
+
+======================================================================
+SECTION A — new (heap-alloc + ctor) and delete (dtor + free); the 1:1 match
+======================================================================
+1) SCALAR: `new int(42)` -> int*   (heap-alloc + initialize)
+   *p = 42
+[check] new int(42) returned a non-null pointer whose object == 42: OK
+   delete p;   (int is trivial: NO dtor runs, then the storage is freed)
+[check] after delete the raw pointer was nulled out (dangling-prevention hygiene): OK
+
+2) CLASS TYPE: `new Traced(7)` -> the ctor runs DURING new
+    [ctor] Traced(7)         (live now = 1)
+   t->value = 7
+[check] new Traced(7) constructed an object with value == 7: OK
+[check] exactly ONE Traced instance is live after `new Traced(7)`: OK
+   delete t;   (the dtor runs FIRST, then the storage is freed)
+    [dtor] ~Traced() value=7  (live now = 0)
+[check] after delete the Traced instance count returned to 0 (no leak): OK
+
+3) THE 1:1 MATCH RULE — every `new` needs EXACTLY ONE matching `delete`:
+     new T      <->  delete p;      (non-array form)
+     new T[n]   <->  delete[] p;    (array form — Section B)
+   0 new + 1 delete, or 1 new + 2 deletes => UNDEFINED BEHAVIOR (Section D).
+[check] the 1:1 match rule: new/delete and new[]/delete[] pair by form: OK
+
+======================================================================
+SECTION B — new[]/delete[] (array form); a form MISMATCH is UB
+======================================================================
+1) `new int[5]{10,20,30,40,50}` -> int* (points at the FIRST element)
+   arr[0] = 10
+   arr[1] = 20
+   arr[2] = 30
+   arr[3] = 40
+   arr[4] = 50
+   sum(arr) = 150
+[check] new int[5]{...} initialized all 5 elements: OK
+[check] array contents sum to 150: OK
+
+   delete[] arr;   (frees the WHOLE array — must NOT be `delete arr;`)
+[check] array form matched: new[] freed with delete[]: OK
+
+2) CLASS ARRAY: `new Traced[3]` -> 3 default ctors run DURING new[]
+    [ctor] Traced()           (live now = 1)
+    [ctor] Traced()           (live now = 2)
+    [ctor] Traced()           (live now = 3)
+[check] new Traced[3] ran 3 ctors (live instances == 3): OK
+
+   delete[] objs;  -> 3 dtors run in REVERSE construction order (3,2,1)
+    [dtor] ~Traced() value=3  (live now = 2)
+    [dtor] ~Traced() value=2  (live now = 1)
+    [dtor] ~Traced() value=1  (live now = 0)
+[check] delete[] destroyed all 3 array elements (live back to 0): OK
+
+3) THE FORM-MISMATCH TRAP — UB (gated behind DEMO_UB; never verified):
+   `delete  p;`  on a `new T[n]` pointer  => UB (1 dtor, wrong free size)
+   `delete[] p;` on a `new T`   pointer   => UB (reads a bogus array cookie)
+[check] new/delete AND new[]/delete[] must be paired BY FORM (mismatch == UB): OK
+   (DEMO_UB not defined: the mismatch UB is correctly omitted from this build.)
+
+======================================================================
+SECTION C — the LEAK trap: a `new` with no matching `delete`
+======================================================================
+THE TRAP — any early exit between `new` and `delete` LEAKS:
+     // BAD (leaks on the early return):
+     //   Traced* p = new Traced(99);
+     //   if (some_condition) return;   // <-- LEAK: p never deleted
+     //   delete p;
+
+THE RAII FIX (P3 #18, unique_ptr): the smart pointer's DESTRUCTOR runs at
+scope exit — on EVERY path — and that dtor calls `delete`. Leak = impossible.
+     // GOOD (unique_ptr OWNS it; its dtor deletes):
+    [ctor] Traced(99)         (live now = 1)
+   up->value = 99   (owned by the unique_ptr)
+[check] unique_ptr owns a live Traced(99): OK
+    [dtor] ~Traced() value=99  (live now = 0)
+[check] after the inner scope closed, the unique_ptr auto-deleted (live == 0, no leak): OK
+
+RAII generalizes: std::shared_ptr, std::vector, std::string, std::lock_guard,
+std::fstream... ALL tie resource release to scope exit. See raii (P3 #16).
+
+(DEMO_UB not defined: the deliberate leak is correctly omitted from this build.)
+
+======================================================================
+SECTION D — DOUBLE-DELETE / USE-AFTER-FREE / DANGLING: all UB (gated)
+======================================================================
+After `delete p;` the object's lifetime has ENDED; the storage is freed.
+The pointer VALUE still sits in `p`, but it now DENOTES NOTHING — a DANGLING
+pointer. Three classic UB traps follow from this:
+
+   TRAP 1 — DOUBLE-DELETE:   delete p; delete p;        => UB
+   TRAP 2 — USE-AFTER-FREE:  delete p; *p; / p->f();    => UB
+   TRAP 3 — DANGLING read:   delete p; int x = *p;      => UB
+
+THE VERIFIED (safe) SHAPE: new, use, delete, then NULL OUT the pointer so it
+cannot be accidentally double-deleted or dereferenced:
+   int* q = new int(55);   -> *q = 55
+[check] q points at a live int == 55: OK
+[check] after delete, q was nulled out (no dangling pointer left): OK
+
+THE RAII FIX: a unique_ptr CANNOT be double-deleted (its dtor runs once,
+at scope exit) and CANNOT be used after free (the object is alive for the
+whole lifetime of the unique_ptr). The bug class is designed away.
+
+(DEMO_UB not defined: the double-delete / UAF / dangling UB is omitted.)
+[check] verified path: no double-delete, no UAF, no dangling-deref (all gated): OK
+
+======================================================================
+SECTION E — placement new, operator new/delete customization, the lesson
+======================================================================
+1) PLACEMENT NEW: construct an object in PRE-ALLOCATED memory (no allocation).
+   Used by std::vector/std::optional/std::any to split storage from object.
+   YOU must manually call the dtor — placement-new memory is NOT freed.
+
+   alignas(Traced) unsigned char buf[4];   (raw, correctly-aligned storage)
+    [ctor] Traced(314)         (live now = 1)
+   placed->value = 314   (constructed inside buf, no heap allocation)
+[check] placement new constructed a Traced(314) in local storage: OK
+[check] the placement-new'd object is live (count == 1): OK
+    [dtor] ~Traced() value=314  (live now = 0)
+[check] manual ~Traced() ended the object's lifetime (count == 0): OK
+   (buf itself is automatic storage — reclaimed at scope exit; NO delete here!)
+
+2) operator new / operator delete CUSTOMIZATION (global & class-specific):
+   `new T`    calls operator new(sizeof(T))   [or a class-specific overload];
+   `delete p` calls operator delete(p)        [or a class-specific overload].
+   You may REPLACE the globals, or give a class its OWN, to instrument/arena/pool.
+    [Tracker::operator new] allocating 4 bytes
+   t->id = 7
+[check] Tracker(7) was allocated via its class-specific operator new: OK
+    [Tracker::operator delete] freeing
+
+3) THE LESSON — NEVER use raw new/delete in modern C++:
+   every leak / double-delete / use-after-free / dangling bug class LIVES at
+   this layer. RAII smart pointers (P3 #18-19) make the 1:1 match AUTOMATIC:
+     std::make_unique<T>(...)  -> std::unique_ptr<T>   (owning, move-only)
+     std::make_shared<T>(...)  -> std::shared_ptr<T>   (refcounted sharing)
+   Their destructors call `delete` exactly once, on exactly one path.
+
+   CROSS-LANGUAGE — this whole bug class is a C/C++ peculiarity:
+     Rust:   NO new/delete. Box<T>/Arc<T>/Vec OWN; the borrow checker makes
+             double-free & use-after-free COMPILE-TIME ERRORS.
+     Go/TS/Python: a garbage collector frees unreachable objects — no `delete`,
+             no manual double-free / UAF (cost: nondeterministic GC pauses).
+[check] placement new + class-specific operator new/delete both demonstrated UB-free: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

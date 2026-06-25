@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MVCC — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:300px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:7ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  table.cmp{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.5rem;width:100%}
+  table.cmp td,table.cmp th{border:1px solid #30363d;padding:4px 8px;text-align:center}
+  table.cmp th{color:var(--muted);font-weight:600}
+  table.cmp tr.hl td{background:#1c3a25;color:#9be}
+  table.cmp td.good{color:var(--green);font-weight:700}
+  table.cmp td.bad{color:#ff9a8a}
+  table.cmp td.dim{color:var(--muted)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  code{background:#0a0e14;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:.78rem}
+  canvas{display:block;width:100%;max-width:980px}
+  #chain{height:230px}
+  #timeline{height:240px}
+  #page{height:200px}
+  #nline{height:130px}
+  #wrap{height:150px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Multi-Version Concurrency Control (MVCC) — interactive
+    <a class="badge" href="./MVCC.md">MVCC.md</a>
+    <a class="badge" href="./mvcc.py">mvcc.py</a></h1>
+  <div class="sub">Every row is a <b>stack of drafts</b>: an UPDATE writes a new version and stamps the old one's <code>xmax</code>,
+    but never overwrites. A transaction picks the <b>one draft</b> whose <code>xmin</code>/<code>xmax</code> match its snapshot —
+    so readers never block writers. Drag the <b style="color:var(--green)">snapshot horizon</b> and watch the visible version step
+    forward. The visibility engine is recomputed in JS from the <i>identical</i> rules as <code>mvcc.py</code>. &nbsp;|&nbsp;
+    <a href="./covering_index.html">visibility map (Index-Only Scan) →</a></div>
+
+  <!-- ===== PANEL 1: VERSION CHAIN + VISIBILITY ===== -->
+  <h2>① Version chain — slide the snapshot horizon, watch the visible version step</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b>xmax (snapshot horizon = next xid)</b>. The querier sees inserts with <code>xmin &lt; xmax</code>
+      (committed). As xmax grows past 200, then 300, the visible version steps <b>v1 → v2 → v3</b>. Same three drafts on the page; the snapshot picks one.</div>
+    <div class="controls">
+      <label>snapshot xmax (next xid the querier can see) <input type="range" id="xmax" min="101" max="350" value="251">
+        <span class="val" id="xmaxVal">251</span></label>
+      <span class="micro">chain: v1(100,200) · v2(200,300) · v3(300,0) &nbsp; committed = {100,200,300}</span>
+    </div>
+    <canvas id="chain" width="980" height="230"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>VISIBLE version (the one this txn reads)</span>
+      <span><i class="sw" style="background:var(--red)"></i>dead / superseded (xmax committed-visible)</span>
+      <span><i class="sw" style="background:#3a3a3a"></i>inserter not yet visible (xmin &ge; xmax)</span>
+    </div>
+    <div class="readout" id="chainReadout"></div>
+    <div style="overflow-x:auto"><table class="cmp" id="chainTable"></table></div>
+    <div class="micro" style="margin-top:.5rem">At xmax=251 (mvcc.py Section A, snapshot@250) the visible version is <b>v2</b>: T200 committed &amp; visible,
+      but T300 (the superseder) hasn't started (300 &ge; 251), so v2's delete doesn't count. (MVCC.md §1)</div>
+  </div>
+
+  <!-- ===== PANEL 2: SNAPSHOT NUMBER LINE ===== -->
+  <h2>② The snapshot — xmin horizon, xmax horizon, and the in-progress list (xip)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> a snapshot carves the xid line into <span style="color:var(--green)">committed-visible</span>
+      (started, not running, committed), <span style="color:var(--red)">in xip = running → invisible</span>, and <span style="color:var(--muted)">&ge; xmax = not started → invisible</span>.
+      A row is visible iff its inserter is committed-visible AND its deleter is not.</div>
+    <div class="controls">
+      <span class="micro">snapshot S = {xmin:200, xmax:400, xip:[250,350]} &nbsp; committed = {100,150,200,300}</span>
+    </div>
+    <canvas id="nline" width="980" height="130"></canvas>
+    <div style="overflow-x:auto;margin-top:.4rem"><table class="cmp" id="probeTable"></table></div>
+    <div class="readout" id="probeReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Note <b>p5</b>: an old row whose <b>deleter is in xip stays visible</b> — the delete hasn't happened yet from this snapshot's view.
+      That same rule is why a long-running txn blocks VACUUM (MVCC.md §2, §5).</div>
+  </div>
+
+  <!-- ===== PANEL 3: RC vs RR TIMELINE ===== -->
+  <h2>③ Isolation — READ COMMITTED (non-repeatable) vs REPEATABLE READ (pinned snapshot)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> toggle the isolation level. <b>READ COMMITTED</b> takes a fresh snapshot per statement → the second read sees
+      T501's update (<b>non-repeatable read</b>). <b>REPEATABLE READ</b> pins the snapshot at t1 → xid 501 stays "not started" → both reads return 100.</div>
+    <div class="controls">
+      <button id="bRC" class="active">READ COMMITTED</button>
+      <button id="bRR">REPEATABLE READ</button>
+      <span class="micro">T500 reads, T501 UPDATE balance 100→200 + COMMIT between the reads</span>
+    </div>
+    <canvas id="timeline" width="980" height="240"></canvas>
+    <div class="readout" id="isoReadout"></div>
+    <div class="micro" style="margin-top:.5rem">The <i>only</i> difference is one line: whether t4 uses a fresh <code>S2</code> (xmax=502) or the pinned <code>S</code> (xmax=501). (MVCC.md §3, §4)</div>
+  </div>
+
+  <!-- ===== PANEL 4: VACUUM ===== -->
+  <h2>④ VACUUM — UPDATE bloats, VACUUM removes dead tuples</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> hit <b>VACUUM</b>. It removes every tuple that <b>no live snapshot</b> can see, frees the line pointers, and
+      sets the visibility-map bit. Toggle the <b>old snapshot open</b> switch: v1 is still visible to it, so VACUUM must retain it → bloat stays.</div>
+    <div class="controls">
+      <button id="bVac">▶ run VACUUM</button>
+      <button id="bResetVac">↺ reset</button>
+      <span class="pill" id="oldSnap" style="background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:4px 10px;font-size:.8rem;cursor:pointer;user-select:none">old snapshot open: OFF</span>
+    </div>
+    <canvas id="page" width="980" height="200"></canvas>
+    <div class="readout" id="vacReadout"></div>
+    <div class="micro" style="margin-top:.5rem">dead(v) = not visible under ANY live snapshot. A single long-running transaction pins the xmin horizon and stalls VACUUM for the whole DB. (MVCC.md §5)</div>
+  </div>
+
+  <!-- ===== PANEL 5: XID WRAPAROUND ===== -->
+  <h2>⑤ XID wraparound — freeze old tuples before the 32-bit counter wraps</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b>current_xid</b> past the thresholds. At <b>50M</b> VACUUM freezes opportunistically; at <b>200M</b> a
+      FORCED anti-wraparound autovacuum runs (cannot be disabled); at <b>2³¹</b> the signed comparison flips → data loss unless frozen.</div>
+    <div class="controls">
+      <label>current_xid <input type="range" id="currxid" min="1000000" max="4294967295" value="60000000" step="1000000">
+        <span class="val" id="currxidVal">60,000,000</span></label>
+      <span class="micro">oldest unfrozen xmin = 1,000 &nbsp;·&nbsp; 32-bit space = 2³²</span>
+    </div>
+    <canvas id="wrap" width="980" height="150"></canvas>
+    <div class="readout" id="wrapReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Freezing overwrites <code>xmin</code> with <code>FrozenTransactionId(2)</code> = "committed forever", so the old xid can be reused after the wrap. (MVCC.md §6)</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS visibility engine matches mvcc.py Section A (snapshot xmax=251 → visible version <b>v2 / alice-v2</b>, xmin=200, xmax=300).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth visibility engine, copied verbatim from mvcc.py ===== */
+const FROZEN_XID=2, XID_MOD=2**32, XID_HALF=2**31;
+const VACUUM_FREEZE_MIN_AGE=50_000_000, AUTOVACUUM_FREEZE_MAX_AGE=200_000_000;
+
+function committedVisible(xid, snap, committed){
+  if(xid===FROZEN_XID) return true;
+  if(xid>=snap.xmax) return false;
+  if(snap.xip.includes(xid)) return false;
+  return committed.has(xid);
+}
+function visibleTo(v, snap, committed){
+  if(!committedVisible(v.xmin, snap, committed)) return false;
+  if(v.xmax===0) return true;
+  return !committedVisible(v.xmax, snap, committed);
+}
+function visibility(chain, snap, committed){       // newest-first
+  for(const v of chain) if(visibleTo(v, snap, committed)) return v;
+  return null;
+}
+function reasonV(xid, snap, committed){
+  if(xid===FROZEN_XID) return "frozen=forever";
+  if(xid>=snap.xmax) return ">= xmax (not started)";
+  if(snap.xip.includes(xid)) return "in xip (in progress)";
+  return committed.has(xid) ? "committed & < xmax" : "aborted";
+}
+const fmt = n => n.toLocaleString('en-US');
+
+/* canvas DPR helper */
+function setup(cv, h){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, hh=h||cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(hh*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: version chain ===== */
+const CHAIN=[                                          // newest -> oldest (Section A)
+  {tag:'alice-v3', xmin:300, xmax:0},
+  {tag:'alice-v2', xmin:200, xmax:300},
+  {tag:'alice-v1', xmin:100, xmax:200},
+];
+const COMMITTED_A=new Set([100,200,300]);
+function snapFor(xmax){ return {xmin:Math.max(1,xmax-1), xmax:xmax, xip:[]}; }
+function drawChain(){
+  const cv=document.getElementById('chain');
+  const ctx=setup(cv), w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const xmax=+document.getElementById('xmax').value;
+  const snap=snapFor(xmax);
+  const chosen=visibility(CHAIN, snap, COMMITTED_A);
+  const n=CHAIN.length, colW=260, gap=(w-3*colW)/4;
+  ctx.font='12px ui-monospace,monospace';
+  CHAIN.forEach((v,i)=>{
+    const x=gap+i*(colW+gap), y=40, bh=130;
+    const vis = (chosen && chosen.tag===v.tag);
+    const ins = committedVisible(v.xmin, snap, COMMITTED_A);
+    const del = v.xmax!==0 && committedVisible(v.xmax, snap, COMMITTED_A);
+    let fill, stroke, tc;
+    if(vis){ fill='#1c3a25'; stroke='#27ae60'; tc='#9be'; }
+    else if(del){ fill='#3a1414'; stroke='#c0392b'; tc='#fbb'; }
+    else if(!ins){ fill='#1a1a1a'; stroke='#555'; tc='#888'; }
+    else { fill='#161b22'; stroke='#8b949e'; tc='#e6edf3'; }
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=vis?3:2;
+    ctx.fillRect(x,y,colW,bh); ctx.strokeRect(x,y,colW,bh);
+    ctx.fillStyle=tc;
+    ctx.font='bold 14px ui-monospace,monospace';
+    ctx.fillText(v.tag, x+14, y+24);
+    ctx.font='12px ui-monospace,monospace';
+    ctx.fillText('xmin = '+v.xmin+'  '+ (ins?'(visible)':'(NOT visible)'), x+14, y+52);
+    ctx.fillText('xmax = '+v.xmax + (v.xmax===0?'  (alive)':(del?'  (delete VISIBLE)':'  (delete not visible)')), x+14, y+72);
+    ctx.font='11px system-ui';
+    ctx.fillStyle = vis?'#27ae60':(del?'#c0392b':'#8b949e');
+    ctx.fillText(vis?'VISIBLE ← snapshot reads this':(del?'dead (superseded)':(!ins?'inserter not yet seen':'hidden')), x+14, y+100);
+    // link arrow xmax -> next version
+    if(v.xmax!==0 && i<n-1){
+      ctx.strokeStyle='#c0392b'; ctx.lineWidth=1.5; ctx.globalAlpha=.6;
+      ctx.beginPath(); ctx.moveTo(x+colW/2,y+bh); ctx.lineTo(x+colW+gap+colW/2, y); ctx.stroke();
+      ctx.globalAlpha=1;
+    }
+  });
+  ctx.fillStyle='#8b949e'; ctx.font='bold 13px system-ui';
+  ctx.fillText('snapshot xmax = '+xmax+'  (sees inserts with xmin < '+xmax+')', 14, 16);
+  // readout + table
+  const ro=document.getElementById('chainReadout');
+  if(chosen){
+    ro.innerHTML='snapshot {xmax:'+snap.xmax+'} → visible version = <b>'+chosen.tag+'</b> '
+      +'(xmin='+chosen.xmin+', xmax='+chosen.xmax+') &nbsp;→ balance/data = <b>'+chosen.tag.split('-')[1]+'</b>';
+  } else {
+    ro.innerHTML='<span class="bad">no version visible (snapshot sees nothing yet)</span>';
+  }
+  let H='<tr><th>version</th><th>xmin</th><th>xmin visible?</th><th>xmax</th><th>xmax delete visible?</th><th>result</th></tr>';
+  CHAIN.forEach(v=>{
+    const ins=committedVisible(v.xmin,snap,COMMITTED_A);
+    const del= v.xmax!==0 && committedVisible(v.xmax,snap,COMMITTED_A);
+    const vis=visibleTo(v,snap,COMMITTED_A);
+    const isChosen=chosen&&chosen.tag===v.tag;
+    H+='<tr class="'+(isChosen?'hl':'')+'"><td>'+v.tag+'</td><td>'+v.xmin+'</td>'
+      +'<td class="'+(ins?'good':'bad')+'">'+(ins?'YES':'no')+'</td>'
+      +'<td>'+(v.xmax===0?'0':v.xmax)+'</td>'
+      +'<td class="'+(v.xmax===0?'dim':(del?'good':'bad'))+'">'+(v.xmax===0?'n/a':(del?'YES':'no'))+'</td>'
+      +'<td class="'+(vis?'good':'')+'">'+(vis?'VISIBLE':'hidden')+'</td></tr>';
+  });
+  document.getElementById('chainTable').innerHTML=H;
+}
+
+/* ===== PANEL 2: snapshot number line + probes ===== */
+const SNAP_B={xmin:200, xmax:400, xip:[250,350]};
+const COMMITTED_B=new Set([100,150,200,300]);
+const PROBES=[
+  {tag:'p1', xmin:100, xmax:0},
+  {tag:'p2', xmin:250, xmax:0},
+  {tag:'p3', xmin:350, xmax:0},
+  {tag:'p4', xmin:500, xmax:0},
+  {tag:'p5', xmin:150, xmax:250},
+  {tag:'p6', xmin:200, xmax:300},
+];
+function drawNline(){
+  const cv=document.getElementById('nline');
+  const ctx=setup(cv), w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const lo=60, hi=520, pad=40;
+  const X = x => pad + (x-lo)/(hi-lo)*(w-2*pad);
+  // axis
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(pad, h/2); ctx.lineTo(w-pad, h/2); ctx.stroke();
+  // regions: committed-visible band vs not
+  // draw ticks
+  const ticks=[100,150,200,250,300,350,400,500];
+  ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+  ticks.forEach(t=>{
+    const x=X(t);
+    let col='#8b949e', label=''+t;
+    if(SNAP_B.xip.includes(t)){ col='#c0392b'; label+=' (xip)'; }
+    else if(t>=SNAP_B.xmax){ col='#555'; label+=' (future)'; }
+    else if(COMMITTED_B.has(t)){ col='#27ae60'; }
+    ctx.strokeStyle=col; ctx.lineWidth= t===SNAP_B.xmin||t===SNAP_B.xmax?3:1.5;
+    ctx.beginPath(); ctx.moveTo(x,h/2-12); ctx.lineTo(x,h/2+12); ctx.stroke();
+    ctx.fillStyle=col; ctx.fillText(label, x, h/2+28);
+  });
+  // xmin / xmax markers
+  ctx.fillStyle='#2980b9'; ctx.textAlign='center';
+  ctx.fillText('xmin', X(SNAP_B.xmin), h/2-18);
+  ctx.fillText('xmax', X(SNAP_B.xmax), h/2-18);
+  ctx.textAlign='start';
+  // probe table
+  let H='<tr><th>tuple</th><th>xmin</th><th>xmin visible?</th><th>xmax</th><th>xmax delete visible?</th><th>visible?</th></tr>';
+  let nVis=0;
+  PROBES.forEach(v=>{
+    const ins=committedVisible(v.xmin,SNAP_B,COMMITTED_B);
+    const del= v.xmax!==0 && committedVisible(v.xmax,SNAP_B,COMMITTED_B);
+    const vis=visibleTo(v,SNAP_B,COMMITTED_B);
+    if(vis) nVis++;
+    H+='<tr class="'+(vis?'hl':'')+'"><td>'+v.tag+'</td><td>'+v.xmin+'</td>'
+      +'<td class="'+(ins?'good':'bad')+'">'+(ins?'YES':'no')+'</td>'
+      +'<td>'+(v.xmax===0?'0':v.xmax)+'</td>'
+      +'<td class="'+(v.xmax===0?'dim':(del?'good':'bad'))+'">'+(v.xmax===0?'n/a':(del?'YES':'no'))+'</td>'
+      +'<td class="'+(vis?'good':'')+'">'+(vis?'YES':'no')+'</td></tr>';
+  });
+  document.getElementById('probeTable').innerHTML=H;
+  document.getElementById('probeReadout').innerHTML=
+    'committed-visible = {100,150,200,300} (green ticks). xip = {250,350} (red) invisible. '
+    +'&ge; xmax=400 (gray) not started → invisible. <b>'+nVis+' of '+PROBES.length+' probes visible (p1, p5)</b>.';
+}
+
+/* ===== PANEL 3: RC vs RR timeline ===== */
+let iso='RC';
+const tl=document.getElementById('timeline');
+function drawTimeline(){
+  const ctx=setup(tl), w=tl.clientWidth, h=tl.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const steps=[0,1,2,3,4];
+  const xAt = t => 80 + t*((w-160)/4);
+  const yT1=70, yT2=160;
+  // lanes
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(70,yT1); ctx.lineTo(w-60,yT1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(70,yT2); ctx.lineTo(w-60,yT2); ctx.stroke();
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 13px system-ui'; ctx.textAlign='right';
+  ctx.fillText('T500', 60, yT1+5);
+  ctx.fillText('T501', 60, yT2+5);
+  // t1: T500 read
+  const r1 = 100;  // first read always v1 balance 100
+  // t4 read depends on iso
+  const r2 = iso==='RC' ? 200 : 100;
+  const r2tag = iso==='RC' ? 'v2' : 'v1';
+  const ops=[
+    {t:1, y:yT1, lab:'SELECT\nbalance', val:'→ '+r1, col:'#2980b9'},
+    {t:3, y:yT2, lab:'UPDATE=200\nCOMMIT', val:'writes v2', col:'#e67e22'},
+    {t:4, y:yT1, lab:'SELECT\nagain', val:'→ '+r2+' ('+r2tag+')', col: iso==='RC'?'#c0392b':'#27ae60'},
+  ];
+  ctx.textAlign='center'; ctx.font='11px system-ui';
+  ops.forEach(op=>{
+    const x=xAt(op.t);
+    ctx.fillStyle=op.col; ctx.beginPath(); ctx.arc(x,op.y,7,0,2*Math.PI); ctx.fill();
+    ctx.fillStyle='#e6edf3'; ctx.font='11px system-ui';
+    op.lab.split('\n').forEach((ln,i)=>ctx.fillText(ln, x, op.y + (op.y===yT1?-22:30) + i*13));
+    ctx.fillStyle=op.col; ctx.font='bold 12px ui-monospace,monospace';
+    ctx.fillText(op.val, x, op.y + (op.y===yT1?-42:52));
+  });
+  // t2 BEGIN T501
+  ctx.fillStyle='#8b949e'; ctx.font='11px system-ui';
+  ctx.fillText('BEGIN', xAt(2), yT2+30);
+  // snapshots annotation
+  ctx.fillStyle= iso==='RC'?'#c0392b':'#27ae60';
+  ctx.font='bold 11px ui-monospace,monospace';
+  ctx.fillText(iso==='RC'?'snap S1 (xmax=501)':'pinned snap S (xmax=501)', xAt(1), yT1-58);
+  ctx.fillText(iso==='RC'?'FRESH snap S2 (xmax=502)':'REUSED snap S (xmax=501)', xAt(4), yT1-58);
+  // title
+  ctx.fillStyle='#8b949e'; ctx.font='bold 13px system-ui'; ctx.textAlign='left';
+  ctx.fillText(iso==='RC'?'READ COMMITTED — non-repeatable read':'REPEATABLE READ — snapshot pinned (repeatable)', 14, 24);
+  ctx.textAlign='start';
+  const ro=document.getElementById('isoReadout');
+  if(iso==='RC'){
+    ro.innerHTML='READ COMMITTED: t4 takes a <b>fresh</b> snapshot S2 (xmax=502). Now xid 501 has started &amp; committed → '
+      +'<b>committed_visible(501)=true</b> → v2 is visible. T500 reads <b>100</b> then <b>200</b> → '
+      +'<span class="bad">NON-REPEATABLE READ</span>.';
+  } else {
+    ro.innerHTML='REPEATABLE READ: t4 <b>reuses</b> the pinned snapshot S (xmax=501). Under S, <b>501 &ge; 501 → "not started"</b> → '
+      +'v2 invisible; v1 (xmin=100, superseder 501 invisible) stays visible. T500 reads <b>100 both times</b> → <b>repeatable</b>.';
+  }
+}
+
+/* ===== PANEL 4: VACUUM ===== */
+let vacDone=false, oldOpen=false;
+const pg=document.getElementById('page');
+function drawPage(){
+  const ctx=setup(pg), w=pg.clientWidth, h=pg.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const committed=new Set([100,200,300]);
+  const v3={tag:'v3',xmin:300,xmax:0}, v2={tag:'v2',xmin:200,xmax:300}, v1={tag:'v1',xmin:100,xmax:200};
+  const versions=[v3,v2,v1];
+  // live snapshots
+  const snaps=[{xmin:301,xmax:301,xip:[]}];
+  if(oldOpen) snaps.push({xmin:200,xmax:301,xip:[200]});
+  const removable = v => !snaps.some(s=>visibleTo(v,s,committed));
+  const colW=180, gap=(w-3*colW)/4;
+  ctx.font='12px ui-monospace,monospace';
+  versions.forEach((v,i)=>{
+    const x=gap+i*(colW+gap), y=40, bh=110;
+    const rm=removable(v);
+    const kept = !(vacDone && rm);
+    let fill,stroke,tc,note;
+    if(!kept){ fill='#0d1117'; stroke='#444'; tc='#555'; note='(removed by VACUUM)'; }
+    else if(v.xmax===0){ fill='#1c3a25'; stroke='#27ae60'; tc='#9be'; note='LIVE'; }
+    else { fill='#3a2f12'; stroke='#e67e22'; tc='#ffd966'; note='dead (retained)'; }
+    if(vacDone && kept && v.xmax!==0 && rm){ /* shouldn't happen */ }
+    ctx.globalAlpha = kept?1:0.35;
+    ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=2;
+    ctx.fillRect(x,y,colW,bh); ctx.strokeRect(x,y,colW,bh);
+    ctx.fillStyle=tc;
+    ctx.font='bold 14px ui-monospace,monospace'; ctx.fillText('LP'+(i+1)+' → '+v.tag, x+12, y+24);
+    ctx.font='12px ui-monospace,monospace';
+    ctx.fillText('xmin='+v.xmin, x+12, y+48);
+    ctx.fillText('xmax='+v.xmax, x+12, y+68);
+    ctx.font='bold 11px system-ui';
+    ctx.fillText(note, x+12, y+92);
+    ctx.globalAlpha=1;
+  });
+  ctx.fillStyle='#8b949e'; ctx.font='bold 13px system-ui';
+  let title = 'BEFORE VACUUM';
+  if(vacDone) title='AFTER VACUUM — dead tuples removed, vis-map bit SET';
+  if(oldOpen && vacDone) title='AFTER VACUUM with old snapshot open (v1 retained)';
+  ctx.fillText(title, 14, 22);
+  const dead=[v1,v2].filter(v=>removable(v));
+  const retainedDead=[v1,v2].filter(v=>!removable(v));
+  const ro=document.getElementById('vacReadout');
+  if(!vacDone){
+    ro.innerHTML='3 line pointers, '+[v1,v2].filter(v=>removable(v)).length+' removable dead + 1 live. '
+      +(oldOpen?'<span class="bad">old snapshot open → v1 still visible to it → NOT removable (retained).</span> ':'')
+      +'Hit <b>VACUUM</b> to reclaim.';
+  } else {
+    ro.innerHTML='VACUUM removed '+dead.length+' dead tuple(s) '+JSON.stringify(dead.map(v=>v.tag))
+      +', kept 1 live (v3). '
+      +(oldOpen && retainedDead.length ? '<span class="bad">But v1 was retained (still visible to the old snapshot) → bloat persists. Close the old txn!</span>'
+        : 'Visibility-map bit SET (all-visible) → Index-Only Scans can skip the heap.');
+  }
+}
+
+/* ===== PANEL 5: XID wraparound ===== */
+const OLDEST=1000;
+function drawWrap(){
+  const cv=document.getElementById('wrap');
+  const ctx=setup(cv), w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const curr=+document.getElementById('currxid').value;
+  // log-ish mapping: show 0 .. 2^31 on the bar (cliff), markers for 50M,200M,2^31
+  const HALF=XID_HALF;
+  const pad=50;
+  const X = v => pad + (v/HALF)*(w-2*pad);
+  // bar
+  ctx.fillStyle='#0a0e14'; ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  ctx.fillRect(pad,h/2-14,w-2*pad,28); ctx.strokeRect(pad,h/2-14,w-2*pad,28);
+  // threshold bands
+  const bands=[
+    { upto:VACUUM_FREEZE_MIN_AGE, col:'#1a3a1a' },
+    { upto:AUTOVACUUM_FREEZE_MAX_AGE, col:'#3a3212' },
+    { upto:HALF, col:'#3a1414' },
+  ];
+  let prev=0;
+  bands.forEach(b=>{ ctx.fillStyle=b.col; ctx.fillRect(X(prev),h/2-14,X(b.upto)-X(prev),28); prev=b.upto; });
+  // markers
+  ctx.font='11px system-ui'; ctx.textAlign='center';
+  [[VACUUM_FREEZE_MIN_AGE,'50M\nmin_age','#27ae60'],
+   [AUTOVACUUM_FREEZE_MAX_AGE,'200M\nmax_age\nFORCED','#f1c40f'],
+   [HALF,'2³¹\nCLIFF','#c0392b']].forEach(m=>{
+    const x=X(m[0]);
+    ctx.strokeStyle=m[2]; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(x,h/2-22); ctx.lineTo(x,h/2+22); ctx.stroke();
+    ctx.fillStyle=m[2]; m[1].split('\n').forEach((ln,i)=>ctx.fillText(ln,x,h/2+38+i*12));
+  });
+  // current cursor
+  const currX = Math.min(X(Math.min(curr,HALF)), w-pad);
+  ctx.strokeStyle='#58a6ff'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(currX,h/2-28); ctx.lineTo(currX,h/2+28); ctx.stroke();
+  ctx.fillStyle='#58a6ff'; ctx.fillText('current', currX, h/2-34);
+  // axis labels
+  ctx.fillStyle='#8b949e'; ctx.textAlign='left'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText('xid 0', pad, h/2+50);
+  ctx.textAlign='right'; ctx.fillText('2³¹ (cliff)', w-pad, h/2+50);
+  ctx.textAlign='start';
+  // distance + action
+  const dist=(curr-OLDEST+XID_MOD)%XID_MOD;
+  let action, col;
+  if(dist>=XID_HALF){ action='CLIFF PASSED (dist ≥ 2³¹): signed compare flipped → old tuple looks "future" → DATA LOSS unless frozen'; col='#c0392b'; }
+  else if(dist>=AUTOVACUUM_FREEZE_MAX_AGE){ action='FORCED anti-wraparound autovacuum runs (cannot be disabled) → freezes everything ≥ max_age'; col='#f1c40f'; }
+  else if(dist>=VACUUM_FREEZE_MIN_AGE){ action='normal VACUUM freezes this tuple opportunistically'; col='#27ae60'; }
+  else { action='tuple is young — not yet eligible to freeze'; col='#8b949e'; }
+  document.getElementById('wrapReadout').innerHTML=
+    'distance = (current − 1000) mod 2³² = <b>'+fmt(dist)+'</b><br>'
+    +'<span style="color:'+col+'">'+action+'</span><br>'
+    +'After freeze: xmin = FrozenTransactionId(2) → committed_visible = <b>true</b> for ANY snapshot → safe across the wrap.';
+}
+
+/* ===== GOLD CHECK vs mvcc.py Section A (snapshot xmax=251 → alice-v2) ===== */
+const goldSnap=snapFor(251);
+const goldAns=visibility(CHAIN, goldSnap, COMMITTED_A);
+const goldOK = goldAns && goldAns.tag==='alice-v2' && goldAns.xmin===200 && goldAns.xmax===300;
+const chk=document.getElementById('check');
+chk.textContent = goldOK ? 'check: OK — JS visibility matches mvcc.py (xmax=251 → alice-v2, xmin=200, xmax=300)'
+                         : 'check: FAIL — mismatch! (got '+(goldAns?goldAns.tag:'null')+')';
+chk.style.borderColor = goldOK?'#27ae60':'#c0392b';
+chk.style.color = goldOK?'#27ae60':'#c0392b';
+chk.style.background = goldOK?'#1c3a25':'#3a1414';
+
+/* ===== events ===== */
+document.getElementById('xmax').addEventListener('input',()=>{ document.getElementById('xmaxVal').textContent=document.getElementById('xmax').value; drawChain(); });
+document.getElementById('bRC').addEventListener('click',function(){ iso='RC'; this.classList.add('active'); document.getElementById('bRR').classList.remove('active'); drawTimeline(); });
+document.getElementById('bRR').addEventListener('click',function(){ iso='RR'; this.classList.add('active'); document.getElementById('bRC').classList.remove('active'); drawTimeline(); });
+document.getElementById('bVac').addEventListener('click',()=>{ vacDone=true; drawPage(); });
+document.getElementById('bResetVac').addEventListener('click',()=>{ vacDone=false; drawPage(); });
+document.getElementById('oldSnap').addEventListener('click',function(){
+  oldOpen=!oldOpen;
+  this.style.borderColor = oldOpen?'#c0392b':'#30363d';
+  this.style.color = oldOpen?'#c0392b':'#8b949e';
+  this.textContent='old snapshot open: '+(oldOpen?'ON (v1 visible to it)':'OFF');
+  drawPage();
+});
+document.getElementById('currxid').addEventListener('input',()=>{ document.getElementById('currxidVal').textContent=fmt(+document.getElementById('currxid').value); drawWrap(); });
+window.addEventListener('resize',()=>{ drawChain(); drawNline(); drawTimeline(); drawPage(); drawWrap(); });
+
+/* ===== boot ===== */
+document.getElementById('xmaxVal').textContent=document.getElementById('xmax').value;
+document.getElementById('currxidVal').textContent=fmt(+document.getElementById('currxid').value);
+drawChain(); drawNline(); drawTimeline(); drawPage(); drawWrap();
+</script>
+</body>
+</html>

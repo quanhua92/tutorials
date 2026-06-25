@@ -1,0 +1,228 @@
+deadlock_detection.py - reference impl. All numbers feed DEADLOCK_DETECTION.md.
+pure Python stdlib ; deterministic logical-time model.
+
+========================================================================
+  SECTION A: the wait-for graph - lock table -> directed graph
+========================================================================
+Rule: edge Ti -> Tj  <=>  Ti waits for a lock HELD by Tj.
+
+LOCK TABLE (exclusive locks):
+  | resource | holder | waiters |
+  |----------|--------|---------|
+  | A        | T1     | T2      |
+  | B        | T2     | T1      |
+
+WAIT-FOR GRAPH (one edge per waiter->holder):
+  T1 -> T2
+  T2 -> T1
+
+Read it as: T1 waits for T2 (needs B), T2 waits for T1 (needs A).
+That is a 2-cycle:  T1 -> T2 -> T1. The ring of stuck txns.
+
+[check] detect_cycle -> ['T1', 'T2', 'T1']  (cycle found): OK
+
+========================================================================
+  SECTION B: the classic deadlock - T1(A,B) vs T2(B,A) circular wait
+========================================================================
+Two txns, two rows A and B. Each grabs one, then asks for the other.
+
+EVENT TIMELINE (logical time t ->):
+
+  t=10  T1 LOCKS A        (A held by T1)
+  t=20  T2 LOCKS B        (B held by T2)
+  t=30  T1 requests B     -> B held by T2  -> T1 WAITS for T2
+  t=40  T2 requests A     -> A held by T1  -> T2 WAITS for T1
+
+Wait-for graph after t=40:
+  T1 -> T2
+  T2 -> T1
+
+CYCLE DETECTION: ['T1', 'T2']  ->  closes T2 -> T1
+DEADLOCK: YES  (a cycle in the wait-for graph
+          is BOTH necessary and sufficient for a deadlock).
+
+POSTGRESQL MECHANISM (src/backend/storage/lmgr/deadlock.c):
+  - both T1 and T2 backends sleep on their lock queue;
+  - after deadlock_timeout (default 1 s) each backend wakes and runs
+    DeadLockCheck: it builds the wait-for graph and runs DFS;
+  - whichever backend finds a cycle it is PART OF aborts ITSELF.
+  So PostgreSQL's victim = the detecting (timed-out) backend, NOT a
+  global heuristic. Section D shows the general heuristic version.
+
+[check] 2-txn circular wait produces a 2-cycle: OK
+
+========================================================================
+  SECTION C: cycle detection - 3-color DFS, shown step by step
+========================================================================
+WHITE/GRAY/BLACK DFS. A back edge to a GRAY (on-stack) node == cycle.
+
+GRAPH:
+  T1 -> T2, T4
+  T2 -> T3
+  T3 -> T1
+  T4 -> (none)
+
+DFS trace (root order = T1, T2, T3, T4):
+
+  enter T1   [stack: T1]
+    T1 -> T2: WHITE -> recurse
+  enter T2   [stack: T1 -> T2]
+    T2 -> T3: WHITE -> recurse
+  enter T3   [stack: T1 -> T2 -> T3]
+    T3 -> T1: T1 is GRAY (on stack) -> BACK EDGE
+    CYCLE = ['T1', 'T2', 'T3']  (closes T3 -> T1)
+
+RESULT: cycle = ['T1', 'T2', 'T3', 'T1']
+        distinct nodes = ['T1', 'T2', 'T3']  (len 3)
+The DFS went T1 -> T2 -> T3, then saw edge T3 -> T1 where T1 was still
+GRAY (on the stack) -> back edge -> cycle T1->T2->T3. T4 (acyclic side
+branch) was never even visited: we stop at the FIRST cycle found.
+
+[check] cycle found, 3 distinct nodes: OK
+[check] acyclic graph T1->T2->T3 returns None: OK
+
+========================================================================
+  SECTION D: victim selection - 3 heuristics pick 3 different victims
+========================================================================
+Given the cycle T1 -> T2 -> T3 -> T1, which txn do we abort?
+
+CANDIDATES (members of the cycle):
+  | txn | locks held        | #locks | WAL bytes | rows modified |
+  |-----|-------------------|:------:|:---------:|:-------------:|
+  | T1 | {A}               |   1    |   5000    |      40       |
+  | T2 | {B,C,D}           |   3    |   1000    |      100      |
+  | T3 | {E,F}             |   2    |   9000    |      10       |
+
+| heuristic        | minimize       | metric per txn (T1,T2,T3)        | VICTIM | reason                 |
+|------------------|----------------|----------------------------------|--------|------------------------|
+| fewest_locks     | #locks held    | (1,3,2)                          |   T1   | fewest locks -> cheapest to release |
+| least_wal        | WAL bytes      | (5000,1000,9000)                 |   T2   | least WAL     -> cheapest to roll back |
+| fewest_rows      | rows modified  | (40,100,10)                      |   T3   | fewest rows   -> least work lost |
+
+Different heuristics pick DIFFERENT victims - the choice is a
+policy trade-off, not a fact. PostgreSQL sidesteps this entirely:
+the backend that times out and runs the check aborts ITSELF, so the
+victim is simply 'whoever noticed'. The heuristics above are the
+general textbook algorithm (Silberschatz 16.3).
+
+[check] fewest_locks->T1 (1), least_wal->T2 (1000), fewest_rows->T3 (10): OK
+
+========================================================================
+  SECTION E: PREVENTION - make a cycle impossible in the first place
+========================================================================
+Coffman's 4 conditions for deadlock: mutual exclusion, hold-and-wait,
+no-preemption, circular wait. Prevention breaks ONE of them.
+
+(1) LOCK ORDERING - break circular wait
+    Rule: every txn acquires resources in one fixed order: A < B < C.
+    Without it: T1 grabs A then wants B; T2 grabs B then wants A ->
+    cycle (Section B). With ordering both want A FIRST, so one waits
+    for A before either can touch B -> no cycle can form.
+
+    t=10  T1 grabs A             (A held by T1)
+    t=20  T2 wants A             -> A held by T1 -> T2 WAITS
+    t=30  T1 grabs B             (B free; T1 already holds A, ordering OK)
+    t=40  T1 commits, releases A,B
+    t=50  T2 gets A, then B      -> commits. NO deadlock.
+
+    wait-for graph under ordering is acyclic BY CONSTRUCTION.
+
+(2) WOUND-WAIT - break hold-and-wait (preemptive)
+    ts SMALLER = OLDER. Old txn may WOUND (abort) a younger holder;
+    young txn must WAIT for an older holder. Holder can be preempted.
+
+    T1 holds A. Now someone requests A held by the other:
+    | requester | holder | ts(req) vs ts(hold) | action               |
+    |-----------|--------|----------------------|----------------------|
+    | T1        | T2     | 1 < 2 (older)        | WOUND(T2)            |
+    | T2        | T1     | 2 > 1 (younger)      | WAIT                 |
+    => edge req->hold only when req is YOUNGER, so ts strictly
+       DECREASES along every wait edge -> no cycle possible.
+
+(3) WAIT-DIE - break no-preemption (non-preemptive)
+    Old txn may WAIT for a younger holder; young txn DIES (aborts) if
+    it needs a lock held by an older one. Holder is never preempted.
+
+    | requester | holder | ts(req) vs ts(hold) | action               |
+    |-----------|--------|----------------------|----------------------|
+    | T1        | T2     | 1 < 2 (older)        | WAIT                 |
+    | T2        | T1     | 2 > 1 (younger)      | DIE(T2)              |
+    => edge req->hold only when req is OLDER, so ts strictly
+       INCREASES along every wait edge -> no cycle possible.
+
+DETECTION vs PREVENTION:
+  detection   : let deadlocks form, find the cycle, abort a victim.
+                Low overhead when idle; pays deadlock_timeout on each.
+  prevention  : never form a cycle (ordering) or abort early (ww/wd).
+                Zero deadlock_timeout waits, but more aborts/restarts.
+PostgreSQL uses DETECTION (wait + timeout + DFS). Prevention is left
+to the application (e.g. lock rows in a consistent order).
+
+[check] single legal wait edge under each scheme is acyclic: OK
+[check] wound-wait / wait-die action table reproduces: OK
+
+========================================================================
+  SECTION F: livelock + priority boost - the same victim must rotate
+========================================================================
+A transaction repeatedly picked as victim retries, re-deadlocks, and
+gets picked again - never stuck waiting, but never commits. That is a
+LIVELOCK. Fix: boost the victim's priority each round so selection rotates.
+
+Cycle T1<->T2 recurs every round. fewest-locks: T1 has 1 lock, T2 has 2.
+
+  | round | WITHOUT boost (fewest locks) | WITH priority boost               |
+  |-------|------------------------------|-----------------------------------|
+  | 1     | victim = T1                    | victim = T1          (prio T1=1,T2=0  ) |
+  | 2     | victim = T1                    | victim = T2          (prio T1=1,T2=1  ) |
+  | 3     | victim = T1                    | victim = T1          (prio T1=2,T2=1  ) |
+  | 4     | victim = T1                    | victim = T2          (prio T1=2,T2=2  ) |
+
+WITHOUT boost: victims = ['T1', 'T1', 'T1', 'T1']  -> T1 aborted EVERY round ->
+T1 never commits. LIVELOCK.
+WITH    boost: victims = ['T1', 'T2', 'T1', 'T2']  -> victim rotates; after being
+aborted once, a txn's priority rises so the OTHER txn is picked next.
+Both eventually commit. Progress restored.
+
+POSTGRESQL NOTE: PG's anti-livelock is structural, not a priority
+counter - because the TIMED-OUT backend is always the victim, and
+different backends time out on different cycles, the victim naturally
+varies. The priority-boost model above is the textbook fix (used by
+heuristic-based selectors) and is what the .html animates.
+
+[check] no-boost livelocks on T1; boost rotates T1,T2,T1,T2: OK
+
+========================================================================
+  GOLD: 3-txn circular wait - cycle detection must find the ring
+========================================================================
+A ring of three: T1 waits for T2, T2 waits for T3, T3 waits for T1.
+
+LOCK TABLE:
+  | resource | holder | waiter |
+  |----------|--------|--------|
+  | X        | T1     | T3     |
+  | Y        | T2     | T1     |
+  | Z        | T3     | T2     |
+
+WAIT-FOR GRAPH:
+  T1 -> T2
+  T2 -> T3
+  T3 -> T1
+
+DETECTED CYCLE: ['T1', 'T2', 'T3', 'T1']
+distinct nodes (sorted): ['T1', 'T2', 'T3']  (len 3)
+
+GOLD values (pinned for deadlock_detection.html):
+  cycle_found        = True
+  cycle_nodes_sorted = ['T1', 'T2', 'T3']
+  cycle_length       = 3
+  closes_edge        = T3 -> T1
+  graph_edges        = [('T1', ['T2']), ('T2', ['T3']), ('T3', ['T1'])]
+  victim_fewest_locks = T1   (locks T1=1, T2=3, T3=2)
+  victim_least_wal    = T2   (wal T1=5000, T2=1000, T3=9000)
+  victim_fewest_rows  = T3   (rows T1=40, T2=100, T3=10)
+
+[check] 3-cycle found, 3 distinct nodes, victims T1/T2/T3: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

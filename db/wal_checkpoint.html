@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAL + Checkpoint — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --teal:#16a085;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:300px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:8ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  table.cmp{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.5rem;width:100%}
+  table.cmp td,table.cmp th{border:1px solid #30363d;padding:4px 8px;text-align:left}
+  table.cmp th{color:var(--muted);font-weight:600;text-align:center}
+  table.cmp td.c{text-align:center}
+  table.cmp tr.hl td{background:#1c3a25;color:#9be}
+  table.cmp td.good{color:var(--green);font-weight:700}
+  table.cmp td.bad{color:#ff9a8a}
+  table.cmp td.win{color:var(--green)}
+  table.cmp td.lose{color:#ff9a8a}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--gold)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button.crash{border-color:var(--red);color:#ff9a8a}
+  button.crash:hover{background:#3a1414;color:#fff}
+  code{background:#0a0e14;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:.78rem}
+  canvas{display:block;width:100%;max-width:980px}
+  #wal{height:340px}
+  #pool{height:200px}
+  #trade{height:230px}
+  .phases{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Write-Ahead Logging &amp; Checkpointing — interactive
+    <a class="badge" href="./WAL_CHECKPOINT.md">WAL_CHECKPOINT.md</a>
+    <a class="badge" href="./wal_checkpoint.py">wal_checkpoint.py</a></h1>
+  <div class="sub">Every modification is <b>logged first</b> (WAL <code>fsync</code>), then the page is modified, then — much later — flushed to disk.
+    A <b style="color:var(--green)">checkpoint</b> flushes all dirty pages and pins where recovery starts; on a crash, <b>ARIES</b> does
+    <b>Analysis → Redo → Undo</b>. The scenario below is the <i>identical</i> one as <code>wal_checkpoint.py</code> Section D, recomputed live in JS.
+    &nbsp;|&nbsp; <a href="./mvcc.html">MVCC rollback segments (dual of WAL) →</a></div>
+
+  <!-- ===== PANEL 1: WAL TIMELINE ===== -->
+  <h2>① The WAL timeline — the append-only notebook (log BEFORE modify)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> the 11 records of the scenario, oldest at top. Each carries a <b>redo</b> (forward) and <b>undo</b> (backward) action.
+      The <b style="color:var(--gold)">CHECKPOINT</b> (L5) pins where recovery redo starts; the <b style="color:var(--red)">CRASH</b> happens after L11 with T2 still uncommitted.</div>
+    <canvas id="wal" width="980" height="340"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--blue)"></i>BEGIN</span>
+      <span><i class="sw" style="background:var(--green)"></i>INSERT</span>
+      <span><i class="sw" style="background:var(--orange)"></i>UPDATE</span>
+      <span><i class="sw" style="background:var(--red)"></i>DELETE</span>
+      <span><i class="sw" style="background:var(--purple)"></i>COMMIT</span>
+      <span><i class="sw" style="background:var(--gold)"></i>CHECKPOINT</span>
+    </div>
+    <div class="readout" id="walReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Note each record's <code>prev_lsn</code> chains to the previous record of the SAME txn. T2's chain L6→L7→L9 is what UNDO walks backwards. (WAL_CHECKPOINT.md §2)</div>
+  </div>
+
+  <!-- ===== PANEL 2: BUFFER POOL + CRASH/RECOVERY ===== -->
+  <h2>② Buffer pool &amp; disk — crash it, then recover with ARIES</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> hit <b style="color:var(--red)">💥 CRASH</b> (the buffer pool is lost; only disk + WAL survive), then step through the three recovery phases.
+      <b>REDO</b> re-applies every logged change (idempotent); <b>UNDO</b> rolls back the loser T2 by walking its <code>prev_lsn</code> chain and appending CLRs.</div>
+    <div class="controls phases">
+      <button id="bPre" class="active">① pre-crash (buffer dirty)</button>
+      <button id="bCrash" class="crash">💥 CRASH</button>
+      <button id="bAna">② Analysis</button>
+      <button id="bRedo">③ Redo</button>
+      <button id="bUndo">④ Undo</button>
+      <button id="bReset">↺ reset</button>
+    </div>
+    <canvas id="pool" width="980" height="200"></canvas>
+    <div class="readout" id="poolReadout"></div>
+    <div style="overflow-x:auto;margin-top:.4rem"><table class="cmp" id="phaseTable"></table></div>
+    <div class="micro" style="margin-top:.5rem">After UNDO the database is <b>{1:'A'}</b> only — T1's committed insert kept (redo), T3's committed delete honored, T2's uncommitted insert + update reversed (undo). That is the ARIES correctness contract. (WAL_CHECKPOINT.md §4)</div>
+  </div>
+
+  <!-- ===== PANEL 3: CHECKPOINT FREQUENCY TRADE-OFF ===== -->
+  <h2>③ Checkpoint frequency — fast recovery vs low overhead (the dial)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag the <b>checkpoint interval</b>. Shorter = <span style="color:var(--green)">fast recovery</span> but <span style="color:var(--red)">high I/O overhead</span>; longer = the reverse.
+      The vertical marker is PostgreSQL's <code>checkpoint_timeout = 300s</code> default. The two curves cross at the sweet spot.</div>
+    <div class="controls">
+      <label>checkpoint interval <input type="range" id="ival" min="30" max="3600" value="300" step="10">
+        <span class="val" id="ivalVal">300s</span></label>
+      <span class="micro">WAL rate 1,000 rec/s · replay 5,000 rec/s · flush cost 0.5s (matches wal_checkpoint.py Section E)</span>
+    </div>
+    <canvas id="trade" width="980" height="230"></canvas>
+    <div class="readout" id="tradeReadout"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Fuzzy checkpoint:</b> a background writer flushes continuously, so the redo point becomes <code>min(recLSN in DPT)</code> instead of the checkpoint LSN — no stall, slightly more redo. Postgres/InnoDB/DB2 all do this. (WAL_CHECKPOINT.md §5)</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS ARIES recovery matches wal_checkpoint.py Section D (recovered = <b>{1:'A'}</b> on P1, empty P2 · 3 redos · 2 CLRs).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth scenario, copied verbatim from wal_checkpoint.py ===== */
+/* Records: {lsn, txn, type, page, key, redo, undo, prev, ckpt?(bool)}.
+   redo/undo actions: ['SET',k,v] or ['DEL',k] or null. Matches build_scenario(). */
+const WAL=[
+  {lsn:1, txn:'T1', type:'BEGIN',  page:null,key:null,redo:null,           undo:null,         prev:0},
+  {lsn:2, txn:'T1', type:'INSERT', page:'P1',key:1,   redo:['SET',1,'A'],  undo:['DEL',1],    prev:1},
+  {lsn:3, txn:'T1', type:'UPDATE', page:'P2',key:2,   redo:['SET',2,'X'],  undo:['SET',2,'B'],prev:2},
+  {lsn:4, txn:'T1', type:'COMMIT', page:null,key:null,redo:null,           undo:null,         prev:3},
+  {lsn:5, txn:null, type:'CHECKPOINT', page:null,key:null,redo:null,undo:null,prev:0, ckpt:true, redo_pt:5, txntab:{}},
+  {lsn:6, txn:'T2', type:'BEGIN',  page:null,key:null,redo:null,           undo:null,         prev:0},
+  {lsn:7, txn:'T2', type:'INSERT', page:'P1',key:3,   redo:['SET',3,'C'],  undo:['DEL',3],    prev:6},
+  {lsn:8, txn:'T3', type:'BEGIN',  page:null,key:null,redo:null,           undo:null,         prev:0},
+  {lsn:9, txn:'T2', type:'UPDATE', page:'P1',key:1,   redo:['SET',1,'Y'],  undo:['SET',1,'A'],prev:7},
+  {lsn:10,txn:'T3', type:'DELETE', page:'P2',key:2,   redo:['DEL',2],      undo:['SET',2,'X'],prev:8},
+  {lsn:11,txn:'T3', type:'COMMIT', page:null,key:null,redo:null,           undo:null,         prev:10},
+];
+const CKPT_LSN=5;
+const CRASH_AFTER=11;
+// disk state after the checkpoint (survives the crash): P1={1:'A'}, P2={2:'X'}
+const DISK_AT_CRASH={P1:{1:'A'}, P2:{2:'X'}};
+// buffer (RAM, lost on crash) right before the crash
+const BUF_PRECRASH={P1:{1:'Y',3:'C'}, P2:{}};
+const EXPECTED={P1:{1:'A'}, P2:{}};     // correct recovered state (GOLD)
+
+/* tiny helpers */
+function clone(o){ return JSON.parse(JSON.stringify(o)); }
+function applyAct(rows, act){
+  if(!act) return;
+  if(act[0]==='SET') rows[act[1]]=act[2];
+  else if(act[0]==='DEL') delete rows[act[1]];
+}
+function rowsStr(rows){ const k=Object.keys(rows).map(Number).sort((a,b)=>a-b); return '{'+k.map(x=>x+":'"+rows[x]+"'").join(', ')+'}'; }
+function actStr(a){ if(!a) return '-'; return a[0]==='SET'? "SET("+a[1]+"='"+a[2]+"')" : "DEL("+a[1]+")"; }
+
+/* canvas DPR helper (mirrors mvcc.html / gqa.html setup) */
+function setup(cv, h){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, hh=h||cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(hh*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: WAL timeline ===== */
+const TYPE_COL={BEGIN:'#2980b9',INSERT:'#27ae60',UPDATE:'#e67e22',DELETE:'#c0392b',
+                COMMIT:'#8e44ad',CHECKPOINT:'#f1c40f'};
+function drawWAL(){
+  const cv=document.getElementById('wal');
+  const ctx=setup(cv), w=cv.clientWidth, h=cv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const rowH=24, padX=24, top=18;
+  // central spine
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(padX+16, top); ctx.lineTo(padX+16, top+rowH*WAL.length+6); ctx.stroke();
+  ctx.font='12px ui-monospace,monospace'; ctx.textAlign='left';
+  WAL.forEach((r,i)=>{
+    const y=top+i*rowH;
+    const col=TYPE_COL[r.type]||'#888';
+    // node
+    ctx.fillStyle=col; ctx.beginPath(); ctx.arc(padX+16,y+8,6,0,2*Math.PI); ctx.fill();
+    // LSN
+    ctx.fillStyle='#8b949e'; ctx.fillText('L'+r.lsn, padX+30, y+12);
+    // type chip
+    ctx.fillStyle=col; ctx.font='bold 11px ui-monospace,monospace';
+    ctx.fillText(r.type.padEnd(10,' '), padX+72, y+12);
+    ctx.font='12px ui-monospace,monospace'; ctx.fillStyle='#e6edf3';
+    let rest='';
+    if(r.type==='CHECKPOINT') rest='redo_pt=L'+r.redo_pt+'   txntab={}';
+    else if(r.type==='BEGIN'||r.type==='COMMIT') rest='txn='+r.txn;
+    else rest='txn='+r.txn+'  '+r.page+'  k'+r.key+'   redo='+actStr(r.redo)+'   undo='+actStr(r.undo)+'   prev=L'+r.prev;
+    ctx.fillText(rest, padX+168, y+12);
+  });
+  // checkpoint band
+  const yCk=top+(CKPT_LSN-1)*rowH;
+  ctx.strokeStyle='#f1c40f'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(padX+16, yCk+8); ctx.lineTo(w-12, yCk+8); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle='#f1c40f'; ctx.textAlign='right'; ctx.font='bold 11px system-ui';
+  ctx.fillText('◄ recovery REDO starts here', w-14, yCk+5);
+  // crash band (after L11)
+  const yCr=top+CRASH_AFTER*rowH;
+  ctx.strokeStyle='#c0392b'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(padX+16, yCr); ctx.lineTo(w-12, yCr); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle='#c0392b';
+  ctx.fillText('◄ CRASH (T2 uncommitted)', w-14, yCr-3);
+  ctx.textAlign='left';
+  // readout
+  document.getElementById('walReadout').innerHTML=
+    'T2 chain (UNDO walks this backwards): <b>L9 (UPDATE k1 A→Y) → L7 (INSERT k3=C) → L6 (BEGIN)</b>. '+
+    'T2 has no COMMIT record → it is a <span class="bad">LOSER</span>. T3 (L11 COMMIT) is a <b>WINNER</b>. '+
+    'T1 committed before the checkpoint, so it is already on disk.';
+}
+
+/* ===== ARIES engine in JS (mirrors wal_checkpoint.py section_d) ===== */
+function analyze(){
+  const ckpt=WAL.find(r=>r.ckpt);
+  let txnTable=clone(ckpt.txntab);           // start from frozen table
+  const dpt={};
+  WAL.forEach(r=>{
+    if(r.lsn<=ckpt.lsn) return;
+    if(r.type==='BEGIN') txnTable[r.txn]=['in-progress', r.lsn];
+    else if(r.type==='INSERT'||r.type==='UPDATE'||r.type==='DELETE'){
+      txnTable[r.txn]=['in-progress', r.lsn];
+      if(!(r.page in dpt)) dpt[r.page]=r.lsn;
+    } else if(r.type==='COMMIT') txnTable[r.txn]=['committed', r.lsn];
+  });
+  const losers=Object.keys(txnTable).filter(t=>txnTable[t][0]!=='committed');
+  const winners=Object.keys(txnTable).filter(t=>txnTable[t][0]==='committed');
+  return {txnTable, dpt, losers, winners, redoPt:ckpt.redo_pt};
+}
+function redoPhase(){
+  // rebuild buffer from disk-at-crash, then apply redo from redoPt
+  const pool={P1:clone(DISK_AT_CRASH.P1), P2:clone(DISK_AT_CRASH.P2)};
+  const steps=[];
+  WAL.forEach(r=>{
+    if(r.lsn<5 || !r.redo) return;
+    applyAct(pool[r.page], r.redo);
+    steps.push({lsn:r.lsn, act:r.redo, P1:clone(pool.P1), P2:clone(pool.P2)});
+  });
+  return {pool, steps};
+}
+function undoPhase(redoPool){
+  const A=analyze();
+  const pool={P1:clone(redoPool.P1), P2:clone(redoPool.P2)};
+  const byLsn={}; WAL.forEach(r=>byLsn[r.lsn]=r);
+  let last={}; A.losers.forEach(t=>last[t]=A.txnTable[t][1]);
+  let nextLsn=12; const steps=[];
+  while(Object.values(last).some(v=>v>0)){
+    const t=Object.keys(last).filter(k=>last[k]>0).sort((a,b)=>last[b]-last[a])[0];
+    const lsn=last[t]; const rec=byLsn[lsn];
+    if(rec.type==='BEGIN'){ last[t]=0; continue; }
+    const act=rec.undo;
+    applyAct(pool[rec.page], act);
+    steps.push({walk:lsn, rec, clr:nextLsn, act, P1:clone(pool.P1), P2:clone(pool.P2)});
+    nextLsn++; last[t]=rec.prev;
+  }
+  return {pool, steps};
+}
+
+/* ===== PANEL 2: pool + phased recovery ===== */
+let phase='pre';   // pre | crash | analysis | redo | undo
+const pc=document.getElementById('pool');
+function drawPool(){
+  const ctx=setup(pc), w=pc.clientWidth, h=pc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  // decide disk & buffer for the current phase
+  let disk, buf, title, titleCol='#8b949e';
+  if(phase==='pre'){
+    disk={P1:clone(DISK_AT_CRASH.P1), P2:clone(DISK_AT_CRASH.P2)};   // post-checkpoint disk
+    buf={P1:clone(BUF_PRECRASH.P1), P2:clone(BUF_PRECRASH.P2)};
+    title='PRE-CRASH — buffer dirty, disk = post-checkpoint';
+  } else if(phase==='crash'){
+    disk={P1:clone(DISK_AT_CRASH.P1), P2:clone(DISK_AT_CRASH.P2)};
+    buf=null;
+    title='💥 CRASH — buffer LOST; only disk + WAL survive'; titleCol='#c0392b';
+  } else if(phase==='analysis'){
+    disk={P1:clone(DISK_AT_CRASH.P1), P2:clone(DISK_AT_CRASH.P2)}; buf=null;
+    title='PHASE 1 ANALYSIS — winners=[T3], losers=[T2]'; titleCol='#2980b9';
+  } else if(phase==='redo'){
+    const R=redoPhase(); disk=R.pool; buf=null;
+    title='PHASE 2 REDO — re-apply 3 logged changes (idempotent)'; titleCol='#e67e22';
+  } else { // undo
+    const R=redoPhase(); const U=undoPhase(R.pool); disk=U.pool; buf=null;
+    title='PHASE 3 UNDO — rolled back T2 via 2 CLRs'; titleCol='#27ae60';
+  }
+  // layout: two columns (P1, P2), each shows DISK and (if buf) BUFFER
+  const colW=(w-60)/2, gap=20, x0=20, y0=44;
+  ['P1','P2'].forEach((pid,i)=>{
+    const x=x0+i*(colW+gap);
+    // disk card
+    drawCard(ctx, x, y0, colW, 70, pid+' · DISK', disk[pid], '#27ae60', false);
+    // buffer card
+    if(buf){
+      const dirty = JSON.stringify(buf[pid])!==JSON.stringify(disk[pid]);
+      drawCard(ctx, x, y0+86, colW, 70, pid+' · BUFFER (RAM)', buf[pid],
+               dirty?'#e67e22':'#8b949e', dirty);
+      if(phase==='pre' && dirty){
+        ctx.fillStyle='#e67e22'; ctx.font='bold 10px system-ui'; ctx.textAlign='right';
+        ctx.fillText('DIRTY — lost on crash', x+colW-8, y0+100);
+        ctx.textAlign='left';
+      }
+    } else {
+      ctx.fillStyle='#3a1414'; ctx.strokeStyle='#c0392b'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+      ctx.fillRect(x, y0+86, colW, 70); ctx.strokeRect(x, y0+86, colW, 70); ctx.setLineDash([]);
+      ctx.fillStyle='#c0392b'; ctx.font='bold 12px system-ui'; ctx.textAlign='center';
+      ctx.fillText(phase==='crash'?'BUFFER POOL — LOST':(pid+' · buffer (rebuilt by redo/undo)'), x+colW/2, y0+126);
+      ctx.textAlign='left';
+    }
+  });
+  ctx.fillStyle=titleCol; ctx.font='bold 13px system-ui'; ctx.textAlign='left';
+  ctx.fillText(title, 14, 24);
+}
+function drawCard(ctx,x,y,w,hh,title,rows,col,emph){
+  ctx.fillStyle=emph?'#1c2616':'#0a0e14';
+  ctx.strokeStyle=col; ctx.lineWidth=emph?2.5:1.5;
+  ctx.fillRect(x,y,w,hh); ctx.strokeRect(x,y,w,hh);
+  ctx.fillStyle=col; ctx.font='bold 11px ui-monospace,monospace';
+  ctx.fillText(title, x+10, y+18);
+  ctx.fillStyle='#e6edf3'; ctx.font='13px ui-monospace,monospace';
+  ctx.fillText(rowsStr(rows), x+10, y+44);
+}
+
+/* phase readout + table */
+function renderPhaseReadout(){
+  const ro=document.getElementById('poolReadout');
+  const A=analyze();
+  if(phase==='pre'){
+    ro.innerHTML='Buffer holds T2 &amp; T3 unflushed changes (P1={1:Y,3:C}, P2={}). Disk is still at the checkpoint (P1={1:A}, P2={2:X}). Hit <b>💥 CRASH</b>.';
+  } else if(phase==='crash'){
+    ro.innerHTML='<span class="bad">Buffer pool is gone.</span> Survivors: disk={P1:{1:A}, P2:{2:X}} + the WAL (all 11 records). Now run ANALYSIS.';
+  } else if(phase==='analysis'){
+    ro.innerHTML='Scan WAL from checkpoint L5 forward. WINNERS=<b>'+A.winners.join(',')+'</b> (committed), LOSERS=<span class="bad">'+A.losers.join(',')+'</span> (in-progress, no COMMIT). DPT={P1:L7, P2:L10}. Redo will start at L'+A.redoPt+'.';
+  } else if(phase==='redo'){
+    const R=redoPhase();
+    ro.innerHTML='Re-apply '+R.steps.length+' redo action(s) from L5 onto disk. Disk now = <b>P1:'+rowsStr(R.pool.P1)+', P2:'+rowsStr(R.pool.P2)+'</b> (the pre-crash in-memory state, including T2\'s uncommitted writes).';
+  } else {
+    const R=redoPhase(); const U=undoPhase(R.pool);
+    const ok = JSON.stringify(U.pool)===JSON.stringify(EXPECTED);
+    ro.innerHTML='Walk T2 backwards (L9→L7), appending '+U.steps.length+' CLRs. Final = <b>P1:'+rowsStr(U.pool.P1)+', P2:'+rowsStr(U.pool.P2)+'</b>. '
+      +(ok?'<b>== expected ✓</b> (k1=A kept; k2 deleted by T3; k3 + T2\'s A→Y undone)':'<span class="bad">MISMATCH</span>');
+  }
+  renderPhaseTable(A);
+}
+function renderPhaseTable(A){
+  const t=document.getElementById('phaseTable');
+  if(phase==='analysis'){
+    let H='<tr><th>LSN</th><th>type</th><th>txn</th><th>effect on txn table / DPT</th></tr>';
+    WAL.forEach(r=>{
+      if(r.lsn<=CKPT_LSN) return;
+      let eff='';
+      if(r.type==='BEGIN') eff='+'+r.txn+' = in-progress';
+      else if(r.type==='INSERT'||r.type==='UPDATE'||r.type==='DELETE'){
+        const dpt = r.lsn<=7?'P1:L7':'P2:L10'; eff=r.txn+'.last=L'+r.lsn+'; DPT['+r.page+']=L'+A.dpt[r.page];
+      } else if(r.type==='COMMIT') eff=r.txn+' = committed (WINNER)';
+      const cls=(r.type==='COMMIT')?'win':((r.txn==='T2'&&r.type!=='BEGIN')?'lose':'');
+      H+='<tr><td class="c">L'+r.lsn+'</td><td class="c">'+r.type+'</td><td class="c '+cls+'">'+r.txn+'</td><td>'+eff+'</td></tr>';
+    });
+    H+='<tr class="hl"><td class="c" colspan="4">WINNERS='+A.winners+' &nbsp; LOSERS='+A.losers+' &nbsp; DPT='+JSON.stringify(A.dpt).replace(/"/g,'')+'</td></tr>';
+    t.innerHTML=H;
+  } else if(phase==='redo'){
+    const R=redoPhase();
+    let H='<tr><th>LSN</th><th>redo action</th><th>P1 after</th><th>P2 after</th></tr>';
+    R.steps.forEach(s=>H+='<tr><td class="c">L'+s.lsn+'</td><td class="c">'+actStr(s.act)+'</td><td>'+rowsStr(s.P1)+'</td><td>'+rowsStr(s.P2)+'</td></tr>');
+    H+='<tr class="hl"><td class="c" colspan="4">applied '+R.steps.length+' redo action(s) — disk now reflects pre-crash in-memory state</td></tr>';
+    t.innerHTML=H;
+  } else if(phase==='undo'){
+    const R=redoPhase(); const U=undoPhase(R.pool);
+    let H='<tr><th>step</th><th>walk LSN</th><th>record</th><th>undo (CLR)</th><th>P1 after</th><th>P2 after</th></tr>';
+    U.steps.forEach((s,i)=>{
+      const lab=s.rec.type+' '+s.rec.txn+' '+s.rec.page+' k'+s.rec.key;
+      H+='<tr><td class="c">'+(i+1)+'</td><td class="c">L'+s.walk+'</td><td>'+lab+'</td><td class="c">CLR L'+s.clr+' '+actStr(s.act)+'</td><td>'+rowsStr(s.P1)+'</td><td>'+rowsStr(s.P2)+'</td></tr>';
+    });
+    H+='<tr class="hl"><td class="c" colspan="6">appended '+U.steps.length+' CLR(s) — all loser effects reversed</td></tr>';
+    t.innerHTML=H;
+  } else {
+    t.innerHTML='<tr><td class="c" style="color:var(--muted)">(use the phase buttons above: ANALYSIS / REDO / UNDO)</td></tr>';
+  }
+}
+
+/* ===== PANEL 3: checkpoint frequency trade-off ===== */
+const WAL_RATE=1000, REPLAY_RATE=5000, FLUSH_COST=0.5, PG_DEFAULT=300;
+function recoverySec(T){ return WAL_RATE*T/REPLAY_RATE; }
+function overheadPct(T){ return FLUSH_COST/T*100; }
+const tc=document.getElementById('trade');
+function drawTrade(){
+  const ctx=setup(tc), w=tc.clientWidth, h=tc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=52, padR=24, padT=22, padB=38;
+  const iw=w-padL-padR, ih=h-padT-padB;
+  const Tmin=30, Tmax=3600;
+  const X=T=> padL + (Math.log(T)-Math.log(Tmin))/(Math.log(Tmax)-Math.log(Tmin))*iw;
+  // axes
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+ih); ctx.lineTo(padL+iw,padT+ih); ctx.stroke();
+  // grid + x ticks
+  ctx.font='10px ui-monospace,monospace'; ctx.fillStyle='#8b949e'; ctx.textAlign='center';
+  [30,60,120,300,600,1800,3600].forEach(T=>{
+    const x=X(T);
+    ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+ih); ctx.stroke();
+    const lbl = T>=3600?(T/3600)+'h' : (T>=60?(T/60)+'m':T+'s');
+    ctx.fillText(lbl, x, padT+ih+14);
+  });
+  // recovery curve (0..~720s). scale to ih.
+  const maxRec=recoverySec(3600);     // 720
+  ctx.strokeStyle='#27ae60'; ctx.lineWidth=2.5; ctx.beginPath();
+  for(let T=Tmin; T<=Tmax; T+=10){
+    const x=X(T), y=padT+ih - (recoverySec(T)/maxRec)*ih;
+    if(T===Tmin) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  // overhead curve (0..1.67%). scale to ih (cap at 2%).
+  const maxOh=2.0;
+  ctx.strokeStyle='#c0392b'; ctx.lineWidth=2.5; ctx.beginPath();
+  for(let T=Tmin; T<=Tmax; T+=10){
+    const x=X(T), y=padT+ih - (overheadPct(T)/maxOh)*ih;
+    if(T===Tmin) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  // PG default marker
+  const xpg=X(PG_DEFAULT);
+  ctx.strokeStyle='#f1c40f'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(xpg,padT); ctx.lineTo(xpg,padT+ih); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#f1c40f'; ctx.textAlign='center'; ctx.font='bold 10px system-ui';
+  ctx.fillText('Postgres default 300s', xpg, padT-6);
+  // current slider cursor
+  const cur=+document.getElementById('ival').value;
+  const xc=X(cur);
+  ctx.strokeStyle='#58a6ff'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(xc,padT); ctx.lineTo(xc,padT+ih); ctx.stroke();
+  ctx.fillStyle='#58a6ff'; ctx.beginPath(); ctx.arc(xc, padT+ih-(recoverySec(cur)/maxRec)*ih, 4,0,2*Math.PI); ctx.fill();
+  ctx.beginPath(); ctx.arc(xc, padT+ih-(Math.min(overheadPct(cur),maxOh)/maxOh)*ih, 4,0,2*Math.PI); ctx.fill();
+  // axis titles
+  ctx.fillStyle='#8b949e'; ctx.textAlign='left'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText('checkpoint interval (log)', padL, h-6);
+  ctx.save(); ctx.translate(12, padT+ih/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center';
+  ctx.fillText('recovery redo time (s) / overhead (%)', 0, 0); ctx.restore();
+  // legend
+  ctx.textAlign='left'; ctx.font='11px system-ui';
+  ctx.fillStyle='#27ae60'; ctx.fillText('━ recovery redo time', padL+iw-200, padT+12);
+  ctx.fillStyle='#c0392b'; ctx.fillText('━ checkpoint overhead', padL+iw-200, padT+28);
+  // readout
+  document.getElementById('tradeReadout').innerHTML=
+    'interval = <b>'+cur+'s</b> &nbsp;·&nbsp; WAL accrued = <b>'+(WAL_RATE*cur).toLocaleString()+'</b> rec &nbsp;·&nbsp; '
+    +'<span style="color:var(--green)">recovery redo = '+recoverySec(cur).toFixed(1)+'s</span> &nbsp;·&nbsp; '
+    +'<span style="color:var(--red)">overhead = '+overheadPct(cur).toFixed(2)+'%</span><br>'
+    +(cur===PG_DEFAULT?'PostgreSQL default — the conventional sweet spot.':
+      (cur<PG_DEFAULT?'shorter than default: <span class="warn">faster recovery, more I/O tax</span>.':
+       'longer than default: <span class="warn">less I/O tax, slower recovery after a crash</span>.'));
+}
+
+/* ===== GOLD CHECK vs wal_checkpoint.py Section D ===== */
+function goldCheck(){
+  const R=redoPhase(); const U=undoPhase(R.pool);
+  const ok = JSON.stringify(U.pool)===JSON.stringify(EXPECTED)
+          && R.steps.length===3 && U.steps.length===2;
+  const chk=document.getElementById('check');
+  chk.textContent = ok ? 'check: OK — JS ARIES matches wal_checkpoint.py (recovered {1:\'A\'}, 3 redos, 2 CLRs)'
+                       : 'check: FAIL — mismatch!';
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== events ===== */
+function setPhase(p){
+  phase=p;
+  ['Pre','Crash','Ana','Redo','Undo'].forEach(k=>{
+    document.getElementById('b'+k).classList.remove('active');
+  });
+  const map={pre:'bPre',crash:'bCrash',analysis:'bAna',redo:'bRedo',undo:'bUndo'};
+  document.getElementById(map[p]).classList.add('active');
+  drawPool(); renderPhaseReadout();
+}
+document.getElementById('bPre').addEventListener('click',()=>setPhase('pre'));
+document.getElementById('bCrash').addEventListener('click',()=>setPhase('crash'));
+document.getElementById('bAna').addEventListener('click',()=>setPhase('analysis'));
+document.getElementById('bRedo').addEventListener('click',()=>setPhase('redo'));
+document.getElementById('bUndo').addEventListener('click',()=>setPhase('undo'));
+document.getElementById('bReset').addEventListener('click',()=>setPhase('pre'));
+document.getElementById('ival').addEventListener('input',()=>{
+  const v=+document.getElementById('ival').value;
+  document.getElementById('ivalVal').textContent = v>=3600?(v/3600)+'h':(v>=60?(v/60)+'m':v+'s');
+  drawTrade();
+});
+window.addEventListener('resize',()=>{ drawWAL(); drawPool(); drawTrade(); });
+
+/* ===== boot ===== */
+drawWAL();
+setPhase('pre');
+drawTrade();
+goldCheck();
+</script>
+</body>
+</html>

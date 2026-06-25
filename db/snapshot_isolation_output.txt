@@ -1,0 +1,189 @@
+snapshot_isolation.py - reference impl. All numbers feed SNAPSHOT_ISOLATION.md.
+pure Python stdlib ; deterministic logical-time model.
+
+========================================================================
+  SECTION A: SI basics - each txn reads a frozen snapshot taken at START
+========================================================================
+Model: one row R. Logical time t. A version is (commit_time, value).
+
+EVENT TIMELINE (logical time t ->):
+
+  t=1   T_init COMMITS  : R = 0
+  t=10  T1 BEGIN        : snapshot S1 (sees R=0)
+  t=15  T1 writes R=100 : in T1 workspace (visible to T1, blind to T2)
+  t=20  T2 BEGIN        : snapshot S2 (sees R=0; T1 NOT committed yet)
+  t=30  T1 COMMITS      : R=100 now committed
+  t=40  T2 reads R      : still 0 (S2 frozen at t=20, before T1 commit)
+  t=50  T2 COMMITS      : (T2 wrote nothing)
+  t=60  T3 BEGIN        : snapshot S3 (sees R=100; T1 committed @30<60)
+
+SNAPSHOT VISIBILITY (value of R each txn sees at BEGIN):
+
+  | txn | start | snapshot sees R= | reason                                 |
+  |-----|-------|------------------|----------------------------------------|
+  | T1  |    10 |                0 | latest committed R@1=0 (1 < 10)            |
+  | T2  |    20 |                0 | T1 uncommitted at 20 -> snapshot blind    |
+  | T3  |    60 |              100 | T1 committed @30=100 (30 < 60)            |
+
+KEY POINT: T2 re-reads R at t=40 and STILL sees 0, even though T1
+committed R=100 at t=30. T2's snapshot is frozen at its BEGIN (t=20).
+This is exactly how SI blocks non-repeatable reads and phantoms -
+and it is also exactly why write skew can hide between snapshots (Section B).
+
+[check] visibility rule  Tj sees Ti  <=>  Ti.commit < Tj.start :
+        T2(t=20) blind to T1(commit=30) since 30 < 20 is False:  OK
+
+========================================================================
+  SECTION B: WRITE SKEW - two doctors on call, rule broken
+========================================================================
+Table doctors(name, on_call). INITIAL: Alice on-call, Bob on-call.
+BUSINESS RULE: at least 1 doctor must be on call at all times.
+
+t=1    INITIAL: alice=on_call, bob=on_call  (count=2)
+t=10  T1 (Alice's shift) BEGIN -> snapshot S1: count = 2
+t=10  T2 (Bob's shift)   BEGIN -> snapshot S2: count = 2
+        (both snapshots see BOTH on-call; rule '>=1' looks satisfied)
+
+t=15   T1: count==2 (>=1) -> safe to go off-call
+           UPDATE doctors SET on_call=false WHERE name='alice'
+t=15   T2: count==2 (>=1) -> safe to go off-call
+           UPDATE doctors SET on_call=false WHERE name='bob'
+
+t=20   T1 COMMITS. FCW check on {alice}: no concurrent committed
+       write to alice -> COMMIT OK.
+t=30   T2 COMMITS. FCW check on {bob} vs T1's {alice}:
+       DISJOINT write sets -> no WW conflict -> COMMIT OK.
+
+FINAL committed state: alice_on_call=False, bob_on_call=False
+       on-call count = 0
+
+RULE '>=1 on call'  ==>  0  ==>  VIOLATED  <== WRITE SKEW ANOMALY
+
+[check] detect_write_skew(T1,T2) = True  -> FCW saw only disjoint
+        writes and let both commit; the bidirectional rw-conflict
+        (each read the row the other wrote) is the tell-tale skew.  OK
+
+========================================================================
+  SECTION C: first-committer-wins - same-row write -> second ABORTS
+========================================================================
+Account balance. INITIAL: balance = 100. Two deposits concurrently.
+
+t=1    INITIAL balance = 100
+t=10   T1 BEGIN: reads balance = 100 (snapshot S1)
+t=20   T2 BEGIN: reads balance = 100 (snapshot S2; T1 NOT committed -> still sees 100)
+       T1 wants balance += 10  -> 110
+       T2 wants balance += 50  -> 150
+
+t=30   T1 COMMITS balance=110. FCW check {balance}: no concurrent
+       committed write -> COMMIT OK.
+t=40   T2 tries COMMIT. FCW check {balance} vs T1's {balance}:
+       SAME row -> WW conflict -> T2 ABORTED  (blocker = T1).
+
+FINAL committed balance = 110
+T2's write was DISCARDED. No lost update: T1's +10 survived, and the
+client for T2 must RETRY (it will re-read 110 and write 160). SI's FCW
+turns a silent lost update into an explicit ABORT.
+
+[check] ww_conflict(T1,T2) = True;  abort happened = True;
+        detect_write_skew = False (same-row -> FCW, NOT write skew). OK
+
+========================================================================
+  SECTION D: SI vs Read Committed - anomaly prevention
+========================================================================
+PostgreSQL 'READ COMMITTED' (default) vs 'REPEATABLE READ' (= SI).
+
+  P = prevents,  A = allows
+
+| anomaly            | Read Committed | Snapshot Isolation |
+|--------------------|:--------------:|:-------------------:|
+| Dirty read         |       P        |          P          |
+| Non-repeatable     |       A        |          P          |
+| Phantom            |       A        |          P          |
+| Write skew         |       A        |          A          |
+| Lost update        |       A        |          P          |
+
+DETAIL:
+  Dirty read         RC=P SI=P  -  RC/SI read only committed versions
+  Non-repeatable     RC=A SI=P  -  RC re-reads latest -> value can change
+  Phantom            RC=A SI=P  -  RC predicate re-scan sees new rows
+  Write skew         RC=A SI=A  -  disjoint writes slip past FCW (Section B)
+  Lost update        RC=A SI=P  -  SI FCW aborts the second same-row writer
+
+Read Committed prevents 1/5 anomalies.
+Snapshot Isolation prevents 4/5 anomalies.
+
+SI is strictly stronger: it adds non-repeatable, phantom, and lost-
+update prevention on top of RC's dirty-read prevention. The ONE thing
+SI still allows is write skew (Section E shows Serializable closing it).
+
+[check] RC prevents 1, SI prevents 4 of 5: OK
+
+========================================================================
+  SECTION E: SI vs Serializable - write skew is the gap SSI closes
+========================================================================
+PostgreSQL 'REPEATABLE READ' (= SI) vs 'SERIALIZABLE' (= SSI).
+
+  P = prevents,  A = allows
+
+| anomaly            | Snapshot Isolation | Serializable (SSI) |
+|--------------------|:------------------:|:-------------------:|
+| Dirty read         |         P          |          P          |
+| Non-repeatable     |         P          |          P          |
+| Phantom            |         P          |          P          |
+| Write skew         |         A          |          P          |
+| Lost update        |         P          |          P          |
+
+Snapshot Isolation prevents 4/5; Serializable prevents 5/5.
+The ONLY difference is WRITE SKEW. SI permits it; SSI detects it.
+
+HOW SSI CATCHES WRITE SKEW (Cahill 2008):
+  SSI records every predicate read as a 'SIREAD'. When a txn commits,
+  SSI looks for rw-conflicts that form a DANGEROUS STRUCTURE:
+    T1 read-then-T2-wrote  (rw T1->T2)   AND
+    T2 read-then-T1-wrote  (rw T2->T1)
+  = a bidirectional rw-conflict = write skew. SSI ABORTS one of them.
+
+  In the doctors example (Section B):
+    T1 read {alice,bob}, wrote {alice}  ->  rw T2->T1 (T2 read alice)
+    T2 read {alice,bob}, wrote {bob}    ->  rw T1->T2 (T1 read bob)
+  SSI sees the bidirectional conflict and aborts (say) T2, so Bob
+  stays on call and the rule holds. SI does NOT record predicate reads,
+  so it sees nothing and lets both commit -> count=0.
+
+POSTGRESQL MAPPING (docs 13.2, verified):
+  READ UNCOMMITTED  ~ behaves like READ COMMITTED
+  READ COMMITTED    = statement-level snapshot
+  REPEATABLE READ   = Snapshot Isolation  <-- this file
+  SERIALIZABLE      = SSI (Serializable Snapshot Isolation)
+
+[check] SI prevents 4, SSI prevents 5; the +1 is write skew: OK
+
+========================================================================
+  GOLD: write-skew detection - pinned for snapshot_isolation.html
+========================================================================
+The detector re-implements SSI's bidirectional rw-conflict test:
+
+  write_skew(a,b) =  concurrent(a,b)
+                  AND (a.write & b.write) == {}      [disjoint -> FCW misses]
+                  AND (a.write & b.read)  != {}      [rw a->b]
+                  AND (b.write & a.read)  != {}      [rw b->a]
+
+| scenario            | concurrent | WW conflict | rw a->b | rw b->a | WRITE SKEW? |
+|---------------------|:----------:|:-----------:|:-------:|:-------:|:-----------:|
+| doctors (alice/bob) |    yes     |     no      |   yes   |   yes   |     YES     |
+| counter (balance)   |    yes     |     yes     |   yes   |   yes   |     no      |
+| independent (p/q)   |    yes     |     no      |   no    |   no    |     no      |
+
+GOLD values (pinned for snapshot_isolation.html):
+  doctors   : write_skew=True  ww=False
+  counter   : write_skew=False  ww=True   (FCW aborts, not skew)
+  independent: write_skew=False  ww=False   (clean, no conflict)
+  anomalies prevented: RC=1, SI=4, SER=5
+  final on-call count (doctors, SI) = 0
+  final balance (counter, SI FCW)   = 110
+
+[check] all GOLD asserts hold (skew detect + anomaly counts + finals): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,260 @@
+mvcc.py - reference impl. All numbers feed MVCC.md.
+pure Python stdlib. XID space = 32-bit. Run: python3 mvcc.py
+
+========================================================================
+  SECTION A: tuple visibility - the xmin/xmax version chain
+========================================================================
+Every row version carries two transaction IDs:
+
+  t_xmin : the xid that INSERTED this version (created it)
+  t_xmax : the xid that SUPERSEDED this version (0 = still alive)
+
+A transaction sees a version iff:
+   (1) its inserter (xmin) committed and is visible to the snapshot, AND
+   (2) its superseder (xmax) is 0, aborted, or NOT YET committed-visible.
+
+Readers never block writers and writers never block readers: each
+transaction simply picks the version whose xmin/xmax match its snapshot.
+
+Row 1's version chain (newest -> oldest):
+  Version(tag='alice-v3', xmin=300, xmax=0, payload='v3')
+  Version(tag='alice-v2', xmin=200, xmax=300, payload='v2')
+  Version(tag='alice-v1', xmin=100, xmax=200, payload='v1')
+
+Query transaction = T250 (runs between T200 and T300).
+  snapshot@250 = Snapshot(xmin=250, xmax=251, xip=[])
+  -> every xid < 250 is finalized; 250 is the querier (sees its own
+     writes specially); xids >= 251 (i.e. 300) have NOT STARTED yet,
+     so T300's UPDATE is invisible to T250.
+
+Visibility check per version:
+  | version   | xmin | xmin visible? why            | xmax | xmax visible? why            | result   |
+  |-----------|------|------------------------------|------|------------------------------|----------|
+  | alice-v3  | 300  | no  >= xmax (not started)    | 0    | 0 = never superseded         | hidden   |
+  | alice-v2  | 200  | YES committed & < xmax       | 300  | no  >= xmax (not started)    | VISIBLE  |
+  | alice-v1  | 100  | YES committed & < xmax       | 200  | YES committed & < xmax       | hidden   |
+
+For txid=250 the visible version is: Version(tag='alice-v2', xmin=200, xmax=300, payload='v2')
+
+Why v2:  inserter T200 is committed and visible (200 < xmax=251);
+         superseder T300 has NOT STARTED (300 >= xmax=251) so xmax is
+         invisible -> the delete does not count -> v2 is alive.
+[check] visibility(txid=250) -> v2 (alice-v2, xmin=200): OK
+
+========================================================================
+  SECTION B: the snapshot - xmin horizon, xmax horizon, xip
+========================================================================
+A snapshot is a transaction's FROZEN answer to 'which transactions
+count as committed for me?'. Three fields carve the xid number line:
+
+  xmin : lowest in-progress xid. Every xid < xmin is FINALIZED
+         (committed or aborted) -> its fate is decided.
+
+  xmax : next xid to be assigned. Every xid >= xmax has NOT STARTED
+         -> its effects are invisible ('not yet').
+
+  xip  : the in-progress list. xids in [xmin, xmax) still RUNNING at
+         snapshot time -> invisible ('still working').
+
+So 'committed and visible' = started (xid < xmax) AND not running
+(not in xip) AND committed (in the commit log).
+
+Worked snapshot  S = Snapshot(xmin=200, xmax=400, xip=[250, 350])
+commit log      : committed = [100, 150, 200, 300]
+                  (250, 350 are in xip -> their writes are invisible)
+
+Number line:
+   ... 100  150  [200=xmin ... 250,350 in xip ... 400=xmax]  500 ...
+
+Probe versions and decide visibility:
+
+  | tuple | xmin | xmin visible? why            | xmax | xmax visible? why            | visible? |
+  |-------|------|------------------------------|------|------------------------------|----------|
+  | p1    | 100  | YES committed & < xmax       | 0    | 0 = never superseded         | YES      |
+  | p2    | 250  | no  in xip (in progress)     | 0    | 0 = never superseded         | no       |
+  | p3    | 350  | no  in xip (in progress)     | 0    | 0 = never superseded         | no       |
+  | p4    | 500  | no  >= xmax (not started)    | 0    | 0 = never superseded         | no       |
+  | p5    | 150  | YES committed & < xmax       | 250  | no  in xip (in progress)     | YES      |
+  | p6    | 200  | YES committed & < xmax       | 300  | YES committed & < xmax       | no       |
+
+-> 2 of 6 probes visible: ['p1', 'p5']
+   p1 : plain live old row.
+   p5 : inserted long ago, but its DELETER (250) is still in progress,
+        so the delete does not count yet -> the row is still visible.
+
+[check] exactly 2 visible (p1, p5): OK
+
+========================================================================
+  SECTION C: READ COMMITTED - non-repeatable read (snapshot per stmt)
+========================================================================
+Isolation level READ COMMITTED takes a FRESH snapshot for EVERY
+statement. A re-read inside the SAME transaction can therefore see a
+DIFFERENT value if another transaction committed in between. That is a
+non-repeatable read - allowed under READ COMMITTED.
+
+Setup: accounts(id=1, balance). Row 1 starts as v1(balance=100),
+inserted long ago by T100 (committed).
+
+Timeline:
+  t0  T500 BEGIN
+  t1  T500 SELECT balance WHERE id=1   (fresh snapshot S1)
+  t2  T501 BEGIN
+  t3  T501 UPDATE balance=200 WHERE id=1;  COMMIT  (writes v2,
+       stamps v1.xmax=501)
+  t4  T500 SELECT balance WHERE id=1   (fresh snapshot S2)
+
+  S1 = Snapshot(xmin=500, xmax=501, xip=[])    (at t1 only 100 committed; 501 not started)
+  S2 = Snapshot(xmin=500, xmax=502, xip=[])    (at t4 501 has started AND committed -> visible)
+
+  read @ t1 : visibility(chain, S1) -> v1, balance = 100
+  read @ t4 : visibility(chain, S2) -> v2, balance = 200
+
+T500 read balance=100 at t1, then balance=200 at t4 -> a
+NON-REPEATABLE READ. Same transaction, same row, two different values,
+because READ COMMITTED re-took the snapshot and T501 slipped in.
+
+[check] RC: first read 100, second read 200 (non-repeatable): OK
+
+========================================================================
+  SECTION D: REPEATABLE READ - snapshot isolation (snapshot pinned)
+========================================================================
+Isolation level REPEATABLE READ takes ONE snapshot at the transaction's
+first statement and REUSES it for every later statement. The snapshot
+is PINNED: transactions that commit later are invisible to it. So a
+re-read always returns the same value -> reads are repeatable.
+
+SAME timeline as Section C; the only difference is the snapshot rule.
+
+Timeline (identical to Section C):
+  t0  T500 BEGIN
+  t1  T500 SELECT balance WHERE id=1   (takes snapshot S, KEEPS it)
+  t2  T501 BEGIN
+  t3  T501 UPDATE balance=200 WHERE id=1;  COMMIT
+  t4  T500 SELECT balance WHERE id=1   (REUSES snapshot S)
+
+  pinned S = Snapshot(xmin=500, xmax=501, xip=[])   (captured at t1; xmax=501 -> 501 is 'not started')
+  under S, committed_visible(501) = (501 < 501)? -> False
+
+  read @ t1 : visibility(chain, S) -> v1, balance = 100
+  read @ t4 : visibility(chain, S) -> v1, balance = 100
+
+At t4 the chain also contains v2(xmin=501), but under the PINNED
+snapshot S, xid 501 is >= xmax (501 >= 501) -> 'not started' -> v2's
+insert is INVISIBLE. v1(xmin=100) is visible and its superseder 501 is
+also invisible -> v1 stays the visible version. T500 sees balance=100
+BOTH times.
+
+                  READ COMMITTED (Sec C)   REPEATABLE READ (Sec D)
+  read @ t1      balance = 100                 balance = 100
+  read @ t4      balance = 200                 balance = 100
+  repeatable?    NO  (non-repeatable read)   YES
+
+[check] RR: both reads 100 (repeatable); only difference from C is the
+       snapshot rule (reuse S vs take fresh S2): OK
+
+========================================================================
+  SECTION E: dead tuple lifecycle - UPDATE bloats, VACUUM reclaims
+========================================================================
+UPDATE never overwrites in place. It writes a NEW version and stamps the
+OLD version's xmax, leaving the old version on the page as a DEAD TUPLE
+once no live snapshot can need it. Dead tuples accumulate = BLOAT.
+
+VACUUM removes dead tuples, reclaims their space, frees line pointers,
+and sets the visibility-map bit so future index-only scans can skip the
+heap. (🔗 FREE_SPACE_MAP.md is a sibling per-page bitmap.)
+
+Removable rule:  dead(v) = not visible under ANY live snapshot.
+
+Case 1 - the only open snapshot is S_now = Snapshot(xmin=301, xmax=301, xip=[]) (sees only v3):
+  | version | xmin | xmax | visible to S_now? | removable? |
+  |---------|------|------|--------------------|------------|
+  | v3      | 300  | 0    | yes                | no         |
+  | v2      | 200  | 300  | no                 | YES        |
+  | v1      | 100  | 200  | no                 | YES        |
+
+  VACUUM frees 2 dead tuples ['v2', 'v1'],
+  keeps 1 live tuple ['v3'].
+
+  BEFORE VACUUM                 AFTER VACUUM
+  -------------------------     -------------------------
+  line pointers : 3            line pointers : 1
+  dead tuples   : 2            dead tuples   : 0
+  live tuples   : 1            live tuples   : 1
+  free space    : low           free space    : reclaimed
+  vis-map bit   : clear         vis-map bit   : SET (all-visible)
+
+Case 2 - a long-running reader opened S_old BEFORE T200 committed:
+  S_old = Snapshot(xmin=200, xmax=301, xip=[200])
+  | version | visible to S_old? | removable now? |
+  |---------|--------------------|----------------|
+  | v3      | yes                | no             |
+  | v2      | no                 | YES            |
+  | v1      | yes                | no             |
+
+  v1 is STILL VISIBLE to S_old (its superseder 200 is in xip -> the
+  delete does not count). So VACUUM MUST RETAIN v1. This is why
+  long-running transactions stall VACUUM and cause bloat: VACUUM can
+  only remove what NO open transaction can still read.
+
+[check] with S_old open, v1 is retained (not removable): OK
+
+========================================================================
+  SECTION F: XID wraparound - freeze old tuples before the counter wraps
+========================================================================
+Transaction IDs are a 32-bit counter: only 2^32 = 4,294,967,296 of them.
+Eventually the counter WRAPS back to 0 and reuses old xids. An old tuple
+stamped with xmin=1000 would then be confused with a brand-new xid 1000
+-> visibility would silently break (data loss).
+
+Defense: VACUUM FROZENS old tuples first - it overwrites their xmin with
+FrozenTransactionId (== 2), a marker meaning 'committed
+forever'. Once frozen, the original xid is no longer referenced, so it
+can be reused safely after wraparound.
+
+XIDs are compared as SIGNED 32-bit offsets (mod 2^32): a stored xid is
+'older' if the forward distance (curr - old) mod 2^32 is < 2^31. Once the
+distance reaches 2^31 (2,147,483,648), the sign flips and the old tuple
+looks 'in the future' -> broken. So everything must be frozen before that.
+
+Worked example: oldest UNFROZEN tuple has xmin = 1,000.
+
+  |      current_xid | distance = curr-old | vs thresholds                     | action                                          |
+  |------------------|---------------------|-----------------------------------|-------------------------------------------------|
+  |       60,000,000 |          59,999,000 | min_age(50M) <= d < max_age(200M) | normal VACUUM freezes opportunistically         |
+  |      200,001,000 |         200,000,000 | d == max_age(200M)                | FORCED anti-wraparound autovacuum               |
+  |    1,000,000,000 |         999,999,000 | d < 2^31 (still comparable)       | freeze overdue but still safe                   |
+  |    2,147,484,647 |       2,147,483,647 | d == 2^31 - 1 (edge)              | last safe moment - sign about to flip           |
+  |    2,147,484,648 |       2,147,483,648 | d == 2^31 (CLIFF)                 | sign flips: old xid looks 'future' -> DATA LOSS |
+
+  (the FORCED autovacuum at d == max_age(200M) CANNOT be disabled - it
+   runs even if autovacuum is turned off, to prevent wraparound.)
+
+If not frozen, after a full wrap the old xid is reused and visibility
+breaks. With freezing, xmin becomes FrozenXid(2) -> always visible:
+
+  current_xid = 5 (just wrapped)
+  distance to xmin=1000 = 4,294,966,301  (>= 2^31 -> sign flip)
+  unfrozen tuple: looks 'in the future' -> INVISIBLE -> data loss
+  frozen tuple:   xmin == 2 -> committed_visible -> True for
+                  ANY snapshot -> SAFE across the wrap.
+
+[check] committed_visible(FrozenXid=2) == True even with an
+       EMPTY commit log and a wrapped snapshot: OK
+[check] freeze thresholds 50M / 200M, cliff distance == 2^31: OK
+
+========================================================================
+  GOLD (pinned for mvcc.html) - JS must reproduce these
+========================================================================
+  visibility(chainA, snap@250) -> tag   = 'alice-v2'
+                                   xmin  = 200
+                                   xmax  = 300
+  REPEATABLE READ second read balance  = 100  (v1)
+  READ COMMITTED  second read balance  = 200  (v2)
+  VACUUM dead tuples reclaimed         = 2   (v1, v2)
+  XID wraparound cliff distance        = 2^31 = 2,147,483,648
+
+[check] GOLD: visibility -> alice-v2 (xmin=200, xmax=300): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

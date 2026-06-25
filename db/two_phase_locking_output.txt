@@ -1,0 +1,316 @@
+two_phase_locking.py - reference impl. All numbers feed TWO_PHASE_LOCKING.md.
+pure Python stdlib. Lock modes: S (shared/read), X (exclusive/write).
+Run: python3 two_phase_locking.py
+
+========================================================================
+  SECTION A: basic 2PL - growing (acquire) then shrinking (release)
+========================================================================
+Two-Phase Locking splits every transaction into two phases, in order:
+
+  PHASE 1 - GROWING  : the txn only ACQUIRES locks.
+  PHASE 2 - SHRINKING: the txn only RELEASES locks.
+
+The phase boundary is the txn's FIRST release. Crossing it is one-way:
+once a txn has released a lock it may NEVER acquire another. A txn that
+releases then tries to acquire VIOLATES 2PL and the manager rejects it.
+
+Worked run: T1 reads A, writes B, then commits. It tries to grab C AFTER
+releasing A - watch the rejection.
+
+  | step | txn | item | mode | action                                              | lock table   |
+  | ---- | --- | ---- | ---- | --------------------------------------------------- | ------------ |
+  | 1    | T1  | A    | S    | GRANTED (growing phase)                             | A:T1S        |
+  | 2    | T1  | B    | X    | GRANTED (growing phase)                             | A:T1S  B:T1X |
+  | 3    | T1  | A    | S    | RELEASED -> enters SHRINKING phase                  | B:T1X        |
+  | 4    | T1  | C    | S    | REJECT - shrinking phase, cannot acquire (2PL rule) | B:T1X        |
+  | 5    | T1  |      |      | COMMIT - released 1 lock(s)                         | (empty)      |
+
+Read the trace:
+  steps 1-2 (GROWING) : T1 collects S(A) then X(B). Both granted.
+  step 3  (release A) : first release -> T1 flips to SHRINKING.
+  step 4  (acquire C) : rejected - T1 is in the shrinking phase, so the
+                         manager REJECTS the acquire. This IS the 2PL rule.
+                         (T1 should have taken C during the growing phase,
+                         before releasing anything.)
+  step 5  (commit)    : T1 releases its remaining X(B) and finishes.
+
+[check] acquire-after-release in basic 2PL -> rejected: OK
+
+========================================================================
+  SECTION B: strict 2PL - X-locks held until COMMIT (no cascading aborts)
+========================================================================
+Basic 2PL has a fatal flaw: a txn RELEASES its write locks DURING the
+transaction, BEFORE commit. Another txn may then READ that uncommitted
+data. If the writer later ABORTS, every reader must ALSO abort - the
+dreaded CASCADING ABORT.
+
+STRICT 2PL fixes it: a txn's X-locks (writes) are held until COMMIT. No
+other txn can read or overwrite its uncommitted writes, so cascading
+aborts are impossible. (RIGOROUS 2PL goes further: ALL locks, S and X,
+are held until commit - the easiest variant to build.)
+
+Same schedule under both variants: T1 writes B, T2 reads B.
+
+--- BASIC 2PL: T1 releases X(B) mid-txn; T2 reads uncommitted B ---
+  | step | txn | item | mode | action                                  | lock table |
+  | ---- | --- | ---- | ---- | --------------------------------------- | ---------- |
+  | 1    | T1  | B    | X    | GRANTED (growing phase)                 | B:T1X      |
+  | 2    | T1  | B    | X    | RELEASED -> enters SHRINKING phase      | (empty)    |
+  | 3    | T2  | B    | S    | GRANTED (growing phase)                 | B:T2S      |
+  | 4    | T1  |      |      | ABORT - released 0 lock(s), rolled back | B:T2S      |
+  | 5    | T2  |      |      | ABORT - released 1 lock(s), rolled back | (empty)    |
+  -> T1 released X(B) before commit (step 2). T2 acquired S(B) at step 3
+     and READ T1's uncommitted write. When T1 aborts (step 4), T2 has
+     read dirty data -> T2 must ALSO abort. CASCADING ABORT. X
+
+--- STRICT 2PL: T1 holds X(B) until COMMIT; T2 must WAIT ---
+  | step | txn | item | mode | action                                              | lock table |
+  | ---- | --- | ---- | ---- | --------------------------------------------------- | ---------- |
+  | 1    | T1  | B    | X    | GRANTED (growing phase)                             | B:T1X      |
+  | 2    | T2  | B    | S    | WAIT - incompatible with current holder             | B:T1X      |
+  | 3    | T1  |      |      | COMMIT - released 1 lock(s); admitted waiters: T2BS | B:T2S      |
+  | 4    | T2  |      |      | COMMIT - released 1 lock(s)                         | (empty)    |
+  -> T1 keeps X(B) across its whole body. T2's read at step 2 WAITS
+     (waiting). T2 only proceeds once T1 COMMITS and releases X(B), at
+     which point the manager admits the waiter (step 3). T2 NEVER sees
+     uncommitted data. NO cascading aborts. This is why production DBs
+     (DB2, SQL Server under READ COMMITTED LOCKS / SERIALIZABLE, the 2PL
+     side of MySQL/InnoDB) use strict or rigorous 2PL.
+
+  | variant     | X-locks released when?      | read uncommitted? | cascading aborts? |
+  |-------------|-----------------------------|-------------------|-------------------|
+  | basic 2PL   | as soon as no longer needed | YES (dirty read)  | POSSIBLE          |
+  | strict 2PL  | at COMMIT                   | no                | IMPOSSIBLE        |
+  | rigorous 2PL| at COMMIT (S AND X)         | no                | IMPOSSIBLE        |
+
+[check] strict 2PL: T2 waits for T1's X(B) until commit -> no dirty read: OK
+
+========================================================================
+  SECTION C: lock compatibility matrix - S (shared) vs X (exclusive)
+========================================================================
+Two lock modes:
+
+  S (Shared)    : a READ lock. Many readers may hold S on the same item.
+  X (eXclusive) : a WRITE lock. Only ONE txn may hold X; nobody else may
+                   hold S or X concurrently.
+
+Compatibility matrix  (rows = requested mode, cols = currently-held mode):
+
+  | requested \ held | S        | X        |
+  |------------------|----------|----------|
+  | S (read)         | OK        | NO        |
+  | X (write)        | NO        | NO        |
+
+Only S-S is compatible (co-readers coexist). Every pair that involves an
+X is incompatible: a writer is mutually exclusive with everyone, including
+other writers (only one writer at a time). This is the readers-writers
+problem, and the matrix is the lock manager's ONLY granting rule.
+
+Demonstrate each cell (fresh item per case, T1 holds first, T2 asks second):
+
+  | case        | T1 holds | T2 wants | matrix says | T2 result |
+  |-------------|----------|----------|-------------|-----------|
+  | S after S   | S        | S        | compatible  | granted   |
+  | S after X   | S        | X        | conflict    | WAITS     |
+  | X after S   | X        | S        | conflict    | WAITS     |
+  | X after X   | X        | X        | conflict    | WAITS     |
+
+[check] grant decision matches COMPAT matrix for all 4 cells: OK
+
+========================================================================
+  SECTION D: lock upgrade S->X - granted alone, must WAIT if shared
+========================================================================
+A txn that holds S(R) (it read R) and then decides to WRITE R must
+UPGRADE its lock to X. An upgrade is special-cased:
+
+  * if this txn is the SOLE S-holder of R -> upgrade granted AT ONCE
+    (a txn never conflicts with itself);
+  * if ANOTHER txn also holds S(R) -> the upgrade WAITS, otherwise two
+    readers could both become writers and break the matrix.
+
+(Downgrade X->S is the mirror move and is always safe - it only relaxes.)
+
+--- Scenario 1: T1 is the SOLE S-holder of A -> upgrade SUCCEEDS ---
+  | step | txn | item | mode | action                      | lock table |
+  | ---- | --- | ---- | ---- | --------------------------- | ---------- |
+  | 1    | T1  | A    | S    | GRANTED (growing phase)     | A:T1S      |
+  | 2    | T1  | A    | X    | UPGRADED S->X (sole holder) | A:T1X      |
+  -> upgrade result: granted-upgrade. T1 was the only S-holder, so the upgrade is
+     applied in place (no waiting). T2 has no locks on A yet.
+
+--- Scenario 2: T1 AND T2 both hold S(A) -> T1's upgrade WAITS ---
+  | step | txn | item | mode | action                                  | lock table |
+  | ---- | --- | ---- | ---- | --------------------------------------- | ---------- |
+  | 1    | T1  | A    | S    | GRANTED (growing phase)                 | A:T1S      |
+  | 2    | T2  | A    | S    | GRANTED (growing phase)                 | A:T1S,T2S  |
+  | 3    | T1  | A    | X    | WAIT - upgrade blocked (other S-holder) | A:T1S,T2S  |
+  -> upgrade result: waiting. T2 also holds S(A); granting T1's X would let
+     T1 write while T2 still reads -> conflict. So T1 WAITS. If T2 now
+     ALSO tries to upgrade S(A)->X(A), BOTH wait on each other = an A-B
+     DEADLOCK. This upgrade-deadlock is a classic 2PL hazard; DBs detect
+     it (wait-for cycle) and abort one txn to break it.
+
+--- Contrast: downgrade X->S always succeeds (only relaxes) ---
+  T1 holds X(A), asks for S(A) -> granted-downgrade (X->S only drops strength, never
+  conflicts with anyone). Some systems use this during the growing phase
+  to release a write early while keeping a read.
+
+[check] sole-holder upgrade -> granted; shared-holder upgrade -> wait; downgrade -> granted: OK
+
+========================================================================
+  SECTION E: lock escalation - many fine locks -> one coarse lock
+========================================================================
+A lock manager cannot keep one lock per row forever: 100M rows would mean
+100M lock-table entries (each hundreds of bytes of RAM). Instead it
+ESCALATES: when a single txn holds too many FINE-grained locks on adjacent
+rows, the manager trades them in for ONE COARSER lock covering the whole
+page, then the whole table. Coarser locks are cheap to track but cause
+more contention (they block txns that only wanted unrelated rows).
+
+Escalation ladder:
+
+  row lock   -> covers 1 row
+  page lock  -> covers ~8 KB (tens to hundreds of rows)
+  table lock -> covers the whole table
+
+Demo thresholds: ROW->PAGE at 5 row-locks on one page; PAGE->TABLE at 3 page-locks. T1 locks rows 0..14:
+
+  | step | op          | tier  | result                                                                                   |
+  | ---- | ----------- | ----- | ---------------------------------------------------------------------------------------- |
+  | 1    | lock row 0  | ROW   | rows=[0]                                                                                 |
+  | 2    | lock row 1  | ROW   | rows=[0,1]                                                                               |
+  | 3    | lock row 2  | ROW   | rows=[0,1,2]                                                                             |
+  | 4    | lock row 3  | ROW   | rows=[0,1,2,3]                                                                           |
+  | 5    | lock row 4  | PAGE  | ESCALATE 5 row-locks on P0 -> 1 page-lock | pages=[P0]                                   |
+  | 6    | lock row 5  | PAGE  | rows=[5] pages=[P0]                                                                      |
+  | 7    | lock row 6  | PAGE  | rows=[5,6] pages=[P0]                                                                    |
+  | 8    | lock row 7  | PAGE  | rows=[5,6,7] pages=[P0]                                                                  |
+  | 9    | lock row 8  | PAGE  | rows=[5,6,7,8] pages=[P0]                                                                |
+  | 10   | lock row 9  | PAGE  | ESCALATE 5 row-locks on P1 -> 1 page-lock | pages=[P0,P1]                                |
+  | 11   | lock row 10 | PAGE  | rows=[10] pages=[P0,P1]                                                                  |
+  | 12   | lock row 11 | PAGE  | rows=[10,11] pages=[P0,P1]                                                               |
+  | 13   | lock row 12 | PAGE  | rows=[10,11,12] pages=[P0,P1]                                                            |
+  | 14   | lock row 13 | PAGE  | rows=[10,11,12,13] pages=[P0,P1]                                                         |
+  | 15   | lock row 14 | TABLE | ESCALATE 5 row-locks on P2 -> 1 page-lock; ESCALATE 3 page-locks -> 1 table-lock | TABLE |
+
+Lock-table memory at the end:
+  row-lock entries   : 0
+  page-lock entries  : 0
+  table-lock entries : 1
+  TOTAL entries      : 1   (began as 15 row locks)
+
+At row 4 the 5 row locks on P0 collapse to ONE P0 page lock. At row 14 the 3 page locks
+collapse to ONE table lock. Memory: 15 row entries -> 1 entry.
+That is the whole point of escalation: cap the lock-table size, at the cost
+of coarser (more blocking) locks. SQL Server escalates at ~5,000 locks per
+transaction by default; PostgreSQL does NOT escalate (it relies on the
+fast-path lock table + MVCC to avoid the contention spike).
+
+[check] 15 row locks escalate to a single table lock: OK
+
+========================================================================
+  SECTION F: 2PL vs MVCC - pessimistic (block) vs optimistic (version)
+========================================================================
+2PL and MVCC are the two big concurrency-control philosophies:
+
+  2PL  - PESSIMISTIC: assume conflicts WILL happen, so BLOCK early. A reader
+        takes an S-lock, a writer an X-lock; conflicting requests WAIT.
+        Simple, strong guarantees, but throughput COLLAPSES under contention
+        as txns spend most of their time blocked.
+
+  MVCC - OPTIMISTIC (multi-version): keep OLD versions so readers NEVER block
+        writers and writers NEVER block readers. The only blocking is on
+        WRITE-WRITE (same row) - far rarer. Throughput stays HIGH under
+        read-heavy or moderate load; only severe ww contention hurts it.
+        PostgreSQL's DEFAULT since v6.5 (1999). 🔗 See MVCC.md.
+
+Throughput model (deterministic; 100 = single-threaded maximum):
+
+  contention c in [0,1] = fraction of txns touching the same hot rows.
+  2PL_throughput(c)  = 100 * (1 - c)        pessimistic: linear drop
+                                       (a txn waits with probability ~= c)
+  MVCC_throughput(c) = 100 * (1 - c*c)      optimistic: quadratic drop
+                              (only ww conflicts at probability ~= c*c)
+
+  | contention c | 2PL throughput | MVCC throughput | winner | 2PL blocks on   | MVCC blocks on |
+  |--------------|----------------|-----------------|--------|----------------|----------------|
+  | 0.00         | 100.0          | 100.0           | tie    | any conflict   | write-write    |
+  | 0.25         | 75.0           | 93.8            | MVCC   | any conflict   | write-write    |
+  | 0.50         | 50.0           | 75.0            | MVCC   | any conflict   | write-write    |
+  | 0.75         | 25.0           | 43.8            | MVCC   | any conflict   | write-write    |
+  | 1.00         | 0.0            | 0.0             | tie    | any conflict   | write-write    |
+
+At c=0 both score 100 (no conflicts, no difference). As contention rises,
+MVCC's curve sits strictly ABOVE 2PL's: 2PL blocks on EVERY conflict
+(reader-writer AND writer-writer), MVCC only on writer-writer (~c^2). That
+is why every major OLTP database moved to MVCC for the default: PostgreSQL
+and Oracle (since v4, 1984), SQL Server (READ_COMMITTED_SNAPSHOT),
+MySQL/InnoDB (consistent reads). 2PL survives where strong, simple
+serializability is worth the blocking: DB2, and SQL Server under
+SERIALIZABLE or READ COMMITTED with locking.
+
+[check] MVCC throughput >= 2PL at every contention level (strictly > for 0<c<1): OK
+
+========================================================================
+  GOLD (pinned for two_phase_locking.html) - 2PL => conflict-serializable
+========================================================================
+THE 2PL THEOREM (Kung & Papadimitriou, TODS 1979): if EVERY transaction in
+a schedule obeys two-phase locking, the schedule is CONFLICT-SERIALIZABLE.
+
+Conflict-serializable = equivalent (by conflict order) to SOME serial
+schedule. The test is the PRECEDENCE (serialization) GRAPH:
+
+  * one node per transaction;
+  * edge Ti -> Tj iff Ti has an EARLIER op that CONFLICTS with a LATER op
+    of Tj on the same item (conflicts are R-W, W-R, W-W; R-R is NOT);
+  * the schedule is conflict-serializable IFF this graph is ACYCLIC.
+
+Schedule A (legal under 2PL, all committed) - ops in order:
+  1. T1 W(A)
+  2. T1 W(B)
+  3. T2 R(A)
+  4. T2 W(C)
+  5. T3 R(B)
+  6. T3 R(C)
+
+Precedence edges (Ti->Tj for each conflicting earlier-later pair):
+  T1 -> T2
+  T1 -> T3
+  T2 -> T3
+
+  nodes = [1, 2, 3] ; edges = [(1, 2), (1, 3), (2, 3)]
+  cycle? False  ->  conflict-serializable? True
+
+Topological order exists (e.g. T1 before T2 before T3), so the schedule is
+equivalent to the serial run T1;T2;T3. Exactly what 2PL promises.
+
+[check] precedence graph of the 2PL schedule is ACYCLIC: OK
+
+Contrast - schedule B (NOT legal under 2PL): T1 and T2 each write both
+A and B, interleaved so each releases-then-reacquires:
+
+  1. T1 W(A)
+  2. T2 W(B)
+  3. T1 W(B)
+  4. T2 W(A)
+
+  edges = [(1, 2), (2, 1)]  ;  cycle? True  ->  conflict-serializable? False
+  The graph has the cycle T1->T2->T1. T1 must precede T2 (wrote A first)
+  AND T2 must precede T1 (wrote B first) - impossible. T1 reacquiring a
+  lock after releasing one is the 2PL violation that creates the cycle.
+
+--- GOLD values (pinned for two_phase_locking.html) ---
+  compatibility matrix     : S-S=True, S-X=False, X-S=False, X-X=False
+  schedule A edges         : [(1, 2), (1, 3), (2, 3)]
+  schedule A cyclic?       : False   (False = serializable)
+  schedule B edges         : [(1, 2), (2, 1)]
+  schedule B cyclic?       : True   (True = NOT serializable)
+  2PL throughput @ c=0.5   : 50.0
+  MVCC throughput @ c=0.5  : 75.0
+  escalation final tier    : TABLE (1 entry from 15 row locks)
+
+[check] GOLD: 2PL schedule acyclic, non-2PL schedule cyclic: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

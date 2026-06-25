@@ -1,0 +1,334 @@
+wal_checkpoint.py - reference impl. All numbers feed WAL_CHECKPOINT.md.
+pure Python stdlib. STEAL/NO-FORCE + ARIES. Run: python3 wal_checkpoint.py
+
+========================================================================
+  SECTION A: the WAL protocol - log BEFORE modify (STEAL/NO-FORCE)
+========================================================================
+Databases use STEAL/NO-FORCE buffering because it is the fastest:
+  STEAL    : a dirty page MAY be flushed to disk before its txn
+             commits (the buffer pool can evict under pressure).
+  NO-FORCE : pages need NOT be flushed at commit (commit is fast).
+
+Both make recovery harder: STEAL needs UNDO (roll back the evicted
+uncommitted change); NO-FORCE needs REDO (re-apply committed changes
+never flushed). The WAL RULE ties them together safely:
+
+   A data page may be written to disk ONLY AFTER the log record that
+   describes its modification has been fsync'd to the WAL:
+
+        page_lsn(page)  <=  wal_flush_lsn()        (must hold)
+
+Consequence: every modification is performed in this ORDER:
+
+   1. APPEND the WAL record  (assign LSN, write to log, fsync)
+   2. MODIFY the page in the buffer pool (stamp page_lsn = LSN)
+   3. (later) FLUSH the page to disk  -- only legal once the WAL is
+      durable past page_lsn.
+
+Worked: T1 UPDATE(P2, k2: B->X), starting from page_lsn=0, flush_lsn=0.
+
+  BEFORE: page P2 = {2: 'B'}, page_lsn = L0, flush_lsn = L0
+
+  Step 1  APPEND WAL:  WALRec(L1, UPDATE, txn=T1, page=P2, key=2, redo=SET(2='X'), undo=SET(2='B'), prev=L0)
+          now flush_lsn = L1  (log fsync'd to here)
+  Step 2  MODIFY page: P2 = {2: 'X'}, page_lsn = L1, dirty = True
+  Step 3  FLUSH gate:  page_lsn(L1) <= flush_lsn(L1)?  YES -> flush legal
+          after flush: disk P2 = {2: 'X'}
+
+WHY THE ORDER IS INVIOLABLE - the no-WAL failure mode:
+  Suppose we FLUSH the page FIRST, then crash BEFORE appending the log:
+    disk now holds k2=X, but there is NO log record for it. On restart
+    the engine cannot redo it (no record) nor undo it (no undo info,
+    and it does not even know which txn owns it). The change is
+    UNRECOVERABLE - and worse, if the txn was going to abort, the
+    half-applied write silently corrupts the database. The WAL rule
+    is what makes STEAL/NO-FORCE safe: the log is always the authority.
+
+[check] WAL rule honored: page_lsn <= flush_lsn and disk == {2:'X'}: OK
+
+========================================================================
+  SECTION B: WAL record types and the record format (redo + undo)
+========================================================================
+Every modification is described by ONE record. The generic format:
+
+   [ LSN | txn | type | page | key | redo | undo | prev_lsn ]
+
+  LSN      : monotonic id of this record.
+  txn      : transaction that wrote it.
+  type     : one of BEGIN / INSERT / UPDATE / DELETE / COMMIT /
+             ABORT / CHECKPOINT / CLR.
+  page,key : where the change lands.
+  redo     : FORWARD action ('re-apply this on recovery').
+  undo     : BACKWARD action ('reverse this on rollback'). A CLR has
+             redo but NO undo (a CLR is itself the reversal; it is
+             never re-reversed).
+  prev_lsn : previous record of the SAME txn -> the chain UNDO walks.
+
+redo/undo actions are expressed as absolute, IDEMPOTENT primitives so
+that replaying them twice is harmless:
+
+   SET(k, v)  : rows[k] = v       (redo of insert/update; undo of
+                                  delete / value-reverting update)
+   DEL(k)     : rows.pop(k)        (redo of delete; undo of insert)
+
+Per-type redo/undo summary:
+
+  | type       | redo action         | undo action           | notes |
+  |------------|---------------------|-----------------------|-------|
+  | BEGIN      | -                   | -                     | starts the prev_lsn chain |
+  | INSERT     | SET(k,v)            | DEL(k)                | undo removes the new row |
+  | UPDATE     | SET(k,new)          | SET(k,old)            | undo restores the prior value |
+  | DELETE     | DEL(k)              | SET(k,old)            | undo re-inserts the row |
+  | COMMIT     | -                   | -                     | txn is a winner; never undone |
+  | ABORT      | -                   | -                     | txn already rolled back |
+  | CHECKPOINT | -                   | -                     | carries redo_pt + txn table |
+  | CLR        | (the compensation)  | -  (none)             | logged undo; idempotent |
+
+Three concrete records (from the Section D scenario):
+
+  WALRec(L2, INSERT, txn=T1, page=P1, key=1, redo=SET(1='A'), undo=DEL(1), prev=L1)
+  WALRec(L3, UPDATE, txn=T1, page=P2, key=2, redo=SET(2='X'), undo=SET(2='B'), prev=L2)
+  WALRec(L9, UPDATE, txn=T2, page=P1, key=1, redo=SET(1='Y'), undo=SET(1='A'), prev=L7)
+
+Note L9's undo = SET(1,'A'): if T2 aborts, applying it reverts k1 to A.
+Note each record's prev_lsn chains to the previous record of its txn:
+T2's chain is L6(BEGIN) -> L7(INSERT) -> L9(UPDATE); UNDO walks 9 -> 7 -> 6.
+
+[check] INSERT.undo=DEL, UPDATE.undo=SET(old), DELETE.undo=SET(old): OK
+
+========================================================================
+  SECTION C: checkpoint - flush dirty pages, pin the redo point
+========================================================================
+Recovery without a checkpoint would have to replay the ENTIRE log from
+the beginning of time - unbounded. A CHECKPOINT caps it:
+
+  Action : flush every dirty buffer page to disk (a 'sharp' checkpoint).
+  Record : write a CHECKPOINT record holding
+             - redo_pt   : the LSN at which REDO will start (= the
+                           checkpoint record's own LSN for a sharp ckpt),
+             - txn_table : a snapshot of which txns were in-progress and
+                           their last LSN (a head start for ANALYSIS).
+
+After a checkpoint, recovery may ignore everything before redo_pt for
+REDO (those changes are already on disk). ANALYSIS still starts at the
+checkpoint record so it can rebuild the in-progress txn table.
+
+BEFORE checkpoint (after T1 committed, L1..L4 written):
+
+  P1: buffer = {1: 'A'} (dirty=True, page_lsn=L2), disk = {}
+  P2: buffer = {2: 'X'} (dirty=True, page_lsn=L3), disk = {2: 'B'}
+
+CHECKPOINT executes -> flushes pages: ['P1', 'P2']
+  writes record: WALRec(L5, CHECKPOINT, redo_pt=L5, txntab={})
+
+AFTER checkpoint:
+
+  P1: buffer = {1: 'A'} (dirty=False, page_lsn=L2), disk = {1: 'A'}
+  P2: buffer = {2: 'X'} (dirty=False, page_lsn=L3), disk = {2: 'X'}
+
+  redo_pt = L5  -> REDO on recovery starts here,
+                                  NOT at L1. Everything before is on disk.
+  txn_table at checkpoint = {}  (T1 already committed; nothing in flight)
+
+[check] after ckpt: disk P1={1:'A'}, P2={2:'X'}, all pages clean, redo_pt=L5: OK
+
+========================================================================
+  SECTION D: ARIES recovery - Analysis -> Redo -> Undo (crash test)
+========================================================================
+A crash loses the buffer pool; disk + WAL survive. ARIES rebuilds the
+correct state in three phases, starting from the LAST checkpoint:
+
+  Phase 1 ANALYSIS : scan the WAL forward from the checkpoint record.
+                     Rebuild the txn table (who is in-progress / committed)
+                     and the dirty page table. Decide WINNERS (committed)
+                     vs LOSERS (in-progress at crash -> must undo).
+  Phase 2 REDO     : re-apply every redo action from the redo point
+                     forward, making disk >= the pre-crash state. Redo is
+                     IDEMPOTENT, so already-flushed pages are harmless.
+  Phase 3 UNDO     : roll back every LOSER, walking its prev_lsn chain
+                     from newest to oldest. Each step appends a CLR
+                     (so undo itself survives a second crash).
+
+The scenario (built in build_scenario()):
+
+  L1  BEGIN T1
+  L2  T1 INSERT(P1, k1=A)
+  L3  T1 UPDATE(P2, k2: B->X)
+  L4  T1 COMMIT
+  L5  CHECKPOINT   <- recovery starts here
+  L6  BEGIN T2
+  L7  T2 INSERT(P1, k3=C)
+  L8  BEGIN T3
+  L9  T2 UPDATE(P1, k1: A->Y)   <- T2 uncommitted
+  L10 T3 DELETE(P2, k2)
+  L11 T3 COMMIT
+  *** CRASH ***                  (buffer lost; disk = post-L5 state)
+
+  committed at crash = ['T1', 'T3'] ; loser = ['T2']
+
+Disk at crash (survives): {'P2': {2: 'X'}, 'P1': {1: 'A'}}
+Buffer at crash (LOST):   P1={1:'Y',3:'C'}, P2={}  (only in RAM)
+
+========================================================================
+  PHASE 1 - ANALYSIS  (scan WAL forward from checkpoint L5)
+========================================================================
+  start: redo_pt = L5, txn_table (from ckpt) = {}
+
+  | LSN | type      | txn | effect on txn_table / DPT |
+  |-----|-----------|-----|--------------------------|
+  | L6  | BEGIN     | T2  | +T2=in-progress          |
+  | L7  | INSERT    | T2  | T2.last=L7; DPT[P1]=L7   |
+  | L8  | BEGIN     | T3  | +T3=in-progress          |
+  | L9  | UPDATE    | T2  | T2.last=L9; DPT[P1]=L7   |
+  | L10 | DELETE    | T3  | T3.last=L10; DPT[P2]=L10 |
+  | L11 | COMMIT    | T3  | T3=committed (WINNER)    |
+
+  -> WINNERS (committed): ['T3']   LOSERS (must undo): ['T2']
+  -> dirty page table at crash: {'P1': 7, 'P2': 10}
+  -> redo will start at L5 (could also start at min recLSN = L7 for less work)
+
+========================================================================
+  PHASE 2 - REDO  (re-apply redo from L5 forward, idempotent)
+========================================================================
+  | LSN | redo action        | P1 after        | P2 after   |
+  |-----|--------------------|-----------------|------------|
+  | L7  | SET(3='C')         | {1: 'A', 3: 'C'} | {2: 'X'}   |
+  | L9  | SET(1='Y')         | {1: 'Y', 3: 'C'} | {2: 'X'}   |
+  | L10 | DEL(2)             | {1: 'Y', 3: 'C'} | {}         |
+
+  -> applied 3 redo action(s). Disk now reflects the
+     pre-crash in-memory state (including T2's uncommitted writes,
+     which UNDO will next remove). Redo is idempotent, so a later
+     re-run changes nothing.
+
+========================================================================
+  PHASE 3 - UNDO  (roll back LOSERS via prev_lsn; append CLRs)
+========================================================================
+  Losers to undo: ['T2'], starting from lastLSN = {'T2': 9}
+
+  | step | walk LSN | record                | undo (CLR) action   | P1 after        | P2 after   |
+  |------|----------|-----------------------|---------------------|-----------------|------------|
+  | 1    | L9       | WALRec(L9, UPDATE, txn=T2, page=P1, key=1, redo=SET(1='Y'), undo=SET(1='A'), prev=L7) | CLR L12 SET(1='A') | {1: 'A', 3: 'C'} | {}         |
+  | 2    | L7       | WALRec(L7, INSERT, txn=T2, page=P1, key=3, redo=SET(3='C'), undo=DEL(3), prev=L6) | CLR L13 DEL(3)    | {1: 'A'}        | {}         |
+
+  -> appended 2 CLR(s). All loser effects reversed.
+
+  RECOVERED database: {'P2': {}, 'P1': {1: 'A'}}
+  EXPECTED database : {'P1': {1: 'A'}, 'P2': {}}
+
+  GOLD CHECK: recovered == expected?  YES
+    - T1's committed INSERT(k1=A): PRESENT  (redo kept it)
+    - T1's committed UPDATE(k2=X) then T3's committed DELETE: k2 ABSENT
+    - T2's uncommitted INSERT(k3=C): ABSENT  (undo removed it)
+    - T2's uncommitted UPDATE(k1=A->Y): REVERTED to A (undo)
+
+[check] ARIES: recovered == expected, redo=3, undo(CLRs)=2: OK
+
+========================================================================
+  SECTION E: checkpoint timing - fast recovery vs low overhead
+========================================================================
+Checkpoints are a dial. The more often you checkpoint, the LESS WAL
+accrues between them (so recovery is FAST), but the MORE flush I/O you
+do in steady state (high OVERHEAD). The two pull against each other.
+
+Model: WAL rate = 1,000 rec/s, replay rate = 5,000 rec/s, checkpoint flush cost = 0.5 s.
+
+  | interval | WAL accrued | recovery redo time | checkpoint overhead |
+  |----------|-------------|--------------------|---------------------|
+  |    30s    |    30,000   |            6.0 s    |    1.67 %          |
+  |    60s    |    60,000   |           12.0 s    |    0.83 %          |
+  |   120s    |   120,000   |           24.0 s    |    0.42 %          |
+  |   300s    |   300,000   |           60.0 s    |    0.17 %          |  <- PostgreSQL checkpoint_timeout default
+  |   600s    |   600,000   |          120.0 s    |    0.08 %          |
+  |  1800s    | 1,800,000   |          360.0 s    |    0.03 %          |
+  |  3600s    | 3,600,000   |          720.0 s    |    0.01 %          |
+
+  Read the table two ways:
+    * drop the interval -> recovery is fast, but you spend a large
+      fraction of every second flushing (30s interval = 1.7% overhead).
+    * raise the interval -> overhead vanishes, but a crash re-reads a
+      huge WAL (1h interval = 720s of pure redo before the DB is up).
+
+FUZZY checkpoint - making the checkpoint non-blocking:
+  A SHARP checkpoint halts writing while it flushes every dirty page.
+  A FUZZY checkpoint does not: a background writer flushes pages
+  continuously, and the checkpoint record simply notes the REDO POINT
+  = the oldest recLSN in the dirty page table (the first unflushed
+  change). Writers keep running. Recovery redoes a little more, but no
+  stall. The redo point is now min(recLSN), NOT the checkpoint LSN:
+
+    sharp  : redo_pt = checkpoint_LSN          (everything flushed)
+    fuzzy  : redo_pt = min(recLSN in DPT)      (oldest dirty change)
+  PostgreSQL, InnoDB, DB2 all use fuzzy checkpoints.
+
+[check] recovery time grows with interval, overhead shrinks: OK
+
+========================================================================
+  SECTION F: PostgreSQL specifics - bgwriter, checkpointer, the knobs
+========================================================================
+PostgreSQL splits the work across dedicated processes (not one thread):
+
+  * checkpointer : the only process allowed to write a CHECKPOINT
+                   record. Flushes the shared buffer pool's dirty pages
+                   and recycles old WAL segments. Runs a checkpoint when
+                   either time or WAL volume trips a trigger.
+  * bgwriter     : the background writer. Trickle-flushes dirty buffers
+                   continuously so checkpoints have little left to do
+                   (smoother I/O, fewer stalls).
+  * walwriter    : fsyncs WAL records in the background so commits do
+                   not always block on an explicit fsync.
+
+A checkpoint fires when EITHER of these is hit:
+
+  * time-based   : checkpoint_timeout = 300s (5 min default) since the last checkpoint
+  * volume-based : max_wal_size = 1024 MB (1 GB default) of WAL consumed since the last checkpoint
+
+checkpoint_completion_target = 0.9: the
+checkpointer spreads its flush work over 90% of the time before the NEXT
+checkpoint is due, smoothing I/O instead of a burst at the deadline.
+
+  | parameter                          | default      | controls |
+  |------------------------------------|--------------|----------|
+  | checkpoint_timeout                 | 300s         | time-based trigger |
+  | max_wal_size                       | 1024 MB         | volume-based trigger |
+  | checkpoint_completion_target       | 0.9        | flush smoothing |
+  | full_page_writes                   | True        | partial-page defence |
+  | checkpoint_flush_after / sync      | tuned by OS  | fsync batching |
+  | wal_level                          | replica      | how much to log |
+
+FULL PAGE WRITES - the partial-write defence (worth understanding):
+  Disks may write a page PARTIALLY (torn write) if power dies mid-flush.
+  With full_page_writes=on, the FIRST modification of a page after each
+  checkpoint logs the WHOLE page image; redo then has a clean baseline
+  to re-apply later deltas against. Cost: a burst of big records right
+  after each checkpoint. (Stock Postgres keeps it on; some appliances
+  with atomic-page storage turn it off.)
+
+What a PostgreSQL CHECKPOINT record effectively pins (simplified):
+  redo_pt = LSN of the checkpoint record (redo starts here)
+  + the list of dirty buffers + their recLSN  (fuzzy checkpoint)
+  + the oldest active xid   (so VACUUM's xmin horizon is consistent)
+  -> after redo + the next checkpoint's flush, old WAL segments can be
+     recycled/removed (WAL is not kept forever - only back to redo_pt).
+
+[check] defaults: timeout=300s, max_wal_size=1GB, completion_target=0.9, full_page_writes=True: OK
+
+========================================================================
+  GOLD (pinned for wal_checkpoint.html) - JS must reproduce these
+========================================================================
+  Crash scenario: 2 committed winners (T1, T3) + 1 loser (T2).
+  recovered database        = {'P2': {}, 'P1': {1: 'A'}}
+  expected database         = {'P1': {1: 'A'}, 'P2': {}}
+  redo actions applied      = 3   (L7, L9, L10)
+  undo CLRs appended        = 2     (L9->SET(1,A), L7->DEL(3))
+  losers rolled back        = ['T2']
+  winners kept              = ['T1' insert k1=A, 'T3' delete k2]
+  k1 final value            = 'A'   (T2's A->Y reverted by undo)
+  k2 final                  = ABSENT (T3 committed delete)
+  k3 final                  = ABSENT (T2 uncommitted insert undone)
+
+[check] GOLD: recovered{P1:{1:'A'}, P2:{}} == expected: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

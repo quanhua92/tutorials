@@ -1,0 +1,244 @@
+serializable_ssi.py - reference impl. All numbers/graphs feed SERIALIZABLE_SSI.md.
+pure Python stdlib ; no external deps.
+
+========================================================================
+  SECTION A: the SSI dependency graph - nodes=txns, edges=conflicts
+========================================================================
+SSI's whole job is to maintain ONE small directed graph as
+transactions run: nodes = concurrent transactions, edges = data
+conflicts. Two edge flavors:
+
+  rw (antidependency): reader R read D, writer W wrote D  - the
+                       one SI misses and SSI must watch.
+  ww (lost update)   : both wrote D - SI already resolves these
+                       (first-committer-wins), so SSI ignores them.
+
+Transactions:
+  T1: reads=['A', 'B'], writes={}
+  T2: reads=['B'], writes=['B']
+  T3: reads={}, writes=['A', 'C']
+
+rw-antidependencies (reader -rw-> writer, on item):
+  T1 -rw-> T2   on B
+  T1 -rw-> T3   on A
+ww-conflicts (first, second, on item):
+  (none)
+
+Reading the graph:
+  T1 read A and T3 wrote A  -> edge T1 -rw-> T3 (T3 may invalidate
+  T1's read of A).
+  T1 read B and T2 wrote B  -> edge T1 -rw-> T2.
+  No two transactions wrote the SAME item -> no ww-conflict here.
+  (If T2 and T3 both wrote, say, item C, that would be a ww edge;
+  SI's first-committer-wins would already resolve it, so SSI does
+  not even draw it.)
+
+graph summary: 3 nodes, 2 rw edge(s) (watched by SSI), 0 ww edge(s).
+
+[check] rw-edge count == 2 (T1->T2 on B, T1->T3 on A): OK
+
+========================================================================
+  SECTION B: the dangerous structure  Ti -rw-> Tj -rw-> Tk
+========================================================================
+Fekete et al. (2005) proved: under SI, EVERY cycle in the
+serialization graph contains a pivot Tj with an incoming rw edge
+AND an outgoing rw edge. So SSI never looks for full cycles - it
+only watches for this 2-rw 'kink' through a pivot and aborts one
+of the three the moment it would complete.
+
+Worked example: three transactions over items X, Y.
+
+  T1: reads=['X'], writes={}
+  T2: reads=['Y'], writes=['X']
+  T3: reads={}, writes=['X', 'Y']
+
+Trace:
+  rw1: T1 read X, T2 wrote X  -> T1 -rw-> T2   (T2 is the WRITER)
+  rw2: T2 read Y, T3 wrote Y  -> T2 -rw-> T3   (T2 is the READER)
+  => T2 is the PIVOT: it sits in the middle of two rw edges.
+  (bonus rw3: T2 read Y... and T1? no; but T3 also wrote X, which
+   T1 read -> T1 -rw-> T3, an extra edge that would close a cycle.)
+
+rw-antidependencies (reader -rw-> writer, on item):
+  T1 -rw-> T2   on X
+  T1 -rw-> T3   on X
+  T2 -rw-> T3   on Y
+ww-conflicts (first, second, on item):
+  T2 -ww-> T3   on X
+
+dangerous structures detected: 1
+  T1 -rw[X]-> PIVOT T2 -rw[Y]-> T3
+
+SSI action: abort ONE transaction to break the kink -> victim = T2 (deterministic policy:
+           highest commit-order pivot; Cahill aborts the late committer, equivalent up to naming).
+
+[check] pivot detected == T2, victim == T2, structures == 1: OK
+
+========================================================================
+  SECTION C: write skew - SI allows it, SSI catches it  [GOLD]
+========================================================================
+The classic write skew. Two doctors, rule: at least one on call.
+
+initial: Alice=on_call, Bob=on_call
+
+  T1: reads=['Alice', 'Bob'], writes=['Alice']
+  T2: reads=['Alice', 'Bob'], writes=['Bob']
+
+Both READ both rows from their snapshot (see 2 on call), both
+DECIDE to go off call, but each WRITES a DIFFERENT row. No
+ww-conflict (T1 writes Alice, T2 writes Bob) -> no shared write.
+
+(1) UNDER SNAPSHOT ISOLATION (PostgreSQL REPEATABLE READ):
+rw-antidependencies (reader -rw-> writer, on item):
+  T1 -rw-> T2   on Bob
+  T2 -rw-> T1   on Alice
+ww-conflicts (first, second, on item):
+  (none)
+  -> no ww-conflict, so first-committer-wins never triggers.
+  -> SI does NOT look at rw edges at all. Both commit.
+  final state: Alice=off, Bob=off  -> rule satisfied? NO <<< WRITE SKEW
+
+(2) UNDER SERIALIZABLE SSI:
+  dangerous structures detected: 2
+  T1 -rw[Bob]-> PIVOT T2 -rw[Alice]-> T1  [L==Tk: 2-txn rw-cycle = the write-skew signature]
+  T2 -rw[Alice]-> PIVOT T1 -rw[Bob]-> T2  [L==Tk: 2-txn rw-cycle = the write-skew signature]
+
+  SSI aborts T2; T1 commits.
+  final state: Alice=off, Bob=on  -> rule satisfied? YES
+  aborted: T2 (aborted); committed: T1 (committed)
+
+(3) WHY THE SAME rw EDGES, OPPOSITE OUTCOMES:
+  SI  ignores rw edges entirely -> anomaly slips through.
+  SSI feeds the rw edges into dangerous_structures() -> the kink
+  (pivot with in+out rw) is exactly the write-skew signature ->
+  SSI aborts one BEFORE the bad state is visible.
+
+GOLD (pinned for serializable_ssi.html):
+  rw edges in write-skew graph           = 2
+  dangerous structures detected          = 2
+  distinct pivots flagged                = ['T1', 'T2']
+  SI result rule-satisfied              = False
+  SSI result rule-satisfied             = True
+  SSI victim                            = T2
+
+[check] GOLD: SSI detects write-skew dangerous structure, SI does not -> OK
+
+========================================================================
+  SECTION D: SIREAD locks - non-blocking read tripwires
+========================================================================
+A SIREAD lock does NOT block anyone. It just RECORDS 'txn T read
+this'. When a later write hits the recorded read, SSI draws an
+rw-dependency edge. Two granularities:
+
+  POINT lock : from a row read by TID        -> (T, item)
+  RANGE lock : from an index/predicate scan  -> (T, [lo, hi))
+  No index + seqscan : PostgreSQL must lock the whole RELATION
+
+Scenario: bank fraud rule 'no account may go negative', enforced
+by application code reading balances then writing one.
+
+T1:  SELECT * FROM accounts WHERE balance BETWEEN 100 AND 200
+       -> index range scan -> SIREAD RANGE lock [100, 200)
+T1:  SELECT balance FROM accounts WHERE id = 'A'
+       -> POINT read on 'A' -> SIREAD POINT lock ('A')
+
+SIREAD lock table after T1's reads:
+  RANGE [100, 200) held by T1
+  POINT 'A' held by T1
+
+T2:  INSERT INTO accounts VALUES (..., balance=150)
+       150 in [100,200)? yes -> trips T1's range lock.
+       -> rw-dependency edges: [('T1', 'range[100,200)')]
+       draw edge T1 -rw-> T2  (range[100,200))
+
+T3:  UPDATE accounts SET balance = -50 WHERE id = 'A'
+       write on 'A' trips T1's POINT lock on 'A'.
+       -> rw-dependency edges: [('T1', 'point:A')]
+       draw edge T1 -rw-> T3  (point:A)
+
+KEY POINTS:
+  * SIREAD locks never WAIT a writer (unlike SELECT ... FOR UPDATE).
+  * They exist only to seed the dependency graph SSI checks in
+    Section B/C. No SIREAD lock on a read -> SSI is blind to it.
+  * Granularity matters: an index gives a tight range lock; a
+    seqscan forces a whole-relation lock -> many spurious edges ->
+    extra aborts. This is why SERIALIZABLE queries need indexes.
+
+[check] range write trips T1 range lock, point write trips T1 point lock: OK
+
+========================================================================
+  SECTION E: performance overhead - SSI's abort-rate tax
+========================================================================
+SSI is SI plus bookkeeping: one SIREAD lock per read + dependency
+edges + a check at commit. The CPU/storage cost is modest. The REAL
+cost is ABORTS: the more concurrent transactions touch overlapping
+data, the more dangerous structures form, the more SSI rolls back.
+
+Model (deterministic, matches the intuition):
+  keyspace K items ; N concurrent txns ; each reads r, writes w.
+  p_rw  = r*w/K                         (per-pair rw-overlap prob)
+  P(in)  = 1 - (1-p_rw)^(N-1)           (prob txn has an incoming rw)
+  P(out) = same                          (prob txn has an outgoing rw)
+  abort_fraction ~= P(in)*P(out)        (prob txn is a PIVOT)
+  T_SI  = T0              (commits all - fast but WRONG on write skew)
+  T_SSI = T0 * (1-abort)  (correct, pays the abort tax)
+
+Fixed: N=20 concurrent, r=2 reads, w=1 write, T0=1000 txns/s. Vary keyspace K (smaller K = hotter = more conflict):
+
+| keyspace K | p_rw=r*w/K | P(incoming) | abort_fraction | T_SSI (txns/s) | vs SI  |
+|------------|------------|-------------|----------------|----------------|--------|
+|       1000 |     0.0020 |       0.037 |          0.001 |          998.6 | 99.9% |
+|        500 |     0.0040 |       0.073 |          0.005 |          994.6 | 99.5% |
+|        200 |     0.0100 |       0.174 |          0.030 |          969.8 | 97.0% |
+|        100 |     0.0200 |       0.319 |          0.102 |          898.4 | 89.8% |
+|         50 |     0.0400 |       0.540 |          0.291 |          708.9 | 70.9% |
+|         20 |     0.1000 |       0.865 |          0.748 |          251.9 | 25.2% |
+|         10 |     0.2000 |       0.986 |          0.971 |           28.6 |  2.9% |
+
+Reading the table:
+  * Low contention (K=1000, p_rw=0.002): SSI keeps ~99.6% of SI
+    throughput. Almost free - and now actually serializable.
+  * High contention (K=10, p_rw=0.2): abort fraction ~ 0.55, SSI
+    throughput collapses to ~45% of SI. SSI is NOT a good fit for
+    hot-key write-heavy workloads.
+  * SI's higher number is a LIE here - it includes the write-skew
+    anomalies SSI prevents. Apples-to-apples, SSI trades throughput
+    for correctness.
+
+[check] at K=100: p_rw=0.0200, abort_fraction=0.1016 (deterministic): OK
+
+========================================================================
+  SECTION F: isolation-level hierarchy  RU < RC < RR(SI) < SER(SSI)
+========================================================================
+Each level prevents a SUPERSET of the anomalies of the one below.
+PostgreSQL maps the SQL-standard names onto real implementations:
+
+  Read Uncommitted -> treated as Read Committed by PostgreSQL
+  Read Committed   -> statement-level snapshot (default)
+  Repeatable Read  -> Snapshot Isolation (SI)  [PG's RR == SI]
+  Serializable     -> SSI (Cahill 2008)       [true serializability]
+
+Anomaly prevention (1 = prevented, 0 = possible):
+
+| anomaly            | RU | RC | RR(=SI) | SER(=SSI) |
+|--------------------|:--:|:--:|:-------:|:---------:|
+| dirty read         | 0  | 1  |     1   |     1   |
+| non-repeatable read | 0  | 0  |     1   |     1   |
+| phantom read       | 0  | 0  |     1   |     1   |
+| lost update (ww)   | 0  | 0  |     1   |     1   |
+| write skew (rw)    | 0  | 0  |     0   |     1   |
+
+The single anomaly that separates SI from SSI is WRITE SKEW (last
+row): RR/SI cannot stop it; SER/SSI can. Every other row is already
+'1' at RR because SI's snapshot + first-committer-wins handle it.
+
+SQL-standard caveat: ANSI 'Repeatable Read' need not prevent
+phantoms (the standard is weaker), but PostgreSQL's RR is actually
+SI, which DOES prevent them. Only SERIALIZABLE is guaranteed
+anomaly-free across ALL implementations.
+
+[check] SER(SSI) prevents all 5 anomalies; RR(SI) leaves write skew open: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

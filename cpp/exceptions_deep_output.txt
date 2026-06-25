@@ -1,0 +1,136 @@
+exceptions_deep.cpp — Phase 7 bundle (the full depth of exception SAFETY).
+Every value below is computed by this file. Compiled -std=c++23 -O2
+-Wall -Wextra -Wpedantic; UB-free (just sanitize clean); every throw caught.
+
+======================================================================
+SECTION A — the 4 exception-safety guarantees & strong via copy-and-swap
+======================================================================
+The four guarantees (Abrahams), strict supersets of each other:
+  NOTHROW : never throws (dtors, swap, move ctors)
+  STRONG  : commit-or-rollback (state UNCHANGED on throw)
+  BASIC   : no leak, invariants intact (state may have moved)
+  NONE    : leaks / corruption / broken invariants possible
+
+(1) NOTHROW — intSwap(int&,int&) noexcept:
+    x=2 y=1 (swapped); noexcept(intSwap(x,y))=1
+[check] nothrow intSwap swapped the values (x==2, y==1): OK
+[check] intSwap is noexcept (the no-throw guarantee): OK
+
+(2) STRONG — appendStrong({10,20,30}, fail_at=1) on {1,2,3}:
+    (builds new state in a copy; throw leaves the bag UNCHANGED)
+    caught: "appendStrong: simulated failure"
+    bag after = { 1, 2, 3 } (size 3)
+[check] STRONG appendStrong ROLLED BACK: size still 3: OK
+[check] STRONG appendStrong ROLLED BACK: contents unchanged {1,2,3}: OK
+
+(3) BASIC — appendBasic({10,20,30}, fail_at=1) on {1,2,3}:
+    (mutates in place; throw leaves a VALID but partially-mutated bag)
+    caught: "appendBasic: simulated failure"
+    bag after = { 1, 2, 3, 10 } (size 4)
+[check] BASIC appendBasic did NOT roll back: size grew to 4 (one push before throw): OK
+[check] BASIC appendBasic left a VALID state {1,2,3,10}: OK
+
+(4) NONE — raw `new` without RAII LEAKS on throw (documented, not run):
+    int* p = new int(42);  if (fail) throw ...;  delete p; // <- delete skipped -> LEAK
+    fix: std::unique_ptr<int> p(new int(42)); // dtor frees even on throw (RAII)
+[check] no-guarantee leak documented (RAII/unique_ptr is the fix; never run the leak): OK
+
+======================================================================
+SECTION B — stack unwinding + RAII (no leak) & the no-throw-during-unwind rule
+======================================================================
+(1) two Trackers constructed, then throw -> dtors run during unwinding:
+[check] Trackers alive after construction (==2): OK
+    caught: "unwind test"; Tracker::alive after catch = 0
+[check] RAII freed BOTH Trackers during unwinding (alive==0): OK
+
+(2) unwinding order is REVERSE of construction:
+    construction order = 1,2 ; dtor order during unwind = "21"
+[check] unwinding ran dtors in REVERSE order ("21"): OK
+
+(3) dtors are implicitly noexcept (C++11+) -> unwinding can't meet a 2nd throw:
+[check] Tracker's dtor is noexcept (is_nothrow_destructible_v<Tracker>): OK
+[check] throw-from-dtor-DURING-unwind -> std::terminate (documented; never run — ends program): OK
+
+======================================================================
+SECTION C — noexcept specifier/operator & the move-vs-copy reallocation choice
+======================================================================
+(1) noexcept SPECIFIER (promise) vs OPERATOR (compile-time query):
+    int alwaysOk() noexcept;   int mayFail();
+    alwaysOk() = 1 ;  mayFail() = 2  (both called with safe bodies)
+    noexcept(alwaysOk()) = 1 ;  noexcept(mayFail()) = 0
+[check] alwaysOk() is noexcept (specifier promise): OK
+[check] mayFail() is potentially-throwing (!noexcept): OK
+
+(2) conditional noexcept — noexcept(noexcept(T())):
+    usingT<int>()           noexcept = 1 (int() is noexcept)
+    usingT<ThrowsDefault>() noexcept = 0 (ThrowsDefault() may throw)
+[check] usingT<int>() is noexcept (propagated: int() is noexcept): OK
+[check] usingT<ThrowsDefault>() is NOT noexcept (propagated: ctor may throw): OK
+
+(3) move_if_noexcept — vector's strong-guarantee move/copy decision:
+    is_nothrow_move_constructible<MoveOk>  = 1 (noexcept move)
+    is_nothrow_move_constructible<MoveBad> = 0 (throwing move)
+[check] MoveOk has a noexcept move ctor (is_nothrow_move_constructible): OK
+[check] MoveBad has a THROWING move ctor (!is_nothrow_move_constructible): OK
+    move_if_noexcept(MoveOk&)  -> MoveOk&&  (MOVE on reallocation)
+    move_if_noexcept(MoveBad&) -> const MoveBad& (COPY on reallocation)
+[check] move_if_noexcept(MoveOk&) yields MoveOk&& (move — noexcept): OK
+[check] move_if_noexcept(MoveBad&) yields const MoveBad& (copy — for strong guarantee): OK
+    => std::vector MOVES MoveOk on realloc; COPIES MoveBad. A throwing move
+       would break push_back's STRONG guarantee (a half-moved element can't roll back).
+[check] mark move ctors noexcept so vector MOVES (else it COPIES for the strong guarantee): OK
+
+======================================================================
+SECTION D — never throw from a dtor; noexcept(false); the cost model
+======================================================================
+(1) destructors are implicitly noexcept (C++11+) -> unwinding is safe:
+[check] ImplicitDtor's dtor is noexcept (the default): OK
+[check] std::vector<int>'s dtor is noexcept (RAII frees during unwinding): OK
+
+(2) noexcept(false) dtor — legal, but dangerous:
+    struct BadDtor { ~BadDtor() noexcept(false) {} };  // declared, never throws here
+[check] BadDtor's dtor is potentially-throwing (!is_nothrow_destructible): OK
+    if ~BadDtor actually threw WHILE another exception propagated -> std::terminate.
+[check] throw-from-dtor-during-unwind -> std::terminate (documented; body never throws here): OK
+
+(3) the other std::terminate triggers (documented; never run):
+    a) a noexcept function that throws  -> std::terminate
+    b) an uncaught exception            -> std::terminate
+[check] noexcept-violation -> std::terminate (documented; never run): OK
+[check] uncaught exception -> std::terminate (every throw in THIS bundle is caught): OK
+
+(4) cost model: zero-cost-when-NOT-thrown (table-driven EH, Itanium C++ ABI):
+    happy path: NO per-try/catch overhead (the compiler emits unwind TABLES instead)
+    thrown path: unwinding-table walk + handler lookup (expensive) + .text size growth
+    (opposite of older setjmp/longjmp 'SJLJ' models where every try costs a little)
+[check] cost model documented (not measured): zero-cost-when-not-thrown on this ABI: OK
+
+======================================================================
+SECTION E — exceptions vs error codes vs std::expected & cross-language
+======================================================================
+(1) THROW (control-flow jump to a handler):
+    divThrow(10, 0) -> caught "div by zero"
+[check] throw path: div by zero caught: OK
+
+(2) ERROR CODE (explicit return; caller must check):
+    divCode(10, 0, out) -> DivCode::ZeroDivisor
+[check] error-code path: divCode(10,0) returned ZeroDivisor: OK
+[check] error-code path: quotient left untouched (==0): OK
+
+(3) std::expected<int,string> (C++23 — typed value-or-error, no jump):
+    divExpected(10, 2) -> 5
+    divExpected(10, 0) -> error "div by zero"
+[check] std::expected: 10/2 == 5 (value present): OK
+[check] std::expected: 10/0 is an error (no throw, no jump): OK
+
+(4) cross-language error signaling:
+    C++     : throw/try/catch  AND  std::expected<T,E> (both philosophies)
+    TS      : throw/try/catch   (closest to C++; GC-backed)
+    Python  : raise/try/except  (throw-based; GC-backed; cheap/idiomatic)
+    Go      : return error, if err != nil  (EXPLICIT, no throw)
+    Rust    : Result<T,E> + ?   (typed, FORCED handling, NO exceptions)
+[check] cross-language map documented (C++ spans both throw AND return-expected): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

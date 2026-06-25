@@ -1,0 +1,194 @@
+sanitizers_static_analysis.cpp — Phase 7 bundle (the C++ safety net).
+Every value below is computed by this file. Compiled -std=c++23 -O2
+-Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+The DEMO_BUG use-after-free is GATED (-DDEMO_BUG) and never in the
+default build.
+
+======================================================================
+SECTION A — The 4 runtime sanitizers + their bug domains
+======================================================================
+This verified path was captured on: macOS / Apple clang 17 / arm64
+(platform facts below cite the LLVM docs + this build's probes).
+
+C++ has NO compiler-enforced memory/data-race safety (unlike Rust's
+borrow checker). The SAFETY NET is the SANITIZERS: instrumented builds
+that catch bugs at RUNTIME, plus STATIC analyzers at compile time.
+
+sanitizer  -fsanitize=       bug domain                slowdown
+---------  ----------------  ------------------------  -------------------
+ASan       address            memory: UAF/OOB/leak/double 2x (+stack 3x)
+UBSan      undefined          UB: overflow/null/shift    small
+TSan       thread             data races (multithread)   5x-15x (mem 5x-10x)
+MSan       memory             uninitialized reads        3x
+
+How to invoke (the `just sanitize NAME` recipe):
+    c++ -std=c++23 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+        NAME.cpp -o /tmp/cpp_NAME_san && /tmp/cpp_NAME_san
+(This combines ASan + UBSan — the two COMPATIBLE, broadly-available
+ sanitizers. ASan+MSan / ASan+TSan are MUTUALLY EXCLUSIVE — pick one.)
+[check] ASan flag string is "address": OK
+[check] UBSan flag string is "undefined": OK
+[check] TSan flag string is "thread": OK
+[check] MSan flag string is "memory": OK
+[check] `just sanitize` combines ASan+UBSan (-fsanitize=address,undefined): OK
+[check] ASan documented slowdown is 2x: OK
+[check] MSan documented slowdown is 3x: OK
+[check] TSan documented slowdown range is 5x-15x: OK
+[check] ASan+UBSan are compatible (both in the `just sanitize` combo): OK
+
+======================================================================
+SECTION B — ASan (AddressSanitizer): the memory bug detector
+======================================================================
+ASan instruments heap, stack, and globals with REDZONES + a shadow
+memory map, catching these at runtime (LLVM AddressSanitizer.html):
+  - heap-buffer-overflow   (read/write past `new[]` end)
+  - stack-buffer-overflow  (read/write past a local array end)
+  - global-buffer-overflow (read/write past a global array end)
+  - heap-use-after-free    (access through a freed pointer)
+  - stack-use-after-return / -after-scope (dangling local refs)
+  - double-free / invalid free (free the same heap block twice)
+  - memory leaks (LeakSanitizer — Linux only; see gap below)
+
+The macOS LEAK-DETECTION GAP (this platform):
+  - LeakSanitizer (LSan) ships inside ASan and is ON by default on Linux.
+  - The `just sanitize` recipe does NOT force ASAN_OPTIONS=detect_leaks=1
+    because on Apple clang that option prints
+      "AddressSanitizer: detect_leaks is not supported on this platform."
+    and aborts (exit 134). So: leaks are caught on Linux, NOT on macOS.
+  - Use Linux (or a from-source LLVM clang with LSan) for leak detection.
+
+The use-after-free demo is GATED behind -DDEMO_BUG (NOT in the verified
+path; `just run`/`just out`/`just check`/`just sanitize` never pass it):
+    (DEMO_BUG not defined — the UAF read is correctly OMITTED from this build.)
+    Build with -DDEMO_BUG -fsanitize=address to SEE ASan fire.
+
+The UB-FREE alternative the verified path exercises: RAII ownership.
+    int v[4] = {42,0,0,0};   // automatic storage; freed at scope end
+    v[0] = 42  (safe; no manual delete; no UAF possible)
+[check] ASan instruments heap (new) memory: OK
+[check] ASan instruments stack (local array) memory: OK
+[check] ASan instruments global memory: OK
+[check] ASan detects use-after-free (UAF): OK
+[check] ASan detects heap/stack/global buffer overflow: OK
+[check] ASan detects double-free / invalid free: OK
+[check] ASan detects memory leaks ONLY on Linux (LSan; macOS Apple clang has no LSan): OK
+[check] this verified path does NOT compile the DEMO_BUG UAF (default build is clean): OK
+
+======================================================================
+SECTION C — UBSan (UB) + TSan (data races) + MSan (uninit)
+======================================================================
+UBSan (-fsanitize=undefined): a FAST undefined-behavior detector.
+Compiles in runtime checks that catch (LLVM UndefinedBehaviorSanitizer.html):
+  - signed-integer-overflow   (INT_MAX + 1; INT_MIN / -1; INT_MIN * -1)
+  - shift                     (exponent >= width, or negative; neg base)
+  - null                      (dereference of a null pointer/ref)
+  - alignment                 (misaligned pointer/reference access)
+  - integer-divide-by-zero    (a / 0, a % 0)
+  - bounds                    (array index past a statically-known bound)
+  - enum                      (load of an out-of-range enum value)
+  - bool / vptr / object-size / return / unreachable / float-cast-overflow
+  + (opt-in) implicit-conversion / unsigned-integer-overflow (NOT UB)
+Small runtime cost; no ABI/address-space impact. macOS: supported.
+
+UBSan demo (computed, NOT executed): INT32_MAX = 2147483647.
+    `INT32_MAX + 1` is signed-integer-overflow UB -> would trip UBSan:
+    "runtime error: signed integer overflow: 2147483647 + 1 cannot be
+     represented in type 'int'". (We detect it, never run it.)
+[check] INT32_MAX == 2147483647: OK
+[check] overflow precondition 1 > INT32_MAX - INT32_MAX (=> +1 would overflow): OK
+
+TSan (-fsanitize=thread): detects DATA RACES — two threads, one shared
+variable, at least one WRITE, no synchronization (happens-before).
+Typical report (LLVM ThreadSanitizer.html):
+    WARNING: ThreadSanitizer: data race
+      Write of size 4 at 0x... by thread T1:   #0 Thread1 race.c:4
+      Previous write ... by main thread:        #0 main race.c:10
+Slowdown 5x-15x; mem 5x-10x. Needs a genuinely racy program to fire.
+Supported on Darwin arm64/x86_64 (Apple clang). Linux aarch64/x86_64.
+Use TSan for CONCURRENCY code; ASan+UBSan for everything else.
+[check] TSan detects data races (unsynchronized read+write across threads): OK
+[check] TSan needs a multithreaded, genuinely racy program to fire: OK
+
+MSan (-fsanitize=memory): detects UNINITIALIZED reads. Tracks the
+initialization state of EVERY bit; reading an uninitialized value trips
+    WARNING: MemorySanitizer: use-of-uninitialized-value
+Supported ONLY on Linux / NetBSD / FreeBSD — NOT on macOS. INCOMPATIBLE
+with ASan (both reserve shadow memory differently; pick ONE).
+[check] MSan detects uninitialized reads (tracks every bit's init state): OK
+[check] MSan is Linux/NetBSD/FreeBSD-only (NOT supported on macOS): OK
+[check] MSan is MUTUALLY EXCLUSIVE with ASan (pick one, never both): OK
+
+======================================================================
+SECTION D — Perf cost + STATIC analysis + CI best practice
+======================================================================
+THE PERFORMANCE COST (why sanitizers are a DEBUG/CI tool, NOT release):
+  - ASan:  ~2x slower, more real memory, stack up to 3x.
+  - UBSan: small overhead (tens of percent) — sometimes OK in release.
+  - TSan:  5x-15x slower, 5x-10x more memory (only for concurrency code).
+  - MSan:  3x slower, 2x more memory (Linux only).
+-> Never ship -fsanitize=... in a production/release binary. (LLVM docs:
+   sanitizer runtimes "were not developed with security-sensitive
+   constraints in mind.")
+
+STATIC analysis (at COMPILE time — no run, no slowdown):
+  - clang-tidy: a lint + modernize + bugprone checker. Runs as a separate
+    pass (NOT a -fsanitize flag). Catches: modernize-use-nullptr,
+    bugprone-use-after-move, cert-*, cppcoreguidelines-*, performance-*.
+  - cppcheck: a standalone static bug finder (null deref, OOB index,
+    resource leaks). Conservative; some false positives.
+Neither is in the default `just run`/`just check` build — they are run
+separately (e.g. in CI or via an editor integration).
+
+CI BEST PRACTICE (the recommended sanitizer diet):
+  1. ASan + UBSan on EVERY commit, over the full test suite
+     (`just sanitize NAME` is exactly this combo).
+  2. TSan on concurrency-touching code paths (jthread/atomic/mutex).
+  3. MSan on Linux CI for the uninit-read class (complements ASan).
+  4. clang-tidy + cppcheck as a separate static-analysis CI job.
+  5. LeakSanitizer (Linux) for any C/C++ with manual allocation.
+[check] sanitizers are DEBUG/CI tools (never release) due to 2x-15x slowdown: OK
+[check] ASan+UBSan every commit is the recommended baseline: OK
+[check] TSan is reserved for concurrency code (5x-15x too slow for everything): OK
+[check] clang-tidy + cppcheck are STATIC (compile-time), not -fsanitize runtime: OK
+
+======================================================================
+SECTION E — Cross-language: Rust borrow checker vs C++ sanitizers
+======================================================================
+THE HEADLINE CONTRAST. C++ has NO compiler-enforced memory or data-race
+safety. It relies on the RUNTIME sanitizers (ASan/UBSan/TSan/MSan) to
+FIND the bugs AFTER the program is built and run. Rust's BORROW CHECKER
+prevents the same bug CLASSES at COMPILE TIME — in safe Rust you do not
+NEED ASan or TSan for memory/data-race safety:
+
+  bug class            C++ (runtime sanitizer)   Rust (compile-time)
+  -------------------  ------------------------   -------------------
+  use-after-free       ASan (heap-use-after-free) borrow checker (lifetimes)
+  double-free          ASan (double-free)         ownership is unique
+  out-of-bounds        ASan (buffer-overflow)     indexing is checked /
+                                                   Iterator bounds
+  data race            TSan                       Send/Sync + borrow ck
+  dangling pointer     ASan (-after-return/scope)  lifetimes reject it
+  uninitialized read   MSan                       must-init enforced
+  signed overflow      UBSan (signed-overflow)    debug_assert / i32
+                                                  ::checked_add
+
+Rust does NOT make sanitizers obsolete — it still ships them for UNSAFE
+Rust and for the few UB-equivalents that remain (e.g. signed overflow in
+release is defined wrap, but integer-overflow LOGIC bugs still happen).
+But for SAFE Rust the entire ASan/TSan/MSan bug domain is CLOSED by the
+compiler. C++ has no equivalent; the sanitizers ARE the safety net.
+
+Other languages in the curriculum:
+  - Go: GC handles memory (no UAF/double-free); `go build -race` is a
+    data-race detector (analogous to TSan).
+  - TS/Python: GC + a GIL/single-thread event loop -> no memory-safety
+    sanitizer needed (the GIL removes the data race in pure-Python land).
+[check] Rust's borrow checker catches UAF/dangling/data-race at COMPILE TIME: OK
+[check] safe Rust does NOT need ASan/TSan for memory/data-race safety: OK
+[check] C++ relies on the RUNTIME sanitizers as its safety net (no borrow checker): OK
+[check] Go has a race detector (go build -race); GC handles memory: OK
+[check] TS/Python rely on GC + (Python) GIL -> no memory-safety sanitizer needed: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

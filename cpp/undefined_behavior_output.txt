@@ -1,0 +1,143 @@
+undefined_behavior.cpp — Phase 7 bundle #42 (THE central C++ expert topic).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; verified path is UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — UB: NO requirements; the compiler ASSUMES none
+======================================================================
+The C++ standard's behavior classes (cppreference / ISO defns):
+  ill-formed             diagnosable error; conforming compiler MUST emit a diagnostic
+  ill-formed, NDR        semantic error a compiler need NOT diagnose; if run -> UB
+  implementation-defined impl chooses AND MUST document it (e.g. sizeof(int) == 4)
+  unspecified            impl chooses, NEED NOT document (e.g. order of f(a(), b()))
+  erroneous  (C++26)     wrong but well-defined; diagnostic recommended (e.g. uninit read)
+  undefined behavior     NO requirements on the program — ANYTHING can happen
+
+THE DANGER: a correct C++ program is UB-free, so the compiler is ALLOWED to
+ASSUME no UB happens and OPTIMIZE on that assumption. UB therefore does not
+merely 'do something random at runtime' — it lets the compiler DELETE checks,
+FOLD expressions to constants, or even 'time-travel' (move an effect earlier).
+
+UNSIGNED wraparound is DEFINED: UINT_MAX(4294967295) + 1 = 0
+[check] unsigned wraparound is well-defined: UINT_MAX + 1 == 0: OK
+CHECKED signed add is DEFINED: __builtin_add_overflow(INT_MAX,1) -> overflow=1
+[check] checked signed add DETECTS INT_MAX+1 overflow (no UB executed): OK
+
+THE OPTIMIZER PAYOFF (documented; the overflow itself is NOT executed here):
+  bool foo(int x){ return x + 1 > x; }  // 'true' OR signed-overflow UB
+  -> gcc/clang -O2 fold it to `return true` (mov eax,1; ret)
+  the `x+1 > x` overflow-check is DELETED: assuming no UB, it can't be false
+[check] documented: assuming-no-UB lets the optimizer delete an overflow check: OK
+
+CONSTANT evaluation DIAGNOSES UB: `constexpr int x = INT_MAX + 1;` is a
+compile error (the only place UB is guaranteed-diagnosable). `2 + 3` in a
+constant expression is fine -> constexpr result = 5
+[check] constexpr 2 + 3 == 5 (well-defined constant evaluation): OK
+
+======================================================================
+SECTION B — the common UB family + the WELL-DEFINED fix for each
+======================================================================
+(1) signed overflow: INT_MAX+1 is UB. Fix = CHECKED add (defined): overflow=1
+[check] checked add detects INT_MAX+1 overflow (the well-defined fix): OK
+    unsigned INT_MAX + 1u = 2147483648 (unsigned overflow WRAPS — it is NOT UB)
+[check] unsigned INT_MAX + 1u wraps without UB (defined modular arithmetic): OK
+(2) invalid shift: 1<<32 (and 1<<-1) is UB. Fix = validate the exponent first.
+    safe_shl(1, 32) = 0   (exponent rejected -> 0, no UB)
+    safe_shl(1, 4)  = 16   (in range -> 16)
+[check] safe_shl rejects exponent >= width (returns 0, no UB): OK
+[check] safe_shl computes 1<<4 == 16 when the exponent is in range: OK
+(3) null deref: *nullptr is UB. Fix = check `p != nullptr` first -> 42
+[check] null-checked dereference reads the real value (no UB): OK
+[check] null pointer correctly handled (never dereferenced): OK
+(4) integer div-by-zero: x/0 is UB. Fix = guard the divisor -> -1
+[check] divisor guarded: 10/0 never executes (no UB): OK
+(5) out-of-bounds: arr[4] on a 4-elem array is UB. The bounds-check uses size:
+    arr index 2 (in range) = 30
+    manual bounds check on idx=4 -> -1 (rejected, no UB)
+[check] manual bounds check rejects idx=4 (no OOB access): OK
+[check] in-range index arr[2] == 30: OK
+(6) use-after-free: *p after delete is UB. Fix = capture-before-delete + null.
+    captured value before delete = 7 (the freed storage is NOT read)
+[check] value captured BEFORE delete (freed storage never read): OK
+[check] pointer nulled after delete (delete-on-nullptr is a defined no-op): OK
+[check] delete nullptr is a well-defined no-op (no double-free, no UB): OK
+(7) aliasing: reading an int via float* is UB. Fix = std::memcpy -> 3.141593
+[check] memcpy round-trips the bit pattern (the well-defined aliasing fix): OK
+(8) uninit read: reading `int x;` (indeterminate) is UB. Fix = `int x{};` -> 0
+[check] value-initialized int == 0 (the fix; no indeterminate read): OK
+(9) data race: unsynchronized r/w of a non-atomic is UB. Fix = std::atomic -> 100
+[check] atomic counter reached 100 (race-free; single-thread demo): OK
+
+======================================================================
+SECTION C — UB != implementation-defined != unspecified
+======================================================================
+DISTINCT categories (do not confuse):
+  implementation-defined: impl picks ONE behavior and MUST document it.
+      -> portable within a documented platform; assertable; NOT UB.
+  unspecified:           impl picks ONE of a set; NEED NOT document which.
+      -> each result is valid; NOT UB. Avoid printing which one you got.
+  undefined behavior:    NO requirements; the whole program is meaningless.
+      -> NEVER rely on it; the compiler may assume it doesn't happen.
+
+implementation-defined: sizeof(int) == 4 bytes (32 bits) on this platform
+[check] sizeof(int) >= 2 (>= 16 bits) — impl-defined, NOT UB: OK
+[check] this platform documents sizeof(int) == 4 (assertable, stable): OK
+implementation-defined: char is SIGNED here (CHAR_MIN == -128)
+[check] char is signed on this platform (CHAR_MIN < 0): OK
+unspecified: evaluation ORDER of the 2 args in `f(a(), b())` — either is
+    valid; we deliberately print NO order-dependent value here (portable).
+[check] unspecified eval-order NOT relied on for a printed value (portable): OK
+
+THE CONTRAST — each is its OWN category, none of them is UB:
+  sizeof(int)==4           implementation-defined (documented, stable)
+  eval order of a(),b()    unspecified (valid either way; don't depend)
+  INT_MAX + 1              UNDEFINED BEHAVIOR (no requirements; compiler assumes none)
+[check] the three categories are DISTINCT (only UB renders the program meaningless): OK
+
+======================================================================
+SECTION D — the detectors: ASan / UBSan / TSan / MSan
+======================================================================
+Compiler sanitizers (-fsanitize=...) — each catches a UB class:
+  ASan   address           memory UBs: OOB, use-after-free, double-free, leaks
+  UBSan  undefined         scalar UBs: signed overflow, shift, null deref, div0, ...
+  TSan   thread            data races (two threads, one non-atomic, no sync)
+  MSan   memory            use of an uninitialized value (primarily Linux)
+
+How to run them:
+  just sanitize undefined_behavior   # the bundle gate: ASan + UBSan, MUST be clean
+  -fsanitize=address,undefined       # what `just sanitize` compiles with
+  -fsanitize=thread                  # TSan (data races) — separate from ASan
+  -fsanitize=memory                  # MSan (uninit reads) — Linux, separate from ASan
+  -DDEMO_UB + ASan/UBSan              # make the detectors FIRE on this bundle's demos
+
+VERIFIED PATH: every UB demo is #ifdef DEMO_UB-gated, so the default build
+(what `just run` / `just out` / `just check` / `just sanitize` compile) contains
+ZERO undefined behavior. `just sanitize undefined_behavior` is therefore clean,
+and `just out` is byte-identical across runs (determinism: UB-free output).
+[check] the verified path is 100% UB-free (all UB demos are DEMO_UB-gated): OK
+
+Well-defined + sanitizer-friendly: std::atomic fetch_add -> 1 (TSan sees no race)
+[check] std::atomic access is well-defined (no data race, TSan-clean): OK
+
+======================================================================
+SECTION E — how to AVOID UB + cross-language contrast
+======================================================================
+THE DISCIPLINE (how experts write UB-free C++):
+  1. Initialize everything: `T x{};` (value-init -> zero), never bare `T x;`.
+  2. Own with RAII / smart pointers (P3): unique_ptr/shared_ptr delete for you -> no UAF/dangling.
+  3. Bounds-check with .at() (throws) or an explicit size test -> no OOB.
+  4. Share data via std::atomic (P4) or a mutex (P4) -> no data race.
+  5. Reinterpret bytes with std::memcpy, NOT reinterpret_cast+read -> no aliasing.
+  6. Detect overflow with __builtin_*_overflow / unsigned math -> no signed-overflow UB.
+  7. Run ASan+UBSan (+TSan/+MSan) in CI -> the runtime safety net for whatever slips through.
+[check] the 7-rule discipline is the expert recipe for UB-free C++: OK
+
+CROSS-LANGUAGE — THE defining contrast:
+  C++    : trusts the programmer; UB is possible; caught by SANITIZERS at RUNTIME (or not at all).
+  Rust   : SAFE BY DEFAULT — the borrow checker FORBIDS UAF/dangling/data-race/null-deref at COMPILE time.
+  Go/TS/Python: GARBAGE-COLLECTED — no manual-memory UB; a DIFFERENT bug class (data races still bite Go/TS).
+[check] C++ trusts + sanitizers; Rust forbids at compile time; GC languages are a different bug class: OK
+
+======================================================================
+SECTION DONE — all sections printed (UB demos gated; compile -DDEMO_UB to enable)
+======================================================================

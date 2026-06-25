@@ -1,0 +1,145 @@
+std_expected_optional.cpp — Phase 7 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — std::optional<T>: maybe-a-value
+======================================================================
+(1) std::optional<int> has = 42;
+    has.has_value() = true
+    (bool)has       = true   (contextual conversion)
+    has.value()     = 42   (the SAFE accessor)
+    *has            = 42   (unchecked; safe ONLY after has_value)
+    has.value_or(0) = 42   (returns the T, ignores the default)
+[check] optional<int>=42 has_value: OK
+[check] (bool)optional matches has_value: OK
+[check] optional.value() == 42: OK
+[check] operator* == .value() when engaged: OK
+[check] value_or returns the T when present: OK
+
+(2) std::optional<int> empty;        emptied = 7; emptied = nullopt;
+    empty.has_value()  = false
+    emptied.has_value()= false   (nullopt assignment clears it)
+    empty.value_or(99) = 99   (the default, since empty)
+[check] default-constructed optional is empty: OK
+[check] nullopt assignment empties the optional: OK
+[check] value_or returns the default when empty: OK
+
+(3) empty.value()  -> THROWS std::bad_optional_access (caught):
+    caught std::bad_optional_access: what() = "bad_optional_access"
+[check] empty.value() threw std::bad_optional_access: OK
+
+(4) *empty  -> UNDEFINED BEHAVIOR (documented, NOT executed):
+    operator* performs NO check. The verified path uses .value()
+    (throws) or checks .has_value() first. The offending call lives
+    behind #ifdef DEMO_UB (never passed by just run/out/check/sanitize).
+[check] operator* on empty optional NOT called (UB; gated behind DEMO_UB): OK
+    (DEMO_UB not defined: the UB call is correctly omitted from this build.)
+
+======================================================================
+SECTION B — std::expected<T,E>: a-value-OR-an-error
+======================================================================
+(1) std::expected<int,std::string> ok = 42;
+    ok.has_value()  = true   (success)
+    ok.value()      = 42
+    *ok             = 42   (unchecked; safe only after has_value)
+    ok.value_or(0)  = 42
+[check] expected<int,string>=42 has_value (success): OK
+[check] success .value() == 42: OK
+[check] operator* == .value() on success: OK
+[check] value_or returns the T on success: OK
+
+(2) Exp err = std::unexpected(std::string("disk full"));
+    err.has_value() = false   (failure)
+    err.error()     = "disk full"   (the E)
+    err.value_or(0) = 0   (the default; .value() would be UB here)
+[check] unexpected expected has_value() == false: OK
+[check] unexpected .error() == "disk full": OK
+[check] value_or returns the default on unexpected: OK
+
+(3) THE TWO expected UB TRAPS (documented, NOT executed):
+    (a) err.value()  on UNEXPECTED -> UB  (expected does NOT throw;
+        contrast optional.value() which throws bad_optional_access)
+    (b) ok.error()   on SUCCESS     -> UB
+    Always check .has_value() before the unchecked accessors.
+[check] expected .value()/.error() UB traps NOT triggered (gated behind DEMO_UB): OK
+    (DEMO_UB not defined: the UB calls are correctly omitted from this build.)
+
+======================================================================
+SECTION C — Monadic ops (C++23) & the error-as-value return
+======================================================================
+--- optional monadic ops ---
+o = 5;
+    o.transform(x*2)                  = 10
+    optional<int>{}.transform(x*2)    = (empty)   (empty propagates)
+    optional{7}.and_then(+10).transform(*3) = 51
+    optional<int>{}.or_else(=>99)        = 99   (recovered)
+[check] optional transform engaged = 10: OK
+[check] optional transform on empty propagates empty: OK
+[check] optional and_then+transform chain = (7+10)*3 = 51: OK
+[check] optional or_else recovered empty to 99: OK
+
+--- expected monadic ops (the Rust Result pipeline) ---
+    safe_div(20,4).and_then(add_one).transform(*10)
+        -> has_value=true, value=60
+    safe_div(20,0).and_then(add_one).transform(*10)
+        -> has_value=false, error=ZeroDivisor (pipeline short-circuited)
+[check] expected pipeline success: 20/4=5, +1=6, *10=60: OK
+[check] expected pipeline short-circuits on error (no add_one, no *10): OK
+
+--- the error-as-value return style (no throw; error in signature) ---
+    safe_div(100,5) -> has_value=true, value=20
+    safe_div(100,0) -> has_value=false, error=ZeroDivisor
+[check] safe_div(100,5) == 20 (success path): OK
+[check] safe_div(100,0) is an error (no throw; caller inspects .error()): OK
+
+======================================================================
+SECTION D — throw vs expected vs error-code (the decision)
+======================================================================
+(a) THROW style  (invisible in signature; implicit propagation):
+    parse_throw("42")  = 42   (success)
+    parse_throw("no")  -> caught runtime_error: "not 42"
+[check] throw style: success returns 42: OK
+[check] throw style: failure throws a catchable runtime_error: OK
+
+(b) EXPECTED style (visible in signature; caller MUST inspect):
+    parse_expected("42") -> has_value=true, value=42
+    parse_expected("no") -> has_value=false, error="not 42"
+[check] expected style: success has_value == true and == 42: OK
+[check] expected style: failure carries the error payload (no throw): OK
+
+(c) ERROR-CODE style (legacy C; type is just int; easy to ignore):
+    parse_errcode("42",out) -> rc=0, out=42   (rc 0 == ok)
+    parse_errcode("no", out) -> rc=2        (rc 2 == not-42; payload via out)
+[check] error-code style: rc==0 on success and out==42: OK
+[check] error-code style: rc!=0 on failure (caller MUST check rc, not out): OK
+
+DECISION RULE (no single right answer):
+  - THROW      for truly exceptional failure crossing many layers the
+               immediate caller cannot handle (RAII unwinds cleanup).
+  - EXPECTED   for recoverable failure visible in the signature; the
+               caller usually knows what to do (parse, lookup, I/O).
+  - ERROR-CODE for legacy C interop / tiny bool-ish success flags.
+[check] all three styles exercised on the same operation: OK
+
+======================================================================
+SECTION E — expected IS Rust Result (the cross-language pivot)
+======================================================================
+Rust `?`-style pipeline in C++23 (safe_div(seed,2).and_then(add_one)):
+    pipeline(10) -> has_value=true, value=6   (== Rust Ok(6))
+    pipeline(0)  -> has_value=true, value=1   (0/2=0, +1=1; still Ok)
+    safe_div(10,0).and_then(add_one) -> has_value=false, error=ZeroDivisor
+        (== Rust: the `?` short-circuits on Err, returning Err early)
+
+Cross-language alignment (expected <-> Result <-> (T,error)):
+    C++23 std::optional<T>      ==  Rust Option<T>   (Some|None)
+    C++23 std::expected<T,E>    ==  Rust Result<T,E> (Ok|Err) + `?`
+    Go (T, error)               ==  same error-as-value idea, runtime-only
+    ENFORCEMENT: Rust = compile time; C++/Go = trust (+UB if you lie in C++)
+[check] pipeline(10) == Ok(6): OK
+[check] pipeline(0) succeeds (0/2=0, +1=1): OK
+[check] error short-circuits the .and_then chain (== Rust ?): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,102 @@
+modern_idioms.cpp — Phase 7 bundle.
+Three recurring C++ design idioms: PIMPL, CRTP, TYPE ERASURE.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — PIMPL: the compilation firewall
+======================================================================
+sizeof(void*) == 8  (one pointer)
+sizeof(Widget) == 8  (only a pointer; Impl's members are hidden)
+[check] sizeof(Widget) == sizeof(void*) (object repr is one pointer; Impl hidden): OK
+
+Widget w(7): value()=7  data_count()=7  live_impls=1
+[check] Widget w(7).value() == 7: OK
+[check] Widget w(7).data_count() == 7 (Impl built the hidden vector): OK
+[check] one live Impl while a Widget exists: OK
+after move: live_impls still 1 (move transferred the pointer, no copy/free)
+[check] move did not copy or destroy Impl (still 1 live): OK
+[check] moved-to Widget holds the value (7): OK
+after scope exit: live_impls=0 (dtor ran; RAII freed Impl)
+[check] Impl freed after Widget destroyed (RAII; out-of-line ~Widget ran): OK
+
+======================================================================
+SECTION B — CRTP: compile-time (static) polymorphism
+======================================================================
+CRTP Square(4):      name=Square    area=16   (static_cast dispatch, no vtable)
+CRTP Rectangle(3,5): name=Rectangle area=15
+[check] CRTP Square(4).area() == 16 (dispatched to Square::area_impl): OK
+[check] CRTP Rectangle(3,5).area() == 15: OK
+[check] CRTP name() dispatched to Derived::name_impl (Square): OK
+
+sizeof(Square)=4  sizeof(VSquare)=16   (CRTP base adds no vptr; virtual does)
+[check] Shape<> has no virtuals: sizeof(Square) == sizeof(int) (EBO, no vptr): OK
+
+Virtual VSquare(4) via VShape*: name=Square    area=16   (runtime dispatch via vtable)
+[check] virtual VSquare(4).area() == 16 (via VShape*): OK
+
+CRTP vs virtual:
+  CRTP    : compile-time, inlinable, no vtable/vptr — but the derived type is
+            FIXED; Square and Rectangle are unrelated types (no shared base ptr).
+  virtual : runtime, one indirection (vtable lookup) — but a VShape* addresses
+            any derived type, so heterogeneous collections work.
+
+======================================================================
+SECTION C — TYPE ERASURE: std::function (any callable) + std::any
+======================================================================
+std::function<int(int)> holds three different concrete callables:
+  lambda   (x -> x+3): fn(10) = 13
+  fn ptr   (x -> x+1): fn(10) = 11
+  functor  (x -> x+2): fn(10) = 12
+[check] std::function holds a lambda  (fn(10)==13): OK
+[check] std::function holds a fn ptr (fn(10)==11): OK
+[check] std::function holds a functor(fn(10)==12): OK
+[check] a lambda target and a fn-ptr target have DIFFERENT erased target types: OK
+
+sizeof(std::function<int(int)>) == 32  (impl-defined; includes the SBO buffer)
+[check] sizeof(std::function) >= sizeof(void*) (non-trivial wrapper): OK
+[check] default-constructed std::function is empty: OK
+invoking an empty std::function throws bad_function_call: true
+[check] empty std::function throws std::bad_function_call: OK
+
+std::any holds heterogeneous values behind one type:
+  a = 42;     type==int: yes   any_cast<int> = 42
+[check] std::any holds an int (type==int, any_cast<int>==42): OK
+  a = "hi";   type==string: yes   any_cast<string> = hi
+[check] std::any re-assigned to string (type==string, any_cast=="hi"): OK
+  any_cast<double>(string any) throws bad_any_cast: true
+[check] wrong-type any_cast<double> on a string any throws bad_any_cast: OK
+
+======================================================================
+SECTION D — the type-erasure MECHANISM (concept + templated holder)
+======================================================================
+A std::vector<AnyDrawable> of two unrelated concrete types draws as:
+Circle::draw()
+Triangle::draw()
+[check] AnyDrawable erased two unrelated types into one container (size 2): OK
+
+The mechanism, in miniature (this is how std::function/std::any work):
+  struct Concept { virtual void draw() const = 0; };            // the concept
+  template<class T> struct Model : Concept {                    // the holder
+      T obj; void draw() const override { obj.draw(); }         //   forwards to T
+  };
+  AnyDrawable(T o) : held(make_unique<Model<T>>(move(o))) {}    // <-- erases T
+[check] AnyDrawable is value-semantic (copy of vector would copy each holder): OK
+
+======================================================================
+SECTION E — recap: when each idiom wins
+======================================================================
+Idiom        poly?      overhead            hides impl?  when to use
+------------ ---------- ------------------- ----------- --------------------------------
+PIMPL        no         1 ptr + heap alloc  YES         cut compile-time coupling; ABI
+CRTP         compile    ZERO (inlineable)   no          static interface / mixin; speed
+virtual      runtime    vtable + indirection no         heterogeneous related types
+type erasure runtime    heap + indirection  yes (value) heterogeneous VALUES, one type
+
+PIMPL    : hide private members behind a forward-declared unique_ptr<Impl>.
+CRTP     : Base<Derived> forwards to Derived via static_cast<Derived*>(this).
+ERASURE  : a concept + a templated holder store any T behind a uniform type.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

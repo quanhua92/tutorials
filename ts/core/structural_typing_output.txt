@@ -1,0 +1,122 @@
+structural_typing.ts — Phase 2 bundle (Type System & Generics).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TS types are ERASED at runtime. The COMPILE-TIME claims
+below are gated by `expectType<...>` (compiles only if true) and by
+`// @ts-expect-error` on lines that SHOULD error (tsc fails if unused).
+RUNTIME claims are gated by `check(...)`.
+
+======================================================================
+SECTION A — Structural compatibility: has-at-least the members
+======================================================================
+type Point = { x: number; y: number }
+const p = { x: 1, y: 2, z: 3 }   (inferred: { x; y; z })
+const q: Point = p              -> OK (p has AT LEAST x and y)
+runtime: q.x = 1, q.y = 2   (z is invisible through Point)
+[check] typeof q === "object" (Point type erased at runtime): OK
+[check] q.x === 1 and q.y === 2 (structural assignment copies the reference): OK
+[check] typeof q === Point: OK
+[check] typeof p === { x: number; y: number; z: number } (source shape preserved): OK
+
+magnitude(p) -> 2.2361   (extra z ignored by the callee)
+[check] magnitude(p) === sqrt(5) (structural arg check): OK
+
+type Screen = { horizontal: number; vertical: number }
+Screen and Point have the SAME width (two numbers) but DIFFERENT
+member NAMES -> a Screen is NOT assignable to a Point.
+[check] keyof Screen === "horizontal" | "vertical": OK
+
+======================================================================
+SECTION B — Excess property checks (literals) & satisfies vs annotation
+======================================================================
+type Point = { x: number; y: number }
+  const fromLiteral: Point = { x:1, y:2, z:3 }   -> ERROR (excess z)
+  const v = { x:1, y:2, z:3 }; const q: Point = v -> OK (variable bypass)
+  fromVariable.x = 1
+[check] fromVariable.x === 1 (variable assignment bypasses excess check): OK
+
+type Options = { color?: string; width?: number }  (all-optional = weak type)
+  const badOpts: Options = { flavour: 'chocolate' } -> ERROR (no common prop)
+
+type RGB = [number, number, number]; type ColorEntry = string | RGB
+const paletteSat = { red:[255,0,0], green:'#00ff00' } satisfies Record<...,ColorEntry>
+const paletteAnn: Record<...,ColorEntry>       = { red:[255,0,0], green:'#00ff00' }
+  typeof paletteSat.red   === [number,number,number]   (satisfies: per-key type PRESERVED)
+  typeof paletteSat.green === string                  (satisfies: per-key type PRESERVED)
+  typeof paletteAnn.red   === ColorEntry (the union)  (annotation: WIDENED to declared type)
+  typeof paletteAnn.green === ColorEntry (the union)  (annotation: WIDENED to declared type)
+[check] satisfies preserves typeof paletteSat.red === [number, number, number]: OK
+[check] satisfies preserves typeof paletteSat.green === string: OK
+[check] annotation widens typeof paletteAnn.red === ColorEntry (the union): OK
+[check] annotation widens typeof paletteAnn.green === ColorEntry (the union): OK
+[check] paletteSat.green === paletteAnn.green === "#00ff00" at runtime (satisfies emits no code): OK
+[check] paletteSat.red[0] === 255 === paletteAnn.red[0] (identical values at runtime): OK
+
+======================================================================
+SECTION C — Nominal faking via brands (compile-time safe, runtime-erased)
+======================================================================
+declare const userIdBrand: unique symbol;
+type UserId  = string & { readonly [userIdBrand]: true };
+type OrderId = string & { readonly [orderIdBrand]: true };
+(the unique symbols are DECLARED but never created as values)
+
+const id  = mkUserId("u-42") -> runtime: typeof = string, value = "u-42"
+const ord = mkOrderId("o-7") -> runtime: typeof = string, value = "o-7"
+  id.length = 4, JSON.stringify(id) = "u-42"   (brand is a phantom symbol key;
+  declared but NEVER created as a runtime value, so id is just the raw string)
+[check] typeof branded UserId === "string" (brand erased at runtime): OK
+[check] typeof branded OrderId === "string": OK
+[check] the brand is a phantom symbol never created at runtime (id is just the raw string): OK
+[check] id === "u-42" at runtime (raw string preserved): OK
+
+  const directAssign: UserId = "u-42"   -> ERROR (bare string rejected)
+  const crossBrand: OrderId = id         -> ERROR (UserId != OrderId)
+[check] mkUserId returns exactly UserId: OK
+[check] idOk === "u-99" (factory output is the raw string at runtime): OK
+
+Without brands: type Email = string; type Username = string;
+  const username: Username = email  -> OK (purely structural; NO protection)
+[check] unbranded aliases are interchangeable (no nominal safety by default): OK
+
+======================================================================
+SECTION D — Function variance, typeof query, keyof & indexed access
+======================================================================
+[check] (e: BaseEvent) => number is assignable to (e: ClickEvent) => void (contravariance): OK
+interface Emitter { emit(e: BaseEvent): void }   (METHOD -> bivariant)
+const emitter: Emitter = { emit: logClick }       -> OK (methods are bivariant)
+emitter.emit({ timestamp: 99 })                   -> runtime: logClick reads .x = undefined
+[check] method-syntax bivariance allows the unsound assignment (strictFunctionTypes exempts methods): OK
+
+const defaultPoint = { x: 0, y: 0, label: "origin" }
+type DefaultPoint = typeof defaultPoint
+[check] typeof defaultPoint === { x: number; y: number; label: string }: OK
+
+type Point = { x: number; y: number }
+type PointKeys = keyof Point        // "x" | "y"
+type PointX = Point["x"]            // number
+[check] keyof Point === "x" | "y": OK
+[check] Point["x"] === number: OK
+[check] DefaultPoint["label"] === string: OK
+[check] typeof defaultPoint === object (keyof/indexed-access emit no runtime code): OK
+
+======================================================================
+SECTION E — Cross-language framing: Go (structural) vs Rust (nominal)
+======================================================================
+language     : model      : satisfaction         : nominal escape hatch
+------------ : ---------- : -------------------- : ---------------------------
+TypeScript   : structural : implicit (by shape)  : yes (the brand pattern)
+Go           : structural : implicit (by shape)  : n/a (interfaces are the model)
+Python       : structural : implicit (Protocol)  : no (Protocol is structural)
+Rust         : nominal    : EXPLICIT `impl Trait for T` : native (traits are nominal)
+[check] TS + Go are structural (shape-based); Rust is nominal (declaration-based): OK
+[check] Go interfaces are IMPLICIT (no implements keyword) — TS's closest sibling: OK
+[check] Rust requires EXPLICIT `impl Trait for T` — the starkest contrast to TS: OK
+
+Expert consequence: TS gives you nominal safety ONLY if you ask
+for it (brands). Rust gives it to you for free. Go — like TS — does
+not, which is why both ecosystems lean on conventions/linters.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

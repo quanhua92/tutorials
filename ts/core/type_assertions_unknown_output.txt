@@ -1,0 +1,155 @@
+type_assertions_unknown.ts — Phase 2 bundle (Type System & Generics).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TypeScript types are ERASED at runtime (tsx/tsc strip them).
+So `as`, `satisfies`, and `as const` emit NO code — only the runtime
+checks (typeof / instanceof / type predicates) actually execute.
+That erasure is WHY an assertion can lie: it changes the compile-time
+view but leaves the runtime value untouched.
+
+Two evidence modes: check() = RUNTIME verdict; expectType<>/
+@ts-expect-error = COMPILE-TIME verdict (the typecheck is canon).
+
+======================================================================
+SECTION A — `as`: a forced assertion, UNCHECKED at runtime (it can LIE)
+======================================================================
+const maybe: string | number = 42;
+const asNum = maybe as number;            -> OK (number overlaps string|number)
+  asNum = 42   (typeof number)
+[check] typeof asNum === number (union narrowed by `as`): OK
+[check] asNum === 42 at runtime (value unchanged by the assertion): OK
+
+THE OVERLAP RULE: `as` is allowed only between overlapping types.
+  123 as string   -> ERROR (number and string do not overlap)
+  123 as unknown as string -> COMPILES (the escape hatch; loaded footgun)
+  forced = 123   (typeof number — runtime value is a NUMBER)
+[check] TS believes forced === string (the escape hatch lied): OK
+[check] typeof forced === "number" at runtime (escape hatch does NOT change the value): OK
+
+THE LIE (a realistic function boundary):
+  function asNumber(x: unknown): number { return x as number; }
+  const liedTo = asNumber("hello");
+    TS type of liedTo : number   (the compiler TRUSTS the assertion)
+    runtime typeof     : string   (THE LIE — runtime value unchanged)
+[check] TS believes liedTo === number (compile-time view): OK
+[check] typeof liedTo === "string" at runtime (the assertion LIED — value untouched): OK
+
+======================================================================
+SECTION B — any: opts out of ALL checking (the danger)
+======================================================================
+let danger: any = 1;                       // a number, typed any (the off switch)
+danger.toUpperCase();                       // COMPILES (any allows it), then:
+  runtime -> threw TypeError   (number has no .toUpperCase)
+[check] any: danger.toUpperCase() threw at runtime (compiler was silenced): OK
+[check] any throw is a TypeError: OK
+[check] runtime typeof danger === "number" (the real value underneath any): OK
+
+const leaked: string = danger;             // COMPILES, but at runtime:
+  typeof leaked === number   (a number sitting in a string slot)
+[check] TS believes leaked === string (any leaked through): OK
+[check] typeof leaked === "number" at runtime (a number in a string-typed slot): OK
+
+======================================================================
+SECTION C — unknown: the safe TOP type (you MUST narrow)
+======================================================================
+unknown accepts ANY value (everything assignable TO the top type):
+  const u1: unknown = 1;        // number
+  const u2: unknown = "hello";  // string
+  const u3: unknown = { a: 1 }; // object
+  const u4: unknown = [1,2,3];  // object
+  const u5: unknown = null;     // object
+[check] unknown accepts number: OK
+[check] unknown accepts string: OK
+[check] unknown accepts object: OK
+[check] unknown accepts array (typeof object): OK
+[check] unknown accepts null (typeof object — the lie): OK
+
+Through unknown, NOTHING is usable without narrowing:
+  u2.toUpperCase();  -> COMPILE ERROR (Object is of type 'unknown')
+  if (typeof u2 === 'string') u2.toUpperCase();  -> OK after narrowing
+  narrowed result: "HELLO"
+[check] unknown narrowed via typeof: u2.toUpperCase() === 'HELLO' after the check: OK
+
+unknown vs any — the contrast (same intent, opposite safety):
+                   any                          unknown
+  assign TO it:    any value (1,'x',{})         any value (1,'x',{})   [same]
+  read FROM it:    ANY operation COMPILES      NOTHING compiles until narrowed
+  assign FROM it:  assignable to any type      assignable ONLY to unknown/any
+[check] a value typed any, read as unknown, is unknown: OK
+[check] unknown is a safe SINK for any-typed values (no info lost, no use allowed): OK
+
+======================================================================
+SECTION D — satisfies + as const: preserve the narrow type (TS 4.9+)
+======================================================================
+type Port = number | { host: string; port: number };
+type Config = { db: Port; cache: Port };
+const cfgSat = { db: 5432, cache: { host:'redis', port:6379 } } satisfies Config;
+const cfgAnn: Config = { db: 5432, cache: { host:'redis', port:6379 } };
+  typeof cfgSat.db    === number                       (satisfies: PRESERVED)
+  typeof cfgSat.cache === { host: string; port: number } (satisfies: PRESERVED)
+  typeof cfgAnn.db    === Port (the union)             (annotation: WIDENED)
+  typeof cfgAnn.cache === Port (the union)             (annotation: WIDENED)
+[check] satisfies preserves cfgSat.db === number: OK
+[check] satisfies preserves cfgSat.cache === { host: string; port: number }: OK
+[check] annotation widens cfgAnn.db === Port (the union): OK
+[check] annotation widens cfgAnn.cache === Port (the union): OK
+
+THE PAYOFF — satisfies keeps downstream usage type-safe:
+  const dbPortDirect: number = cfgSat.db;   -> OK (cfgSat.db === number)
+  cfgAnn.db.toFixed();                      -> ERROR (cfgAnn.db === Port, must narrow)
+[check] satisfies: cfgSat.db usable directly as number (=== 5432): OK
+[check] satisfies emits no code: cfgSat.db === cfgAnn.db === 5432 at runtime: OK
+[check] satisfies emits no code: cfgSat.cache.port === cfgAnn cache port === 6379: OK
+
+as const — assert the narrowest literal/readonly type:
+  const tuple = [1, 2] as const;            -> typeof tuple === readonly [1, 2]
+  const obj = { kind: "ok", code: 200 } as const;  -> { readonly kind: "ok"; readonly code: 200 }
+[check] as const: [1, 2] -> readonly [1, 2]: OK
+[check] as const: object -> { readonly kind: "ok"; readonly code: 200 }: OK
+  as const is TYPE-ONLY — it does NOT Object.freeze at runtime.
+  Object.isFrozen(tuple) === false   (readonly type, mutable value)
+[check] as const is type-only: tuple is NOT frozen at runtime: OK
+[check] as const runtime values unchanged: tuple[0] === 1, tuple[1] === 2: OK
+
+======================================================================
+SECTION E — never (bottom type) + THE RULE: prefer a guard over `as`
+======================================================================
+(1) never-returning functions (throw or loop forever):
+  function fail(msg: string): never { throw new Error(msg); }
+  never is assignable to EVERY type (the empty set fits anywhere).
+[check] ReturnType<typeof fail> === never: OK
+
+(2) The empty intersection:
+  type EmptyIntersection = string & number;   -> never (no value is both)
+[check] string & number === never (empty intersection): OK
+
+(3) Exhaustive switch (never is the exhaustiveness tool):
+  type Result = { ok: true; value: number } | { ok: false; error: string };
+  function handle(r: Result): string {
+    switch (r.ok) {
+      case true:  return `value=${r.value}`;
+      case false: return `error=${r.error}`;
+      default:    return fail(`unexpected: ${r}`);  // r is never here
+    }
+  }
+  handle({ ok: true, value: 7 })       -> "value=7"
+  handle({ ok: false, error: "boom" }) -> "error=boom"
+[check] never exhaustiveness: handle({ok:true,value:7}) === "value=7": OK
+[check] never exhaustiveness: handle({ok:false,error:"boom"}) === "error=boom": OK
+
+(4) THE RULE — prefer a type PREDICATE over `as`:
+  function isNumberGuard(x: unknown): x is number { return typeof x === 'number'; }
+  function safeDouble(x: unknown): number {
+    if (isNumberGuard(x)) return x * 2;   // SAFE: narrowed by a runtime check
+    throw new TypeError(`expected number, got ${typeof x}`);
+  }
+  // Contrast: `return (x as number) * 2;` would COMPILE for any value and LIE.
+  safeDouble(21) -> 42   (predicate narrowed x to number)
+[check] type predicate (safe alt to `as`): safeDouble(21) === 42: OK
+[check] isNumberGuard accepts unknown (the safe top type): OK
+[check] unknown is the TOP type, never is the BOTTOM type (this bundle's spine): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

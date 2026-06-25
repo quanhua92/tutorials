@@ -1,0 +1,169 @@
+type_narrowing.ts — Phase 2 bundle (type-system).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TS types are ERASED at runtime. Narrowing is the bridge —
+a RUNTIME check (typeof/in/instanceof/tag) tells the COMPILER the
+value's type in the branch that follows.
+
+======================================================================
+SECTION A — typeof narrowing + blind spots (null/array) + Array.isArray
+======================================================================
+typeof's blind spots (why typeof alone can't narrow objects):
+  typeof null   = object    <- THE LIE: null is a primitive
+  typeof []     = object    <- arrays report "object"
+  typeof {}     = object
+  typeof "a"    = string
+  typeof 1      = number
+[check] typeof null === "object" (THE LIE — typeof CANNOT narrow null): OK
+[check] typeof [] === "object" (typeof CANNOT tell array from object): OK
+[check] typeof {} === "object": OK
+[check] Array.isArray([]) === true (the realm-safe array test): OK
+[check] Array.isArray({}) === false: OK
+[check] Array.isArray(null) === false: OK
+
+typeof narrows the PRIMITIVE arms of a union (live expectType):
+[check] typeof === "string" narrows string|number -> string: OK
+  classify("hi") = HI
+[check] after the string arm is removed, union -> number: OK
+  classify(42)   = 42
+
+Array.isArray narrows T | T[] (live expectType):
+[check] Array.isArray narrows string|string[] -> string[]: OK
+  firstOrIt(["a","b"]) = a
+[check] else branch narrows -> string (the T arm): OK
+  firstOrIt("solo")    = solo
+
+(tsc-verified, not run: proof_noGuardErrors, proof_typeofObjectKeepsNull,
+ proof_cantWidenBeyondDeclared — each @ts-expect-error suppresses a real error)
+[check] typeof can't remove null from a typeof-object branch (tsc proof above): OK
+
+======================================================================
+SECTION B — truthiness + equality + the `in` operator narrowing
+======================================================================
+Truthiness narrows out the falsy arms:
+[check] if(name) narrows string|null|undefined -> string: OK
+  greet("Pat") = hi PAT
+  greet(null) = hi stranger
+
+Equality narrows on === , !== , and == (the nullish idiom):
+[check] c.value != null narrows -> number (both nulls out): OK
+  doubled({value:21})      = 42
+  doubled({value:null})    = -1
+  doubled({value:undefined}) = -1
+[check] == null / != null remove both null and undefined (the nullish idiom): OK
+
+The `in` operator narrows on a property/method name:
+[check] "swim" in animal narrows Fish|Bird -> Fish: OK
+  "swim" in fish  = true    -> swimming
+[check] else branch -> Bird (Fish removed): OK
+  "swim" in bird  = false   -> flying
+[check] "swim" in fish === true (in searches own keys): OK
+[check] "swim" in bird === false: OK
+[check] "in" finds inherited (prototype-chain) properties: OK
+[check] "x" in null throws TypeError (RHS must be an object): OK
+
+======================================================================
+SECTION C — instanceof narrowing (Date/Error/class) + catch-unknown
+======================================================================
+instanceof walks the prototype chain:
+  ve instanceof ValidationError = true
+  ve instanceof Error           = true
+  ve instanceof Object          = true
+[check] ve instanceof ValidationError (its own class): OK
+[check] ve instanceof Error (parent class — chain walk): OK
+[check] ve instanceof Object (chain reaches Object.prototype): OK
+
+instanceof Date narrows Date|string:
+[check] instanceof Date narrows Date|string -> Date: OK
+  label(new Date('2024-01-15')) = year 2024
+[check] else branch -> string: OK
+  label('hello')               = HELLO
+
+catch (e) binds `unknown` — narrow with instanceof:
+[check] instanceof narrows catch(unknown) -> ValidationError: OK
+  caught class   = ValidationError
+  caught message = "bad input"
+[check] instanceof narrows catch-bound unknown to ValidationError: OK
+[check] narrowed catch binding exposes .message: OK
+
+instanceof is for objects (arrays/dates are objects):
+[check] [] instanceof Array === true: OK
+[check] [] instanceof Object === true (Array.prototype chain reaches Object): OK
+[check] new Date(0) instanceof Date === true: OK
+
+======================================================================
+SECTION D — TYPE PREDICATES (`x is T`) + assertion functions (`asserts`)
+======================================================================
+User-defined type predicate `value is string` narrows the caller:
+[check] isString narrows unknown -> string: OK
+  describe("hi") = string of length 2
+[check] isNumber narrows unknown -> number: OK
+  describe(42)   = number 42
+  describe(true) = something else
+[check] isString is a correct guard for a string: OK
+[check] isString rejects a number: OK
+
+Predicate narrows BOTH branches (Fish kept / Fish removed):
+[check] isFish narrows Fish|Bird -> Fish: OK
+  act({swim}) = swim
+[check] else branch -> Bird (Fish removed): OK
+  act({fly})  = fly
+
+Predicate filters (Fish|Bird)[] -> Fish[]:
+  zoo.length=3  onlyFish.length=2
+[check] zoo.filter(isFish) is typed Fish[]: OK
+[check] filter(isFish) keeps the 2 Fish: OK
+
+Assertion functions narrow OR throw:
+[check] assertString narrows unknown -> string for the rest: OK
+  useAsserts("hi") = HI
+[check] assertString(42) throws (narrow OR throw): OK
+
+assertDefined narrows to NonNullable<T>:
+[check] assertDefined narrows string|null -> NonNullable<string>=string: OK
+  useAssertDefined("hi") = HI
+[check] assertDefined(null) throws: OK
+
+asserts value (truthiness) narrows eagerly:
+[check] assertTruthy narrows (string|0|null) -> string: OK
+  useTruthy("ok") = ok
+[check] assertTruthy(0) throws (0 is falsy): OK
+
+======================================================================
+SECTION E — control-flow narrowing + discriminated unions + exhaustiveness
+======================================================================
+Assignment re-narrows (but never beyond the declared type):
+[check] x = 'hi' narrows -> string: OK
+[check] x = 42 re-narrows -> number: OK
+  assignmentFlow() = HI-42
+
+return / throw narrow the remainder (control-flow analysis):
+  afterReturn("hi") = HI
+[check] after the string-return, union -> number (string removed): OK
+  afterReturn(42)   = 42
+
+Discriminated union: tag literal narrows to one member:
+[check] s.kind === "circle" narrows Shape -> Circle: OK
+  describe(circle r=3) = circle r=3
+[check] else branch -> Square: OK
+  describe(square s=4) = square side=4
+
+Discriminated union in a switch (each case auto-narrows):
+[check] case "circle" narrows -> Circle: OK
+[check] case "square" narrows -> Square: OK
+  area(circle r=2) = 12.566371  (PI * 4)
+  area(square s=3) = 9
+[check] area(circle r=2) = PI * 4: OK
+[check] area(square s=3) = 9: OK
+
+Exhaustiveness via `never` (compile-time completeness alarm):
+  exhaustiveArea(circle r=2) = 12.566371
+  exhaustiveArea(square s=3) = 9
+  (add a `triangle` member and `const _exhaustive: never = s` errors ->
+   the compiler flags the unhandled case. See TYPE_NARROWING.md pitfalls.)
+[check] exhaustive default narrows Shape to never (tsc-verifiable): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

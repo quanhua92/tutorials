@@ -1,0 +1,171 @@
+mapped_conditional_types.ts — Phase 2 bundle (type-system).
+Mapped + conditional + infer + template-literal types: TS's
+type-level PROGRAMMING LANGUAGE — computed at compile time, then ERASED.
+
+Reminder (pinned by VALUES_TYPES_COERCION): TS types are ERASED at runtime.
+So every claim below is proven by tsc (expectType<>/@ts-expect-error); the
+few runtime check()s assert ERASURE (template-literal -> plain string, etc.).
+
+======================================================================
+SECTION A — Mapped types: a type-level `for` loop over a type's keys
+======================================================================
+type Stringify<T> = { [K in keyof T]: string }
+  Stringify<{ a: number; b: boolean }>
+    -> { a: string; b: string }   (keys preserved, value type rewritten)
+[check] Stringify<{a:number;b:boolean}> === {a:string;b:string}: OK
+  const wrongValue: { a: number } = (Stringify result)  -> ERROR (string not number)
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] }
+  Mutable<{ readonly id: string }>
+    -> { id: string }   (readonly STRIPPED)
+[check] Mutable<{readonly id}> === {id} (readonly removed): OK
+  unlocked.id = 'y'  -> OK (Mutable stripped readonly)
+  locked.id = 'z'    -> ERROR (@ts-expect-error gate: readonly blocks it)
+[check] readonly leaves NO runtime trace: descriptor.writable !== false (it's a compile-time modifier): OK
+
+type Concrete<T> = { [K in keyof T]-?: T[K] }
+  Concrete<{ id: string; name?: string }>
+    -> { id: string; name: string }   (optionality STRIPPED)
+[check] Concrete<{id;name?}> === {id;name} (optional removed): OK
+  const missingName: RequiredUser = { id: '1' }  -> ERROR (name now required)
+[check] ReadonlyAll<{x}> === {readonly x}: OK
+[check] OptionalAll<{x}> === {x?}: OK
+
+type ReadonlyAll<T> = { +readonly [K in keyof T]: T[K] }  -> adds readonly
+type OptionalAll<T> = { [K in keyof T]+?: T[K] }          -> adds optional
+  (+ is the default; - is the noteworthy direction.)
+
+======================================================================
+SECTION B — Conditional types: a type-level `if`, + distributivity
+======================================================================
+type IsString<T> = T extends string ? true : false
+  IsString<"x">  -> true
+  IsString<42>   -> false
+[check] IsString<"x"> === true: OK
+[check] IsString<42> === false: OK
+
+type ToArray<T> = T extends unknown ? T[] : never   // NAKED T -> distributes
+  ToArray<string | number>
+    -> string[] | number[]   (NOT (string|number)[])
+[check] ToArray<string|number> distributes to string[] | number[]: OK
+
+type ToArrayNonDist<T> = [T] extends [unknown] ? T[] : never   // [T] -> no distribution
+  ToArrayNonDist<string | number>
+    -> (string | number)[]   (tested whole, NOT distributed)
+[check] ToArrayNonDist<string|number> === (string|number)[] (distribution disabled): OK
+  const mixed: (string|number)[] = [1,'a',2];
+  const asEither: string[]|number[] = mixed  -> ERROR (mixed array is neither all-string nor all-number)
+[check] MyExclude<"a"|"b"|"c", "b"> === "a"|"c" (distributive filter): OK
+
+type MyExclude<U, M> = U extends M ? never : U   // = the built-in Exclude
+  MyExclude<"a"|"b"|"c", "b">  -> "a" | "c"   (the "b" arm became never and vanished)
+
+======================================================================
+SECTION C — `infer`: a type-level capture (reimplement ReturnType)
+======================================================================
+type GetReturnType<T> = T extends (...args: never[]) => infer R ? R : never
+  GetReturnType<() => number>  -> number
+[check] GetReturnType<()=>number> === number: OK
+[check] hand-rolled GetReturnType === built-in ReturnType (identical): OK
+[check] GetReturnType<number> === never (number is not a function -> false branch): OK
+  GetReturnType<number>  -> never   (false branch: number is not callable)
+
+type ElementOf<T> = T extends (infer E)[] ? E : never
+  ElementOf<number[]>  -> number
+  ElementOf<string>    -> never   (string is not an array)
+[check] ElementOf<number[]> === number: OK
+[check] ElementOf<string> === never: OK
+
+type Unwrap<T> = T extends Promise<infer U> ? U : T
+  Unwrap<Promise<boolean>>  -> boolean
+  Unwrap<string>            -> string   (not a Promise -> passes through)
+[check] Unwrap<Promise<boolean>> === boolean: OK
+[check] Unwrap<string> === string (passthrough): OK
+
+declare function overloaded(x: string): number;
+declare function overloaded(x: number): string;
+declare function overloaded(x: string|number): string|number;  // LAST signature
+  GetReturnType<typeof overloaded>  -> string | number   (picks the LAST signature)
+[check] infer on an overloaded fn picks the LAST signature -> string|number: OK
+[check] typeof fn === "function" (ReturnType/infer leave no runtime trace): OK
+[check] fn() === 42 (the captured return type was compile-time only): OK
+
+======================================================================
+SECTION D — Template literal types + intrinsics + key remapping via `as`
+======================================================================
+[check] `hello ${"world"}` === "hello world": OK
+type Greeting = `hello ${string}`   (a PATTERN type)
+type Hello = `hello ${"world"}`     -> "hello world"
+[check] ..."hello world" matches `hello ${string}`: OK
+[check] ..."hi world" does NOT match the pattern: OK
+
+type Lang = "en" | "ja"
+type Locale = `${Lang}_id`   // union cross-multiplies
+  -> "en_id" | "ja_id"
+[check] `${"en"|"ja"}_id` === "en_id"|"ja_id": OK
+
+Intrinsic string types (compiler-built, NOT locale-aware):
+[check] Uppercase<"hello"> === "HELLO": OK
+[check] Lowercase<"HELLO"> === "hello": OK
+[check] Capitalize<"hello"> === "Hello": OK
+[check] Uncapitalize<"Hello"> === "hello": OK
+
+type Getters<T> = { [K in keyof T as `get${Capitalize<string & K>}`]: () => T[K] }
+  Getters<{ name: string; age: number }>
+    -> { getName: () => string; getAge: () => number }   (keys RENAMED)
+[check] Getters<{name;age}> renames keys to getName|getAge: OK
+[check] LazyPerson.getName () -> string (value type travels with the renamed key): OK
+[check] LazyPerson.getAge () -> number: OK
+
+type RemoveKind<T> = { [K in keyof T as Exclude<K, "kind">]: T[K] }
+  RemoveKind<{ kind: "circle"; radius: number }>
+    -> { radius: number }   ("kind" DROPPED via Exclude -> never)
+[check] RemoveKind drops the "kind" key -> {radius:number}: OK
+[check] typeof ev === "string" (template-literal type ERASES to a plain string): OK
+[check] ev === "valueChanged" (the literal value survives; only the TYPE vanished): OK
+
+const ev: `${string}Changed` = "valueChanged";
+  typeof ev -> "string"   (template-literal type erased at runtime)
+
+======================================================================
+SECTION E — Putting it together: reimplement the Utility Types by hand
+======================================================================
+type MyPartial<T> = { [K in keyof T]+?: T[K] }
+  MyPartial<{ id; name; email }>
+    -> { id?: number; name?: string; email?: string }   (=== built-in Partial)
+[check] MyPartial<User> === Partial<User>: OK
+[check] MyPartial result is the all-optional shape: OK
+
+type MyRequired<T> = { [K in keyof T]-?: T[K] }
+  MyRequired<{ id: number; name?: string }>
+    -> { id: number; name: string }   (=== built-in Required)
+[check] MyRequired<{id;name?}> === Required<{id;name?}>: OK
+
+type MyReadonly<T> = { readonly [K in keyof T]: T[K] }
+  MyReadonly<User>  -> { readonly id; readonly name; readonly email }   (=== Readonly)
+[check] MyReadonly<User> === Readonly<User>: OK
+
+type MyPick<T, K extends keyof T> = { [P in K]: T[P] }
+  MyPick<User, "id" | "name">  -> { id: number; name: string }   (=== Pick)
+[check] MyPick<User,"id"|"name"> === Pick<User,"id"|"name">: OK
+[check] MyPick result is the projected subset: OK
+
+type MyRecord<K extends PropertyKey, V> = { [P in K]: V }
+  MyRecord<"a"|"b", number>  -> { a: number; b: number }   (=== Record)
+[check] MyRecord<"a"|"b",number> === Record<"a"|"b",number>: OK
+
+type MyReturnType<T> = T extends (...args: never[]) => infer R ? R : never
+  MyReturnType<() => User>  -> User   (=== ReturnType)
+[check] MyReturnType<()=>User> === ReturnType<()=>User>: OK
+[check] MyReturnType<()=>User> === User: OK
+
+CROSS-LANGUAGE: this is TS's compile-time codegen.
+  mapped   ~ a type-level `for` loop over keys
+  conditional ~ a type-level `if` (with union distribution)
+  infer    ~ a type-level `let`/capture
+  Rust analog: ../rust/MACRO_RULES.md (declarative) + ../rust/PROC_MACROS.md (procedural).
+[check] MyPartial<User> value is a plain object: keys === ["id"] (derivation erased): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

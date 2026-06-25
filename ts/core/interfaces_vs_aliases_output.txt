@@ -1,0 +1,135 @@
+interfaces_vs_aliases.ts — Phase 2 bundle (Type System & Generics).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TS types are ERASED at runtime. The COMPILE-TIME claims
+below are gated by `expectType<...>` (compiles only if true) and by
+`// @ts-expect-error` on lines that SHOULD error (tsc fails if unused).
+RUNTIME claims are gated by `check(...)`.
+
+======================================================================
+SECTION A — Both structural: interface and type alias are the SAME type
+======================================================================
+interface IPoint { x: number; y: number }
+type TPoint = { x: number; y: number }
+  -> Equal<IPoint, TPoint> === true (NOT just assignable: IDENTICAL)
+[check] interface IPoint === type TPoint (exact equal): OK
+[check] type TPoint === interface IPoint (symmetric): OK
+  const a: IPoint = {x:1,y:2}; const b: TPoint = a; const c: IPoint = b;
+  runtime: a === b === c === {"x":1,"y":2} (one object, three names)
+[check] typeof a === "object" (interface IPoint erased at runtime): OK
+[check] a.x === b.x === c.x === 1 (the three names alias ONE object; shapes erased): OK
+  const tooFew: IPoint = { x: 1 }  -> ERROR (missing y; @ts-expect-error gate)
+
+======================================================================
+SECTION B — interface `extends` + class `implements` (compile-time only)
+======================================================================
+interface Animal { name }
+interface Trainable { tricks }
+interface Pet extends Animal, Trainable { owner }
+[check] keyof Pet === "name" | "tricks" | "owner" (extends merges key sets): OK
+const dog = new RealDog()  -> dog.name = "Rex"
+const pet = new RealPet()  -> pet.name="Rex", owner="Ada"
+[check] implements checks conformance: pet satisfies Pet (name+tricks+owner): OK
+  class BadDog implements Pet { name }  -> ERROR (missing owner/tricks)
+  dog instanceof Animal  -> type error (suppressed) AND runtime ReferenceError
+[check] instanceof on an interface throws ReferenceError at runtime (interface erased, no binding): OK
+  Object.keys(dog).sort() = ["name"]   (no "Animal" trace)
+[check] implements leaves no runtime trace: dog has only its own keys, no interface name: OK
+
+SUBTLETY: interface Pet extends Animal,Trainable  vs  type PetByName = Animal & Trainable & {owner}
+  const asIntersection: PetByName = pet  -> OK (Pet -> PetByName)
+  const roundTrip: Pet = asIntersection  -> OK (PetByName -> Pet, symmetric)
+  yet Equal<Pet, PetByName> === false (interface-via-extends != intersection construction)
+
+======================================================================
+SECTION C — DECLARATION MERGING (interfaces only) — THE payoff
+======================================================================
+interface WindowLike { width: number }
+interface WindowLike { height: number }   // <-- SAME name: MERGES (not an error)
+  -> WindowLike now has BOTH width and height
+[check] merged WindowLike === { width: number; height: number }: OK
+  const win: WindowLike = { width: 800, height: 600 }   -> compiles (both present)
+[check] property merge: win.width === 800 && win.height === 600: OK
+
+interface Logger { log(msg: string): void }
+interface Logger { log(msg: number): void }   // <-- merges into TWO overloads
+  logger.log("info")  -> OK (string overload)
+  logger.log(42)      -> OK (number overload)
+[check] overload merge: Logger.log accepts BOTH string and number call signatures: OK
+
+THE ASYMMETRY: a `type` CANNOT be redeclared. The forbidden form (NOT live):
+  type TStringBox = { width: number };
+  type TStringBox = { height: number };   // TS2300 Duplicate identifier 'TStringBox'
+  -> @ts-expect-error cannot clean it (duplicate fires on BOTH decls);
+     types are CLOSED. Only interfaces are open/mergeable.
+[check] type aliases are closed (cannot merge); only interfaces merge: OK
+
+CONSEQUENCE: `declare module "lib" { interface X { ... } }` augments a
+library's interface via merging. A type alias cannot be augmented this way.
+
+======================================================================
+SECTION D — Type-only powers (unions, tuples, intersections, mapped, branded)
+======================================================================
+type Id = string | number;             // UNION (no interface spelling)
+[check] Id === string | number: OK
+  formatId("u-1") = u-1   formatId(42) = #42
+[check] union accepts both arms: formatId(string) and formatId(number): OK
+
+type Pair = [number, string];          // TUPLE (no interface spelling)
+[check] Pair[0] === number: OK
+[check] Pair[1] === string: OK
+  const pair: Pair = [7, "seven"]   -> length = 2, pair[0]=7, pair[1]="seven"
+[check] tuple: pair.length === 2 and slots keep their declared types: OK
+
+type LabeledPoint = IPoint & { label: string };   // INTERSECTION
+  const lp: LabeledPoint = { x:0, y:0, label:"origin" }   -> lp.label = "origin"
+[check] intersection: lp carries x, y, AND label (assignable both ways): OK
+
+type Stringified<T> = { [K in keyof T]: string };   // MAPPED (no interface spelling)
+  const sp: Stringified<IPoint> = { x:"1", y:"2" }   -> every value is a string
+[check] mapped type: Stringified<IPoint> forces both values to string: OK
+
+type Celsius = number & { readonly __celsiusBrand: unique symbol };   // BRANDED
+  const temp = 36.6 as Celsius   -> typeof = number, value = 36.6
+[check] typeof branded Celsius === "number" (brand is a phantom; erased at runtime): OK
+[check] branded primitive carries its numeric value at runtime (brand is type-only): OK
+  const bareNum: Celsius = 36.6   -> ERROR (bare number rejected by the brand)
+
+SUMMARY: interfaces describe object/function/construct/index SIGNATURES only.
+type aliases additionally express UNION | TUPLE | INTERSECTION | MAPPED | CONDITIONAL.
+Reach for `type` whenever the shape is algebraic rather than a single object.
+
+======================================================================
+SECTION E — When to use which (open vs algebraic) + cross-language framing
+======================================================================
+capability                       : interface : type alias
+-------------------------------- : --------- : ---------------------------------------
+union / intersection             : no        : yes  (string|number, A & B)
+tuple [a, b]                     : no        : yes  ([number, string])
+mapped / conditional             : no        : yes  ({[K in keyof T]:...}, T extends U ? X : Y)
+declaration merge                : yes  (open) : no  (closed)
+extends / implements             : yes  (interface extends A; class impl) : via intersection (A & B)
+augment lib .d.ts                : yes  (declare module) : no
+plain object shape               : yes       : yes  (equivalent — Equal<> is true)
+[check] decision rule: open/mergeable -> interface; algebraic/closed -> type: OK
+
+language     : shape-contract concept                        : model          : extension model
+------------ : -------------------------------------------------- : -------------- : ----------------------------------
+TypeScript   : BOTH (open interface + closed type alias)          : structural     : merge (interface) / intersect (type)
+Go           : interface (one concept)                            : structural, IMPLICIT : no merging (method-set only, no data)
+Rust         : trait (one concept)                                : nominal, EXPLICIT `impl` : no merging (default methods, no data fields)
+Python       : Protocol (one concept)                             : structural     : no merging
+[check] TS is the only one of the four offering BOTH open-merge (interface) AND closed-algebraic (type): OK
+[check] Go interfaces are IMPLICIT (no `implements` keyword) — TS's closest sibling: OK
+[check] Rust traits are NOMINAL + EXPLICIT impl — the starkest contrast to TS: OK
+
+EXPERT TAKEAWAY: TypeScript gives you TWO complementary tools, not a
+contest. Use `interface` where openness/merging buys you something
+(library contracts, augmentation). Use `type` where the shape is
+algebraic (unions, tuples, intersections, mapped/conditional). For a
+plain object shape, either is fine — be consistent within a codebase.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

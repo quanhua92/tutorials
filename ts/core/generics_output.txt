@@ -1,0 +1,161 @@
+generics.ts — Phase 2 bundle (type-system).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TS generics are ERASED at runtime. The constraint
+`T extends X` is a compile-time gate; at runtime T is gone — so
+`new T()` and `instanceof T` are impossible, and narrowing
+(🔗 TYPE_NARROWING) is the bridge to a concrete runtime type.
+
+======================================================================
+SECTION A — generic function + inference (T inferred from the argument)
+======================================================================
+Generic identity: T is the link between input and output:
+[check] identity<number>(42) returns number: OK
+[check] identity("hi") infers T="hi" (literal preserved, not widened): OK
+  identity<number>(42) = 42   (T=number, explicit)
+  identity("hi")       = "hi"   (T="hi", literal inferred)
+[check] identity(42) === 42: OK
+[check] identity("hi") === "hi": OK
+
+first<T>(xs): T inferred from the array's element type:
+[check] first([1,2,3]) infers T=number -> number|undefined: OK
+[check] first(["a","b"]) infers T=string -> string|undefined: OK
+[check] first([] as number[]) -> number|undefined: OK
+  first([1,2,3])    = 1   (T=number)
+  first(["a","b"])  = "a"   (T=string)
+  first([])         = undefined   (T=number, empty array -> undefined)
+[check] first([1,2,3]) === 1: OK
+[check] first(["a","b"]) === "a": OK
+[check] first([]) === undefined: OK
+
+======================================================================
+SECTION B — CONSTRAINTS: `extends` and `keyof` (the compile-time gate)
+======================================================================
+Constraint `T extends { length: number }` — accepts any shape with .length:
+  len("abc")      = 3   (string has .length)
+  len([1,2])      = 2   (array has .length)
+  len({length:7}) = 7   (any object literal with .length)
+[check] len("abc") === 3: OK
+[check] len([1,2]) === 2: OK
+[check] len({length:7}) === 7: OK
+
+Constraint `K extends keyof T` — returns the EXACT property type T[K]:
+[check] get(obj, "a") is number (T[K]): OK
+[check] get(obj, "b") is string (T[K]): OK
+[check] get(obj, "c") is boolean (T[K]): OK
+  get(obj, "a") = 1   (T[K] = number)
+  get(obj, "b") = "x"   (T[K] = string)
+  get(obj, "c") = true   (T[K] = boolean)
+[check] get(obj, "a") === 1: OK
+[check] get(obj, "b") === "x": OK
+[check] get(obj, "c") === true: OK
+
+(tsc-verified, not run: proof_lenRejectsNumber, proof_getRejectsBadKey —
+ each @ts-expect-error suppresses a real constraint-violation error)
+[check] len(123) is a compile error (number has no .length): OK
+[check] get({a:1}, "b") is a compile error ("b" is not keyof {a}): OK
+
+======================================================================
+SECTION C — generic class + interface/type + DEFAULT type params
+======================================================================
+Generic class Stack<T> — the class is parameterized per instance:
+[check] Stack<number>.pop() returns number|undefined: OK
+  pushed 1,2,3 ; pop() = 3 ; size = 2
+[check] Stack LIFO: pop() === 3: OK
+[check] Stack LIFO: next pop() === 2: OK
+[check] Stack size after 2 pops === 1: OK
+
+A Stack<string> binds T=string at the type level:
+[check] Stack<string>.pop() returns string|undefined: OK
+  pushed "a","b" ; pop() = "b"
+[check] Stack<string> pop() === "b": OK
+
+Generic interface Box<T> and type alias Pair<A,B>:
+[check] Box<number>.value is number: OK
+[check] Box<string>.value is string: OK
+[check] Pair<number,string> is readonly [number,string]: OK
+  Box<number>  = {"value":42}
+  Box<string>  = {"value":"hi"}
+  Pair<number,string> = [1,"x"]
+[check] numBox.value === 42: OK
+[check] strBox.value === "hi": OK
+[check] pair === [1,'x']: OK
+
+DEFAULT type param `<T = string>` — omit to use the default:
+[check] DefaultBox (omitted) -> T=string (the default): OK
+[check] DefaultBox<number> overrides the default: OK
+  DefaultBox            = {"value":"default"}   (T defaulted to string)
+  DefaultBox<number>    = {"value":99}   (T overridden to number)
+[check] defaulted (default T=string) value === "default": OK
+[check] overridden DefaultBox<number> value === 99: OK
+
+======================================================================
+SECTION D — ERASURE: the payoff (no `new T()`, no `instanceof T`)
+======================================================================
+ERASURE: a generic fn compiles to plain JS — no T at runtime:
+  first<number>([1,2,3]) = 1
+  typeof v               = number   (the VALUE's type, not T)
+  ctorName(v)            = Number   (the VALUE's runtime class, not T)
+[check] first<number>([1,2,3]) === 1 (the value): OK
+[check] typeof v === "number" (the value's own type — T is gone): OK
+[check] ctorName(v) === "Number" (runtime sees the value's class, never T): OK
+
+ONE `first` function serves every type arg (erased — no per-T copy):
+  fnNum === fnStr : true
+  first.name      = first
+[check] first<number> and first<string> are the SAME function (erased): OK
+
+Two generic instances share ONE runtime class (the type arg is erased):
+  sn.constructor === ss.constructor            : true
+  sn.constructor.name                           : Stack
+  Object.getPrototypeOf(sn) === getPrototypeOf(ss): true
+[check] Stack<number> and Stack<string> share the SAME constructor (erased): OK
+[check] both instances share the SAME prototype (no per-type-arg class): OK
+
+THE FACTORY: pass the constructor as a value `new () => T` (you can't `new T`):
+  create(Gadget).label = "gadget"
+  g instanceof Gadget  = true   (instanceof on the VALUE class works)
+[check] create(Gadget) infers T=Gadget from the constructor arg: OK
+[check] create(Gadget) returns a real Gadget (instanceof on the VALUE class): OK
+[check] create(Gadget).label === "gadget": OK
+
+(tsc-verified, not run: proof_cannotNewT, proof_cannotInstanceofT —
+ each @ts-expect-error suppresses a real "T only refers to a type" error)
+[check] new T() is a compile error (T is a type, erased — no value to construct): OK
+[check] x instanceof T is a compile error (T is not a constructor value): OK
+
+======================================================================
+SECTION E — multiple bounds + `const` type params (5.0) + cross-language framing
+======================================================================
+Multiple bounds via intersection `T extends A & B` (the TS "where"):
+[check] label<T extends HasId & HasName> returns string: OK
+  label({id:7, name:"widget"}) = "[7] widget"
+[check] label({id:7,name:"widget"}) === "[7] widget": OK
+
+Two type params, independent constraints `<A extends string, B extends number>`:
+[check] mapPair<A extends string, B extends number> returns string: OK
+  mapPair("k", 42) = "k:42"
+[check] mapPair("k", 42) === "k:42": OK
+
+`const` type parameter (TS 5.0+): preserves literal/tuple types:
+[check] without <const>: array widened -> string[]: OK
+[check] with <const T>: literal tuple readonly ['Alice','Bob','Eve'] preserved: OK
+  wide    (string[])                    = ["Alice","Bob","Eve"]
+  precise (readonly ['Alice','Bob','Eve']) = ["Alice","Bob","Eve"]
+[check] both return the SAME runtime array (only the type differs): OK
+
+Cross-language: how each language handles a generic Stack<T>:
+  TypeScript: ERASED.    One JS class at runtime; T is gone.
+                          -> cannot `new T()` / `instanceof T`; narrowing is the bridge.
+  Java:       ERASED.    (Like TS — T is gone at runtime.)
+  C#:         REIFIED.   T is available at runtime (you can `typeof(T)`).
+  Rust:       MONOMORPHIZED. A real compiled copy per concrete T
+                          (Stack<u32> and Stack<&str> are distinct code, zero cost).
+  Go (1.18+): ERASED.    (Like TS — via GC shape stenciling + a shared
+                          dictionary; the closest sibling, NOT monomorphized.)
+[check] TS generics are ERASED (like Java/Go); Rust MONOMORPHIZES; C# REIFIES: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

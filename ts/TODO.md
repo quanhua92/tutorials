@@ -29,12 +29,12 @@
 | 2 | Type System & Generics | core | 8 | ✅ done (8/8, 318 checks) |
 | 3 | Memory & Object Semantics | core | 6 | ✅ done (6/6, 240 checks) |
 | 4 | Concurrency & the Event Loop | core | 7 | ✅ done (7/7, 214 checks) |
-| 5 | Standard Library Essentials | core | 7 | ◑ in progress (3/7: json + collections_deep + regex, 157 checks) |
+| 5 | Standard Library Essentials | core | 7 | ✅ done (7/7, 282 checks) |
 | 6 | Serialization, Validation & Metaprogramming | metaprog | 5 | ⬜ pending |
 | 7 | Async Runtime, HTTP & Realtime | web | 5 | ⬜ pending |
 | 8 | Web, DB & Production | web + db | 6 | ⬜ pending |
 | — | Companion walkthroughs | hono/drizzle/ioredis | 22 | ⬜ pending |
-| | **Total** | | **52 + 22** | **31/52 built** |
+| | **Total** | | **52 + 22** | **38/52 built** |
 
 > ### 🔖 RESUME POINT (coordinator handoff)
 > **State:** Phases 1–3 ✅ done (committed `c8e7661`→`d4fa0c4`); Phase 4 ◑ — `event_loop`

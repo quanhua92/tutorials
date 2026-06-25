@@ -1,0 +1,184 @@
+modules_packages.ts — Phase 5 bundle (Standard Library Essentials).
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+
+Reminder: this bundle runs as an ESM module (core/ package.json is
+type:module). import.meta, top-level await, and static import/export
+are all ESM features — they would be SyntaxErrors under CommonJS.
+
+======================================================================
+SECTION A — ESM syntax (import/export) + import.meta.url
+======================================================================
+ESM import forms and what each binds:
+  import { v }      from "./m.js"   // named import   -> binding "v"
+  import def        from "./m.js"   // default import -> def === m.default
+  import * as ns    from "./m.js"   // namespace      -> ns.v, ns.default
+  import { v as x } from "./m.js"   // aliased named  -> binding "x"
+  import "./m.js"                   // side-effect only (no bindings)
+
+ESM export forms:
+  export const v = 1;     // named export
+  export default 42;      // default export (at most ONE per module)
+  export { a, b };        // named export list (can be re-exported)
+  export * from "./m.js"; // re-export all named (collisions -> SyntaxError)
+
+import.meta (this bundle's own metadata):
+  import.meta.url = file:///Volumes/data/workspace/tutorials/ts/core/modules_packages.ts
+  parsed.protocol = file:
+  parsed.pathname = /Volumes/data/workspace/tutorials/ts/core/modules_packages.ts
+[check] import.meta.url starts with 'file://': OK
+[check] import.meta.url contains stem 'modules_packages': OK
+[check] URL protocol is 'file:': OK
+[check] URL pathname ends with 'modules_packages.ts': OK
+[check] import.meta.url is a defined string (ESM-only metadata present): OK
+
+======================================================================
+SECTION B — Dynamic import() (async, on-demand) + top-level await
+======================================================================
+data URL module specifier (a real ES module whose source IS the URL):
+  data:text/javascript,export const v = 42; export default 'def'; export const named = 7;
+[check] import(specifier) returns a Promise (it is async): OK
+
+const m = await import(dataUrl)  — the resolved module namespace:
+  m.v       = 42        (matches: import { v } from ...)
+  m.default = "def"     (matches: import def from ...)
+  m.named   = 7        (matches: import { named } from ...)
+[check] data-URL dynamic import: m.v === 42 (named export): OK
+[check] data-URL dynamic import: m.default === 'def' (default export): OK
+[check] data-URL dynamic import: m.named === 7 (named export): OK
+[check] namespace object exposes v/default/named keys: OK
+
+Dynamic import of a built-in (bare specifier -> built-in resolution):
+  const p = await import('node:path');   p.sep = "/"
+[check] dynamic import of 'node:path' resolves (bare -> built-in): OK
+[check] dynamic import('node:path') and static import 'node:path' agree: OK
+
+Top-level await (ESM only — SyntaxError in CJS):
+  At the TOP LEVEL of this file (outside any function):
+  const TLA = (await import("data:...export const top = 99;")) as { top: number };
+  TLA.top reached main(): 99
+[check] top-level await resolved TLA.top === 99 (ESM-only feature works): OK
+
+======================================================================
+SECTION C — CommonJS vs ECMAScript Modules (how Node decides)
+======================================================================
+Two module systems coexist in Node:
+
+  CJS (CommonJS — Node's original):
+    const fs = require('node:fs');          // synchronous, returns module.exports
+    module.exports = { x: 1 };              // a single mutable exports object
+    exports.y = 2;                          // shorthand for module.exports.y
+    __dirname, __filename                   // CJS-wrapper globals (sync, paths)
+
+  ESM (ECMAScript Modules — the standard):
+    import fs from 'node:fs';               // static, hoisted, async-loaded
+    export const x = 1; export default 42;  // named + default (live bindings)
+    import.meta                             // per-module metadata (url, resolve)
+    await ...                               // top-level await (ESM ONLY)
+
+Determining the module system (Node 'Determining module system'):
+  .mjs                              -> ALWAYS ESM (extension wins)
+  .cjs                              -> ALWAYS CJS (extension wins)
+  .js + nearest pkg 'type':'module'  -> ESM    <-- THIS bundle (core/ is type:module)
+  .js + nearest pkg 'type':'commonjs'-> CJS
+  .js + no 'type' field              -> CJS by default (syntax detection may flip it)
+
+Runtime evidence that THIS bundle is evaluated as ESM:
+  typeof globalThis.__dirname  = undefined   (CJS-only global; absent in ESM)
+  typeof globalThis.__filename = undefined   (CJS-only global; absent in ESM)
+  typeof import.meta.url       = string   (ESM-only metadata)
+[check] __dirname is undefined in ESM (CJS-only global, absent): OK
+[check] __filename is undefined in ESM (CJS-only global, absent): OK
+[check] import.meta.url is defined (ESM metadata present): OK
+[check] core/ package.json type:module => this .ts evaluates as ESM: OK
+
+======================================================================
+SECTION D — CJS/ESM interop + the __dirname/__filename fix
+======================================================================
+createRequire(import.meta.url) — a CJS require() usable inside ESM:
+  const r = createRequire(import.meta.url);
+  r('node:path').sep       = "/"
+  r('node:path').delimiter = ":"
+[check] CJS require (via createRequire) returns path.sep: OK
+[check] CJS require (via createRequire) returns path.delimiter: OK
+
+Interop rule — importing a CJS module FROM ESM:
+  import cjsDefault from './legacy.cjs'   // cjsDefault === module.exports (the WHOLE object)
+  import { named }   from './legacy.cjs'  // named may be UNDEFINED: CJS has no real
+                                          //  named exports; Node static-analysis
+                                          //  ('cjs-module-lexer') guesses them.
+  => Prefer the default import for CJS modules; destructure AFTERWARD if needed.
+
+Reconstructing __dirname/__filename in ESM (fileURLToPath + path.dirname):
+  fileURLToPath(import.meta.url) = /Volumes/data/workspace/tutorials/ts/core/modules_packages.ts
+  path.dirname(...)              = /Volumes/data/workspace/tutorials/ts/core
+  path.basename(filename)        = modules_packages.ts
+  path.basename(dirname)         = core
+[check] reconstructed filename ends with 'modules_packages.ts': OK
+[check] reconstructed dirname basename is 'core': OK
+[check] filename === path.join(dirname, path.basename(filename)) (round-trip): OK
+
+======================================================================
+SECTION E — Node resolution (exports/imports) + circular imports + cross-lang
+======================================================================
+Bare specifier resolution walk (Node, modern algorithm):
+  1. Built-in?         ('node:fs', 'fs', 'path') -> load the built-in.
+  2. Starts with '#'?  -> consult package.json 'imports' (PRIVATE map).
+  3. Bare package?     ('zod', '@scope/pkg') -> walk node_modules UPWARD
+                          to the nearest match, then:
+       a. read its package.json 'exports' (modern, ENCAPSULATING field);
+       b. match subpath + conditions (import / require / node / default);
+       c. fall back to legacy 'main' if 'exports' is absent.
+  4. Relative/absolute?('./', '../', '/', 'file://') -> resolve as a file URL.
+     (ESM import does NOT add extensions or resolve directory indexes.)
+
+package.json 'exports' — subpaths + conditions (modern, encapsulating):
+  "exports": {
+    ".":        { "import": "./esm/index.mjs", "require": "./cjs/index.cjs" },
+    "./feature": "./feature.js",
+    "./internal/*": null
+  }
+  -> import 'pkg'            resolves via '.' using condition 'import'.
+  -> import 'pkg/feature'    resolves via './feature'.
+  -> import 'pkg/internal/x' THROWS ERR_PACKAGE_PATH_NOT_EXPORTED (null target).
+  -> import 'pkg/secret.js'  THROWS (encapsulated: only declared paths are public).
+
+package.json 'imports' — PRIVATE self-map (must start with '#'):
+  "imports": { "#dep": { "node": "dep-native", "default": "./polyfill.js" } }
+  -> import '#dep'  (valid ONLY inside this package; maps per condition).
+
+Specifier kinds:
+  bare:      'zod', 'node:fs', '@scope/pkg'    (resolved, not a path)
+  relative:  './m.js', '../util.js'            (relative to importer)
+  absolute:  '/abs/m.js', 'file:///abs/m.js'   (URL or root path)
+
+import.meta.resolve (Node >= 20.6, synchronous):
+  Resolves a specifier to a URL using THIS module's URL as base.
+  import.meta.resolve('node:fs')               = node:fs
+  import.meta.resolve('./modules_packages.ts') = file:///Volumes/data/workspace/tutorials/ts/core/modules_packages.ts
+[check] import.meta.resolve('node:fs') returns a non-empty string: OK
+[check] import.meta.resolve('node:fs') yields a 'node:' URL: OK
+[check] import.meta.resolve('./modules_packages.ts') yields a 'file:' URL: OK
+[check] resolved self URL contains the stem 'modules_packages': OK
+
+Circular imports (the dual-system gotcha):
+  ESM: LIVE BINDINGS — a partially-initialized module IS visible to
+        its importer. The imported binding exists from the start; its
+        value may be undefined until the cycle finishes initializing.
+        Mutations through the binding are seen live (no snapshot).
+  CJS: module.exports is a cached PARTIAL object at cycle time. A
+        require() that hits a cycle returns whatever was on
+        module.exports at that instant; properties added LATER may
+        be missed depending on import order. The classic CJS trap.
+
+Cross-language parallels (design contrasts, not executed here):
+  Go  modules + go.mod: MVS (Minimal Version Selection) selects the
+        MINIMUM version that satisfies all requirements over a version
+        graph. Deterministic, no node_modules tree, no dual system.
+  Rust mod/use/pub + Cargo: a STATIC module tree with EXPLICIT
+        visibility (pub / pub(crate)). One system; the compiler
+        builds the whole tree; no require/import duality, no interop.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

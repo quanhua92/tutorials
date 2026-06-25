@@ -1,0 +1,180 @@
+date_time.ts — Phase 5 bundle (Standard Library Essentials).
+JS's Date is LEGENDARILY bad: 0-indexed months, MUTABLE, local-vs-UTC getters,
+no TZ object, identity-vs-value comparison. performance.now is the monotonic
+timer; Temporal (stage 3) is the modern fix. Every value below is computed by
+this file from FIXED dates; the .md guide pastes it verbatim. Nothing is hand-computed.
+
+DETERMINISM: no Date.now()/new Date() here — every date is a FIXED input. UTC
+getters are asserted (deterministic everywhere); LOCAL getters/getTimezoneOffset
+are machine-TZ dependent (printed + proved by a TZ-invariant, not hard-asserted).
+
+======================================================================
+SECTION A — Constructors + 0-indexed months + Date is MUTABLE
+======================================================================
+Date constructor forms (all FIXED inputs — never `new Date()`):
+  new Date(0)                          -> epoch ms = 0
+  new Date(0).toISOString()            -> 1970-01-01T00:00:00.000Z
+  new Date(1718447400000)              -> 2024-06-15T10:30:00.000Z
+  new Date("2024-06-15T10:30:00Z")      -> 2024-06-15T10:30:00.000Z
+  Date.UTC(2024, 5, 15, 10, 30, 0)     -> epoch ms = 1718447400000
+  new Date(Date.UTC(2024,5,15,10,30,0))-> 2024-06-15T10:30:00.000Z
+  new Date()  /  Date.now()            -> FORBIDDEN here (wall-clock now is non-reproducible)
+[check] new Date(0).getTime() === 0 (epoch): OK
+[check] new Date(0).toISOString() === "1970-01-01T00:00:00.000Z": OK
+[check] new Date("2024-06-15T10:30:00Z").toISOString() === "2024-06-15T10:30:00.000Z": OK
+[check] Date.UTC(2024,5,15,10,30,0) === 1718447400000 (ms): OK
+
+THE GOTCHA — months are 0-INDEXED (January = 0, December = 11):
+  new Date(2024, 0, 1)  -> getMonth() = 0   (0 = JANUARY)
+  new Date(2024, 5, 15) -> getMonth() = 5   (5 = JUNE)
+  new Date(2024, 11, 25)-> getMonth() = 11  (11 = DECEMBER)
+  new Date(Date.UTC(2024, 5, 15, 12, 0, 0)).getUTCMonth() = 5   (5 = JUNE, via UTC)
+[check] new Date(2024, 0, 1).getMonth() === 0 (January is month 0): OK
+[check] new Date(2024, 5, 15).getMonth() === 5 (June is month 5): OK
+[check] new Date(2024, 11, 25).getMonth() === 11 (December is month 11): OK
+[check] new Date(Date.UTC(2024,5,15,12)).getUTCMonth() === 5 (June via UTC): OK
+
+Date is MUTABLE — set*() mutates the SAME object (shared-mutability trap):
+  d.toISOString() before setUTCMonth(0) -> 2024-06-15T12:00:00.000Z
+  d.toISOString() after  setUTCMonth(0) -> 2024-01-15T12:00:00.000Z
+  alias.toISOString() (untouched)       -> 2024-01-15T12:00:00.000Z   <-- the ALIAS sees the change!
+[check] Date is mutable: d mutated by setUTCMonth(0): OK
+[check] mutating d is visible through the alias (shared reference): OK
+[check] d === alias (same object, no copy): OK
+
+======================================================================
+SECTION B — getTime() (epoch ms) + LOCAL vs UTC getters + toISOString/toString/toJSON
+======================================================================
+fixed instant: new Date(Date.UTC(2024, 5, 15, 10, 30, 0))
+  d.getTime()   = 1718447400000   (ms since 1970-01-01T00:00:00Z)
+  d.valueOf()   = 1718447400000   (SAME number; drives <,>, arithmetic)
+  d.getTime() === d.valueOf() -> true
+[check] d.getTime() === 1718447400000 (epoch ms): OK
+[check] d.getTime() === d.valueOf() (relational ops coerce to this): OK
+
+Two getter families — LOCAL (machine-TZ dependent) vs UTC (deterministic):
+  d.getUTCFullYear() = 2024   d.getFullYear()    = 2024   (LOCAL)
+  d.getUTCMonth()    = 5   (June)   d.getMonth()       = 5   (LOCAL)
+  d.getUTCDate()     = 15            d.getDate()        = 15            (LOCAL)
+  d.getUTCHours()    = 10            d.getHours()       = 17            (LOCAL)
+  d.getUTCMinutes()  = 30            d.getMinutes()     = 30            (LOCAL)
+  d.getTimezoneOffset() = -420  (LOCAL offset in minutes; machine-TZ dependent)
+  NOTE: the LOCAL values above depend on THIS machine's timezone.
+        The UTC values are deterministic in every timezone.
+[check] d.getUTCFullYear() === 2024 (UTC, deterministic): OK
+[check] d.getUTCMonth() === 5 (June, UTC, deterministic): OK
+[check] d.getUTCDate() === 15 (UTC, deterministic): OK
+[check] d.getUTCHours() === 10 (UTC, deterministic): OK
+[check] d.getUTCMinutes() === 30 (UTC, deterministic): OK
+  localMinOfDay(1050) − utcMinOfDay(630) + offset(-420) ≡ 0 (mod 1440)
+[check] local ≡ UTC − getTimezoneOffset (mod 24h) — proves the two families differ by the offset: OK
+[check] typeof getTimezoneOffset() === 'number': OK
+
+Serialization — toISOString (UTC, deterministic) vs toString (LOCAL, machine-TZ):
+  d.toISOString() -> 2024-06-15T10:30:00.000Z   (ALWAYS UTC ISO-8601, ends in Z)
+  d.toJSON()      -> 2024-06-15T10:30:00.000Z   (=== toISOString; 🔗 JSON)
+  d.toString()    -> Sat Jun 15 2024 17:30:00 GMT+0700 (Indochina Time)   (LOCAL; machine-TZ dependent)
+  d.toUTCString() -> Sat, 15 Jun 2024 10:30:00 GMT   (UTC, human form)
+[check] d.toISOString() === "2024-06-15T10:30:00.000Z" (UTC ISO-8601): OK
+[check] d.toJSON() === d.toISOString() (Date serializes to ISO string): OK
+[check] JSON.stringify(d) === quoted toISOString(): OK
+
+======================================================================
+SECTION C — Parsing + Date comparison (getTime, NOT ==) + duration math
+======================================================================
+Parsing — ISO-8601 is RELIABLE; non-ISO is implementation-dependent:
+  Date.parse("2024-06-15T10:30:00.000Z") -> 1718447400000
+  new Date("2024-06-15T10:30:00.000Z").getTime() -> 1718447400000
+  Date.parse("not a date") -> NaN   (NaN on unparseable input)
+  new Date("not a date").toString() -> Invalid Date   (Invalid Date sentinel)
+  new Date("not a date").getTime() -> NaN   (NaN — detect with Number.isNaN)
+  WARNING: new Date('06/15/2024') and new Date('June 15, 2024') are NON-ISO and
+  implementation-dependent (UTC vs local differs across engines) — avoid them.
+[check] Date.parse("2024-06-15T10:30:00.000Z") === 1718447400000: OK
+[check] new Date("2024-06-15T10:30:00.000Z").getTime() === 1718447400000: OK
+[check] Date.parse("not a date") is NaN: OK
+[check] new Date("not a date").toString() === "Invalid Date": OK
+[check] invalid Date.getTime() is NaN (detect with Number.isNaN, NOT ===): OK
+
+Comparison trap — two Dates are === by IDENTITY, not value (use getTime()):
+  d1.getTime() === d2.getTime() -> true   (same VALUE)
+  d1 === d2                     -> false   (IDENTITY: distinct objects)
+  Object.is(d1, d2)             -> false   (also identity)
+  d1 <= d2 (relational)         -> true   (coerces via valueOf -> epoch ms)
+[check] d1.getTime() === d2.getTime() (compare Dates by VALUE via getTime): OK
+[check] d1 === d2 is false (=== compares IDENTITY, not value): OK
+[check] Object.is(d1, d2) is false (identity): OK
+[check] d1 <= d2 (relational ops coerce Date to epoch ms via valueOf): OK
+
+Duration math — subtract two getTime() (epoch ms), then divide:
+  start = 2024-06-15T10:00:00.000Z
+  end   = 2024-06-15T12:00:00.000Z
+  end.getTime() - start.getTime() = 7200000 ms
+  /1000  -> 7200 s
+  /60000 -> 120 min
+  /3600000 -> 2 h
+[check] duration === 7200000 ms (2 hours): OK
+[check] duration / 3600000 === 2 (hours): OK
+[check] duration / 60000 === 120 (minutes): OK
+
+======================================================================
+SECTION D — Timezones: no TZ object; getTimezoneOffset; Intl.DateTimeFormat
+======================================================================
+Date has NO timezone object — only LOCAL zone + UTC. Two escape hatches:
+  d.getTimezoneOffset() = -420   (LOCAL offset, minutes; machine-TZ dependent)
+  NOTE: this is THIS machine's offset, NOT the zone of `d` (a Date has no zone).
+
+Intl.DateTimeFormat with a FIXED timeZone (deterministic given instant+zone+locale):
+  instant (UTC): 2024-06-15T10:30:00.000Z
+  America/New_York (full): Sat, Jun 15, 2024, 6:30 AM EDT
+  America/New_York (time): 6:30 AM EDT   <- 10:30 UTC = 06:30 EDT (UTC-4 in summer)
+  Asia/Tokyo       (time): 7:30 PM GMT+9   <- 10:30 UTC = 19:30 JST (UTC+9, no DST)
+[check] Intl NY full === "Sat, Jun 15, 2024, 6:30 AM EDT": OK
+[check] Intl NY time === "6:30 AM EDT": OK
+[check] Intl Tokyo time === "7:30 PM GMT+9": OK
+
+The SAME instant renders at different wall-clock times per zone (Intl handles DST):
+  Date alone CANNOT format in an arbitrary zone — Intl.DateTimeFormat is the only
+  built-in way. (For a typed, zone-aware DATE OBJECT, see the Temporal proposal, §E.)
+[check] Intl NY (06:30) differs from Tokyo (19:30) for the same UTC instant: OK
+
+======================================================================
+SECTION E — performance.now() (monotonic) + Temporal preview + cross-language
+======================================================================
+performance.now() — a high-resolution MONOTONIC timer for DURATIONS:
+  typeof performance.now() -> number   (DOMHighResTimeStamp)
+  reading #2 > reading #1  -> true   (monotonic: never goes backwards)
+  elapsed (r2 - r1)        -> a non-negative DURATION in ms (value is run-dependent; NOT printed/asserted)
+  NOTE: the absolute readings above are RUN-dependent and are NOT asserted;
+        only the TYPE (number) and the monotonic INCREASE (r2 > r1) are pinned.
+[check] typeof performance.now() === 'number': OK
+[check] performance.now() is monotonic: r2 > r1 (after a busy loop): OK
+[check] elapsed duration is a non-negative finite number: OK
+[check] busy-loop accumulator is a number (no dead code): OK
+
+Why Date is the WRONG duration tool (and performance.now is the right one):
+  - Date = wall clock (epoch ms): can JUMP on NTP/DST/user edits. Mutable. No TZ.
+  - performance.now() = monotonic counter from process start: never goes backwards.
+  - JS gives you TWO separate globals with NO unified type (unlike Go/Rust).
+
+The Temporal proposal (stage 3) — the modern, immutable, typed, tz-aware fix:
+  "Temporal" in globalThis -> false   (NOT enabled by default in Node)
+  Temporal.Instant       — a UTC instant (like Date but immutable)
+  Temporal.PlainDateTime — a wall-clock date+time with NO zone (no local/UTC trap)
+  Temporal.ZonedDateTime — instant + IANA zone + calendar (the type Date never had)
+  Temporal.Duration      — a typed duration (fields, not a bare ms number)
+  (Not run here: Temporal is gated behind --harmony-temporal / a polyfill in Node.)
+[check] typeof globalThis.Temporal === "undefined" (Temporal not enabled by default in Node): OK
+
+Cross-language time model — who separates MONOTONIC from WALL cleanly:
+  JS   : Date = wall (mutable, ms-since-epoch, no TZ object). performance.now =
+         monotonic, but a SEPARATE global (no unified type). CAUTIONARY TALE.
+  Go   : time.Time carries BOTH a wall AND a monotonic reading; time.Since/Now()
+         use the MONOTONIC field automatically. Duration is a typed ns count. DONE RIGHT.
+  Rust : Instant = MONOTONIC (measure durations); SystemTime = WALL (absolute instant).
+         Two SEPARATE types — the clean split JS conflated in one Date object. DONE RIGHT.
+  => Go and Rust cleanly separate monotonic-from-wall; JS conflated them in Date.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

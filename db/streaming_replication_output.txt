@@ -1,0 +1,248 @@
+streaming_replication.py - reference impl. All numbers feed
+STREAMING_REPLICATION.md. Pure Python stdlib.
+Run: python3 streaming_replication.py
+
+========================================================================
+  SECTION A: async replication - ack now, ship later (data-loss window)
+========================================================================
+In ASYNC mode the primary acks the COMMIT to the client the instant its
+OWN WAL is flushed. Shipping to the standby happens in parallel but is
+NOT on the commit path. If the standby is behind and the primary dies,
+committed transactions the standby never received are LOST.
+
+Model: primary_flush = 5 ms ; standby s1 with
+  ship = 2, flush = 4, ack = 2 (unused in async), replay = 3 ms.
+
+  | t (ms) | where     | event                                          |
+  |--------|-----------|------------------------------------------------|
+  |      0  | client    | COMMIT issued                                  |
+  |      5  | primary   | WAL flush (fsync) done -> ACK CLIENT 'committed' |  <- client told 'done' HERE (async)
+  |      7  | standby   | WAL record received over TCP                   |
+  |     11  | standby   | WAL flushed to disk (durable on standby)       |
+  |     14  | standby   | WAL replayed onto data pages (visible)         |
+
+DATA-LOSS WINDOW (RPO) = [t=5 (client acked), t=11 (standby durable)]  =  6 ms wide.
+
+Crash probes:
+  | crash at t | committed on primary? | on standby? | outcome          |
+  |------------|-----------------------|-------------|------------------|
+  | t=6        | yes (acked)           | NO (not shipped yet)      | DATA LOSS       |  <- loss
+  | t=8        | yes (acked)           | in OS cache, not fsync'd  | AT RISK         |
+  | t=12       | yes (acked)           | yes (flushed)             | SAFE (no loss)  |
+  | t=15       | yes (acked)           | yes (flushed, replayed)   | SAFE + readable |
+
+Lesson: async gives the lowest commit latency (5 ms = primary only) but a non-trivial RPO. The window is the gap
+between the local ack and the standby's durable flush. Sync mode
+(Section B) closes that window by putting the standby ON the path.
+
+[check] async ack = 5 ms ; RPO window = 6 ms wide: OK
+
+========================================================================
+  SECTION B: sync replication - wait for standby flush before ack
+========================================================================
+In SYNC mode the primary does NOT ack the COMMIT until the required
+standby/standbys confirm they have FLUSHED the WAL (flush_lsn >= the
+commit LSN). The client pays the round-trip; in exchange there is no
+data-loss window - at ack time the commit is durable on BOTH sides.
+
+Configured by synchronous_standby_names. Simplest form: a single name.
+
+  synchronous_standby_names = 's1'
+  primary_flush = 5 ms ; s1 flush_time = ship(2) + flush(4) + ack(2) = 8 ms
+
+  | t (ms) | where     | event                                          |
+  |--------|-----------|------------------------------------------------|
+  |      0  | client    | COMMIT issued                                  |
+  |      5  | primary   | WAL flushed LOCALLY (not yet acked)            |
+  |      7  | standby   | s1 received the WAL record                     |
+  |     11  | standby   | s1 FLUSHED WAL (flush_lsn >= commit LSN)       |
+  |     13  | primary   | s1's flush ack arrives                         |
+  |     13  | primary   | -> ACK CLIENT 'committed' (sync wait over)     |  <- client told 'done' HERE (sync)
+
+sync commit latency = primary_flush + flush_time(s1) = 5 + 8 = 13 ms
+  latency cost vs async = 13 - 5 = 8 ms (the round-trip tax for zero RPO).
+
+GOLD-CHECK: latency (13) == primary_flush (5) + max(standby_flush_times=[8]) (8) == 13: OK
+
+Why flush (not write, not replay)? Postgres sync replication waits for
+the standby's WAL to be DURABLE (flush_lsn), so a standby crash right
+after the ack cannot lose the commit. Waiting for replay (visible) would
+be stricter and slower; waiting for mere write (cached) would be unsafe.
+
+[check] sync single-standby latency = 13 ms, cost = 8 ms, GOLD holds: OK
+
+========================================================================
+  SECTION C: quorum commit - 'ANY n (s1,s2,s3)' vs 'FIRST n (s1,s2,s3)'
+========================================================================
+With multiple sync standbys the question is WHICH acks to wait for.
+
+  FIRST n (s1, s2, s3) : wait for the FIRST n standbys IN THIS ORDER.
+                          Always s1..sn, regardless of who is fastest.
+  ANY   n (s1, s2, s3) : wait for ANY n of the named set to reply.
+                          A QUORUM - whichever n ack first satisfy it.
+
+Standby flush times (ship+flush+ack):
+  | standby | ship | flush | ack | flush_time |
+  |---------|------|-------|-----|------------|
+  | s1      | 2    | 4     | 2   | 8          |
+  | s2      | 3    | 6     | 3   | 12         |
+  | s3      | 2    | 6     | 2   | 10         |
+
+Latency per mode (latency = primary_flush + wait):
+
+  | synchronous_standby_names | rule         | wait on        | latency |
+  |---------------------------|--------------|----------------|---------|
+  | FIRST 1 (s1, s2, s3)      | max(first 1) | s1 (max=8)     | 5+8 = 13  |
+  | ANY 1 (s1, s2, s3)        | 1-th fastest | s1 (nth=8)     | 5+8 = 13  |
+  | FIRST 2 (s1, s2, s3)      | max(first 2) | s1,s2 (max=12) | 5+12 = 17  |
+  | ANY 2 (s1, s2, s3)        | 2-th fastest | s1,s3 (nth=10) | 5+10 = 15  |
+  | FIRST 3 (s1, s2, s3)      | max(first 3) | s1,s2,s3 (max=12) | 5+12 = 17  |
+  | ANY 3 (s1, s2, s3)        | 3-th fastest | s1,s3,s2 (nth=12) | 5+12 = 17  |
+
+FIRST 2 (s1, s2, s3): waits for s1 and s2 -> max(8,12) = 12 -> latency 17 ms. Bound by s2 (the slow one).
+ANY   2 (s1, s2, s3): waits for any 2     -> 2nd-smallest of [8, 12, 10] = 10 -> latency 15 ms. s3 (10) replies before s2 (12), so ANY is FASTER.
+
+  -> ANY 2 (15 ms) beats FIRST 2 (17 ms) by 2 ms: a quorum
+     tolerates one slow/hot standby; FIRST does not. Trade-off: ANY lets
+     ANY 2 standbys hold the commit, so a failover to the one that HAD
+     NOT yet acked could still lose it - FIRST guarantees the named
+     priority standbys have it.
+
+[check] FIRST 2 latency 17 = 5+max([8, 12]); ANY 2 latency 15 = 5+max(n fastest); ANY < FIRST: OK
+
+========================================================================
+  SECTION D: replication slots - do not recycle WAL the standby needs
+========================================================================
+Without a slot, the primary recycles old WAL segments based ONLY on its
+own checkpoint horizon (keep the last few). A standby that disconnects
+or falls behind can need a segment the primary has already erased -> the
+standby goes STALE and must be rebuilt from a base backup.
+
+A REPLICATION SLOT fixes this: the primary tracks the standby's
+restart_lsn and refuses to recycle WAL at or before it. The slot makes
+the primary's WAL retention depend on the slowest standby.
+
+Model: WAL segments W0..W5 (100 LSNs each); primary insert_lsn = 540 (in W5).
+Primary recycle policy: keep the last 3 segments (W3..W5); recycle older.
+
+Standby 'app_slot' restart_lsn = 220 (in W2).
+
+Case 1 - NO slot (primary recycles by policy only):
+  floor = W3 (LSN 300); recycle ['W0', 'W1', 'W2']; keep ['W3', 'W4', 'W5']
+  standby needs W2 (restart_lsn 220); W2 is RECYCLED -> STALE (needs base backup)
+
+Case 2 - WITH slot 'app_slot' (restart_lsn pinned at 220):
+  floor = W2 (LSN 200); recycle ['W0', 'W1']; keep ['W2', 'W3', 'W4', 'W5']
+  standby needs W2; W2 is KEPT -> standby can stream from here
+
+  | config    | floor | recycled | standby W2 status      |
+  |-----------|-------|----------|------------------------|
+  | no slot   | W3    | W0,W1,W2 | STALE (data loss) |
+  | with slot | W2    | W0,W1    | kept (safe) |
+
+SLOT ADVANCES as the standby replays (restart_lsn moves forward):
+  after replay, app_slot restart_lsn -> 350 (W3); floor -> W3; now W2 can be recycled (standby moved past it).
+
+[check] no-slot floor W3 (standby stale); slot floor W2 (standby safe); slot advances -> floor W3: OK
+
+========================================================================
+  SECTION E: lag monitoring - sent / write / flush / replay LSNs
+========================================================================
+pg_stat_replication exposes FOUR progress markers per standby. They are
+monotone descending (each <= the previous) and together form the lag
+waterfall - each gap is a different kind of slowness you can act on.
+
+  | marker        | LSN | meaning                                       |
+  |---------------|-----|-----------------------------------------------|
+  | insert_lsn (P)| 540 | primary's current WAL position (the source)  |
+  | sent_lsn      | 540 | primary has PUSHED this far over TCP         |
+  | write_lsn     | 500 | standby has WRITTEN this far (not fsync'd)   |
+  | flush_lsn     | 480 | standby has FLUSHED this far (durable)       |
+  | replay_lsn    | 450| standby has REPLAYED this far (visible)     |
+
+The waterfall (each gap = a distinct bottleneck):
+
+  | segment        | from      | to        | gap (LSN) | what is slow        |
+  |----------------|-----------|-----------|-----------|---------------------|
+  | send   lag     | insert    | sent      |    0      | walsender / network|
+  | write  lag     | sent      | write     |   40      | standby I/O write   |
+  | flush  lag     | write     | flush     |   20      | standby fsync       |
+  | replay lag     | flush     | replay    |   30      | standby apply (CPU) |
+  | TOTAL          | insert    | replay    |   90      | end-to-end lag      |
+
+Monotonicity MUST hold (an invariant pg_stat_replication relies on):
+  insert(540) >= sent(540) >= write(500) >= flush(480) >= replay(450)  -> OK
+
+Read it as a diagnostic:
+  - send lag = 0: network/walsender healthy (everything shipped).
+  - write lag = 40: standby has NOT yet written 40 LSN - I/O.
+  - flush lag = 20: written but not fsync'd - the durability gap.
+    (sync replication waits here: flush_lsn is what unblocks a COMMIT.)
+  - replay lag = 30: durable but not yet visible - the read lag.
+  - TOTAL end-to-end lag = 90 LSN behind the primary.
+
+[check] monotone; total_lag 90 == sum of gaps (0+40+20+30): OK
+
+========================================================================
+  SECTION F: failover - promote a standby (and avoid split-brain)
+========================================================================
+When the primary dies, you PROMOTE a standby: it finishes replaying WAL,
+flips itself to read-write, and becomes the new primary (pg_promote).
+The danger is SPLIT-BRAIN: if the old primary is not actually dead (just
+partitioned) and BOTH accept writes, the two WAL streams diverge and
+cannot be reconciled. HA stacks (Patroni + etcd) fence the old primary
+(STONITH) so only ONE primary ever exists.
+
+  | t (ms) | event                                                   |
+  |--------|---------------------------------------------------------|
+  |     0   | primary becomes unreachable (detected by heartbeat timeout) |
+  |     0   | standby's walreceiver notices the connection dropped    |
+  |    10   | failover manager (Patroni) acquires the etcd leader lease |
+  |    10   | Patroni runs pg_promote on the chosen standby           |
+  |    12   | standby finishes replaying any buffered WAL             |
+  |    12   | standby flips to read-write = NEW PRIMARY               |
+  |    15   | DNS / connection pooler repoints clients to the new primary |
+  |    15   | old primary is FENCED (STONITH) - kernel panic / power off |
+
+SPLIT-BRAIN - what happens WITHOUT fencing:
+  - old primary is only PARTITIONED (network split), not dead.
+  - it keeps accepting writes from clients that can still reach it.
+  - the promoted standby ALSO accepts writes.
+  - two primaries, two WAL streams -> DIVERGENCE. On heal, the old
+    primary's WAL cannot be merged (it has writes the new primary never
+    saw). The only safe recovery is to DISCARD the old primary's divergent
+    writes (pg_rewind) or rebuild it from a base backup.
+
+MITIGATIONS:
+  - FENCING / STONITH: the failover manager kills the old primary
+    (kernel panic, power-cycle via IPMI) BEFORE promoting, so it cannot
+    accept writes. The standard Postgres HA approach (Patroni, repmgr).
+  - CONSENSUS QUORUM: Patroni uses etcd/raft so only ONE primary wins
+    the lease; a partitioned old primary loses the lease and demotes
+    itself. This is the SAME quorum idea as Section C's 'ANY n'.
+  - sync replication: if the new primary was a SYNC standby, its data is
+    a superset of what the old primary committed - no committed loss.
+
+[check] failover order: detect -> promote lease -> finish replay -> read-write -> repoint -> fence: OK
+
+========================================================================
+  GOLD (pinned for streaming_replication.html) - JS must reproduce these
+========================================================================
+  primary_flush              = 5 ms
+  standby flush_times        = [8, 12, 10]   (s1,s2,s3 = ship+flush+ack)
+  async commit latency       = 5 ms
+  sync  's1'     latency     = 13 ms   (= 5 + 8)
+  sync  'FIRST 2' latency    = 17 ms   (= 5 + max(8,12))
+  sync  'ANY 2'   latency    = 15 ms   (= 5 + 2nd-smallest[8, 12, 10])
+  pg_stat_replication LSNs   = insert 540, sent 540, write 500, flush 480, replay 450
+  total end-to-end lag       = 90 LSN
+
+  GOLD-CHECK: sync commit latency == primary_flush + max(standby_flush_times)
+    's1'     : 13 == 5 + max([8]) == 13   OK
+    'FIRST 2': 17 == 5 + max([8,12]) == 17   OK
+
+[check] GOLD pinned; async < ANY 2 < FIRST 2 < max(flush_times): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

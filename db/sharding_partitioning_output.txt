@@ -1,0 +1,252 @@
+sharding_partitioning.py - reference impl. All numbers below feed SHARDING_PARTITIONING.md.
+Python stdlib only; hash = FNV-1a 32-bit (portable to JS).
+
+========================================================================
+  SECTION A: RANGE partitioning - orders split by created_at
+========================================================================
+CREATE TABLE orders (id int, created_at date, amount int)
+  PARTITION BY RANGE (created_at);
+  CREATE TABLE p2024_01 PARTITION OF orders FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+  CREATE TABLE p2024_02 PARTITION OF orders FOR VALUES FROM ('2024-02-01') TO ('2024-03-01');
+  CREATE TABLE p2024_03 PARTITION OF orders FOR VALUES FROM ('2024-03-01') TO ('2024-04-01');
+
+INSERTing 6 deterministic rows; routing each:
+
+| id   | created_at   | amount   | -> partition |
+|------|--------------|----------|-------------- |
+| 1    | 2024-01-05   | 100      | p2024_01     |
+| 2    | 2024-01-28   | 200      | p2024_01     |
+| 3    | 2024-02-03   | 150      | p2024_02     |
+| 4    | 2024-02-25   | 300      | p2024_02     |
+| 5    | 2024-03-02   | 250      | p2024_03     |
+| 6    | 2024-03-30   | 400      | p2024_03     |
+
+Per-partition row counts:
+  p2024_01  (FROM ('2024-01-01') TO ('2024-02-01')): 2 rows -> ids [1, 2]
+  p2024_02  (FROM ('2024-02-01') TO ('2024-03-01')): 2 rows -> ids [3, 4]
+  p2024_03  (FROM ('2024-03-01') TO ('2024-04-01')): 2 rows -> ids [5, 6]
+  TOTAL: 6 rows across 3 partitions
+
+WHY RANGE: time-series and rolling windows. Dropping a whole month
+is DROP TABLE p2024_01 (O(1)), not a DELETE that vacuums later. A
+indexed lookup 🔗 (BTREE.md) is still O(log n) WITHIN a partition, but
+n is now ~1/3 of the whole, so caches stay hot.
+
+========================================================================
+  SECTION B: LIST partitioning - users split by region
+========================================================================
+CREATE TABLE users (user_id int, region text, name text)
+  PARTITION BY LIST (region);
+  CREATE TABLE p_us PARTITION OF users FOR VALUES IN ('US');
+  CREATE TABLE p_eu PARTITION OF users FOR VALUES IN ('EU');
+  CREATE TABLE p_apac PARTITION OF users FOR VALUES IN ('APAC');
+
+INSERTing 5 rows; routing each:
+
+| user_id  | region   | name       | -> partition |
+|----------|----------|------------|-------------- |
+| 10       | US       | Ada        | p_us         |
+| 11       | EU       | Alan       | p_eu         |
+| 12       | APAC     | Grace      | p_apac       |
+| 13       | US       | Linus      | p_us         |
+| 14       | EU       | Dijkstra   | p_eu         |
+
+Per-partition counts:
+  p_us  (IN ('US')): 2 users -> [10, 13]
+  p_eu  (IN ('EU')): 2 users -> [11, 14]
+  p_apac  (IN ('APAC')): 1 users -> [12]
+
+WHY LIST: multi-tenant / geo. Each region's data is physically
+isolated - handy for data-residency ('EU data stays in EU'). A row
+whose region matches NO list value would ERROR without a DEFAULT
+partition (we omit it here to keep routing explicit).
+
+========================================================================
+  SECTION C: HASH partitioning - events split by hash(user_id) % 4
+========================================================================
+CREATE TABLE events (user_id int, payload text)
+  PARTITION BY HASH (user_id);
+  CREATE TABLE ph0 PARTITION OF events FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+  CREATE TABLE ph1 PARTITION OF events FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+  CREATE TABLE ph2 PARTITION OF events FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+  CREATE TABLE ph3 PARTITION OF events FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+
+Assignment rule:  partition = hash(user_id) % modulus == remainder
+hash = FNV-1a(str(user_id)) & 0xFFFFFFFF   (modulus = 4)
+
+| user_id  | hash(user_id)  | % 4        | -> partition   |
+|----------|----------------|------------|---------------- |
+| 1        | 0873244444     | 0          | ph0            |
+| 2        | 0923577301     | 1          | ph1            |
+| 3        | 0906799682     | 2          | ph2            |
+| 4        | 0822911587     | 3          | ph3            |
+| 5        | 0806133968     | 0          | ph0            |
+| 6        | 0856466825     | 1          | ph1            |
+| 7        | 0839689206     | 2          | ph2            |
+| 8        | 1024243015     | 3          | ph3            |
+| 9        | 1007465396     | 0          | ph0            |
+| 10       | 0468396612     | 0          | ph0            |
+| 42       | 2279835011     | 3          | ph3            |
+| 100      | 1731450012     | 0          | ph0            |
+| 1000     | 0580373188     | 0          | ph0            |
+| 9999     | 0042784521     | 1          | ph1            |
+
+Distribution (the whole point of HASH - even spread):
+  ph0  rem=0:  6 rows  ############################
+  ph1  rem=1:  3 rows  ##############
+  ph2  rem=2:  2 rows  #########
+  ph3  rem=3:  3 rows  ##############
+
+Skew check: max=6, min=2, max/min ratio = 3.00
+
+WHY HASH: an unordered id (a uuid, a surrogate key) spreads evenly
+across N partitions with no hot spot. The COST: hash is not monotonic,
+so a range predicate ('user_id < 100') CANNOT be pruned (Section D).
+An EQUALITY predicate ('user_id = 42') CAN - we know its hash.
+
+========================================================================
+  SECTION D: PARTITION PRUNING - skip partitions the WHERE rules out
+========================================================================
+Pruning asks: 'given the WHERE, which partitions COULD hold matches?'
+The executor then opens only those. Everything else stays un-touched.
+
+1) RANGE table, WHERE created_at >= '2024-03-01'
+   partitions scanned: p2024_03   [1/3]
+   SKIP p2024_01  SKIP p2024_02  KEEP  p2024_03
+
+2) LIST table, WHERE region = 'EU'
+   partitions scanned: p_eu   [1/3]
+   SKIP p_us  KEEP  p_eu  SKIP p_apac
+
+3) HASH table, WHERE user_id = 42   (equality is decisive)
+   partitions scanned: ph3   [1/4]
+   hash(42)=2279835011, % 4 = 3
+   SKIP ph0  SKIP ph1  SKIP ph2  KEEP  ph3
+
+4) HASH table, WHERE user_id < 100   (inequality on a HASH key)
+   partitions scanned: ph0, ph1, ph2, ph3   [4/4]
+   hash is NOT monotonic -> cannot prune -> scan ALL
+   KEEP  ph0  KEEP  ph1  KEEP  ph2  KEEP  ph3
+
+RULE OF THUMB: pruning works when the partition key's ORDER/SET is
+queryable. RANGE prunes ranges; LIST prunes IN/eq; HASH prunes ONLY
+equality. Plan a range scan on a hash key and you fan out everywhere.
+
+========================================================================
+  SECTION E: constraint exclusion (old) vs declarative pruning (new)
+========================================================================
+Two mechanisms, same GOAL (skip partitions). Different ENGINES:
+
+  OLD (PG <= 9.6): child tables INHERIT parent, each with a CHECK:
+    CREATE TABLE orders_p2024_01 (CHECK (created_at >= '2024-01-01'
+                                 AND created_at <  '2024-02-01'))
+      INHERITS (orders);
+    planner's GENERIC constraint solver excludes children whose CHECK
+    contradicts WHERE. constraint_exclusion=partition must be ON.
+
+  NEW (PG >= 10, 2017): CREATE TABLE orders PARTITION BY RANGE(...);
+    native partition DESCRIPTORS drive a dedicated pruner. Fast, and
+    runs at PLAN time AND EXECUTE time (runtime pruning).
+
+QUERY (constant predicate): WHERE created_at >= '2024-03-01'
+
+  [constant WHERE]
+    declarative  -> scan p2024_03   [1/3]
+    constraint   -> scan p2024_03   [1/3]
+    -> same set
+
+QUERY (PREPARED param): PREPARE q AS SELECT ... WHERE created_at >= $1;
+EXECUTE q('2024-03-01');   -- $1 known only at EXECUTE time
+
+  [prepared $1 (runtime)]
+    declarative  -> scan p2024_03   [1/3]
+    constraint   -> scan p2024_01, p2024_02, p2024_03   [3/3]
+    -> DIFFERENT (declarative prunes, old does not)
+
+THE DIFFERENCE THAT MATTERS: with a prepared statement, the OLD
+constraint-exclusion planner sees $1 as UNKNOWN at plan time and scans
+ALL children every execution. Declarative pruning re-prunes at execute
+time with the bound value -> still 1 partition. On a 100-partition
+time-series table that is a 100x speedup for every cached plan.
+
+========================================================================
+  SECTION F: DISTRIBUTED SHARDING - Citus / Vitess across nodes
+========================================================================
+SHARDING = partitioning, but each partition lives on a NODE. Same HASH
+strategy (almost always), now with single-shard routing + gather.
+
+Cluster: 4 shards, 2 worker nodes, 2^32 hash space split into equal ranges, round-robin placement.
+
+Shard layout:
+  S0=[0..1,073,741,824)  (1,073,741,824 hash values)  ->  node0
+  S1=[1,073,741,824..2,147,483,648)  (1,073,741,824 hash values)  ->  node1
+  S2=[2,147,483,648..3,221,225,472)  (1,073,741,824 hash values)  ->  node0
+  S3=[3,221,225,472..4,294,967,296)  (1,073,741,824 hash values)  ->  node1
+
+Node placement:
+  node0: shards [0, 2]
+  node1: shards [1, 3]
+
+--- (1) SINGLE-SHARD QUERY (shard key in WHERE) ---
+SELECT * FROM events WHERE user_id = 42;
+  route: hash(42)=2279835011  ->  S2=[2,147,483,648..3,221,225,472)  (1,073,741,824 hash values)  ->  node0
+  plan:  Custom Scan (Citus Router Select)
+           -> Seq Scan on events_2   (node0 only)
+  fan-out: 1 node touched. ZERO cross-node traffic. This is the
+           95% case that makes sharded OLTP fast.
+
+--- (2) CROSS-SHARD aggregate  SELECT count(*) FROM events; ---
+  plan:  Hash Aggregate (distributed)
+           -> Seq Scan on node0  ->  partial count = 2
+           -> Seq Scan on node1  ->  partial count = 2
+         Gather (sum)  ->  4
+  fan-out: ALL 2 nodes. The coordinator SUMS partial
+           counts. Composable: avg = sum / count, both gathered.
+
+--- (3) CROSS-SHARD ORDER BY ... LIMIT  (GATHER MERGE) ---
+SELECT * FROM events ORDER BY amount DESC LIMIT 3;
+  Each node runs its local ORDER BY, emitting a SORTED stream:
+           node0 stream (sorted DESC): [100, 80, 50]
+           node1 stream (sorted DESC): [200, 90, 40]
+  Gather Merge (k-way merge of sorted streams) -> [200, 100, 90, 80, 50, 40]
+  Top-3: [200, 100, 90]
+  COST: O(total) merge, NO resort. Each node kept its index 🔗
+
+--- (4) JOIN across shards ---
+  events JOIN users ON user_id  (both sharded by user_id): CO-LOCATED
+           -> join runs LOCALLY on each node. 0 rows moved.
+  events JOIN countries ON region  (countries NOT sharded by region):
+           -> BROADCAST countries (send full copy to every node), then
+              local hash join. Cost: 1x copy of the small table.
+
+SHARDING vs PARTITIONING: same slicing math, different PHYSICS. A
+partition is a file on ONE box; a shard is a file on a NODE. Once you
+cross the network, query routing, gather merges, and co-located joins
+become the dominant cost - and the design lever (pick the shard key so
+most queries stay single-shard).
+
+========================================================================
+  GOLD CHECK - INSERT then QUERY must route to the SAME partition
+========================================================================
+Invariant: a row INSERTed via partition routing must be findable by a
+query whose pruning keeps exactly that one partition.
+
+[RANGE]   INSERT id=99 created_at=2024-03-15 -> p2024_03
+         SELECT ... WHERE created_at >= '2024-03-15' prunes to ['p2024_03']
+         [check] routing covers the inserted partition? OK
+
+[HASH]    INSERT user_id=42 -> ph3
+         hash(42) = 2279835011 ; 2279835011 % 4 = 3 (remainder of ph3)
+         SELECT ... WHERE user_id = 42 prunes to ['ph3']
+         [check] exactly one partition AND it matches the INSERT? OK
+
+GOLD scalar (pinned for sharding_partitioning.html):
+   stable_hash(42) = 2279835011
+   stable_hash(42) % 4 = 3
+   partition = ph3
+
+[check] GOLD overall: OK   (insert routing == query pruning, all types)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

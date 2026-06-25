@@ -1,0 +1,225 @@
+join_algorithms.py - reference impl. All numbers below feed JOIN_ALGORITHMS.md.
+N (outer |R|) = 5    M (inner |S|) = 4
+
+==========================================================================
+  SECTION 0: the inputs (the deterministic tables R and S)
+==========================================================================
+OUTER R: 5 rows  (emp tables, customer lists, ...)
+INNER S: 4 rows  (lookup tables, dimension tables, ...)
+
+R = [(rid, key)]                              S = [(rid, key)]
+------------------------------------------------------------
+  r0  key=1                     s0  key=1
+  r1  key=2                     s1  key=1
+  r2  key=1                     s2  key=2
+  r3  key=3                     s3  key=9
+  r4  key=2                   
+------------------------------------------------------------
+
+Why these values exercise every edge case:
+  * key=1 appears TWICE on each side -> a 2x2 fan-out (4 output rows)
+  * key=2 appears twice in R, once in S -> 2 output rows
+  * key=3 (R only) -> no match (drops out)
+  * key=9 (S only) -> no match (drops out)
+  * Expected output cardinality: 4 + 2 = 6 joined rows.
+
+[check] gold expected pairs (sorted): (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+
+==========================================================================
+  SECTION A: Nested Loop Join  --  O(N*M) = 5*4 = 20 comparisons
+==========================================================================
+For each outer row, walk the ENTIRE inner table once:
+
+| step | outer r (key) | inner scan | comparisons this row | matched s rows |
+|------|---------------|------------|------------------------|----------------|
+| 0    | r0 (key=1)       | full (#1)  | 4                      | s0,s1          |
+| 1    | r1 (key=2)       | full (#2)  | 4                      | s2             |
+| 2    | r2 (key=1)       | full (#3)  | 4                      | s0,s1          |
+| 3    | r3 (key=3)       | full (#4)  | 4                      | -              |
+| 4    | r4 (key=2)       | full (#5)  | 4                      | s2             |
+
+TOTALS:  comparisons = 20   (= N*M = 5*4)   inner scans = 5  (= N = 5)
+output rows emitted: 6  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+
+VARIANT -- Block Nested Loop (block_size B=2):
+  chunk outer into ceil(N/B) = ceil(5/2) = 3 blocks:
+    block @0: ['r0', 'r1']
+    block @2: ['r2', 'r3']
+    block @4: ['r4']
+  -> inner is scanned once PER BLOCK  = 3 times (was 5 for plain NL)
+  -> comparisons UNCHANGED = 20  (still N*M; we still test every pair)
+  -> output identical: 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+[check] Block NL output == plain NL output:  OK
+
+Take-away: Block NL does not reduce CPU comparisons; it reduces
+I/O on the INNER table (read once per block, not per row). When the
+inner is large and lives on disk, that is the dominant win.
+
+==========================================================================
+  SECTION B: Hash Join  --  O(N+M) = 5+4 = 9 row-touches
+==========================================================================
+Two phases. BUILD hashes the inner into buckets; PROBE hashes each
+outer row and looks ONLY in its bucket.
+
+hash function:  h(key) = key mod 3   (num_buckets = 3)
+
+BUILD (inner S, M=4 rows -> hash table):
+  bucket 0: s3(k=9)
+  bucket 1: s0(k=1), s1(k=1)
+  bucket 2: s2(k=2)
+  build ops = 4  (= M = 4 hashes)
+
+PROBE (outer R, N=5 rows -> lookup):
+| outer r (key) | h(key) | bucket contents        | matches      |
+|---------------|--------|------------------------|--------------|
+| r0 (key=1)       | 1      | s0(k=1), s1(k=1)       | s0,s1        |
+| r1 (key=2)       | 2      | s2(k=2)                | s2           |
+| r2 (key=1)       | 1      | s0(k=1), s1(k=1)       | s0,s1        |
+| r3 (key=3)       | 0      | s3(k=9)                | -            |
+| r4 (key=2)       | 2      | s2(k=2)                | s2           |
+
+TOTALS:  build ops + probe ops = 4+5 = 9 row-touches  (= N+M = 9)
+         in-bucket key comparisons (collisions) = 7
+         (compare to NL's 20 = N*M full comparisons)
+output rows emitted: 6  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+
+Why Hash wins big equi-joins: it pays N+M row-touches TOTAL, not
+N*M. The in-bucket collisions are tiny if the hash spreads rows
+evenly (a few per bucket); they balloon only if the join key is
+pathologically skewed (e.g. one key value covers 90% of rows).
+
+==========================================================================
+  SECTION C: (Sort-)Merge Join  --  sort both, then one merge pass
+==========================================================================
+Step 1 -- STABLE-SORT both tables on the join key:
+
+  R sorted: (rid=0,k=1), (rid=2,k=1), (rid=1,k=2), (rid=4,k=2), (rid=3,k=3)
+  S sorted: (rid=0,k=1), (rid=1,k=1), (rid=2,k=2), (rid=3,k=9)
+  sort comparisons (both sorts combined) = 12
+
+Step 2 -- MERGE with two pointers i (into R), j (into S):
+  rule: if R[i].key == S[j].key -> expand the GROUP on both sides
+        (collect all duplicates), emit their cartesian product,
+        advance both pointers past the group.
+        if R[i].key <  S[j].key -> i++  (R row cannot match any
+        future S row, since S is sorted ascending).
+        if R[i].key >  S[j].key -> j++.
+
+| step | i | j | R[i].key | S[j].key | action                     |
+|------|---|---|----------|----------|----------------------------|
+| 0    | 0 | 0 | 1        | 1        | emit group (2x2=4 rows)    |
+| 1    | 2 | 2 | 2        | 2        | emit group (2x1=2 rows)    |
+| 2    | 4 | 3 | 3        | 9        | R<S -> i++ (skip r)            |
+
+TOTALS:  sort comparisons = 12   merge advances = 8
+  if inputs were PRE-SORTED, the sort cost drops to 0 -> merge = 9
+output rows emitted: 6  -> (r0,s0), (r0,s1), (r2,s0), (r2,s1), (r1,s2), (r4,s2)
+
+When Merge Join dominates: if EITHER input is already ordered on
+the key (clustered B-tree, or an index scan that returns sorted
+rows), the sort is free and the whole join is a single N+M pass.
+PostgreSQL's nodeMergejoin is exactly this two-pointer merge.
+
+==========================================================================
+  SECTION D: Cost comparison + optimizer decision matrix
+==========================================================================
+Closed-form costs (per the Selinger 1979 / System R cost model).
+
+Legend:  N=|R| (outer),  M=|S| (inner),  B=Block-NL block size.
+         'idx' = inner has a B-tree index on the join key.
+
+| algorithm              | predicate   | cost (comparisons / I/O)        |
+|------------------------|-------------|---------------------------------|
+| Nested Loop            | any         | N*M                             |
+| Block Nested Loop      | any         | N*M compares, ceil(N/B) inner reads |
+| Indexed Nested Loop    | any (idx)   | N * log2(M)   (one lookup per outer row) |
+| Hash Join              | = (equi)    | N + M  (+ small collisions)     |
+| Merge Join (pre-sorted)| = , < , >   | N + M                           |
+| Merge Join (sort both) | = , < , >   | N*log2(N) + M*log2(M) + N + M   |
+| Grace Hash Join        | = (equi)    | 3*(N+M) I/O  (spill+rewind+reread) |
+
+Worked numbers for a sweep of (N, M):
+| N       | M       | NL = N*M | Hash = N+M | Merge sorted = N+M | Merge+sort = NlgN+MlgM+N+M | Indexed NL = N*lgM |
+|---------|---------|----------|------------|---------------------|----------------------------|--------------------|
+| 5       | 4       | 20       | 9          | 9                   | 29                         | 10                 |
+| 100     | 100     | 10,000   | 200        | 200                 | 1,529                      | 664                |
+| 1,000   | 1,000   | 1,000,000 | 2,000      | 2,000               | 21,932                     | 9,966              |
+| 10,000  | 10,000  | 100,000,000 | 20,000     | 20,000              | 285,754                    | 132,877            |
+| 1,000,000 | 1,000,000 | 1,000,000,000,000 | 2,000,000  | 2,000,000           | 41,863,137                 | 19,931,569         |
+| 10      | 1,000,000 | 10,000,000 | 1,000,010  | 1,000,010           | 20,931,612                 | 199                |
+| 1,000,000 | 10      | 10,000,000 | 1,000,010  | 1,000,010           | 20,931,612                 | 3,321,928          |
+
+Read the table:
+  * At N=M=1M, NL does 10^12 compares (impossible); Hash does 2M.
+    That ~6-orders-of-magnitude gap is why hash join exists.
+  * Indexed NL is competitive when N is SMALL (10) and M is huge:
+    10 * log2(1M) ~ 200 lookups -- this is the OLTP point-lookup
+    join (e.g. join a 10-row result to a billion-row fact table).
+  * Merge+sort loses to Hash on unsorted data: the two sorts add
+    NlgN+MlgM overhead that Hash simply never pays.
+
+DECISION MATRIX (what the optimizer actually picks):
+| situation                                   | cheapest join        | why |
+|---------------------------------------------|----------------------|-----|
+| small outer, indexed inner (OLTP lookup)    | Indexed Nested Loop  | N*logM << N+M when N tiny |
+| small outer, no index (e.g. < ~10 rows)     | Nested Loop          | overhead of building a hash table is not worth it |
+| large equi-join, both sides unsorted        | Hash Join            | N+M beats N*M and beats sort+merge |
+| one/both sides pre-sorted (B-tree, ORDER BY)| Merge Join           | sort is free -> pure N+M, also keeps output sorted |
+| equi-join, hash table bigger than RAM       | Grace / Hybrid Hash  | partition so each piece fits in memory |
+| non-equi predicate (a < b, a BETWEEN b)     | Nested Loop          | Hash and Merge REQUIRE equality |
+| data already needs sorting downstream       | Sort-Merge           | amortize the sort across join + ORDER BY/GROUP BY |
+
+==========================================================================
+  SECTION E: Grace Hash Join  --  partition first, then join per bucket
+==========================================================================
+When the hash table does NOT fit in memory, classic Hash Join
+thrashes. Grace Hash (Kitsuregawa 1983) sidesteps this: hash BOTH
+tables into B partitions; rows that could match are guaranteed to
+land in the SAME partition number on both sides; then load each
+pair of partitions into memory one at a time and join there.
+
+hash function:  h(key) = key mod 3   (B = 3 partitions)
+
+PHASE 1 -- PARTITION both tables by hash:
+  R partitions:
+    partition 0: (rid=3,k=3)
+    partition 1: (rid=0,k=1), (rid=2,k=1)
+    partition 2: (rid=1,k=2), (rid=4,k=2)
+  S partitions:
+    partition 0: (rid=3,k=9)
+    partition 1: (rid=0,k=1), (rid=1,k=1)
+    partition 2: (rid=2,k=2)
+
+PHASE 2 -- JOIN each matching partition pair in memory:
+  partition 0: |R_b|=1, |S_b|=1  -> in-memory join -> 0 output rows  
+  partition 1: |R_b|=2, |S_b|=2  -> in-memory join -> 4 output rows  (r0,s0), (r0,s1), (r2,s0), (r2,s1)
+  partition 2: |R_b|=2, |S_b|=1  -> in-memory join -> 2 output rows  (r1,s2), (r4,s2)
+
+  sum |R_b| + |S_b| over all partitions = 9  (= N+M = 9; partitioning is a lossless repartition)
+output rows emitted (all partitions): 6  -> (r0,s0), (r0,s1), (r2,s0), (r2,s1), (r1,s2), (r4,s2)
+
+I/O cost model: classic Grace Hash does 3 passes over each side
+  -> 3*(N+M) = 3*9 = 27 I/Os.
+  Hybrid Hash (Shapiro 1986) keeps partition 0 in RAM during the
+  first pass instead of spilling it -- the version every modern DB
+  actually implements. PG's nodeHashjoin chooses this automatically
+
+==========================================================================
+  GOLD CHECK: all three algorithms produce the SAME join
+==========================================================================
+  Nested Loop  : 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+  Hash Join    : 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+  Merge Join   : 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+  Grace Hash   : 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+  expected gold: 6 rows  -> (r0,s0), (r0,s1), (r1,s2), (r2,s0), (r2,s1), (r4,s2)
+
+[check] NL == Hash == Merge == Grace == gold :  OK
+[check] all four algorithms agree on the join result:  OK
+
+This is the correctness invariant: the optimizer may pick any of
+them based on cost, but the RESULT is byte-identical. That is why a
+query plan can swap algorithms freely without changing semantics.
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

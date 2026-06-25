@@ -1,0 +1,271 @@
+aggregation_pipeline.py - reference impl. All numbers below feed
+AGGREGATION_PIPELINE.md.  (pure stdlib; python3 aggregation_pipeline.py)
+N_BUCKETS=8  GROUP_MEM=80B  WORK_MEM=200B  HAVING>1000
+
+========================================================================
+  SECTION A: Sort-based aggregation  (sort by GROUP BY key, then a single ordered scan)
+========================================================================
+Query:  SELECT region, COUNT(*), SUM(total), AVG(total), MIN(total), MAX(total)
+        FROM sales GROUP BY region
+
+Two phases:
+  1. SORT rows by the GROUP BY key (region).  (cost: O(N log N), or 0 if an
+     index already yields this order -- an Index Scan / Sort node.)
+  2. ONE linear scan. Keep a running accumulator for the CURRENT group;
+     when the key changes, EMIT the finished group and start a new one.
+     PostgreSQL calls this node GroupAggregate.
+
+Phase 1 -- sorted input (stable sort by region; ties keep input order):
+| step | id | region | product | total |
+|------|----|--------|---------|-------|
+| 1    | 3  | East   | Widget  | 320   |
+| 2    | 7  | East   | Gadget  | 280   |
+| 3    | 11 | East   | Widget  | 460   |
+| 4    | 1  | North  | Widget  | 250   |
+| 5    | 5  | North  | Gadget  | 410   |
+| 6    | 9  | North  | Widget  | 380   |
+| 7    | 2  | South  | Gadget  | 180   |
+| 8    | 6  | South  | Widget  | 290   |
+| 9    | 10 | South  | Gadget  | 175   |
+| 10   | 4  | West   | Gadget  | 150   |
+| 11   | 8  | West   | Widget  | 540   |
+| 12   | 12 | West   | Gadget  | 310   |
+
+Phase 2 -- ordered scan, accumulator state after each row (>>> emit when key changes):
+| step | id | region | total | -> action | acc.count | acc.sum |
+|------|----|--------|-------|-----------|-----------|---------|
+| 1    | 3  | East   | 320   | start 'East'| 1         | 320     |
+| 2    | 7  | East   | 280   | fold row  | 2         | 600     |
+| 3    | 11 | East   | 460   | fold row  | 3         | 1060    |
+|      |    |        |       | >>> EMIT group 'East' done (count=3, sum=1060)
+| 4    | 1  | North  | 250   | start 'North'| 1         | 250     |
+| 5    | 5  | North  | 410   | fold row  | 2         | 660     |
+| 6    | 9  | North  | 380   | fold row  | 3         | 1040    |
+|      |    |        |       | >>> EMIT group 'North' done (count=3, sum=1040)
+| 7    | 2  | South  | 180   | start 'South'| 1         | 180     |
+| 8    | 6  | South  | 290   | fold row  | 2         | 470     |
+| 9    | 10 | South  | 175   | fold row  | 3         | 645     |
+|      |    |        |       | >>> EMIT group 'South' done (count=3, sum=645)
+| 10   | 4  | West   | 150   | start 'West'| 1         | 150     |
+| 11   | 8  | West   | 540   | fold row  | 2         | 690     |
+| 12   | 12 | West   | 310   | fold row  | 3         | 1000    |
+|      |    |        |       | >>> EMIT group 'West' done (count=3, sum=1000)
+
+Sort-based GROUP BY result:
+| region | COUNT(*) | SUM(total) | AVG(total) | MIN(total) | MAX(total) |
+|--------|----------|------------|------------|------------|------------|
+| East   | 3        | 1060       | 353.33     | 280        | 460        |
+| North  | 3        | 1040       | 346.67     | 250        | 410        |
+| South  | 3        | 645        | 215.00     | 175        | 290        |
+| West   | 3        | 1000       | 333.33     | 150        | 540        |
+| TOTAL  | 12       | 3745       |            |            |            |
+
+Memory: exactly ONE accumulator live at a time (plus the one being
+emitted). That is the whole appeal of sort-based: O(1) state per group
+in scan order, no hash table, no spill -- but you paid for the sort.
+
+========================================================================
+  SECTION B: Hash-based aggregation  (hash the key, accumulate in buckets -- no sort)
+========================================================================
+Query:  same as Section A, but skip the sort.
+
+For every row: bucket = hash(region) mod N_BUCKETS; look in that bucket's
+CHAIN for the region. Seen it? update its accumulator. New? append a fresh
+accumulator to the chain. PostgreSQL calls this node HashAggregate.
+
+hash(region) = (hash * 31 + ord(c)) mod 2^32 ;  bucket = hash mod 8
+| region | full hash   | bucket mod 8 |
+|--------|-------------|-------------|
+| East   | 2152477     | 5           |
+| North  | 75454693    | 5           |
+| South  | 80075181    | 5           |
+| West   | 2692559     | 7           |
+
+Note the COLLISION: 3 distinct regions hash to bucket 5. They are
+disambiguated by a CHAIN (linked list) inside the bucket -- this is
+'separate chaining'. Bucket 7 holds West alone; the rest are empty.
+
+Streaming build -- one row at a time, show the bucket chain reached:
+| step | id | region | total | bucket | action          | chain after |
+|------|----|--------|-------|--------|-----------------|-------------|
+| 1    | 1  | North  | 250   | 5      | NEW -> append   | b5=['North'] |
+| 2    | 2  | South  | 180   | 5      | NEW -> append   | b5=['North', 'South'] |
+| 3    | 3  | East   | 320   | 5      | NEW -> append   | b5=['North', 'South', 'East'] |
+| 4    | 4  | West   | 150   | 7      | NEW -> append   | b7=['West'] |
+| 5    | 5  | North  | 410   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 6    | 6  | South  | 290   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 7    | 7  | East   | 280   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 8    | 8  | West   | 540   | 7      | update existing | b7=['West'] |
+| 9    | 9  | North  | 380   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 10   | 10 | South  | 175   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 11   | 11 | East   | 460   | 5      | update existing | b5=['North', 'South', 'East'] |
+| 12   | 12 | West   | 310   | 7      | update existing | b7=['West'] |
+
+Final hash table (bucket -> chain -> accumulator):
+  bucket 0: (empty)
+  bucket 1: (empty)
+  bucket 2: (empty)
+  bucket 3: (empty)
+  bucket 4: (empty)
+  bucket 5: North{cnt=3,sum=1040} -> South{cnt=3,sum=645} -> East{cnt=3,sum=1060}
+  bucket 6: (empty)
+  bucket 7: West{cnt=3,sum=1000}
+
+Hash-based GROUP BY result:
+| region | COUNT(*) | SUM(total) | AVG(total) | MIN(total) | MAX(total) |
+|--------|----------|------------|------------|------------|------------|
+| East   | 3        | 1060       | 353.33     | 280        | 460        |
+| North  | 3        | 1040       | 346.67     | 250        | 410        |
+| South  | 3        | 645        | 215.00     | 175        | 290        |
+| West   | 3        | 1000       | 333.33     | 150        | 540        |
+| TOTAL  | 12       | 3745       |            |            |            |
+
+Memory: ALL distinct groups live simultaneously (one accumulator each).
+If that exceeds work_mem we cannot just emit-and-forget like the sort
+path -- we must SPILL. That is Section E.
+
+========================================================================
+  SECTION C: HAVING  (filter GROUPS after aggregation, threshold=1000)
+========================================================================
+Query:  ... GROUP BY region HAVING SUM(total) > 1000
+
+WHERE filters ROWS before grouping; HAVING filters GROUPS after. Because
+it runs on finished accumulators, HAVING can reference aggregates
+(SUM, COUNT, ...) -- WHERE cannot.
+
+Pre-HAVING aggregates, with the predicate applied:
+| region | SUM(total) | SUM > 1000 ? | kept by HAVING |
+|--------|------------|--------------|----------------|
+| East   | 1060       | TRUE         | KEEP           |
+| North  | 1040       | TRUE         | KEEP           |
+| South  | 645        | false        | drop           |
+| West   | 1000       | false        | drop           |
+
+Rows in -> 12 (4 groups). Groups out after HAVING -> 2 (['East', 'North']).
+The filter is a trivial extra pass over the finished groups; it does NOT
+change how aggregation was executed (sort or hash are both fine).
+[check] HAVING is a strict > (West sum=1000 is NOT kept): OK
+
+========================================================================
+  SECTION D: DISTINCT  (SELECT DISTINCT reuses the exact GROUP BY machinery)
+========================================================================
+Query:  SELECT DISTINCT region FROM sales
+
+DISTINCT collapses duplicate keys to one row each. The engine implements
+it with the IDENTICAL operator as GROUP BY -- a hash table (HashAggregate)
+or a sort+dedupe (GroupAggregate) -- just with no aggregate functions
+attached. 'GROUP BY region with no aggregates' IS 'SELECT DISTINCT region'.
+
+Streaming DISTINCT over the 12 rows (hash dedupe):
+| row | region | bucket | first time? | distinct set so far |
+|-----|--------|--------|-------------|----------------------|
+| 1   | North  | 5      | yes         | ['North'] |
+| 2   | South  | 5      | yes         | ['North', 'South'] |
+| 3   | East   | 5      | yes         | ['North', 'South', 'East'] |
+| 4   | West   | 7      | yes         | ['North', 'South', 'East', 'West'] |
+| 5   | North  | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 6   | South  | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 7   | East   | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 8   | West   | 7      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 9   | North  | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 10  | South  | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 11  | East   | 5      | no (dup)    | ['North', 'South', 'East', 'West'] |
+| 12  | West   | 7      | no (dup)    | ['North', 'South', 'East', 'West'] |
+
+DISTINCT region -> ['East', 'North', 'South', 'West']  (4 distinct out of 12 rows)
+Same bucket layout / chains as Section B's GROUP BY (the dedupe key is
+identical: the region). An aggregate-free GROUP BY region would emit the
+SAME 4 rows. [check] |DISTINCT region| == |GROUP BY region| == 4: OK
+
+========================================================================
+  SECTION E: Memory management  (hash table overflows work_mem -> partition into BATCHES, spill)
+========================================================================
+work_mem = 200 bytes ;  per-group accumulator = 80 bytes
+-> in-memory budget = floor(200/80) = 2 groups at once.
+
+Actual distinct groups = 4. OVERFLOWS work_mem (4*80 = 320 bytes vs budget 160).
+
+Pick n_batches = 2 (so <= 2 groups per batch). batch(region) = (hash(region) >> 8) mod 2
+
+| region | hash(region) | (>>8) mod 2 | batch |
+|--------|--------------|-------------|-------|
+| East   | 2152477      | 0           | 0     |
+| North  | 75454693     | 0           | 0     |
+| South  | 80075181     | 1           | 1     |
+| West   | 2692559      | 1           | 1     |
+
+BATCH 0: groups ['East', 'North'] (6 rows kept in memory, 6 rows of other batch(es) spilled to temp file)
+BATCH 1: groups ['South', 'West'] (6 rows kept in memory, 6 rows of other batch(es) spilled to temp file)
+
+Re-assembled result after spill (union of batches):
+| region | COUNT(*) | SUM(total) | AVG(total) | MIN(total) | MAX(total) |
+|--------|----------|------------|------------|------------|------------|
+| East   | 3        | 1060       | 353.33     | 280        | 460        |
+| North  | 3        | 1040       | 346.67     | 250        | 410        |
+| South  | 3        | 645        | 215.00     | 175        | 290        |
+| West   | 3        | 1000       | 333.33     | 150        | 540        |
+| TOTAL  | 12       | 3745       |            |            |            |
+
+[check] spilled (multi-batch) result == single-pass result: OK
+KEY POINT: spilling trades disk I/O (write other batches out, read them
+back per batch) for BOUNDED memory. If a single batch STILL overflows
+(a 'skew' bucket), PostgreSQL raises n_batches again and repartitions.
+
+========================================================================
+  SECTION F: Parallel PARTIAL aggregation  (each worker aggregates its slice; leader COMBINES via combinefunc)
+========================================================================
+Query (parallel): SELECT region, SUM(total) FROM sales GROUP BY region
+
+A parallel scan splits the input across workers. Each runs a PARTIAL
+Aggregate on its slice (one accumulator per region it sees). The leader
+runs a FINAL Aggregate that COMBINES the partials per region with the
+combinefunc (sum: add; count: add; min/max: extreme).
+
+Worker partition: worker 0 = rows 1..6 (ids [1, 2, 3, 4, 5, 6]), worker 1 = rows 7..12 (ids [7, 8, 9, 10, 11, 12])
+
+Partial aggregates:
+| region | worker0 (count,sum) | worker1 (count,sum) |
+|--------|---------------------|---------------------|
+| East   | (1,320)          | (2,740) |
+| North  | (2,660)          | (1,380) |
+| South  | (2,470)          | (1,175) |
+| West   | (1,150)          | (2,850) |
+
+Leader-combined result:
+| region | COUNT(*) | SUM(total) | AVG(total) | MIN(total) | MAX(total) |
+|--------|----------|------------|------------|------------|------------|
+| East   | 3        | 1060       | 353.33     | 280        | 460        |
+| North  | 3        | 1040       | 346.67     | 250        | 410        |
+| South  | 3        | 645        | 215.00     | 175        | 290        |
+| West   | 3        | 1000       | 333.33     | 150        | 540        |
+| TOTAL  | 12       | 3745       |            |            |            |
+
+[check] combined-partials == single-worker result: OK
+combinefunc is what makes aggregation parallelizable: SUM/COUNT/MIN/MAX
+are ASSOCIATIVE (the grouping order among partials does not matter), so
+two-phase (partial -> final) always equals one-phase. AVG is NOT directly
+associative, so the partial state stores (count, sum) and the final does
+sum/count -- never fold to an average early.
+
+========================================================================
+  GOLD CHECK: sort-based == hash-based  (strategy invisible to the answer)
+========================================================================
+| region | sort (count,sum,min,max) | hash (count,sum,min,max) | match |
+|--------|--------------------------|--------------------------|-------|
+| East   | (3,1060,280,460)    | (3,1060,280,460)    | OK    |
+| North  | (3,1040,250,410)    | (3,1040,250,410)    | OK    |
+| South  | (3,645,175,290)    | (3,645,175,290)    | OK    |
+| West   | (3,1000,150,540)    | (3,1000,150,540)    | OK    |
+
+[check] ALL aggregates match across strategies: OK
+
+GOLD scalars (pinned for aggregation_pipeline.html) -- SUM(total) per region:
+  SUM[North] = 1040
+  SUM[South] = 645
+  SUM[East] = 1060
+  SUM[West] = 1000
+  bucket[North]=5  bucket[South]=5  bucket[East]=5  bucket[West]=7 (mod 8)
+
+========================================================================
+  DONE - all sections printed, all checks OK
+========================================================================

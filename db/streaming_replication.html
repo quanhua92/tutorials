@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming Replication — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --teal:#16a085;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:200px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:6ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--gold)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  code{background:#0a0e14;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:.78rem}
+  canvas{display:block;width:100%;max-width:980px}
+  #timeline{height:300px}
+  #quorum{height:280px}
+  #lag{height:240px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Streaming Replication — interactive
+    <a class="badge" href="./STREAMING_REPLICATION.md">STREAMING_REPLICATION.md</a>
+    <a class="badge" href="./streaming_replication.py">streaming_replication.py</a></h1>
+  <div class="sub">The primary ships WAL to standby(s) over TCP; each standby <b>write → flush → replay</b>s it into a hot copy.
+    <b style="color:var(--green)">Async</b> acks at the local fsync (data-loss window); <b style="color:var(--gold)">sync</b> waits for a standby's <b>flush</b> ack.
+    <code>synchronous_standby_names</code> picks <b>FIRST n</b> (priority) or <b>ANY n</b> (quorum). All numbers below are recomputed live in JS from the <i>identical</i> model as <code>streaming_replication.py</code>.
+    &nbsp;|&nbsp; <a href="./wal_checkpoint.html">WAL the cargo this ships →</a></div>
+
+  <!-- ===== PANEL 1: ASYNC vs SYNC TIMELINE ===== -->
+  <h2>① Async vs sync — when does the client get told "committed"?</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> toggle the mode. In <b style="color:var(--green)">async</b> the client is acked at the primary's fsync (<b>t=5</b>) — a 6 ms <b style="color:var(--red)">data-loss window</b> opens until the standby flushes.
+      In <b style="color:var(--gold)">sync</b> the primary holds the ack until s1 confirms <b>flush</b> (<b>t=13</b>) — zero RPO, but the client pays the round-trip.</div>
+    <div class="controls">
+      <button id="bAsync" class="active">async (ack at local fsync)</button>
+      <button id="bSync">sync 's1' (wait for standby flush)</button>
+      <span class="micro">primary_flush = 5 ms · s1: ship 2 · flush 4 · ack 2 (flush_time = 8) — matches streaming_replication.py Sections A &amp; B</span>
+    </div>
+    <canvas id="timeline" width="980" height="300"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--blue)"></i>primary WAL</span>
+      <span><i class="sw" style="background:var(--orange)"></i>WAL in flight (ship)</span>
+      <span><i class="sw" style="background:var(--green)"></i>standby flush (durable)</span>
+      <span><i class="sw" style="background:var(--purple)"></i>replay (visible)</span>
+      <span><i class="sw" style="background:var(--gold)"></i>client ACK</span>
+      <span><i class="sw" style="background:var(--red)"></i>data-loss window</span>
+    </div>
+    <div class="readout" id="timeReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: QUORUM ===== -->
+  <h2>② Quorum — FIRST n (priority) vs ANY n (any n ack first)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> pick the rule and n. The standbys that satisfy the commit light up <b style="color:var(--green)">green</b>.
+      <b>ANY n</b> acks at the <b>n-th fastest</b> flush (tolerates a straggler); <b>FIRST n</b> acks at <b>max</b> of the first n named (bound to the slowest named). Watch ANY 2 beat FIRST 2.</div>
+    <div class="controls">
+      <label>rule <select id="rule">
+        <option value="FIRST">FIRST n (priority)</option>
+        <option value="ANY">ANY n (quorum)</option>
+      </select></label>
+      <label>n (sync standbys required) <input type="range" id="n" min="1" max="3" value="2">
+        <span class="val" id="nVal">2</span></label>
+      <span class="micro">s1 flush_time=8 · s2=12 · s3=10 · primary_flush=5 (matches Section C)</span>
+    </div>
+    <canvas id="quorum" width="980" height="280"></canvas>
+    <div class="readout" id="quorumReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: LAG WATERFALL ===== -->
+  <h2>③ Lag waterfall — sent / write / flush / replay LSN (pg_stat_replication)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> the four progress markers must be monotone descending (<code>insert ≥ sent ≥ write ≥ flush ≥ replay</code>). Each gap is a different bottleneck.
+      <b style="color:var(--green)">flush lag</b> is the gap sync replication closes. Drag the markers to see the gaps recompute.</div>
+    <div class="controls">
+      <label>write_lsn <input type="range" id="wLsn" min="450" max="540" value="500"><span class="val" id="wLsnVal">500</span></label>
+      <label>flush_lsn <input type="range" id="fLsn" min="440" max="540" value="480"><span class="val" id="fLsnVal">480</span></label>
+      <label>replay_lsn <input type="range" id="rLsn" min="430" max="540" value="450"><span class="val" id="rLsnVal">450</span></label>
+    </div>
+    <canvas id="lag" width="980" height="240"></canvas>
+    <div class="readout" id="lagReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches streaming_replication.py GOLD (sync s1 = 13 ms · FIRST 2 = 17 ms · ANY 2 = 15 ms · total lag = 90 LSN).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth model, copied verbatim from streaming_replication.py ===== */
+const PRIMARY_FLUSH = 5;            // ms
+// [name, ship, flush, ack, replay]  -> standby_flush_time = ship+flush+ack
+const STANDBYS = [
+  ["s1", 2, 4, 2, 3],   // flush_time = 8
+  ["s2", 3, 6, 3, 4],   // flush_time = 12
+  ["s3", 2, 6, 2, 3],   // flush_time = 10
+];
+const ftOf = s => s[1] + s[2] + s[3];
+const FTS = STANDBYS.map(ftOf);                 // [8, 12, 10]
+// pg_stat_replication LSNs (Section E)
+const INSERT=540, SENT=540;
+
+/* pinned GOLD values from streaming_replication.py section_gold */
+const GOLD = { async:5, sync_s1:13, first2:17, any2:15, totalLag:90 };
+
+/* latency computations — mirror the .py exactly */
+function latencySyncS1(){ return PRIMARY_FLUSH + FTS[0]; }              // 13
+function latencyFirst(n){ const need=FTS.slice(0,n); return PRIMARY_FLUSH + Math.max.apply(null,need); }
+function latencyAny(n){ const s=FTS.slice().sort((a,b)=>a-b); return PRIMARY_FLUSH + s[n-1]; } // n-th smallest
+function countedAny(n){ // which standbys the n-th-fastest quorum counted on
+  const order=STANDBYS.map((s,i)=>i).sort((a,b)=>FTS[a]-FTS[b]);
+  return order.slice(0,n);
+}
+
+/* canvas DPR helper (mirrors wal_checkpoint.html / gqa.html) */
+function setup(cv){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, h=cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: async vs sync timeline ===== */
+let mode='async';
+const tc=document.getElementById('timeline');
+function drawTimeline(){
+  const ctx=setup(tc), w=tc.clientWidth, h=tc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const s1=STANDBYS[0];
+  const tMax=20;                       // ms range shown
+  const padL=60, padR=40, padT=40, padB=40;
+  const iw=w-padL-padR;
+  const X=t=> padL + (t/tMax)*iw;
+  // two lanes: primary (top), standby (bottom)
+  const yP=padT+30, yS=h-padB-30;
+  // lane labels + baselines
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(padL,yP); ctx.lineTo(w-padR,yP); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL,yS); ctx.lineTo(w-padR,yS); ctx.stroke();
+  ctx.fillStyle='#8b949e'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='right';
+  ctx.fillText('primary',  padL-8, yP+4);
+  ctx.fillText('standby s1',padL-8, yS+4);
+  // time ticks
+  ctx.textAlign='center'; ctx.font='10px ui-monospace,monospace';
+  for(let t=0;t<=tMax;t+=5){
+    const x=X(t);
+    ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(x,padT-4); ctx.lineTo(x,h-padB+4); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.fillText(t+'ms', x, h-padB+18);
+  }
+  // events
+  const PF=PRIMARY_FLUSH;
+  const ship=PF+s1[1], flush=ship+s1[2], replay=flush+s1[4], ackBack=flush+s1[3];
+  // WAL record block on primary (append+fsync completes at PF)
+  drawBlock(ctx,X(0),X(PF),yP,'#2980b9','WAL commit record (fsync)',14);
+  // ship (in flight)
+  drawArrow(ctx,X(PF),yP,X(ship),yS,'#e67e22','ship',1);
+  // standby write+flush
+  drawBlock(ctx,X(ship),X(flush),yS,'#27ae60','flush (durable)',14);
+  // replay
+  drawBlock(ctx,X(flush),X(replay),yS,'#8e44ad','replay (visible)',14);
+
+  let ackT, ackLabel, ackCol;
+  if(mode==='async'){
+    ackT=PF; ackLabel="ACK client 'committed' (async)"; ackCol='#27ae60';
+    // data-loss window band: from ackT to standby flush
+    ctx.fillStyle='rgba(192,57,43,0.16)';
+    ctx.fillRect(X(ackT), padT, X(flush)-X(ackT), h-padT-padB);
+    ctx.strokeStyle='#c0392b'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(X(ackT),padT); ctx.lineTo(X(ackT),h-padB); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(flush),padT); ctx.lineTo(X(flush),h-padB); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle='#c0392b'; ctx.font='bold 11px system-ui'; ctx.textAlign='center';
+    ctx.fillText('data-loss window ('+(flush-ackT)+' ms)', (X(ackT)+X(flush))/2, padT-8);
+  } else {
+    ackT=ackBack; ackLabel="ACK client 'committed' (sync)"; ackCol='#f1c40f';
+    // sync wait band: PF -> ackBack
+    ctx.fillStyle='rgba(241,196,15,0.12)';
+    ctx.fillRect(X(PF), padT, X(ackT)-X(PF), h-padT-padB);
+    ctx.fillStyle='#f1c40f'; ctx.font='bold 11px system-ui'; ctx.textAlign='center';
+    ctx.fillText('sync wait ('+(ackT-PF)+' ms)', (X(PF)+X(ackT))/2, padT-8);
+    // flush ack arrow back
+    drawArrow(ctx,X(flush),yS,X(ackBack),yP,'#f1c40f','flush ack',-1);
+  }
+  // client ACK marker
+  ctx.strokeStyle=ackCol; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.moveTo(X(ackT),padT-2); ctx.lineTo(X(ackT),h-padB+2); ctx.stroke();
+  ctx.fillStyle=ackCol; ctx.font='bold 11px system-ui'; ctx.textAlign='center';
+  ctx.fillText(ackLabel, X(ackT), h-padB+32);
+  // readout
+  const ro=document.getElementById('timeReadout');
+  if(mode==='async'){
+    ro.innerHTML='ASYNC: client acked at <b>t='+ackT+' ms</b> (= primary_flush). The commit is durable on the primary, but the standby only flushes at t='+flush+
+      '. A primary crash in <span class="bad">['+ackT+', '+flush+']</span> loses a transaction the client was already told succeeded — a <span class="bad">'+(flush-ackT)+' ms RPO window</span>.';
+  } else {
+    ro.innerHTML='SYNC \'s1\': primary flushes at t='+PF+' but <b>holds the ack</b> until s1 confirms flush (t='+flush+') + the ack returns (t='+ackBack+
+      '). Client acked at <b>t='+ackBack+' ms</b> = primary_flush ('+PF+') + flush_time (8). <span class="warn">Cost: '+(ackBack-PF)+' ms round-trip, zero RPO.</span>';
+  }
+}
+function drawBlock(ctx,x0,x1,y,col,label,fs){
+  const hh=18;
+  ctx.fillStyle=col; ctx.globalAlpha=0.85;
+  ctx.fillRect(x0, y-hh/2, Math.max(x1-x0,3), hh);
+  ctx.globalAlpha=1;
+  ctx.strokeStyle=col; ctx.lineWidth=1.5; ctx.strokeRect(x0, y-hh/2, Math.max(x1-x0,3), hh);
+  if(x1-x0>40){ ctx.fillStyle='#0d1117'; ctx.font='bold '+fs+'px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText(label, (x0+x1)/2, y+4); }
+}
+function drawArrow(ctx,x0,y0,x1,y1,col,label,dir){
+  ctx.strokeStyle=col; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+  // arrowhead
+  const ang=Math.atan2(y1-y0,x1-x0);
+  ctx.beginPath(); ctx.moveTo(x1,y1);
+  ctx.lineTo(x1-7*Math.cos(ang-0.4), y1-7*Math.sin(ang-0.4));
+  ctx.lineTo(x1-7*Math.cos(ang+0.4), y1-7*Math.sin(ang+0.4));
+  ctx.closePath(); ctx.fillStyle=col; ctx.fill();
+}
+
+/* ===== PANEL 2: quorum ===== */
+const qc=document.getElementById('quorum');
+function drawQuorum(){
+  const ctx=setup(qc), w=qc.clientWidth, h=qc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const rule=document.getElementById('rule').value;
+  const n=+document.getElementById('n').value;
+  const padL=70, padR=40, padT=30, padB=46;
+  const lanes=STANDBYS.length;
+  const laneH=(h-padT-padB)/lanes;
+  const yOf=i=> padT + laneH*i + laneH/2;
+  // x axis: time 0..20 ms
+  const X=t=> padL + (t/20)*(w-padL-padR);
+  // time grid
+  ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  for(let t=0;t<=20;t+=5){
+    ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(X(t),padT); ctx.lineTo(X(t),h-padB); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.fillText(t+'ms', X(t), h-padB+16);
+  }
+  // primary flush marker (same for all)
+  ctx.strokeStyle='#2980b9'; ctx.setLineDash([3,3]); ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(X(PRIMARY_FLUSH),padT); ctx.lineTo(X(PRIMARY_FLUSH),h-padB); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#2980b9'; ctx.font='bold 10px system-ui'; ctx.fillText('primary flush t=5', X(PRIMARY_FLUSH), padT-6);
+
+  // decide which standbys are counted (satisfy the commit)
+  let counted;
+  if(rule==='FIRST'){ counted=new Set(STANDBYS.slice(0,n).map((_,i)=>i)); }
+  else { counted=new Set(countedAny(n)); }
+  // the latency = max flush completion among counted
+  let ackWait=0;
+  counted.forEach(i=>{ ackWait=Math.max(ackWait, FTS[i]); });
+  const latency=PRIMARY_FLUSH+ackWait;
+
+  STANDBYS.forEach((sb,i)=>{
+    const y=yOf(i);
+    const isCounted=counted.has(i);
+    // lane label
+    ctx.fillStyle='#e6edf3'; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='right';
+    ctx.fillText(sb[0]+' (ft='+FTS[i]+')', padL-8, y+4);
+    // baseline
+    ctx.strokeStyle='#30363d'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    // flush completion at PRIMARY_FLUSH+FTS[i]
+    const fcomp=PRIMARY_FLUSH+FTS[i];
+    // block from flush arrival to flush completion
+    ctx.fillStyle=isCounted?'#27ae60':'#3a3f46';
+    ctx.globalAlpha=isCounted?0.85:0.5;
+    ctx.fillRect(X(PRIMARY_FLUSH), y-9, X(fcomp)-X(PRIMARY_FLUSH), 18);
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=isCounted?'#27ae60':'#58626d'; ctx.lineWidth=1.5;
+    ctx.strokeRect(X(PRIMARY_FLUSH), y-9, X(fcomp)-X(PRIMARY_FLUSH), 18);
+    if(isCounted){ ctx.fillStyle='#0d1117'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+      ctx.fillText('flush ack @ t='+fcomp, (X(PRIMARY_FLUSH)+X(fcomp))/2, y+4); }
+    // tick at flush completion
+    ctx.strokeStyle=isCounted?'#27ae60':'#58626d'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(X(fcomp),y-14); ctx.lineTo(X(fcomp),y+14); ctx.stroke();
+  });
+  // commit-ack vertical line at latency
+  ctx.strokeStyle='#f1c40f'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.moveTo(X(latency),padT-2); ctx.lineTo(X(latency),h-padB+2); ctx.stroke();
+  ctx.fillStyle='#f1c40f'; ctx.font='bold 12px system-ui'; ctx.textAlign='center';
+  ctx.fillText('COMMIT acked @ t='+latency+' ms', X(latency), h-padB+34);
+
+  // readout
+  const ro=document.getElementById('quorumReadout');
+  const cname=Array.from(counted).map(i=>STANDBYS[i][0]).join(',');
+  if(rule==='FIRST'){
+    ro.innerHTML="<b>FIRST "+n+" (s1,s2,s3)</b>: waits for "+cname+" (the first "+n+" named). latency = primary_flush + max of their flush_times = <b>"+PRIMARY_FLUSH+" + "+ackWait+" = "+latency+" ms</b>. "
+      +(n>=2?"Bound by the slowest named standby — does <span class='warn'>not</span> tolerate a straggler.":"");
+  } else {
+    const sorted=FTS.slice().sort((a,b)=>a-b);
+    ro.innerHTML="<b>ANY "+n+" (s1,s2,s3)</b>: quorum — waits for the <b>"+n+"-th fastest</b> flush = "+sorted[n-1]+". The "+n+" fastest ("+cname+") satisfy it. latency = <b>"+PRIMARY_FLUSH+" + "+ackWait+" = "+latency+" ms</b>. "
+      +(n>=2?"Tolerates one slow/hot standby — that's why it can beat FIRST "+n+".":"");
+  }
+}
+
+/* ===== PANEL 3: lag waterfall ===== */
+const lc=document.getElementById('lag');
+function drawLag(){
+  const ctx=setup(lc), w=lc.clientWidth, h=lc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const wLsn=+document.getElementById('wLsn').value;
+  const fLsn=+document.getElementById('fLsn').value;
+  const rLsn=+document.getElementById('rLsn').value;
+  // enforce monotonicity for display: write<=sent, flush<=write, replay<=flush
+  const sent=SENT, write=Math.min(wLsn,sent), flush=Math.min(fLsn,write), replay=Math.min(rLsn,flush);
+  const minL=Math.min(replay,flush,write,sent,INSERT)-10;
+  const maxL=INSERT+10;
+  const padL=70, padR=40, padT=24, padB=40;
+  const iw=w-padL-padR;
+  const X=l=> padL + ((l-minL)/(maxL-minL))*iw;
+  const rows=[
+    {lab:'insert_lsn', val:INSERT, col:'#2980b9', who:'primary'},
+    {lab:'sent_lsn',   val:sent,   col:'#16a085', who:'shipped'},
+    {lab:'write_lsn',  val:write,  col:'#e67e22', who:'written (cached)'},
+    {lab:'flush_lsn',  val:flush,  col:'#27ae60', who:'flushed (durable)'},
+    {lab:'replay_lsn', val:replay, col:'#8e44ad', who:'replayed (visible)'},
+  ];
+  const rowH=(h-padT-padB)/rows.length;
+  const yOf=i=> padT+rowH*i+rowH/2;
+  // axis line
+  ctx.strokeStyle='#30363d'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(padL,h-padB); ctx.lineTo(w-padR,h-padB); ctx.stroke();
+  // grid ticks
+  ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  for(let l=Math.ceil(minL/50)*50; l<=maxL; l+=50){
+    ctx.strokeStyle='#21262d'; ctx.beginPath(); ctx.moveTo(X(l),padT); ctx.lineTo(X(l),h-padB); ctx.stroke();
+    ctx.fillStyle='#8b949e'; ctx.fillText('L'+l, X(l), h-padB+16);
+  }
+  // draw each marker as a vertical line + label
+  rows.forEach((r,i)=>{
+    const y=yOf(i);
+    ctx.strokeStyle=r.col; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(X(r.val),y-16); ctx.lineTo(X(r.val),y+16); ctx.stroke();
+    ctx.fillStyle=r.col; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='right';
+    ctx.fillText(r.lab, padL-8, y-2);
+    ctx.fillStyle='#e6edf3'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='right';
+    ctx.fillText('L'+r.val, padL-8, y+12);
+    ctx.fillStyle='#8b949e'; ctx.font='10px system-ui'; ctx.textAlign='left';
+    ctx.fillText(r.who, X(r.val)+8, y+4);
+  });
+  // gaps (lag segments) as colored brackets between consecutive markers
+  const send=INSERT-sent, wr=sent-write, fl=write-flush, rp=flush-replay, total=INSERT-replay;
+  const gaps=[['send',send,'#16a085'],['write',wr,'#e67e22'],['flush',fl,'#27ae60'],['replay',rp,'#8e44ad']];
+  const mono = INSERT>=sent && sent>=write && write>=flush && flush>=replay;
+  const ro=document.getElementById('lagReadout');
+  ro.innerHTML='Monotone? <b>'+(mono?'YES':'NO (clamped)')+'</b> &nbsp; insert '+INSERT+' ≥ sent '+sent+' ≥ write '+write+' ≥ flush '+flush+' ≥ replay '+replay+
+    '<br>gaps — send:'+send+' · write:'+wr+' · <span style="color:var(--green)">flush:'+fl+' (sync closes this)</span> · replay:'+rp+
+    ' &nbsp;→&nbsp; <b>TOTAL lag = '+total+' LSN</b> '+(send+wr+fl+rp===total?'(== sum of gaps ✓)':'');
+}
+
+/* ===== GOLD CHECK vs streaming_replication.py section_gold ===== */
+function goldCheck(){
+  const syncS1=latencySyncS1();
+  const first2=latencyFirst(2);
+  const any2=latencyAny(2);
+  const totalLag=INSERT-450;          // replay=450 (default)
+  const ok = syncS1===GOLD.sync_s1 && first2===GOLD.first2 && any2===GOLD.any2 && totalLag===GOLD.totalLag;
+  const chk=document.getElementById('check');
+  chk.textContent = ok ? "check: OK — JS matches streaming_replication.py (sync s1=13 · FIRST 2=17 · ANY 2=15 · total lag=90)"
+                       : "check: FAIL — mismatch!";
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== events ===== */
+function setMode(m){
+  mode=m;
+  document.getElementById('bAsync').classList.toggle('active', m==='async');
+  document.getElementById('bSync').classList.toggle('active', m==='sync');
+  drawTimeline();
+}
+document.getElementById('bAsync').addEventListener('click',()=>setMode('async'));
+document.getElementById('bSync').addEventListener('click',()=>setMode('sync'));
+document.getElementById('rule').addEventListener('change',drawQuorum);
+document.getElementById('n').addEventListener('input',()=>{
+  document.getElementById('nVal').textContent=document.getElementById('n').value; drawQuorum();
+});
+['wLsn','fLsn','rLsn'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',()=>{
+    document.getElementById(id+'Val').textContent=document.getElementById(id).value; drawLag();
+  });
+});
+window.addEventListener('resize',()=>{ drawTimeline(); drawQuorum(); drawLag(); });
+
+/* ===== boot ===== */
+drawTimeline();
+drawQuorum();
+drawLag();
+goldCheck();
+</script>
+</body>
+</html>

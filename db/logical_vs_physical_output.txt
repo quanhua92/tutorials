@@ -1,0 +1,233 @@
+logical_vs_physical.py - reference impl. All numbers below feed
+LOGICAL_VS_PHYSICAL.md.
+python ok, stdlib only (struct/hashlib/json/dataclasses).
+
+
+========================================================================
+  SECTION A: PHYSICAL replication - ship raw WAL bytes, apply verbatim
+========================================================================
+The primary executes the workload and emits a WAL record per change.
+Physical replication streams the RAW BYTES of each record; the standby
+writes them to the same (relfilenode, block, offset). It never reads
+the catalog, never parses SQL - it pastes bytes.
+
+First two non-commit records as raw bytes (what crosses the wire):
+
+  LSN  1  xid 1001  INSERT users  -> rel 16384 block 0 offset 1  (52 bytes)
+  0000  0a 00 00 00 03 e9 00 00 40 00 00 00 00 01 00 00   ........@.......
+  0010  00 00 00 01 00 1e 03 00 69 00 00 00 00 00 00 00   ........i.......
+  0020  01 01 73 00 03 41 64 61 02 73 00 08 61 64 61 40   ..s..Ada.s..ada@
+  0030  78 2e 69 6f                                       x.io
+
+  LSN  2  xid 1001  INSERT users  -> rel 16384 block 0 offset 2  (54 bytes)
+  0000  0a 00 00 00 03 e9 00 00 40 00 00 00 00 02 00 00   ........@.......
+  0010  00 00 00 02 00 20 03 00 69 00 00 00 00 00 00 00   ..... ..i.......
+  0020  02 01 73 00 04 41 6c 61 6e 02 73 00 09 61 6c 61   ..s..Alan.s..ala
+  0030  6e 40 78 2e 69 6f                                 n@x.io
+
+Byte-level fidelity (SHA-256 of every live heap slot):
+  primary  heap fingerprint = 907f19eb7a98f72e
+  standby  heap fingerprint = 907f19eb7a98f72e
+  [check] byte-identical heaps? True
+
+THE CONSTRAINT - physical replication is brittle by construction:
+  - same PG MAJOR version  (page layout, pg_control format must match)
+  - same CPU ARCHITECTURE  (endianness, pointer width, alignment)
+  - a single bit of format drift -> corrupt standby, no warning
+
+  | publisher         | standby           | physical OK? |
+  |-------------------|-------------------|--------------|
+  | PG 14 -> PG 14    | x86_64 -> x86_64  | YES          |
+  | PG 14 -> PG 14    | x86_64 -> ARM64   | NO (format drift) |
+  | PG 14 -> PG 16    | x86_64 -> x86_64  | NO (format drift) |
+  | PG 16 -> PG 16    | ARM64  -> ARM64   | YES          |
+
+  Cross-version / cross-arch is IMPOSSIBLE over physical. That gap is
+  exactly what logical replication (Section B) fills.
+
+========================================================================
+  SECTION B: LOGICAL replication - decode WAL into change records
+========================================================================
+The SAME WAL records, but now the output plugin (pgoutput) DECODES each
+one into a logical change record: {table, op, old, new}. The subscriber
+applies these as if it had run the SQL itself.
+
+  | LSN | xid  | op     | table  | old            | new                    |
+  |-----|------|--------|--------|----------------|------------------------|
+  | 1   | 1001 | INSERT | users  | -              | {id=1, name='Ada', email='ada@x.io'} |
+  | 2   | 1001 | INSERT | users  | -              | {id=2, name='Alan', email='alan@x.io'} |
+  | 3   | 1001 | INSERT | users  | -              | {id=3, name='Grace', email='grace@x.io'} |
+  | 4   | 1002 | INSERT | orders | -              | {id=10, user_id=1, amount=99} |
+  | 5   | 1002 | INSERT | orders | -              | {id=11, user_id=2, amount=50} |
+  | 6   | 1003 | UPDATE | users  | {id=2}         | {id=2, name='Alan T', email='alan@x.io'} |
+  | 7   | 1004 | INSERT | orders | -              | {id=12, user_id=3, amount=250} |
+  | 8   | 1005 | DELETE | users  | {id=1}         | -                      |
+  | 9   | 1002 | UPDATE | orders | {id=10}        | {id=10, user_id=1, amount=120} |
+  | 10  | 1001 | COMMIT | -      | -              | -                      |
+  | 11  | 1002 | COMMIT | -      | -              | -                      |
+  | 12  | 1003 | COMMIT | -      | -              | -                      |
+  | 13  | 1004 | COMMIT | -      | -              | -                      |
+  | 14  | 1005 | COMMIT | -      | -              | -                      |
+
+What the subscriber reconstructs (applying decoded changes):
+
+  SELECT * FROM users ORDER BY pk;
+    {id=2, name='Alan T', email='alan@x.io'}
+    {id=3, name='Grace', email='grace@x.io'}
+
+  SELECT * FROM orders ORDER BY pk;
+    {id=10, user_id=1, amount=120}
+    {id=11, user_id=2, amount=50}
+    {id=12, user_id=3, amount=250}
+
+KEY CONTRAST vs Section A:
+  physical : consumer = a byte-paster. Needs identical page format.
+  logical  : consumer = a SQL executor. Needs matching SCHEMA (column
+             names/types), NOT matching byte layout. So PG 14 -> PG 16,
+             x86 -> ARM, even PG -> a non-PG sink, all work.
+
+========================================================================
+  SECTION C: PUBLICATION / SUBSCRIPTION - the logical topology
+========================================================================
+Logical replication is a pub/sub system layered on logical decoding:
+
+  -- on the PUBLISHER (the source DB)
+  CREATE PUBLICATION pub_all    FOR TABLE users, orders;
+  CREATE PUBLICATION pub_users  FOR TABLE users;
+  -- PG 15+: column + row filters
+  CREATE PUBLICATION pub_big   FOR TABLE orders (id, amount) WHERE (amount > 100);
+
+  -- on the SUBSCRIBER (the target DB)
+  CREATE SUBSCRIPTION sub_all CONNECTION 'host=publisher dbname=shop'
+                              PUBLICATION pub_all;
+
+Topology (3 publications, 3 subscribers) and which of the 9 row-changes each subscriber receives:
+
+  | subscription | publication | carries tables      | # changes shipped |
+  |--------------|-------------|---------------------|-------------------|
+  | sub_all      | pub_all     | users,orders        | 9                 |
+  | sub_users    | pub_users   | users               | 5                 |
+  | sub_big      | pub_big     | orders              | 2                 |
+
+Worked filter demo - pub_big (orders, cols [id,amount], WHERE amount>100):
+  DROP  LSN 4  INSERT {id=10, user_id=1, amount=99}
+  DROP  LSN 5  INSERT {id=11, user_id=2, amount=50}
+  SHIP  LSN 7  INSERT {id=12, user_id=3, amount=250}  -> columns filtered to {id=12, amount=250}
+  SHIP  LSN 9  UPDATE {id=10, user_id=1, amount=120}  -> columns filtered to {id=10, amount=120}
+
+  -> only order id=12 (amount 250 > 100) ships, and with the user_id
+     column stripped. SELECTIVE replication is impossible over physical.
+
+========================================================================
+  SECTION D: DECISION MATRIX - when to pick which
+========================================================================
+Pick by WHAT you need the replica for, not by preference.
+
+  | need                                | physical        | logical                | pick    |
+  |-------------------------------------|-----------------|------------------------|---------|
+  | byte-identical standby              | YES             | no  (rows match, bytes differ) | physical |
+  | cross-major-version upgrade         | no (format drift) | YES                    | logical |
+  | cross-architecture (x86->ARM)       | no              | YES                    | logical |
+  | hot standby / read replica          | YES             | YES (read-only)        | either  |
+  | PITR / point-in-time recovery       | YES (archive WAL) | no (row stream)        | physical |
+  | selective table replication         | no (whole cluster) | YES                    | logical |
+  | column / row filtering              | no              | YES (PG 15+)           | logical |
+  | multi-master / bidirectional        | no (single writer) | YES (with care)        | logical |
+  | data federation / fan-out           | no              | YES (1 -> N)           | logical |
+  | change data capture (CDC)           | no              | YES                    | logical |
+  | zero-downtime major upgrade         | no              | YES (pg_upgrade --link + logical cutover) | logical |
+
+Rule of thumb:
+  * need an EXACT clone or crash recovery    -> physical (fast, dumb, exact).
+  * need flexibility, filtering, or version bridging -> logical (smart, schema-aware).
+
+========================================================================
+  SECTION E: LIMITATIONS of logical - what is NOT shipped
+========================================================================
+Logical decoding only understands ROW changes. Everything else is silent:
+
+  | object / change                       | replicated? | why / consequence
+  |---------------------------------------|-------------|---------------------------
+  | DDL / schema changes                  | no          | ALTER TABLE ADD COLUMN, CREATE INDEX, DROP TABLE are NOT decoded. Subscriber schema must be migrated by hand (or by a tool like pglogical/londiste). A column-type change can break decoding outright.
+  | SEQUENCES                             | no          | nextval/currval are not row changes. Subscribers must partition the sequence range (setval) or use a separate allocator, or they WILL collide on INSERT.
+  | Large objects (lo_*)                  | no          | pg_largeobject writes are not logical change records. (PG 16 added streaming of large objects, but default setups still skip them.)
+  | TRUNCATE (pre-PG 11)                  | no          | Supported since PG 11 only; earlier versions silently dropped TRUNCATE.
+  | REPLICA IDENTITY NONE tables          | no          | UPDATE/DELETE cannot be decoded without a replica identity (PK or FULL). INSERTs still work.
+  | non-loggable tables                   | no          | UNLOGGED and TEMP tables have no WAL -> nothing to decode.
+  | storage-level details                 | n/a         | Physical byte layout differs by design: different XIDs, offsets, free space, hint bits. That is NOT a bug - it is the point.
+
+The big one: SEQUENCES. If publisher and subscriber both auto-generate ids,
+they will eventually hand out the SAME id -> duplicate-key conflict (Sec F).
+Fix: on the subscriber, ALTER SEQUENCE ... INCREMENT BY <big> and setval so
+the two ranges never overlap; or make the subscriber's columns NOT DEFAULT.
+
+========================================================================
+  SECTION F: CONFLICTS - when the subscriber cannot apply a change
+========================================================================
+Physical standbys never conflict: they paste bytes, there is no logic to
+fail. Logical subscribers RE-EXECUTE the change as SQL, so they CAN fail.
+
+Three classic conflicts:
+
+  | conflict          | trigger                                   | default action   | recovery                          |
+  |-------------------|-------------------------------------------|------------------|-----------------------------------|
+  | duplicate key     | INSERT row that already exists on subscriber | ERROR (default)  | subscription STOPS; fix the row, then resume |
+  | missing row       | UPDATE/DELETE of a row absent on subscriber | ERROR (default)  | subscription STOPS; the row was deleted/changed locally |
+  | FK violation      | incoming row references a parent not yet on subscriber | ERROR (default)  | ordering: replicate parent table BEFORE child table |
+  | unique violation  | local unique index rejects the incoming row | ERROR (default)  | drop conflicting local index or dedupe first |
+
+Resolution strategies (PG 17+ adds a native conflict detector; older
+versions need pglogical or application-level handling):
+
+  | strategy          | what it does                         | when to use               |
+  |-------------------|--------------------------------------|---------------------------|
+  | error (default)   | stop the subscription, alert a human | correctness first; never lose data silently |
+  | skip              | log the conflicting change, keep going | best-effort sync; subscriber may permanently diverge |
+  | last-writer-wins  | apply with ON CONFLICT DO UPDATE     | needs a UNIQUE index + a resolver; bidirectional sync |
+  | source-wins       | DELETE local + INSERT incoming       | re-converge to publisher state; discards local edits |
+
+Concrete conflict simulation:
+  subscriber already has: {id=2, name='LOCAL', email='l@x'}
+  publisher ships logical change: INSERT users id=2 ...
+  -> ConflictError: duplicate key on users pk=2
+     existing row : {id=2, name='LOCAL', email='l@x'}
+     default action: subscription STOPS until resolved.
+
+  This is WHY physical is the default for HA failover (it cannot conflict)
+  and logical is chosen only when its flexibility outweighs this risk.
+
+========================================================================
+  SECTION G: GOLD CHECK - logical decoded state == physical replayed state
+========================================================================
+Both paths start from the SAME WAL stream. The promise of logical
+replication: the decoded change records reconstruct the SAME visible
+table state as a byte-faithful physical replay.
+
+  table users:
+    physical replay rows = 2
+    logical  decoded rows = 2
+      [OK] phys {id=2, name='Alan T', email='alan@x.io'}
+      [OK] phys {id=3, name='Grace', email='grace@x.io'}
+
+  table orders:
+    physical replay rows = 3
+    logical  decoded rows = 3
+      [OK] phys {id=10, user_id=1, amount=120}
+      [OK] phys {id=11, user_id=2, amount=50}
+      [OK] phys {id=12, user_id=3, amount=250}
+
+  [check] logical state == physical state (row-by-row)?  True
+  [check] physical standby byte-identical to primary?    True
+
+GOLD values (pinned for logical_vs_physical.html):
+  GOLD canonical state string = orders:[[10,1,120],[11,2,50],[12,3,250]]|users:[[2,"Alan T","alan@x.io"],[3,"Grace","grace@x.io"]]
+  GOLD state sha256[:16]       = 09d09d9720af0b02
+  GOLD users.rows              = 2
+  GOLD orders.rows             = 3
+  GOLD orders.amount SUM       = 420
+
+  [check] gold self-consistency (recompute from .py state):  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

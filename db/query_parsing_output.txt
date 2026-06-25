@@ -1,0 +1,218 @@
+query_parsing.py - reference impl. All output feeds QUERY_PARSING.md.
+python 3.14.5
+
+========================================================================
+  SECTION A: the lexer  (SQL text -> tokens)
+========================================================================
+Input SQL:
+  SELECT name, age FROM users WHERE age > 25 ORDER BY name
+
+The lexer emits one Token per lexical unit. Keywords are normalized
+to UPPER; identifiers keep their case; literals keep their text.
+
+| # | type     | value          |
+|---|----------|----------------|
+| 0  | KEYWORD  | SELECT         |
+| 1  | IDENT    | name           |
+| 2  | PUNCT    | ,              |
+| 3  | IDENT    | age            |
+| 4  | KEYWORD  | FROM           |
+| 5  | IDENT    | users          |
+| 6  | KEYWORD  | WHERE          |
+| 7  | IDENT    | age            |
+| 8  | OP       | >              |
+| 9  | NUMBER   | 25             |
+| 10 | KEYWORD  | ORDER          |
+| 11 | KEYWORD  | BY             |
+| 12 | IDENT    | name           |
+
+Token-type tally:
+  KEYWORD  : 5
+  IDENT    : 5
+  PUNCT    : 1
+  OP       : 1
+  NUMBER   : 1
+
+[check] token count == 13 :  OK
+[check] every KEYWORD token value is in the reserved set :  OK
+
+========================================================================
+  SECTION B: the parser  (tokens -> AST)
+========================================================================
+Recursive descent applies the grammar rule
+
+  select_stmt := SELECT select_list FROM table_ref [WHERE expr]
+                 [ORDER BY order_list] ...
+
+and produces a typed AST. The tree below is what the planner consumes.
+
+└─ SelectStmt targets=[2] from where order_by=[1]
+   ├─ SelectItem(Column(name))
+   │  └─ Column(name)
+   ├─ SelectItem(Column(age))
+   │  └─ Column(age)
+   ├─ TableRef(users)
+   ├─ BinaryOp(>)
+   │  ├─ Column(age)
+   │  └─ Literal(NUMBER:25)
+   └─ OrderItem(ASC)
+      └─ Column(name)
+
+Field summary of the SelectStmt root:
+  distinct   = False
+  targets    = [Column(name), Column(age)]
+  from_clause= TableRef(users)
+  where      = BinaryOp(>)
+  group_by   = -
+  having     = None
+  order_by   = [OrderItem(ASC)]
+  limit      = None
+
+[check] WHERE is BinaryOp('>') with Literal('25') on the right :  OK
+
+========================================================================
+  SECTION C: the logical plan  (AST -> plan tree, relational order)
+========================================================================
+The planner reorganizes the AST into a DATA-FLOW tree. The relational
+order is fixed: FROM -> WHERE -> GROUP BY -> HAVING -> SELECT ->
+ORDER BY -> LIMIT. Each stage wraps the previous, so FROM is the LEAF
+and the final stage is the ROOT. Read the tree top-down as 'do this,
+feeding the result into the node above'.
+
+Sort(name ASC)
+└─ Project[out=name, age]
+   └─ Filter[WHERE](age > 25)
+      └─ Scan(table=users)
+
+Reading this plan top-down:
+  Sort(name ASC)        - order the surviving rows by name
+    Project(name, age)  - emit only these two columns
+      Filter(age > 25)  - keep rows where the predicate holds
+        Scan(users)     - read the users table (the leaf source)
+
+Note the structure is INSIDE-OUT vs the SQL text: SQL lists clauses
+left-to-right (SELECT ... FROM ... WHERE ...), but the plan nests
+FROM at the bottom because data flows UP from the source.
+
+[check] plan shape == Sort > Project > Filter > Scan :  OK
+
+========================================================================
+  SECTION D: logical vs physical plan  (WHAT vs HOW)
+========================================================================
+The LOGICAL plan says WHAT to compute in relational-algebra terms.
+The PHYSICAL plan says HOW - which algorithm implements each node.
+
+One logical operator can map to SEVERAL physical operators; the
+cost-based optimizer picks the cheapest using statistics + a cost
+model (Selinger 1979, System R; Graefe 1993, Cascades).
+
+| logical node      | physical alternatives                                  |
+|-------------------|--------------------------------------------------------|
+| LogicalScan       | SeqScan, IndexScan, IndexOnlyScan, BitmapHeapScan      |
+| LogicalFilter     | Filter (in-memory), BitmapIndexScan (pushed)           |
+| LogicalJoin       | NestedLoopJoin, HashJoin, MergeJoin                    |
+| LogicalAggregate  | HashAggregate, GroupAggregate (sorted input)           |
+| LogicalSort       | QuickSort (in-memory), ExternalMergeSort (on disk)     |
+| LogicalProject    | Result (projection), Projection in child op            |
+| LogicalLimit      | Limit (stop after N rows)                              |
+
+Worked mapping for the Section C plan:
+
+| logical plan node          | example physical pick       | why |
+|----------------------------|-----------------------------|-----|
+| Sort(name ASC)             | QuickSort                   | result set fits in work_mem |
+| Project[out=name, age]     | Result                      | just drops/renames columns |
+| Filter[WHERE](age > 25)    | Filter                      | predicate applied row-by-row after scan |
+| Scan(table=users)          | SeqScan                     | no useful index on age |
+
+KEY POINT: the LOGICAL tree is optimizer-INVARIANT (a property of the
+query); the PHYSICAL tree changes with data, indexes, and cost params.
+That is why PostgreSQL EXPLAIN (physical) and EXPLAIN's logical form
+can differ for the same SQL.
+
+[check] logical root type is stable across runs :  OK
+
+========================================================================
+  SECTION E: subquery handling  (IN (SELECT ...) -> SubqueryScan)
+========================================================================
+Input SQL:
+  SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)
+
+AST (note the InExpr holding a nested SelectStmt):
+
+└─ SelectStmt targets=[1] from where
+   ├─ SelectItem(Star(*))
+   │  └─ Star(*)
+   ├─ TableRef(users)
+   └─ InExpr(subquery)
+      ├─ Column(id)
+      └─ SelectStmt targets=[1] from
+         ├─ SelectItem(Column(user_id))
+         │  └─ Column(user_id)
+         └─ TableRef(orders)
+
+Correlation analysis: outer tables = ['users']
+  inner subquery references an outer column?  False
+
+  -> UNCORRELATED: the subquery is independent of the outer query.
+     The planner can run it ONCE, materialize the result, and reuse
+     it - typically as a Hash Semi-Join (decorrelation).
+
+Logical plan for the subquery alone (SubqueryScan wraps it):
+
+SubqueryScan(uncorrelated)
+└─ Project[out=user_id]
+   └─ Scan(table=orders)
+
+Full plan (outer query), with the IN predicate carried by Filter:
+
+Project[out=*]
+└─ Filter[WHERE](id IN (SELECT user_id FROM orders))
+   └─ Scan(table=users)
+
+Decorrelation rewrite the optimizer may apply (uncorrelated case):
+  Filter(id IN (subquery))  ==>  SemiJoin(users, subquery, on id=user_id)
+A SemiJoin emits an outer row iff it has >=1 matching inner row, then
+STOPS probing that row (no row duplication, unlike an inner join).
+
+[check] WHERE is InExpr with a SelectStmt subquery, uncorrelated :  OK
+
+========================================================================
+  SECTION F: GOLD CHECK  -  round-trip fixed point  parse -> serialize -> parse -> serialize
+========================================================================
+The AST serializer produces a CANONICAL SQL string. The gold check is a
+FIXED-POINT test: parse the canonical SQL, re-serialize, and verify the
+result is byte-identical AND the AST is structurally unchanged.
+
+  canon1 = serialize(parse(tokenize(sql)))
+  canon2 = serialize(parse(tokenize(canon1)))
+  PASS  <=>  canon1 == canon2  AND  ast_signature(AST1) == ast_signature(AST2)
+
+| name      | fixed-point | AST equal | canon1 tokens | canon2 tokens |
+|-----------|-------------|-----------|---------------|---------------|
+| simple    | OK          | yes       | 14            | 14            |
+| join      | OK          | yes       | 24            | 24            |
+| agg       | OK          | yes       | 31            | 31            |
+| subquery  | OK          | yes       | 13            | 13            |
+| not_in    | OK          | yes       | 14            | 14            |
+| distinct  | OK          | yes       | 9             | 9             |
+
+Canonical re-serialization of the demo query (original -> canonical):
+  original : SELECT name, age FROM users WHERE age > 25 ORDER BY name
+  canonical: SELECT name, age FROM users WHERE age > 25 ORDER BY name ASC
+
+Normalization the serializer applies (these are NOT losses - they make
+the form canonical, and the canonical form round-trips perfectly):
+   - bare alias  u      ->  AS u        (parser records alias either way)
+   - ORDER BY name      ->  name ASC    (ASC is the documented default)
+   - precedence parens added only when needed for an unambiguous parse
+
+[check] GOLD: all 6 queries are round-trip fixed points :  OK
+
+GOLD scalar for the .html badge (canonical demo): token count = 14
+GOLD scalar for the .html badge (canonical demo): canonical = 'SELECT name, age FROM users WHERE age > 25 ORDER BY name ASC'
+[check] token signature(canon1) == token signature(canon2) for demo :  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

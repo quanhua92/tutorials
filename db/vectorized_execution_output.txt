@@ -1,0 +1,231 @@
+vectorized_execution.py - reference impl. All numbers below feed VECTORIZED_EXECUTION.md.
+N=8  A=[3, 7, 2, 8, 6, 1, 9, 5]  B=[10, 20, 30, 40, 50, 60, 70, 80]  query: SELECT a+b, a*b FROM t WHERE a>5
+
+========================================================================
+  SECTION A: Volcano model -- one row at a time  (count every call)
+========================================================================
+Table t: 8 rows.  Query: SELECT a+b, a*b FROM t WHERE a > 5
+  a = [ 3,  7,  2,  8,  6,  1,  9,  5]
+  b = [10, 20, 30, 40, 50, 60, 70, 80]
+
+Volcano pull pipeline:  Scan.next() -> Filter.next() -> Add -> Multiply -> Project.next()
+Each operator's next() returns ONE tuple. Walk all 8 rows:
+
+  row   a   b   a>5?   calls this row                emit
+  ---  --  --  -----   ----------------------------  ----
+    0   3  10   drop   filter  (rejected)            -
+    1   7  20   pass   filter, add, multiply, project  (27, 140)
+    2   2  30   drop   filter  (rejected)            -
+    3   8  40   pass   filter, add, multiply, project  (48, 320)
+    4   6  50   pass   filter, add, multiply, project  (56, 300)
+    5   1  60   drop   filter  (rejected)            -
+    6   9  70   pass   filter, add, multiply, project  (79, 630)
+    7   5  80   drop   filter  (rejected)            -
+
+  call counts: filter=8, add=4, multiply=4, project=4
+  TOTAL per-tuple operator calls = 8+4+4+4 = 20
+
+  -> filter evaluates the predicate 8 times (once per input row).
+  -> 4/8 rows pass; each survivor then costs add+multiply+project = 3 more calls (4*3 = 12).
+  -> 20 calls, each doing work on a SINGLE value. Every call is
+     overhead: a virtual dispatch + a branch + a cache jump between
+     columns. THIS per-tuple call overhead is what Volcano pays.
+
+  (If selectivity were 100%, it would be 4 ops x 8 rows = 32 calls. The filter trims downstream work, but every survivor
+   still costs 4 calls, and the filter itself always costs 8.)
+
+========================================================================
+  SECTION B: Vectorized model -- one batch of column values per call
+========================================================================
+Same query, same 8 rows -- but each operator eats the WHOLE column
+vector (batch = 8) in one call:
+
+  STEP 1  Filter (1 call):  scan column a once, emit a SELECTION
+          VECTOR of surviving indices:
+            a       = [ 3,  7,  2,  8,  6,  1,  9,  5]
+            a>5?  = [ .  v  .  v  v  .  v  . ]
+            sel_vec = [1, 3, 4, 6]   (len 4)
+
+  STEP 2  Add (1 call):     compute a+b, but ONLY at sel indices
+            a[sel]  = [ 7,  8,  6,  9]
+            b[sel]  = [20, 40, 50, 70]
+            a+b     = [27, 48, 56, 79]
+
+  STEP 3  Multiply (1 call): compute a*b at sel indices
+            a*b     = [140, 320, 300, 630]
+
+  STEP 4  Project (1 call):  zip the two output columns into tuples
+            result  = [(27, 140), (48, 320), (56, 300), (79, 630)]
+
+  call counts: filter=1, add=1, multiply=1, project=1
+  TOTAL batch operator calls = 4
+
+  PER-OPERATOR view (the 'N / batch' rule):
+    operator    Volcano calls  Vectorized calls  reduction
+    filter                  8                 1         8x
+    add                     4                 1         4x
+    multiply                4                 1         4x
+    project                 4                 1         4x
+
+  Volcano invokes each operator once PER TUPLE (N=8 times for the
+  filter). Vectorized invokes it once PER BATCH = N/batch = 8/8 = 1 time. Each of those calls is a tight loop over
+  contiguous memory -> SIMD-friendly + cache-friendly (Sections C,D).
+
+  [check] vectorized result == volcano result?  True
+          both = [(27, 140), (48, 320), (56, 300), (79, 630)]
+
+========================================================================
+  SECTION C: SIMD -- one instruction processes a whole vector lane
+========================================================================
+A scalar ADD does 1 int32. A SIMD ADD does as many as fit in one
+register. int32 = 32 bits. lanes = register_bits / 32.
+
+  ISA        register  int32 lanes  ADD instrs for 8 values  speedup vs scalar
+  --------- --------- ------------ -------------------------- ------------------
+  scalar         32b            1                          8    1.0x (baseline)
+  NEON          128b            4                          2               4.0x
+  AVX2          256b            8                          1               8.0x
+  AVX-512       512b           16                          1               8.0x
+
+Our batch of 8 int32 values packs into ONE AVX2 register:
+  AVX2 register = 256 bits = 8 x int32 (4 bytes each)
+    [ a0 | a1 | a2 | a3 | a4 | a5 | a6 | a7 ]   <- 8 lanes, one register
+  + [ b0 | b1 | b2 | b3 | b4 | b5 | b6 | b7 ]
+  = [s0  | s1  | s2  | s3  | s4  | s5  | s6  | s7 ]   <- 1 `vpaddd` instr
+
+  scalar path: 8 separate ADD instructions (one per value).
+  AVX2  path: 1 ADD instruction (`vpaddd`) -> 8/1 = 8x fewer instructions.
+
+At a realistic vector size of 2048 values:
+  ISA        lanes  instructions   speedup
+  NEON           4           512      4.0x
+  AVX2           8           256      8.0x
+  AVX-512       16           128     16.0x
+
+  Caveat: this is INSTRUCTION-COUNT speedup. Real wall-clock speedup
+  is lower (memory-bandwidth bound, data dependencies) but the 8x
+  instruction reduction is real and compounds with the cache win (D)
+  and the call-count win (A/B). Together they are why ClickHouse and
+  DuckDB process billions of rows/second on one core.
+
+[check] AVX2 instruction speedup for 8 int32 = 8x:  OK
+
+========================================================================
+  SECTION D: cache efficiency -- columnar reads are prefetcher-friendly
+========================================================================
+Cache line = 64 bytes. The CPU loads memory in these
+chunks. Useful bytes = the column values you actually need.
+
+Wider table for this analysis: columns ['a', 'b', 'c', 'd'], each int32 (4 B). Row = 16 B.
+
+To process column 'a' for 8 rows:
+
+  layout                  bytes loaded cache lines  useful (a)  utilization
+  ---------------------- ------------- ----------- ----------- ------------
+  row store (a,b,c,d)              128           2          32        25.0%
+  column store                      64           1          32        50.0%
+
+  row store loads b, c, d for every row even though the query only
+  needs column a. 128 bytes loaded, 32 useful -> 25.0% utilization, 96 bytes WASTED.
+  column store reads a0..a7 contiguously; the loaded cache line is
+  ALL column-a data (the trailing bytes belong to the next batch of
+  'a', which the prefetcher streams in anyway). ~100% relevant.
+
+At vector size 2048 (scan column 'a' over 2048 rows):
+  row store    :  32,768 bytes =  512 cache lines, useful  8,192 -> 25.0% utilization
+  column store :   8,192 bytes =  128 cache lines, useful  8,192 -> 100% utilization
+
+  -> column store touches 4x FEWER bytes for a single-column
+     scan (32,768 -> 8,192). That is 4x = the number
+     of columns you skip. More columns in the row = bigger win.
+
+[check] row/column byte ratio == #columns (4):  OK
+
+========================================================================
+  SECTION E: selection vectors -- pass indices, not copied data
+========================================================================
+After Filter, two ways to hand survivors to Add/Multiply:
+
+  (1) MATERIALIZE: compact the surviving column values into new arrays.
+  (2) SELECTION VECTOR: keep the ORIGINAL arrays, pass a list of INDICES.
+
+Filter a > 5 on 8 rows -> 4 survivors, sel = [1, 3, 4, 6]
+
+The tiny worked example (2 output columns a, b; int32):
+  materialize a,b : copy 4 values x 2 cols x 4 B = 32 bytes
+  selection vector: 4 indices x 2 B (uint16) = 8 bytes   -> 4x less data movement
+  selection vector: 4 indices x 4 B (uint32) = 16 bytes   -> 2x less
+
+At vector size 2048, selectivity 50% -> 1024 survivors:
+  materialize a,b :  8,192 bytes copied
+  selection vector:  2,048 bytes (uint16)  -> 4x less
+
+Why indices beat copies:
+  - the filter writes a small, dense buffer of positions (branchless:
+    on match, append the index; no per-value branch mispredict cost).
+  - downstream ops GATHER from the originals only at those indices, so
+    you never touch/compute on rejected values.
+  - the SAME sel vector flows through the whole pipeline (Add, Multiply,
+    Project all reuse it) -- one filter, many consumers.
+
+  Real engines (DuckDB, ClickHouse) use uint16 sel vectors for batches
+  up to 65536, and uint32 beyond. Batch sizes are typically 1024-2048.
+
+[check] materialize/selvec byte ratio (tiny, uint16) == 4x:  OK
+
+========================================================================
+  SECTION F: late materialization -- defer the read of column b
+========================================================================
+Query: SELECT a+b, a*b FROM t WHERE a > 5  (needs column a AND b).
+
+  EARLY materialization: read ALL of column a AND ALL of column b,
+    THEN filter. You fetched b for rows that the filter later rejects.
+
+  LATE materialization: read column a, filter -> sel, THEN read column b
+    ONLY at the surviving indices. b is never fetched for rejected rows.
+
+Our 8 rows, selectivity = 4/8 = 50.0%:
+
+  strategy           column a   column b  total values   bytes
+  ---------------- ---------- ---------- ------------- -------
+  early mat.                8          8            16      64
+  late mat.                 8          4            12      48
+
+  late materialization reads 12 values vs early's 16 -> saves 4 values = 25.0% of I/O.
+
+Where it shines -- a wide table (10 columns), low selectivity:
+  selectivity 50.0%: early 10.0 col-equiv, late 5.50 col-equiv ->  45.0% I/O saved
+  selectivity 10.0%: early 10.0 col-equiv, late 1.90 col-equiv ->  81.0% I/O saved
+  selectivity  1.0%: early 10.0 col-equiv, late 1.09 col-equiv ->  89.1% I/O saved
+
+The lower the selectivity, the bigger the win: you read a TINY fraction
+of the non-predicate columns. This is impossible in a row store, where
+reading one column means reading them all (the whole row is one unit).
+
+[check] late reads 12 values vs early 16 (saves 4 = 25%):  OK
+
+========================================================================
+  GOLD CHECK -- Volcano and Vectorized agree on the result set
+========================================================================
+  Volcano    result = [(27, 140), (48, 320), (56, 300), (79, 630)]
+  Vectorized result = [(27, 140), (48, 320), (56, 300), (79, 630)]
+
+  [check] result sets identical?  True
+
+  Volcano    total calls = 20
+  Vectorized total calls = 4
+  call-count reduction   = 20/4 = 5.0x fewer
+
+  Pinned facts (recomputed in vectorized_execution.html):
+    selection vector   = [1, 3, 4, 6]
+    a[sel]             = [ 7,  8,  6,  9]
+    b[sel]             = [20, 40, 50, 70]
+    a+b[sel]           = [27, 48, 56, 79]
+    a*b[sel]           = [140, 320, 300, 630]
+    result set         = [(27, 140), (48, 320), (56, 300), (79, 630)]
+
+[check] GOLD: identical results, sel=[1,3,4,6], 20->4 calls:  OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

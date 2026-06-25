@@ -1,0 +1,263 @@
+cost_estimation.py - reference impl. All numbers feed COST_ESTIMATION.md.
+N = 10,000 rows ; seq_page_cost = 1.0 ; pure Python stdlib.
+
+
+========================================================================
+  SECTION A: statistics - the pg_statistic structure for t(x)
+========================================================================
+Table t: N = 10,000 rows, column x (integer). Tuples/page = 100 -> 100 heap pages.
+
+ANALYZE samples t and writes, for column x (catalog pg_statistic):
+
+  starelid | staattnum | stainherit | stanullfrac | stakindN ...
+  (per-column slot statistics). For x the slots are:
+
+  stanullfrac   = 0.0100   (100 nulls / 10000 rows)
+  stadistinct   = 35   (positive = absolute distinct-value count)
+
+  [slot 1] most_common_vals / most_common_freqs (MCV):
+     value |  count | frequency (count/N)
+     ------+--------+------------------
+         5 |   1500 | 0.1500
+        10 |   1000 | 0.1000
+        20 |    600 | 0.0600
+         1 |    500 | 0.0500
+        99 |    300 | 0.0300
+     ------+--------+------------------
+     sum MCV freq = 0.3900   (covers 3,900 rows)
+
+  [slot 2] histogram_bounds (10 equal-depth buckets over the non-MCV values):
+     [100, 103, 106, 109, 112, 115, 118, 121, 124, 127, 129]
+     each bucket holds ~600 rows; bounds are the bucket edges (values where the row count splits).
+     histogram covers the non-MCV, non-null rows = 0.6000 of the table.
+
+  [slot 3] correlation = rho in [-1, 1] (physical clustering).
+     rho = 1 -> column is sorted on disk (index scans read pages
+            in order, priced at seq_page_cost).
+     rho = 0 -> random order (index scans jump around, priced at
+            random_page_cost). The KEY index-scan dial (Section C).
+
+CHECK: nullfrac + sum(MCV) + tail_mass should be ~1.0:
+   0.0100 + 0.3900 + 0.6000 = 1.0000
+
+[check] probability masses sum to 1.0: OK
+
+========================================================================
+  SECTION B: selectivity estimation (eqsel, rangesel)
+========================================================================
+Rule: cardinality = selectivity * N.
+
+(1) WHERE x = 5  -> 5 IS a most-common value -> use its frequency.
+    eqsel(x=5) = mcv_freq(5) = 0.1500
+    estimated rows = 0.1500 * 10000 = 1500
+    actual rows    = 1500
+    [check] estimate == actual: OK
+
+(2) WHERE x = 100 -> 100 is NOT in MCV -> spread the remaining
+    non-null, non-MCV mass evenly across the remaining distinct values.
+    remaining mass = 1 - sum(mcv) - nullfrac = 1 - 0.3900 - 0.0100 = 0.6000
+    remaining distinct = ndistinct - n_mcv = 35 - 5 = 30
+    eqsel(x=100) = 0.6000 / 30 = 0.0200
+    estimated rows = 0.0200 * 10000 = 200
+    actual rows    = 200  (value 100 appears 200x)
+    [check] estimate == actual: OK
+
+(3) WHERE x = 537 -> not in MCV, not even in the table -> same
+    rare-equality formula (the optimizer cannot tell 'absent' from 'rare').
+    eqsel(x=537) = 0.6000 / 30 = 0.0200
+    estimated rows = 200.0   actual rows = 0
+    -> estimate is nonzero even though no row matches. This is the
+       classic source of cardinality mis-estimation (a value unknown
+       to ANALYZE is assumed 'as common as the average rare value').
+
+(4) WHERE x > 115 -> use the histogram. 115 is a bucket edge.
+    histogram_bounds = [100, 103, 106, 109, 112, 115, 118, 121, 124, 127, 129]
+    115 sits at bucket edge b[5]. Buckets fully to the right: buckets 6..9 = 4 buckets.
+    bucket 5 [115,118): fraction > 115 = (118-115)/(118-115) = 1.0
+    hist_frac = (4 full + 1.0) / 10 = 0.5
+    mcv_part  = sum(MCV freqs for MCV > 115) = 0 (MCV = [5, 10, 20, 1, 99], all < 115)
+    rangesel(x>115) = 0 + 0.5 * 0.6000 = 0.3000
+    estimated rows = 0.3000 * 10000 = 3000
+    actual rows    = 2800  (values 116..129 = 14 values * 200)
+    -> the estimate (3000) slightly OVERSHOOTS actual (2800):
+       linear interpolation prices bucket 5 as fully matched, but the
+       200 rows equal to the edge value 115 should not be.
+       Histograms are an APPROXIMATION; MCV-equality is exact.
+
+(5) WHERE x > 100 -> whole histogram lies to the right.
+    100 <= bounds[0] -> hist_frac = 1.0, mcv_part = 0
+    rangesel(x>100) = 1.0 * 0.6000 = 0.6000
+    estimated rows = 6000   actual rows = 5800
+    -> again an approximation (the 200 rows equal to
+       100 are excluded by '>', but the edge bucket counts them in).
+
+========================================================================
+  SECTION C: the cost model - seqscan vs index scan
+========================================================================
+Cost constants (cost units; seq_page_cost = 1.0 by definition):
+  seq_page_cost   = 1.0
+  random_page_cost= 4.0   (a random fetch is 4x a sequential one)
+  cpu_tuple_cost  = 0.01
+  cpu_index_cost  = 0.005
+
+(1) SeqScan of t (10,000 rows, 100 pages):
+    cost = seq_page_cost * P + cpu_tuple_cost * N
+         = 1.0 * 100 + 0.01 * 10000
+         = 100 + 100 = 200.0
+
+    This is FIXED regardless of the predicate: a seqscan always reads
+    every page. So the seqscan cost is the bar every index scan must
+    beat.
+
+(2) Index Scan for WHERE x = 5 (R = 1500 matching rows), rho = 0:
+    matches scattered -> pages_scattered = P*(1-(1-1/P)^R)
+        = 100*(1-(1-1/100)^1500) = 100.0 pages (>= P -> capped at 100)
+    io = random_page_cost * 100 = 400
+    cpu = (cpu_index_cost + cpu_tuple_cost) * R = 0.015 * 1500 = 22.5
+    index scan cost (rho=0) = 422.5   vs seqscan 200.0 -> SEQSCAN wins (15% selectivity is too coarse for an uncorrelated index)
+
+(3) Same query, but the index is clustered (rho = 1):
+    matches clustered -> pages_clustered = ceil(R/tpp) = ceil(1500/100) = 15 pages
+    io = seq_page_cost * 15 = 15  (sequential!)
+    index scan cost (rho=1) = 37.5   vs seqscan 200.0 -> INDEX wins
+    -> correlation flips the verdict: a clustered index makes 1500
+       matches cheap (1 sequential page each); a scattered one pays 4x.
+
+(4) Break-even: at what R does the UNCORRELATED index beat seqscan?
+    cost_indexscan(R, rho=0) < 200
+
+    | selectivity | R (rows) | pages_scattered | index cost | winner  |
+    |-------------|----------|-----------------|------------|---------|
+    |      0.0001 |        1 |             1.0 |        4.0 | index   |
+    |      0.0010 |       10 |             9.6 |       38.4 | index   |
+    |      0.0050 |       50 |            39.5 |      158.7 | index   |
+    |      0.0070 |       70 |            50.5 |      203.1 | SEQSCAN |
+    |      0.0100 |      100 |           100.0 |      401.5 | SEQSCAN |
+    |      0.0500 |      500 |           100.0 |      407.5 | SEQSCAN |
+    |      0.1500 |     1500 |           100.0 |      422.5 | SEQSCAN |
+    |      1.0000 |    10000 |           100.0 |      550.0 | SEQSCAN |
+
+    -> uncorrelated index wins for R <= ~68 (selectivity ~0.007, ~0.7%).
+    -> a CLUSTERED index (rho=1) wins until R ~= 8000 (80%+); correlation is the single biggest
+       lever on index-scan cost. (The 'index wins below 5%' rule of
+       thumb assumes partial correlation.)
+
+[check] seqscan=200.0, indexscan(1500,rho=0)=422.5, indexscan(1500,rho=1)=37.5: OK
+
+========================================================================
+  SECTION D: join cost - nested loop vs hash vs merge
+========================================================================
+Join: ORDERS(10,000 rows, 100 pages) ⋈ CUSTOMERS(1,000 rows, 10 pages) on customer_id.
+
+  seqscan(orders)   = 200.0
+  seqscan(customers)= 20.0
+  join selectivity  = 1/max(1000,1000) = 0.001
+  join cardinality  = 10000*1000*0.001 = 10,000 rows
+
+  point index probe on customers = random_page_cost + cpu_index + cpu_tuple = 4.015
+
+(1) NESTED LOOP  cost = outer + outer_rows * inner_per_row
+    ORDERS outer: 200 + 10000 * 4.015 = 40350
+    CUSTOMERS outer: 20 + 1000 * 4.015 = 4035   <- put the SMALL table outside
+
+    best nested loop = 4035 (CUSTOMERS outer). NL cost scales with outer_rows * inner_probe, so
+    it blows up on a big outer table.
+
+(2) HASH JOIN  cost = build(smaller) + probe(larger) + output
+    build (customers): 20 + 0.01*1000 = 30
+    probe (orders)  : 200 + 0.01*10000 = 300
+    output          : 0.01*10000 = 100
+    hash join = 30 + 300 + 100 = 430
+    -> each side is scanned ONCE. Cost does NOT multiply. This is why
+       hash join destroys nested loop on large inputs.
+
+(3) MERGE JOIN  cost = sort(both) + merge   (if inputs not pre-sorted)
+    sort(orders)   = 2193
+    sort(customers)= 169
+    merge step     = 430
+    merge join (with explicit sort) = 2793
+    -> if both sides already have sorted indexes, skip the sorts and
+       merge join drops to ~430 (competitive with hash).
+
+COMPARISON (lower is cheaper):
+  | plan                         |   cost | winner?           |
+  |------------------------------|--------|-------------------|
+  | nested loop (orders outer)   |  40350 | (terrible)        |
+  | nested loop (customers outer)|   4035 |                   |
+  | merge join (with sort)       |   2793 |                   |
+  | hash join                    |    430 | WINNER            |
+
+  Hash join wins: both sides scanned once, no per-row random probe,
+  no sort. (PostgreSQL also has a 'parallel' / 'hybrid' hash join.)
+
+[check] hash join < merge+sort < best nested loop: OK
+
+========================================================================
+  SECTION E: plan enumeration - DP over join orders (Selinger)
+========================================================================
+Three tables, chain join  A(10000) -- B(1000) -- C(100):
+  base scan costs: A=200, B=20, C=2
+  predicates: A-B (ndistinct 10000), B-C (ndistinct 1000); A-C has NO predicate (cartesian).
+
+(1) BRUTE FORCE: evaluate all 3! = 6 left-deep orderings.
+
+  | order      | step 1            | step 2            |  total cost |
+  |------------|-------------------|-------------------|-------------|
+  | A->B->C       | (A⋈B) = 1000    (  340)| (⋈C) = 100     (  354)|             |
+  | A->C->B       | (A⋈C) x 1000000 (10303)| (⋈B) = 1000000 (30333)| CARTESIAN   |
+  | B->A->C       | (B⋈A) = 1000    (  340)| (⋈C) = 100     (  354)|             |
+  | B->C->A       | (B⋈C) = 100     (   34)| (⋈A) = 100     (  336)|             |
+  | C->A->B       | (C⋈A) x 1000000 (10303)| (⋈B) = 1000000 (30333)| CARTESIAN   |
+  | C->B->A       | (C⋈B) = 100     (   34)| (⋈A) = 100     (  336)|             |
+
+  cheapest brute-force order: B->C->A  cost = 336
+
+(2) DYNAMIC PROGRAMMING over subsets (what real optimizers do):
+
+  Level 1 (base relations):
+    {A} = 200  (10000 rows)
+    {B} = 20  (1000 rows)
+    {C} = 2  (100 rows)
+
+  Level 2 (pairs):
+    {A,B} = 340  (1,000 rows)
+    {B,C} = 34  (100 rows)
+    {A,C} = 10303  (1,000,000 rows)  <- CARTESIAN (no predicate), pruned later
+
+  Level 3 ({A,B,C}) - try each 2-subset joined with the leftover:
+    ({AB}) join C: 340 -> 354  (100 rows)
+    ({AC}) join B: 10303 -> 30333  (1,000,000 rows)
+    ({BC}) join A: 34 -> 336  (100 rows)
+
+  DP cheapest: ({BC}) join A  cost = 336
+
+(3) WHY DP? It scales far better than brute force:
+  | tables n | brute force (n!) | DP subsets (~3^n) |
+  |----------|------------------|-------------------|
+  |        3 |                6 |                27 |
+  |        5 |              120 |               243 |
+  |        8 |           40,320 |             6,561 |
+  |       10 |        3,628,800 |            59,049 |
+  |       15 | 1,307,674,368,000 |        14,348,907 |
+
+  At n=10 brute force is 3.6M orderings; DP is ~59K subsets. At n=15
+  brute force is hopeless; DP still finishes. PostgreSQL also caps DP
+  with geqo_threshold (default 12): above it, switches to a genetic
+  search. DP also prunes cartesian sub-joins (no predicate) early.
+
+[check] DP cheapest (336) == brute-force cheapest (336): OK
+
+========================================================================
+  GOLD-CHECK SUMMARY (pinned for cost_estimation.html)
+========================================================================
+  eqsel(x=5)*N   = 1500   (actual 1500)
+  eqsel(x=100)*N = 200  (actual 200)
+  seqscan(t)     = 200.0
+  indexscan(R=1500, rho=0) = 422.5
+  indexscan(R=1500, rho=1) = 37.5
+
+[check] all GOLD values reproduce: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

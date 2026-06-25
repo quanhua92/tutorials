@@ -1,0 +1,377 @@
+two_phase_commit.py - reference impl. All numbers feed TWO_PHASE_COMMIT.md.
+pure Python stdlib. States: INITIAL/PREPARED/COMMITTED/ABORTED.
+Run: python3 two_phase_commit.py
+
+========================================================================
+  SECTION A: happy path - PREPARE (all YES) -> COMMIT
+========================================================================
+The coordinator runs phase 1 (PREPARE) against 3 participants. Each
+fsyncs a PREPARE record and votes YES. With all votes YES, the
+coordinator hits the GLOBAL COMMIT POINT, then phase 2 (COMMIT).
+
+Phase 1 - PREPARE:
+  votes received = {'P1': 'YES', 'P2': 'YES', 'P3': 'YES'}
+
+Decision (global commit point):
+  all YES -> decision = COMMIT
+
+Phase 2 - COMMIT:
+
+  SECTION A message diagram  (21 events, t=0..5)
+  --------------------------------------------------------------------
+  t=0  COORD  broadcast PREPARE   (annotation)
+  t=0  COORD ──PREPARE──► P1
+  t=0  COORD ──PREPARE──► P2
+  t=0  COORD ──PREPARE──► P3
+  t=1  P1  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P1 ──VOTE YES──► COORD
+  t=1  P2  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P2 ──VOTE YES──► COORD
+  t=1  P3  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P3 ──VOTE YES──► COORD
+  t=2  COORD  decision=COMMIT; append COMMIT to coord-WAL, fsync  <-- GLOBAL COMMIT POINT
+  t=3  COORD  broadcast COMMIT   (annotation)
+  t=3  COORD ──COMMIT──► P1
+  t=3  COORD ──COMMIT──► P2
+  t=3  COORD ──COMMIT──► P3
+  t=4  P1  [WAL] append COMMIT, fsync  -> apply
+  t=4  P1 ──ACK──► COORD
+  t=4  P2  [WAL] append COMMIT, fsync  -> apply
+  t=4  P2 ──ACK──► COORD
+  t=4  P3  [WAL] append COMMIT, fsync  -> apply
+  t=4  P3 ──ACK──► COORD
+
+  | node  | state     | WAL records (durable)             |
+  |-------|-----------|----------------------------------|
+  | P1    | COMMITTED | PREPARE,COMMIT                   |
+  | P2    | COMMITTED | PREPARE,COMMIT                   |
+  | P3    | COMMITTED | PREPARE,COMMIT                   |
+  | COORD | decision=COMMIT  | COMMIT                           |
+
+Message accounting: 3 PREPARE out + 3 VOTE back + 3 COMMIT out + 3 ACK back = 12 messages (= 4*N for N=3 participants).
+[check] message count = 12 (expected 12): OK
+
+  [check] section A happy path: final states = ['COMMITTED', 'COMMITTED', 'COMMITTED'] -> all COMMITTED: OK
+
+========================================================================
+  SECTION B: failure case - P2 votes NO -> global ROLLBACK
+========================================================================
+The atomicity rule: a SINGLE 'no' (or timeout) forces a global abort.
+P2 is configured to vote NO. Even though P1 and P3 vote YES, the
+coordinator must decide ABORT and tell everyone to roll back.
+
+Phase 1 - PREPARE:
+  votes received = {'P1': 'YES', 'P2': 'NO', 'P3': 'YES'}
+
+Decision:
+  not all YES -> decision = ABORT
+
+Phase 2 - ROLLBACK:
+
+  SECTION B message diagram  (21 events, t=0..5)
+  --------------------------------------------------------------------
+  t=0  COORD  broadcast PREPARE   (annotation)
+  t=0  COORD ──PREPARE──► P1
+  t=0  COORD ──PREPARE──► P2
+  t=0  COORD ──PREPARE──► P3
+  t=1  P1  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P1 ──VOTE YES──► COORD
+  t=1  P2  [WAL] append ABORT, fsync
+  t=1  P2 ──VOTE NO──► COORD
+  t=1  P3  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P3 ──VOTE YES──► COORD
+  t=2  COORD  decision=ABORT; append ABORT to coord-WAL, fsync  <-- GLOBAL ABORT POINT
+  t=3  COORD  broadcast ROLLBACK   (annotation)
+  t=3  COORD ──ROLLBACK──► P1
+  t=3  COORD ──ROLLBACK──► P2
+  t=3  COORD ──ROLLBACK──► P3
+  t=4  P1  [WAL] append ABORT, fsync  -> undo
+  t=4  P1 ──ACK──► COORD
+  t=4  P2  [WAL] append ABORT, fsync  -> undo
+  t=4  P2 ──ACK──► COORD
+  t=4  P3  [WAL] append ABORT, fsync  -> undo
+  t=4  P3 ──ACK──► COORD
+
+  | node  | state     | WAL records (durable)             |
+  |-------|-----------|----------------------------------|
+  | P1    | ABORTED   | PREPARE,ABORT                    |
+  | P2    | ABORTED   | ABORT,ABORT                      |
+  | P3    | ABORTED   | PREPARE,ABORT                    |
+  | COORD | decision=ABORT   | ABORT                            |
+
+Note: P2 (voted NO) already self-aborted in phase 1 (its ABORT is in
+its WAL). In phase 2 it gets ROLLBACK too and stays ABORTED. P1/P3
+voted YES (PREPARE in WAL) but are told ROLLBACK -> they abort.
+
+[check] the lone NO propagated to a global abort: OK
+
+  [check] section B abort path: final states = ['ABORTED', 'ABORTED', 'ABORTED'] -> all ABORTED: OK
+
+========================================================================
+  SECTION C: coordinator crash after PREPARE -> participants BLOCKED
+========================================================================
+THE CENTRAL WEAKNESS. The coordinator crashes AFTER collecting all
+YES votes but BEFORE writing/sending the COMMIT decision. The
+participants have each fsync'd PREPARE and are now PREPARED -- they
+have PROMISED to commit but do not KNOW the global decision. With the
+coordinator down they CANNOT proceed either way: committing would
+break atomicity if the (lost) decision was abort; aborting would
+break it if the decision was commit. So they BLOCK, holding locks,
+until the coordinator recovers.
+
+Phase 1 complete: votes = {'P1': 'YES', 'P2': 'YES', 'P3': 'YES'}
+All participants are PREPARED (PREPARE is durable in every WAL).
+
+Coordinator CRASHES before reaching the global commit point.
+(Its decision was in volatile memory; nothing durable was written.)
+
+Every prepared participant transitions to BLOCKED.
+
+>>> BLOCKING WINDOW: 3 ticks pass with all participants frozen,
+    locks held, transaction in limbo. Other txns waiting on those
+    locks are also stuck. THIS is why classic 2PC is 'blocking'.
+
+Coordinator recovers. Its WAL has NO decision record -> the crash
+happened before the commit point -> PRESUMED ABORT is safe.
+Coordinator broadcasts ROLLBACK:
+
+  SECTION C message diagram (blocking + recovery)  (34 events, t=0..10)
+  --------------------------------------------------------------------
+  t=0  COORD  broadcast PREPARE   (annotation)
+  t=0  COORD ──PREPARE──► P1
+  t=0  COORD ──PREPARE──► P2
+  t=0  COORD ──PREPARE──► P3
+  t=1  P1  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P1 ──VOTE YES──► COORD
+  t=1  P2  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P2 ──VOTE YES──► COORD
+  t=1  P3  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P3 ──VOTE YES──► COORD
+  t=3  COORD  *** COORD CRASH
+  t=4  P1  PREPARED but coordinator DOWN -> BLOCKED (was PREPARED); holding locks, cannot decide
+  t=4  P2  PREPARED but coordinator DOWN -> BLOCKED (was PREPARED); holding locks, cannot decide
+  t=4  P3  PREPARED but coordinator DOWN -> BLOCKED (was PREPARED); holding locks, cannot decide
+  t=5  P1  blocked tick 1: still holding locks
+  t=5  P2  blocked tick 1: still holding locks
+  t=5  P3  blocked tick 1: still holding locks
+  t=6  P1  blocked tick 2: still holding locks
+  t=6  P2  blocked tick 2: still holding locks
+  t=6  P3  blocked tick 2: still holding locks
+  t=7  P1  blocked tick 3: still holding locks
+  t=7  P2  blocked tick 3: still holding locks
+  t=7  P3  blocked tick 3: still holding locks
+  t=8  COORD  coord recovers
+  t=8  COORD  no durable COMMIT in coord-WAL -> decide ABORT (presumed abort), fsync
+  t=9  COORD ──ROLLBACK──► P1
+  t=9  COORD ──ROLLBACK──► P2
+  t=9  COORD ──ROLLBACK──► P3
+  t=10 P1  [WAL] append ABORT, fsync  -> undo
+  t=10 P1 ──ACK──► COORD
+  t=10 P2  [WAL] append ABORT, fsync  -> undo
+  t=10 P2 ──ACK──► COORD
+  t=10 P3  [WAL] append ABORT, fsync  -> undo
+  t=10 P3 ──ACK──► COORD
+
+  | node  | state     | WAL records (durable)             |
+  |-------|-----------|----------------------------------|
+  | P1    | ABORTED   | PREPARE,ABORT                    |
+  | P2    | ABORTED   | PREPARE,ABORT                    |
+  | P3    | ABORTED   | PREPARE,ABORT                    |
+  | COORD | decision=ABORT   | ABORT                            |
+
+The blocking window was 3 ticks (t=5..7). During it the
+transaction made zero progress. On recovery the coordinator could
+not have decided COMMIT safely (that would require a durable record),
+so PRESUMED ABORT resolves it. Atomicity is preserved: all ABORTED.
+
+  [check] section C coordinator-crash recovery: final states = ['ABORTED', 'ABORTED', 'ABORTED'] -> all ABORTED: OK
+
+========================================================================
+  SECTION D: participant crash after PREPARE -> recovery transaction
+========================================================================
+P3 votes YES (PREPARE durable), then CRASHES. The coordinator has all
+YES -> hits the global COMMIT POINT -> sends COMMIT. P1/P2 commit;
+P3 is down. When P3 restarts it finds PREPARE in its WAL but no final
+decision -> it is UNCERTAIN. It runs a RECOVERY TRANSACTION: asks the
+coordinator 'did we commit or abort?' and applies that answer.
+
+Phase 1: votes = {'P1': 'YES', 'P2': 'YES', 'P3': 'YES'}
+
+P3 CRASHES after voting YES. Its PREPARE record survives on disk.
+
+Coordinator: all votes were YES -> decision = COMMIT (GLOBAL COMMIT POINT).
+
+Phase 2 - COMMIT (P3 is down, will miss it):
+  P1, P2 -> COMMITTED. P3 -> still DOWN (no COMMIT applied yet).
+
+
+P3 recovers. WAL replay: PREPARE present, no COMMIT/ABORT -> UNCERTAIN.
+P3 cannot guess; it MUST ask the coordinator (recovery transaction).
+
+
+  SECTION D message diagram (participant crash + recovery)  (25 events, t=0..8)
+  --------------------------------------------------------------------
+  t=0  COORD  broadcast PREPARE   (annotation)
+  t=0  COORD ──PREPARE──► P1
+  t=0  COORD ──PREPARE──► P2
+  t=0  COORD ──PREPARE──► P3
+  t=1  P1  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P1 ──VOTE YES──► COORD
+  t=1  P2  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P2 ──VOTE YES──► COORD
+  t=1  P3  [WAL] append PREPARE, fsync  <-- durable promise
+  t=1  P3 ──VOTE YES──► COORD
+  t=3  P3  *** CRASH: in-memory state lost, WAL survives
+  t=3  COORD  decision=COMMIT; append COMMIT to coord-WAL, fsync  <-- GLOBAL COMMIT POINT
+  t=4  COORD  broadcast COMMIT   (annotation)
+  t=4  COORD ──COMMIT──► P1
+  t=4  COORD ──COMMIT──► P2
+  t=5  P1  [WAL] append COMMIT, fsync  -> apply
+  t=5  P1 ──ACK──► COORD
+  t=5  P2  [WAL] append COMMIT, fsync  -> apply
+  t=5  P2 ──ACK──► COORD
+  t=6  P3  recover: replay WAL
+  t=6  P3  WAL has PREPARE only -> UNCERTAIN
+  t=6  P3 ──DECISION_REQ (did we commit?)──► COORD
+  t=7  COORD ──DECISION=COMMIT──► P3
+  t=8  P3  [WAL] append COMMIT, fsync  -> apply
+  t=8  P3 ──ACK──► COORD
+
+  | node  | state     | WAL records (durable)             |
+  |-------|-----------|----------------------------------|
+  | P1    | COMMITTED | PREPARE,COMMIT                   |
+  | P2    | COMMITTED | PREPARE,COMMIT                   |
+  | P3    | COMMITTED | PREPARE,COMMIT                   |
+  | COORD | decision=COMMIT  | COMMIT                           |
+
+Key points:
+  * The GLOBAL COMMIT POINT (coord's durable COMMIT) happened BEFORE
+    P3 recovered, so the transaction was already 'committed' globally
+    even while P3 was down. P3's recovery just catches it up.
+  * P3 could honour the commit ONLY because its PREPARE record was
+    durable (Section E). Without it, restart would lose the promise.
+
+  [check] section D participant-crash recovery: final states = ['COMMITTED', 'COMMITTED', 'COMMITTED'] -> all COMMITTED: OK
+
+========================================================================
+  SECTION E: PREPARE durability - fsync BEFORE voting YES
+========================================================================
+WHY the fsync matters. A YES vote is a DURABLE promise: 'I have done
+my local work and I WILL commit if told to.' If the participant
+crashes after voting YES, it must STILL be able to commit on restart.
+That is only possible if the PREPARE record (and the work it guards)
+survived the crash -- hence append-PREPARE then fsync THEN vote.
+
+CORRECT participant: append PREPARE, fsync, THEN vote YES.
+  -> state=PREPARED, WAL=[('PREPARE', 0)], (PREPARE is durable)
+
+Now crash AFTER voting YES, then recover:
+  -> recovered state=PREPARED. WAL has PREPARE -> UNCERTAIN;
+     P_good will ask the coordinator and can correctly COMMIT if told
+     to. The durable PREPARE made the promise recoverable.
+
+--------------------------------------------------------------------
+FAULTY participant: votes YES WITHOUT fsync'ing PREPARE, then crashes.
+  -> told the coordinator YES, but WAL=[] (NO PREPARE!).
+
+  -> recovered state=ABORTED. WAL is EMPTY -> the participant
+     has NO memory of its YES. Under presumed-abort it self-aborts.
+     But the coordinator may have recorded a global COMMIT (because it
+     saw YES from everyone) and told others to commit. Result: some
+     nodes COMMITTED while P_bad ABORTED -> ATOMICITY BROKEN. This is
+     exactly the failure the fsync-before-vote rule prevents.
+
+[check] correct participant: PREPARE in WAL after vote => YES: OK
+[check] faulty participant: no PREPARE in WAL => promise lost => UNSAFE: OK
+[check] correct participant recovers to PREPARED (uncertain): state=PREPARED: OK
+
+========================================================================
+  SECTION F: limitations of 2PC and the alternatives
+========================================================================
+2PC gives you ACID atomicity across nodes. The price:
+
+| weakness        | why                                                                                  |
+|-----------------|--------------------------------------------------------------------------------------|
+| BLOCKING        | coordinator crash while participants are PREPARED freezes them all (Section C).      |
+|                 | They hold locks and wait; no timeout can safely unblock them.                        |
+| SLOW            | multiple synchronized round trips + fsyncs on the critical path (see latency below). |
+| COORD IS SPOF   | while the coordinator is down, in-doubt transactions stall.                         |
+| OPERATIVELY     | ops must keep the coordinator HA; participant recovery logic is subtle (Section D).  |
+| COMPLEX         |                                                                                      |
+| CASCADED        | prepared participants hold locks -> other txns queue -> whole cluster can stall.     |
+| STALL           |                                                                                      |
+
+LATENCY MODEL (critical path of one transaction, N participants):
+  prepare phase : 1 RTT  (PREPARE out, VOTE back); the N participants
+                  fsync PREPARE IN PARALLEL -> 1 fsync on critical path
+  decision      : coordinator fsyncs the decision record -> 1 fsync
+  commit phase  : 1 RTT  (COMMIT out, ACK back); the N participants
+                  fsync COMMIT IN PARALLEL -> 1 fsync on critical path
+  => latency = 2*RTT + 3*fsync_latency        (parallel fsyncs)
+  total fsync OPERATIONS (load) = 2*N + 1     (N grows load, not latency)
+
+  with RTT=1.0 ms, fsync=10.0 ms:
+  | N | round trips | critical-path fsyncs | total fsync ops (2N+1) | messages (4N) | 2PC latency (ms) |
+  |---|-------------|----------------------|------------------------|--------------|------------------|
+  | 2 | 2           | 3                    | 5                      | 8            | 32.0             |
+  | 3 | 2           | 3                    | 7                      | 12           | 32.0             |
+  | 5 | 2           | 3                    | 11                     | 20           | 32.0             |
+  | 10 | 2           | 3                    | 21                     | 40           | 32.0             |
+
+  The critical-path LATENCY stays constant as N grows (the participant
+  fsyncs run in parallel). What grows with N is the MESSAGE count (4N)
+  and the total fsync WORK (2N+1), i.e. load on the coordinator/disk --
+  which hurts THROUGHPUT, not single-txn latency. The 3 serialized fsyncs
+  dominate: 32 ms vs 1 RTT = 1.0 ms. Compare a single-node
+  commit (1 fsync = 10 ms): 2PC@N=3 is 3.2x slower.
+
+ALTERNATIVES (trade atomicity/latency for availability/scalability):
+| approach               | atomic across nodes? | blocking? | latency        | when to use                  |
+|------------------------|----------------------|-----------|----------------|------------------------------|
+| 2PC                    | YES (strong)         | YES       | high (3 fsync) | few RM, need ACID (XA/JTA)  |
+| 3PC (non-blocking)     | YES (no coord crash) | NO*       | higher (3 RTT) | rare; fails under partition |
+| Saga (Garcia-Molina)   | NO (eventual)        | NO        | low            | long txns, microservices    |
+| Eventual consistency   | NO                   | NO        | lowest         | large scale, AP systems     |
+  * 3PC only escapes blocking if the coordinator alone fails; a network
+    partition can still violate atomicity (Skeen 1981), so 3PC is rarely used.
+
+[check] 2PC latency @N=3 = 32.0 ms (= 2*1.0 + 3*10.0): OK
+[check] single-node commit baseline = 10.0 ms (1 fsync): OK
+
+========================================================================
+  GOLD (pinned for two_phase_commit.html) - atomicity across all scenarios
+========================================================================
+THE GOLD INVARIANT of 2PC: no matter which node crashes and when,
+after recovery ALL participants reach the SAME final state -- either
+all COMMITTED or all ABORTED. We re-run every crash scenario in a
+single deterministic harness and assert the invariant each time.
+
+| scenario                              | P1         | P2         | P3         | msgs | consistent? |
+|---------------------------------------|------------|------------|------------|------|-------------|
+| A happy path (all YES)                | COMMITTED  | COMMITTED  | COMMITTED  | 12   | all COMMITTED |
+| B P2 votes NO                         | ABORTED    | ABORTED    | ABORTED    | 12   | all ABORTED |
+| C coordinator crashes (blocking)      | ABORTED    | ABORTED    | ABORTED    | 12   | all ABORTED |
+| D P3 crashes after PREPARE            | COMMITTED  | COMMITTED  | COMMITTED  | 13   | all COMMITTED |
+
+Every scenario ends with all three participants in ONE shared final
+state. That is atomicity -- the whole point of 2PC.
+
+--- GOLD values (pinned for two_phase_commit.html) ---
+  A happy path (all YES)                -> finals=['COMMITTED', 'COMMITTED', 'COMMITTED'], msgs=12
+  B P2 votes NO                         -> finals=['ABORTED', 'ABORTED', 'ABORTED'], msgs=12
+  C coordinator crashes (blocking)      -> finals=['ABORTED', 'ABORTED', 'ABORTED'], msgs=12
+  D P3 crashes after PREPARE            -> finals=['COMMITTED', 'COMMITTED', 'COMMITTED'], msgs=13
+  happy-path final state            : COMMITTED (all three)
+  abort-path final state            : ABORTED   (all three)
+  coord-crash final state           : ABORTED   (all three, after blocking)
+  participant-crash final state     : COMMITTED (all three, after recovery)
+  message count, happy path, N=3    : 12  (= 4*N)
+  latency formula                   : 2*RTT + 3*fsync (parallel participants)
+  latency @N=3, RTT=1, fsync=10.0 : 32.0 ms
+  single-node commit baseline       : 10.0 ms (1 fsync)
+
+[check] GOLD: all 4 scenarios atomically consistent: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

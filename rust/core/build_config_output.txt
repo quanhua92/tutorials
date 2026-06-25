@@ -1,0 +1,135 @@
+build_config.rs — Phase 6 bundle.
+Every value below is a compile-time constant baked in by rustc/Cargo.
+
+
+======================================================================
+SECTION A — cfg!(): conditional compilation -> a `bool` literal
+======================================================================
+  cfg!(debug_assertions)       = true   (debug build via `cargo run`)
+[check] cfg!(debug_assertions) is true for a debug (`cargo run`) build: OK
+  cfg!(target_os = "macos")   = true
+  cfg!(target_os = "linux")   = false
+[check] exactly one of macos/linux target_os holds on a single host: OK
+[check] this machine is cfg!(target_os = "macos"): OK
+  cfg!(unix)                   = true
+  cfg!(windows)                = false
+[check] cfg!(unix) and cfg!(windows) are mutually exclusive: OK
+  NOTE: cfg!() expands to a bool and KEEPS all code;
+        #[cfg(...)] is an attribute that REMOVES items when false.
+
+======================================================================
+SECTION B — env! / option_env!: read the env at COMPILE time
+======================================================================
+  env!("CARGO_PKG_NAME")    = "core"
+  env!("CARGO_PKG_VERSION") = "0.0.0"
+  env!("CARGO_CRATE_NAME")  = "build_config"
+[check] env!("CARGO_PKG_NAME") == "core" (the member PACKAGE name): OK
+[check] env!("CARGO_PKG_VERSION") is non-empty (set by Cargo): OK
+[check] env!("CARGO_PKG_VERSION") == "0.0.0" (workspace version): OK
+[check] env!("CARGO_CRATE_NAME") == "build_config": the BIN crate, NOT the package: OK
+[check] CARGO_PKG_NAME ("core") != CARGO_CRATE_NAME ("build_config"): package vs target crate: OK
+  option_env!("HOME")                       = <Some>
+  option_env!("BUILD_CONFIG_DEFINITELY_UNSET...") = <None>
+  option_env!("OUT_DIR")                    = <None>
+[check] option_env!("HOME") is Some on a typical Unix build host (presence only): OK
+[check] option_env! on an unset var returns None (never a compile error): OK
+[check] option_env!("OUT_DIR") is None: `core` has NO build.rs (OUT_DIR is build-script-only): OK
+
+======================================================================
+SECTION C — compile_error!: fail the build on misconfiguration (DOCUMENTED)
+======================================================================
+  // An UNCONDITIONAL compile_error! always fails the build:
+  //   compile_error!("boom");   // <- never ship this in a runnable file
+
+  // The idiomatic cfg-GUARDED form (verbatim from the std docs):
+  //   #[cfg(not(any(feature = "foo", feature = "bar")))]
+  //   compile_error!("Either feature \"foo\" or \"bar\" must be enabled.");
+
+  // Single-feature guard (the brief's pattern):
+  //   #[cfg(not(feature = "x"))]
+  //   compile_error!("enable feature `x`");
+
+  // How it behaves:
+  //   - if the cfg predicate is FALSE -> the item is removed (no error).
+  //   - if the cfg predicate is TRUE  -> compilation stops with the message.
+  //   - it is the compiler-level form of panic!, emitted during compilation.
+[check] a contradictory cfg predicate (all(unix, windows)) is always false: OK
+
+======================================================================
+SECTION D — target info via cfg: arch / os / vendor / width / endian
+======================================================================
+  this target_os = "macos"
+[check] the current target_os is in the Reference's enumerated set: OK
+  cfg!(target_arch         = "aarch64") = true
+  cfg!(target_vendor       = "apple")   = true
+  cfg!(target_pointer_width= "64")      = true
+  cfg!(target_endian       = "little")  = true
+  cfg!(target_family       = "unix")    = true
+[check] cfg!(target_arch = "aarch64") on this Apple Silicon host: OK
+[check] cfg!(target_vendor = "apple") on this host: OK
+[check] cfg!(target_pointer_width = "64") on this 64-bit host: OK
+[check] cfg!(target_endian = "little") on this host: OK
+[check] cfg!(target_family = "unix") on this host: OK
+[check] on macOS, target_env is the empty string (only set when needed to disambiguate): OK
+
+======================================================================
+SECTION E — build.rs workflow (DOCUMENTED) + the concat! splice (RUN)
+======================================================================
+  // ── build.rs (lives at the package root; run BEFORE the crate) ──
+  // fn main() {
+  //     // Cargo sets CARGO_PKG_VERSION, OUT_DIR, TARGET, HOST, ... for
+  //     // the build script. Read the version, bake it into generated code.
+  //     let version = env!("CARGO_PKG_VERSION");
+  //     let out_dir = env!("OUT_DIR");
+  //     let dest = std::path::Path::new(&out_dir).join("generated.rs");
+  //     let generated = format!("pub const VERSION: &str = \"{version}\";\n");
+  //     std::fs::write(&dest, generated).unwrap();
+  //     // Tell Cargo: re-run me only when Cargo.toml changes.
+  //     println!("cargo::rerun-if-changed=Cargo.toml");
+  //     // (optional) expose a value to the crate via env! at compile time:
+  //     println!("cargo::rustc-env=BUILD_GIT_HASH=abc123");
+  // }
+
+  // ── crate side: pull the generated file in at compile time ──
+  // include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+  // // now `VERSION` is in scope, e.g.:
+  // println!("built version: {}", VERSION);
+
+  // cargo:: directives a build script can emit (Cargo Book):
+  //   cargo::rustc-cfg=KEY[="VALUE"]        -> enables a #[cfg(KEY)] in the crate
+  //   cargo::rustc-env=VAR=VALUE            -> readable via env!("VAR") in the crate
+  //   cargo::rerun-if-changed=PATH          -> re-run only when PATH changes
+  //   cargo::rerun-if-env-changed=NAME      -> re-run only when env NAME changes
+  //   cargo::warning=/cargo::error=MESSAGE -> surface a warning / fail the build
+
+  concat!(env!("CARGO_PKG_NAME"), ".rs") = "core.rs"
+[check] concat!(env!(...), ...) is a compile-time &'static str splice (== "core.rs"): OK
+
+======================================================================
+SECTION F — Cargo features: [features] -> cfg(feature = "..") (DOCUMENTED)
+======================================================================
+  // [features] in Cargo.toml:
+  //   [features]
+  //   json   = ["dep:serde_json"]   # optional dep + a cfg switch
+  //   pretty = []                    # pure switch, no extra dep
+
+  // [dependencies] (optional, pulled in only by the feature):
+  //   serde_json = { version = "1", optional = true }
+
+  // In code, the feature becomes a cfg:
+  //   #[cfg(feature = "json")]
+  //   fn parse_json() { /* ... */ }
+
+  //   if cfg!(feature = "pretty") { /* pretty-print */ }
+
+  // Enable from the CLI:   cargo build --features json
+  //                       cargo build --all-features
+  //                       cargo build --no-default-features
+
+  // A feature `json` gates code via the cfg `feature = "json"`:
+  //   format!("feature = \"{}\"", "json") = "feature = \"json\""
+[check] a feature named `json` in [features] gates code via cfg `feature = "json"`: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

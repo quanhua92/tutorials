@@ -1,0 +1,116 @@
+modules.rs — Phase 5 bundle.
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — inline `mod`: items PRIVATE by default; `pub` exposes
+======================================================================
+  mod inner {
+      fn private_greet() -> "(inner secret)"   // private: only inner + descendants
+      pub fn public_greet() -> "hello from inner::public"
+      pub fn leak_via_sibling() -> private_greet()   // descendant reaches private
+  }
+  inner::public_greet() -> "hello from inner::public"
+  inner::leak_via_sibling() -> "(inner secret)"  (sibling inside inner calls the private fn)
+[check] inner::public_greet() callable from the crate root (parent of inner): OK
+[check] a sibling inside `inner` CAN call the private fn (privacy = outside-only): OK
+
+======================================================================
+SECTION B — visibility ladder: pub / pub(crate) / pub(super) / pub(in path) / private
+======================================================================
+  mod outer { pub mod vis {
+      pub          fn pub_anywhere() -> 1;   // visible everywhere reachable
+      pub(crate)   fn pub_crate()   -> 2;   // visible in this whole crate
+      pub(super)   fn pub_parent()  -> 3;   // visible to `outer` (the parent)
+      pub(in crate::outer) fn pub_scope() -> 4;  // visible in the `outer` subtree
+                     fn private_fn()  -> 5;   // visible only inside `vis`
+  } }
+
+  crate-root calls outer::vis::pub_anywhere() -> 1
+  crate-root calls outer::vis::pub_crate()   -> 2  (crate root is in the crate)
+  vis::call_all_from_inside() -> [1, 2, 3, 4, 5]  (a module sees ALL its own items)
+  outer::call_from_parent()   -> [1, 2, 3, 4]  (parent reaches pub(super) + pub(in outer))
+[check] pub: outer::vis::pub_anywhere() == 1 from the crate root: OK
+[check] pub(crate): outer::vis::pub_crate() == 2 from the crate root: OK
+[check] from inside `vis`, all 5 items are callable: [1,2,3,4,5]: OK
+[check] from `outer` (parent), pub+pub(crate)+pub(super)+pub(in outer) reachable: [1,2,3,4]: OK
+
+======================================================================
+SECTION C — `use`: single / grouped / alias  (idiom: module for fns, full path for types)
+======================================================================
+  use warehouse::ship;                  // single
+  use warehouse::{audit, stock};         // grouped (shared prefix)
+  use warehouse::Parcel as Box;         // alias -> local name `Box`
+  ship()="shipped", stock()="stocked", audit()="audited", Parcel{id:1} via `Box`
+[check] use warehouse::ship; brings ship() into scope: OK
+[check] use warehouse::{audit, stock}; groups imports (both callable): OK
+[check] use warehouse::Parcel as Box; aliases the struct (Box.id == 1): OK
+
+======================================================================
+SECTION D — path keywords: self:: / super:: / crate::  (relative vs absolute)
+======================================================================
+  fn crate_root_helper() -> "crate_root_helper"   // lives at the CRATE ROOT
+  mod network { pub fn net_fn(){...}
+      pub mod server { fn handler(){...}
+          pub fn via_self()       -> self::handler();
+          pub fn via_super()      -> super::net_fn();
+          pub fn via_super_super()-> super::super::crate_root_helper();
+          pub fn via_crate()      -> crate::crate_root_helper();
+  } }
+  network::server::via_self()        -> "server::handler"  (self = current module)
+  network::server::via_super()       -> "network::net_fn"  (super = parent = network)
+  network::server::via_super_super() -> "crate_root_helper"  (super::super = crate root)
+  network::server::via_crate()       -> "crate_root_helper"  (crate:: = absolute from root)
+[check] self::handler() reaches a sibling in the SAME module: OK
+[check] super::net_fn() reaches an item in the PARENT module: OK
+[check] crate::crate_root_helper() is an ABSOLUTE path to the crate root: OK
+[check] super::super:: reaches TWO levels up (also the crate root): OK
+
+======================================================================
+SECTION E — `pub use` re-export: bring an item up AND make it public (facade)
+======================================================================
+  mod base  { pub fn x() -> "base::x" }    // private module
+  mod other { pub fn z() -> "other::z" }    // private module
+  pub use base::x;                 // re-export: x() now public FROM HERE
+  pub use other::z as facade_z;    // re-export + alias under a clean name
+  x()         -> "base::x"  (called directly; no base:: prefix)
+  facade_z()  -> "other::z"  (re-exported with an alias)
+[check] pub use base::x; -> x() callable at the re-export site: OK
+[check] pub use other::z as facade_z; -> callable under the alias: OK
+
+======================================================================
+SECTION F — file-tree mod system + module_path!() (ties inline to multi-file form)
+======================================================================
+  module_path!() inside `demo_path::nested` -> "modules::demo_path::nested"
+[check] module_path!() ends with "demo_path::nested" (nested mods form a path): OK
+
+  In a MULTI-FILE crate, `mod foo;` (NO body) loads foo's items from a FILE:
+
+    src/
+    +- main.rs            // crate root:  `mod network;`
+    +- network.rs         // edition 2018+ PREFERRED form  (== network/mod.rs)
+    |   +-- declares `pub mod server;`
+    +- network/
+        +- server.rs      // item lives at crate::network::server::*
+
+    // src/main.rs  (crate root):
+    mod network;              // -> loads network.rs  (OR network/mod.rs)
+
+    // src/network.rs:
+    pub mod server;           // -> loads network/server.rs
+    pub fn connect() {}        // crate::network::connect
+
+    // src/network/server.rs:
+    pub fn listen() {}        // crate::network::server::listen
+
+  Rust Reference rules (items/modules -> Module source filenames):
+    - `mod foo;` loads from foo.rs  OR  foo/mod.rs  -- NOT both (hard error).
+    - rustc >= 1.30 (edition 2018+): prefer foo.rs over foo/mod.rs.
+    - `#[path = "alt.rs"] mod foo;` overrides the filename.
+    - E0432: unresolved import / module file not found on disk.
+    - The INLINE `mod foo { .. }` used in Sections A-E and the
+      file-tree `mod foo;` form build the SAME module tree.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

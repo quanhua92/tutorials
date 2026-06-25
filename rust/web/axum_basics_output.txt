@@ -1,0 +1,90 @@
+axum_basics.rs — Phase 8 bundle (web member).
+Every response below is produced by a Router driven IN-PROCESS.
+
+
+======================================================================
+SECTION A — Router + a GET handler returning &'static str
+======================================================================
+  // `Router::new().route("/", get(handler))` maps GET / to the
+  // handler fn. `get` returns a `MethodRouter` that only answers GET.
+  // We drive it IN-PROCESS with `oneshot`: no socket, no port.
+  let app: Router = Router::new().route("/", get(root));
+  GET /  -> 200 OK  body = "hello, axum"
+[check] GET / returns 200 OK: OK
+[check] GET / body contains "hello": OK
+[check] &'static str handler sets Content-Type: text/plain; charset=utf-8: OK
+
+======================================================================
+SECTION B — method routing: GET and POST on the SAME path
+======================================================================
+  // `get(h).post(h2)` builds a `MethodRouter` that dispatches by the
+  // HTTP method. Same path, two handlers — declarative, type-checked.
+  let app = Router::new().route("/echo", get(echo_get).post(echo_post));
+  GET  /echo -> 200 OK  body = "echo: GET"
+  POST /echo -> 200 OK  body = "echo: POST"
+[check] GET /echo returns 200 + the GET handler's body: OK
+[check] POST /echo returns 200 + the POST handler's body: OK
+
+======================================================================
+SECTION C — extractors: Path + Query + Json, derived from the request
+======================================================================
+  // `Path<T>` from the URL, `Query<T>` from the query string,
+  // `Json<T>` from the body — all typed, all serde-deserialized.
+  // axum 0.8 path capture syntax is {id} (not :id).
+  let app = Router::new().route("/items/{id}", post(create_item));
+  POST /items/7?q=widget  {"name":"axum"}
+    -> 200 OK  body = "id=7, q=widget, name=axum"
+[check] POST with Path+Query+Json returns 200: OK
+[check] Path(id) parsed 7 from the URL: OK
+[check] Query(q) parsed 'widget' from the query string: OK
+[check] Json(NewItem) parsed 'axum' from the body: OK
+
+======================================================================
+SECTION D — State: a shared counter threaded via .with_state(..)
+======================================================================
+  // `.with_state(s)` finalizes the Router, cloning `s` into each
+  // request. `Arc<AtomicU64>` makes the counter shared across clones.
+  // We fire requests on `app.clone()` — oneshot takes the Router by
+  // value, but cloning a Router clones the Arc'd state (cheap), so
+  // increments ACCUMULATE across the cloned routers.
+  GET  /count (start)         -> 200 OK  body = "0"
+[check] counter starts at 0: OK
+    [increment] counter: 0 -> 1
+    [increment] counter: 1 -> 2
+  POST /count (increment #1)  -> 204 No Content
+  POST /count (increment #2)  -> 204 No Content
+  GET  /count (after 2 POSTs) -> 200 OK  body = "2"
+[check] POST increments return 204 No Content: OK
+[check] two POSTs share one Arc'd counter: OK
+[check] after two increments the counter reads 2: OK
+
+======================================================================
+SECTION E — IntoResponse variants: a (StatusCode, Json<T>) tuple
+======================================================================
+  // `impl IntoResponse` is the handler return contract. axum impls it
+  // for String, &'static str, StatusCode, Json<T>, HeaderMap, and
+  // for tuples like (StatusCode, Json<T>) up to 16 parts. Returning a
+  // tuple composes status + headers + body in one expression.
+  let app = Router::new().route("/health", get(health));
+  GET /health -> 200 OK  ctype = Some("application/json")
+               body = "{\"ok\":true}"
+[check] tuple response carries the explicit 200 status: OK
+[check] Json<T> sets Content-Type: application/json: OK
+[check] Json(Health) serialized the struct to {"ok":true}: OK
+
+======================================================================
+SECTION F — error handling: a Result<Ok, Err> handler
+======================================================================
+  // `Result<T, E>` is IntoResponse when both arms are IntoResponse.
+  // The Ok arm returns 200 + the String; the Err arm returns the
+  // (StatusCode::BAD_REQUEST, message) tuple -> a 400 response.
+  let app = Router::new().route("/greet", post(greet));
+  POST /greet {"name":"rust"} -> 200 OK  body = "hello, rust"
+  POST /greet {}              -> 400 Bad Request  body = "missing or empty 'name'"
+[check] Result::Ok arm returns 200 + greeting: OK
+[check] Result::Err arm returns 400 Bad Request: OK
+[check] Err arm body carries the error message: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,111 @@
+testing.rs — Phase 8 bundle (TESTING).
+Rust's built-in test framework (#[test] / assert_eq! / #[should_panic]),
+driven from main: table-driven cases, a catch_unwind panic check, and a
+Result<T,E> case. Nothing is hand-computed.
+NOTE: this is a META bundle — it teaches `cargo test` but runs via
+`cargo run --bin testing`. The canonical #[test] signatures and the
+`cargo test` invocations live in TESTING.md. A real #[cfg(test)] mod
+tests at the bottom of this file runs under `cargo test --bin testing`.
+
+======================================================================
+SECTION A — Table-driven test: a slice of (input, want) + a loop
+======================================================================
+A table-driven test stores cases as DATA: a `&[(input, want)]` slice
+ranged in a loop, each row checked with the SAME assert. Adding a case
+means adding a ROW, not copy-pasting a whole test function.
+
+    pub fn add_two(a: u64) -> u64 { a + 2 }
+
+                 input                     want
+────────────────────────────────────────────────
+                     0                        2   got = 2
+                     2                        4   got = 4
+                    40                       42   got = 42
+                   100                      102   got = 102
+  18446744073709551613     18446744073709551615   got = 18446744073709551615
+
+[check] table row: add_two(0) == 2: OK
+[check] table row: add_two(2) == 4: OK
+[check] table row: add_two(40) == 42: OK
+[check] table row: add_two(100) == 102: OK
+[check] table row: add_two(18446744073709551613) == 18446744073709551615: OK
+[check] ALL table-driven rows passed (the runner's summary assertion): OK
+
+======================================================================
+SECTION B — The assertion macros: assert! / assert_eq! / assert_ne!
+======================================================================
+Three macros back every test. All PANIC on failure (the test thread
+dies -> the harness marks the test FAILED). `assert_eq!` and
+`assert_ne!` require `PartialEq` + `Debug`; on failure they print the
+two values. Rust names them 'left'/'right' (NOT 'expected'/'actual').
+
+    assert!(true);                       // passes: nothing happens
+[check] assert!(cond) backs every test; underlying check is a bool: OK
+    assert_eq!(add_two(2), 4);            // passes: 4 == 4
+[check] assert_eq! uses == (order-independent): add_two(2) == 4: OK
+    assert_ne!(add_two(0), 99);           // passes: 2 != 99
+[check] assert_ne! uses != : add_two(0) != 99: OK
+    assert_eq!(Point{1,2}, Point{1,2}); // needs #[derive(PartialEq, Debug)]
+[check] custom types need #[derive(PartialEq, Debug)] for the equality macros: OK
+    assert!(val > 0, "val must be positive, got {val}");  // custom message
+[check] custom messages take format args after the required ones: OK
+
+======================================================================
+SECTION C — #[should_panic] analog: catch_unwind catches a panic
+======================================================================
+`#[should_panic]` makes a test PASS only if it panics. A `[[bin]]`
+cannot show that attribute directly (its body is `main`), so the
+runner uses `std::panic::catch_unwind` — the PROGRAMMATIC analog: it
+runs a closure and returns Ok(result) or Err(panic payload).
+
+    catch_unwind(|| Guess::new(50))  -> Ok (no panic)
+[check] valid Guess: catch_unwind returns Ok: OK
+[check] valid Guess: the Ok value is the built Guess (value 50): OK
+    catch_unwind(|| Guess::new(200)) -> Err (panic caught)
+[check] invalid Guess: catch_unwind returns Err (panic caught): OK
+    panic payload message: "Guess value must be between 1 and 100, got 200."
+[check] panic payload contains the expected substring (the expected= analog): OK
+    AssertUnwindSafe: count after caught panic = 1 (mutation before panic persists)
+[check] AssertUnwindSafe wraps a closure capturing &mut: OK
+[check] a mutation made before the panic is observable after catch_unwind: OK
+
+======================================================================
+SECTION D — Result<T,E> tests: Ok value + Err propagation
+======================================================================
+A test fn may RETURN `Result<(), E>` instead of panicking. Then `?`
+propagates any `Err` as a test failure. To assert an `Err`, use
+`assert!(r.is_err())` — you CANNOT combine `#[should_panic]` with a
+`Result`-returning test. (Rust Book ch11.1.)
+
+    parse_hex("ff")  -> Ok(255)
+[check] Result Ok case: parse_hex("ff") == Ok(255): OK
+    parse_hex("nope") -> Err (propagated ParseIntError)
+[check] Result Err case: parse_hex("nope") is Err: OK
+    double_hex("ff")  -> Ok(510)   (parse_hex then *2, via `?`)
+[check] `?` propagation: double_hex("ff") == Ok(510): OK
+    double_hex("zz")  -> Err (the parse Err propagated by `?`)
+[check] `?` propagation: double_hex("zz") is Err (parse error short-circuited): OK
+
+======================================================================
+SECTION E — Test organization: unit (mod tests) / integration (tests/) / doc-tests
+======================================================================
+Rust has THREE kinds of tests, discovered differently by `cargo test`:
+
+    KIND          WHERE                         cfg(test)?  NOTES
+    ────────────────────────────────────────────────────────────────────
+    unit          src/*.rs #[cfg(test)] mod tests   yes     `use super::*;`, lives next to code
+    integration   tests/*.rs (each file = 1 bin)    no      `use my_crate::...`, tests the public API
+    doc-tests     /// code blocks in rustdoc        n/a     compiled & run; no_run/ignore/should_panic
+
+A REAL #[cfg(test)] mod tests block lives at the BOTTOM of this file.
+Run it with `cargo test --bin testing` to see the genuine harness.
+
+    cfg!(test) under `cargo run` = false  (mod tests is compiled OUT here)
+[check] unit-test #[cfg(test)] mod tests is excluded from `cargo run` builds: OK
+[check] unit tests live in #[cfg(test)] mod tests { use super::*; ... }: OK
+[check] integration tests live in tests/ and do NOT need #[cfg(test)]: OK
+[check] doc-tests come from /// rustdoc code blocks, run by `cargo test`: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

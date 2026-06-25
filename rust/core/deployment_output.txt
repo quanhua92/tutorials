@@ -1,0 +1,186 @@
+deployment.rs — Phase 8 bundle.
+Every runnable value below is a compile-time constant baked in by rustc/Cargo.
+
+
+======================================================================
+SECTION A — Cross-compile target flags via cfg!(target_*) — RUN + DOCUMENT
+======================================================================
+  cfg!(target_os)    = "macos"
+  cfg!(target_arch)  = "aarch64"
+  cfg!(target_env)   = ""   (musl is the static-link env)
+  cfg!(target_endian)= "little"
+  cfg!(target_pointer_width = "64") = true
+[check] current target_os is in the Reference's enumerated set: OK
+[check] current target_arch is non-empty and in the known arch set: OK
+[check] current target_env is in the known env set: OK
+[check] current target_endian is in {little, big}: OK
+[check] exactly one of cfg!(unix) / cfg!(windows) holds: OK
+
+  // Cross-compile to a STATIC musl Linux binary (no glibc dependency):
+  //   rustup target add x86_64-unknown-linux-musl     # fetch target std
+  //   cargo build --release --target x86_64-unknown-linux-musl
+  // Output -> target/x86_64-unknown-linux-musl/release/<bin>
+
+  // Pin a default target per-project in .cargo/config.toml:
+  //   [build]
+  //   target = "x86_64-unknown-linux-musl"
+
+  // cfg!(target_env = "musl") on THIS host = false (true only when building FOR musl)
+
+======================================================================
+SECTION B — Release vs Debug profile — RUN cfg!(debug_assertions) + DOCUMENT
+======================================================================
+  cfg!(debug_assertions) = true   (dev profile; --release -> false)
+[check] cfg!(debug_assertions) is true for a dev (`cargo run`) build: OK
+  255u8.checked_add(1)    = None    (None -> caller decides; mode-independent)
+  255u8.wrapping_add(1)   = 0      (wraps to 0; mode-independent)
+  255u8.saturating_add(1) = 255    (saturates; mode-independent)
+[check] checked_add on u8::MAX is None regardless of profile: OK
+[check] wrapping_add on u8::MAX wraps to 0 regardless of profile: OK
+[check] saturating_add on u8::MAX stays at 255 regardless of profile: OK
+
+  // Bare arithmetic overflow behavior (the mode-dependent part):
+  //   let x: u8 = 255u8 + 1;
+  //   - dev    (cfg!(debug_assertions)==true ): PANIC at runtime
+  //   - release(cfg!(debug_assertions)==false): WRAPS silently to 0
+
+  // Build the optimized artifact (--release flips debug_assertions OFF):
+  //   cargo build --release   # -> target/release/<bin>
+
+  // Default dev profile (cargo run/build/check) — Cargo Book:
+  //   opt-level=0 debug=true strip="none" debug-assertions=true
+  //   overflow-checks=true lto=false panic="unwind" codegen-units=256
+
+  // Default release profile (--release / cargo install) — Cargo Book:
+  //   opt-level=3 debug=false strip="none" debug-assertions=false
+  //   overflow-checks=false lto=false panic="unwind" codegen-units=16
+
+======================================================================
+SECTION C — env!() Cargo constants + CARGO_CFG_* are build-script-only — RUN + DOCUMENT
+======================================================================
+  env!("CARGO_PKG_NAME")    = "core"    (member PACKAGE name)
+  env!("CARGO_PKG_VERSION") = "0.0.0"    (workspace version)
+  env!("CARGO_CRATE_NAME")  = "deployment"    (this BIN crate, not package)
+[check] env!("CARGO_PKG_NAME") == "core": OK
+[check] env!("CARGO_PKG_VERSION") == "0.0.0" (workspace version): OK
+[check] env!("CARGO_CRATE_NAME") == "deployment" (the BIN crate): OK
+[check] CARGO_PKG_NAME != CARGO_CRATE_NAME (package vs bin crate): OK
+  option_env!("CARGO_CFG_TARGET_OS")   = <None>   (Some only in build.rs)
+  option_env!("CARGO_CFG_TARGET_ARCH") = <None>
+[check] CARGO_CFG_TARGET_OS is None here: CARGO_CFG_* are BUILD-SCRIPT-ONLY: OK
+[check] CARGO_CFG_TARGET_ARCH is None here (same reason): OK
+
+  // In a build.rs, Cargo sets CARGO_CFG_<cfg> for every cfg key:
+  //   fn main() {
+  //     let os = env!("CARGO_CFG_TARGET_OS");   // "linux", "macos", ...
+  //     if os == "linux" { println!("cargo::rustc-cfg=linux_only"); }
+  //   }
+  // The crate then gates code on the installed cfg:  #[cfg(linux_only)]
+
+  // Crates read the SAME fact via cfg!(target_os = "linux") (Section A)
+  // at compile time WITHOUT a build script.
+
+======================================================================
+SECTION D — size_of: deterministic data-layout facts baked into the binary — RUN
+======================================================================
+  size_of::<usize>()           = 8  (target_pointer_width / 8)
+  size_of::<*const u8>()       = 8  (a raw pointer)
+  size_of::<&str>()            = 16  (ptr + len = 2 * usize)
+  size_of::<Vec<u8>>()         = 24  (ptr + len + cap = 3 * usize)
+  size_of::<Option<Box<u8>>>() = 8  (niche-optimized: == a bare Box<u8>)
+[check] size_of::<usize>() == 8 on a 64-bit target: OK
+[check] size_of::<*const u8>() == size_of::<usize>() (pointer width): OK
+[check] size_of::<&str>() == 2 * usize (ptr+len = 16 bytes): OK
+[check] size_of::<Vec<u8>>() == 3 * usize (ptr+len+cap = 24 bytes): OK
+[check] Option<Box<u8>> is niche-optimized to 1 usize (no tag byte for None): OK
+[check] cfg!(target_pointer_width = "64") implies usize == 8 bytes: OK
+
+======================================================================
+SECTION E — Musl static binary + multi-stage scratch Dockerfile (DOCUMENTED)
+======================================================================
+  // ── Why musl: a FULLY STATIC binary with NO glibc dependency ──
+  //   A gnu (glibc) binary dynamically links libc.so.6, so one built on
+  //   Ubuntu 24.04 may fail on older distros ("GLIBC_2.xx not found").
+  //   Linking musl (a small libc-standard C library) yields a STATIC
+  //   binary with zero shared-library deps -> runs in `FROM scratch`.
+
+  // Build for musl, then PROVE it is fully static:
+  //   rustup target add x86_64-unknown-linux-musl
+  //   cargo build --release --target x86_64-unknown-linux-musl
+  //   file target/x86_64-unknown-linux-musl/release/deployment
+  //     # -> "... statically linked"
+  //   ldd  target/x86_64-unknown-linux-musl/release/deployment
+  //     # -> "not a dynamic executable"
+
+  // ── Multi-stage Dockerfile: builder compiles, final stage runs ──
+  //   # ---- stage 1: builder (full Rust toolchain lives here) ----
+  //   FROM rust:1-bookworm AS builder
+  //   RUN apt-get update && apt-get install -y musl-tools
+  //   RUN rustup target add x86_64-unknown-linux-musl
+  //   WORKDIR /app
+  //   COPY Cargo.toml Cargo.lock .
+  //   RUN mkdir src && cargo build --release --target x86_64-unknown-linux-musl  # cache deps
+  //   COPY . .
+  //   RUN cargo build --release --target x86_64-unknown-linux-musl
+  //
+  //   # ---- stage 2: runtime (ONLY the static binary + TLS CAs) ----
+  //   FROM scratch
+  //   COPY --from=builder \
+  //     /app/target/x86_64-unknown-linux-musl/release/deployment /deployment
+  //   COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+  //   ENTRYPOINT ["/deployment"]
+
+  //   docker build -t deployment:latest .
+  //   docker images deployment   # ~ a few MB, not GB (no OS in stage 2)
+
+  // Distroless alternative to scratch (adds CA certs + /etc/passwd, no shell):
+  //   FROM gcr.io/distroless/cc-debian12
+  //   COPY --from=builder /app/target/.../release/deployment /deployment
+
+  // ── `cross` (cross-rs): Dockerized toolchain for tricky targets ──
+  //   cargo install cross --git https://github.com/cross-rs/cross
+  //   cross build --release --target aarch64-unknown-linux-musl
+  //   cross build --release --target x86_64-pc-windows-gnu
+  // `cross` wraps cargo with a per-target Docker image bundling the right
+  // C toolchain + linker, so you never install arm64/mingw locally.
+
+======================================================================
+SECTION F — [profile.release] for minimal binary size (DOCUMENTED)
+======================================================================
+  // Shrink the release binary in Cargo.toml (Cargo Book — Profiles):
+  //   [profile.release]
+  //   opt-level = "z"     # optimize for SIZE ('s' also shrinks; 3 = speed)
+  //   lto = true          # 'fat' LTO across the whole dep graph (or "thin")
+  //   codegen-units = 1   # one unit -> best optimization, slower link
+  //   strip = "symbols"   # strip=true is equivalent; removes symbol tables
+  //   panic = "abort"     # drop the unwind tables -> smaller binary
+
+  //   cargo build --release    # applies [profile.release] automatically
+
+  // Each knob (Cargo Book + min-sized-rust):
+  //   opt-level="z"   -> optimize for binary size ('s'=size, 3=speed)
+  //   lto=true        -> whole-program LLVM optimization across all crates
+  //   codegen-units=1 -> one codegen unit lets LLVM see the whole crate
+  //   strip="symbols" -> remove the symbol table + debuginfo from the binary
+  //   panic="abort"   -> no unwinding machinery (smaller binary)
+
+  // CAVEAT: panic="abort" is IGNORED by tests/benches/build scripts/proc-
+  // macros — the test harness requires unwinding, so a release TEST build
+  // forces deps back to "unwind".
+
+  // Custom profile inheriting release + the size knobs:
+  //   [profile.min]
+  //   inherits = "release"
+  //   opt-level = "z"
+  //   lto = true
+  //   strip = true
+  //   panic = "abort"
+  //   cargo build --profile min   # -> target/min/<bin>
+
+  // Order of magnitude: a default --release binary can be ~5-15 MB; the full
+  // size profile + musl + strip often lands it under ~1-2 MB. (Exact numbers
+  // are binary-specific; this is documentation, not a runnable check.)
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

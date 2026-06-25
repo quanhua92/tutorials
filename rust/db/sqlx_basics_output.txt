@@ -1,0 +1,70 @@
+sqlx_basics.rs — Phase 8 bundle (db member).
+Every value below comes from a live in-memory SQLite database.
+
+
+======================================================================
+SECTION A — POOL + shared in-memory DB + CREATE TABLE
+======================================================================
+  SqlitePoolOptions::new().max_connections(5)
+    .connect("sqlite::memory:?cache=shared").await  -> POOL
+  pool.size() = 1,  num_idle() = 0
+  query("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    .execute(&pool).await  -> DDL applied (ok)
+[check] shared in-memory pool connects and applies DDL: OK
+
+======================================================================
+SECTION B — parameterized INSERT (bind values, never concatenate SQL)
+======================================================================
+  3 x query("INSERT INTO widgets (name) VALUES (?)").bind(name)
+    .execute(&pool).await   (the `?` is a prepared-statement bind)
+  total rows_affected = 3
+[check] 3 parameterized inserts affected exactly 3 rows: OK
+  SELECT COUNT(*) FROM widgets  -> 3
+[check] table holds exactly 3 rows after the inserts: OK
+
+======================================================================
+SECTION C — query_as + FromRow: map rows into Vec<Widget>
+======================================================================
+  query_as::<_, Widget>("SELECT id, name FROM widgets ORDER BY id")
+    .fetch_all(&pool).await  -> Vec<Widget> (3 rows):
+    { id: 1, name: "alpha" }
+    { id: 2, name: "bravo" }
+    { id: 3, name: "charlie" }
+[check] query_as mapped all 3 rows: OK
+[check] ORDER BY id yields the deterministic sequence 1,2,3: OK
+[check] FromRow mapped names in id order: alpha, bravo, charlie: OK
+
+======================================================================
+SECTION D — single row: fetch_one vs fetch_optional
+======================================================================
+  query_as(...WHERE id = 1).fetch_one(&pool).await  -> { id: 1, name: "alpha" }
+[check] fetch_one found id 1 == alpha: OK
+  query_as(...WHERE id = 999).fetch_optional(&pool).await  -> None
+[check] fetch_optional on a missing id returns None: OK
+
+======================================================================
+SECTION E — TRANSACTION: begin + commit (kept), and drop => rollback (discarded)
+======================================================================
+  pool.begin() -> insert delta, echo -> tx.commit().await  (kept)
+  SELECT COUNT(*) FROM widgets  -> 5  (3 base + 2 committed)
+[check] committed transaction added 2 rows -> total 5: OK
+  pool.begin() -> insert foxtrot -> DROP tx (no commit) => rollback
+  SELECT name ... WHERE name = 'foxtrot'  -> None
+[check] rolled-back row 'foxtrot' is absent: OK
+
+======================================================================
+SECTION F — compile-time `query!` macro (DOCUMENTED, not used here)
+======================================================================
+  sqlx offers TWO query APIs:
+    * runtime-checked : sqlx::query(..) / query_as(..)   <- THIS file
+    * compile-time    : sqlx::query!(..) / query_as!(..)  <- macro,
+                        checks SQL against a DB at BUILD time.
+  The macros need DATABASE_URL (or a committed `.sqlx` offline cache
+  from `cargo sqlx prepare`) at build time. This runnable bundle uses
+  the RUNTIME forms so it compiles with NO database at build time.
+  See SQLX_BASICS.md -> Section F for the full macro + offline workflow.
+[check] bundle uses runtime-checked query/query_as (compiles offline): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

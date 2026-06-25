@@ -30,11 +30,11 @@
 | 2 | Types, Traits & Generics | core | 7 | ✅ done (7/7, 138 checks) |
 | 3 | Memory & Smart Pointers | core | 6 | ✅ done (6/6, 108 checks) |
 | 4 | Concurrency | core | 7 | ✅ done (7/7, 101 checks) |
-| 5 | Standard Library Essentials | core | 6 | ⬜ not started |
-| 6 | Serde & Macros | serde + pmacros + core | 5 | ⬜ not started |
-| 7 | Tokio Async | async | 5 | ⬜ not started |
-| 8 | Web, DB & Production | web + db + core | 6 | ⬜ not started |
-| | **Total** | **6 members** | **50** | **28 / 50 done — 487 checks, 0 failures** |
+| 5 | Standard Library Essentials | core | 6 | ✅ done (6/6, 131 checks) |
+| 6 | Serde & Macros | serde + pmacros + core | 5 | ✅ done (5/5, 94 checks) |
+| 7 | Tokio Async | async | 5 | ✅ done (5/5, 70 checks) |
+| 8 | Web, DB & Production | web + db + core | 6 | ✅ done (6/6, 103 checks) |
+| | **Total** | **7 members** | **50** | **✅ ALL DONE — 885 checks, 0 failures** |
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3
 smart pointers lean on Phase 1's ownership; Phase 4 concurrency leans on
@@ -140,17 +140,17 @@ smart pointers lean on Phase 1's ownership; Phase 4 concurrency leans on
 > **Goal:** ship correct Rust using the stdlib — collections, I/O, fs, time,
 > formatting, and the module/crate system.
 
-- [ ] **29. `collections`** — `HashMap`/`BTreeMap`/`HashSet`/`VecDeque`/`LinkedList`;
+- [x] **29. `collections`** — `HashMap`/`BTreeMap`/`HashSet`/`VecDeque`/`LinkedList`;
   when each wins; the `HashMap` random-seed (sort keys for output!); `Entry`.
-- [ ] **30. `io`** — `Read`/`Write`/`BufRead` traits; `io::copy`; chaining;
+- [x] **30. `io`** — `Read`/`Write`/`BufRead` traits; `io::copy`; chaining;
   `Cursor`; `?` on `io::Result`; the `std::io` error story.
-- [ ] **31. `fs_paths`** — `fs::read`/`write`/`File`; `Path`/`PathBuf`; `walkdir`-
+- [x] **31. `fs_paths`** — `fs::read`/`write`/`File`; `Path`/`PathBuf`; `walkdir`-
   style traversal by hand; canonicalize/join; dirs vs files.
-- [ ] **32. `time`** — `Instant` (monotonic, for measuring) vs `SystemTime`
+- [x] **32. `time`** — `Instant` (monotonic, for measuring) vs `SystemTime`
   (wall); `Duration`; sleep; do NOT print wall-clock values as asserted numbers.
-- [ ] **33. `formatting`** — `Display`/`Debug`; `format!`/`println!`/`write!`;
+- [x] **33. `formatting`** — `Display`/`Debug`; `format!`/`println!`/`write!`;
   formatting traits (`{:?}`/`{:#?}`/`{:>5}`/`{:.2}`); custom `Debug`.
-- [ ] **34. `modules`** — `mod`/`use`/`pub`/`pub(crate)`; file mod tree; `crate`/
+- [x] **34. `modules`** — `mod`/`use`/`pub`/`pub(crate)`; file mod tree; `crate`/
   `super`/`self`; re-exports; visibility gating.
 
 ---
@@ -160,16 +160,16 @@ smart pointers lean on Phase 1's ownership; Phase 4 concurrency leans on
 > **Goal:** serialization (serde) and metaprogramming (declarative + procedural
 > macros). Third-party crates land here.
 
-- [ ] **35. `serde_basics`** [serde] — `#[derive(Serialize, Deserialize)]`; struct
+- [x] **35. `serde_basics`** [serde] — `#[derive(Serialize, Deserialize)]`; struct
   tags (`#[serde(rename, default)]`); JSON round-trip; field visibility.
-- [ ] **36. `serde_advanced`** [serde] — custom `Serialize`/`Deserialize`;
+- [x] **36. `serde_advanced`** [serde] — custom `Serialize`/`Deserialize`;
   `#[serde(tag, untagged, flatten)]` for enums; `serde_json::Value` dynamic JSON.
-- [ ] **37. `macro_rules`** [core] — declarative macros; the matcher grammar;
+- [x] **37. `macro_rules`** [core] — declarative macros; the matcher grammar;
   repetitions (`$x:expr, *`); hygiene; macro-export vs crate-local.
-- [ ] **38. `proc_macros`** [pmacros-derive + pmacros-demo] — a derive macro
+- [x] **38. `proc_macros`** [pmacros-derive + pmacros-demo] — a derive macro
   (syn + quote + proc-macro2); the `pmacros-derive` lib produces tokens the
   `pmacros-demo` bin consumes.
-- [ ] **39. `build_config`** [core] — `build.rs` + `OUT_DIR` codegen; reading
+- [x] **39. `build_config`** [core] — `build.rs` + `OUT_DIR` codegen; reading
   env at build time; `include!` of generated code; feature flags (`#[cfg]`).
 
 ---
@@ -179,15 +179,15 @@ smart pointers lean on Phase 1's ownership; Phase 4 concurrency leans on
 > **Goal:** the tokio runtime — the production layer over `Future`. Member gets
 > `tokio`, `futures`, `tracing`.
 
-- [ ] **40. `tokio_runtime`** — `#[tokio::main]`; the runtime; `spawn` + `JoinHandle`;
+- [x] **40. `tokio_runtime`** — `#[tokio::main]`; the runtime; `spawn` + `JoinHandle`;
   blocking vs async (the `spawn_blocking` rule); `tokio::time` timeouts.
-- [ ] **41. `tokio_select`** — `tokio::select!`; first-ready wins; branch futures
+- [x] **41. `tokio_select`** — `tokio::select!`; first-ready wins; branch futures
   dropped; the `biased` mode; cancellation propagation.
-- [ ] **42. `tokio_channels`** — `mpsc`/`oneshot`/`broadcast`/`watch`; backpressure
+- [x] **42. `tokio_channels`** — `mpsc`/`oneshot`/`broadcast`/`watch`; backpressure
   (bounded capacity); ownership through async channels.
-- [ ] **43. `tokio_io`** — `AsyncRead`/`AsyncWrite`; `tokio_util::io` framing;
+- [x] **43. `tokio_io`** — `AsyncRead`/`AsyncWrite`; `tokio_util::io` framing;
   `BufReader` async; copying streams; EOF handling.
-- [ ] **44. `tracing_basics`** — `tracing` structured spans/events; the subscriber;
+- [x] **44. `tracing_basics`** — `tracing` structured spans/events; the subscriber;
   context propagation across `.await`; deterministic output (drop timestamps).
 
 ---
@@ -197,17 +197,17 @@ smart pointers lean on Phase 1's ownership; Phase 4 concurrency leans on
 > **Goal:** wire the whole stack into production — HTTP (axum/reqwest), DB
 > (sqlx), testing, FFI, and deployment.
 
-- [ ] **45. `axum_basics`** [web] — `Router`/`get`/`post`; `Handler` + extractors;
+- [x] **45. `axum_basics`** [web] — `Router`/`get`/`post`; `Handler` + extractors;
   `State`; tested via `tower::ServiceExt::oneshot` (in-process, no socket).
-- [ ] **46. `reqwest_client`** [web] — the HTTP client; timeouts; a `wiremock`
+- [x] **46. `reqwest_client`** [web] — the HTTP client; timeouts; a `wiremock`
   or `httpmock`-style in-process mock (offline); retries pattern.
-- [ ] **47. `sqlx_basics`** [db] — `sqlx` with in-memory sqlite; compile-time
+- [x] **47. `sqlx_basics`** [db] — `sqlx` with in-memory sqlite; compile-time
   checked queries; `FromRow`; `Pool`; transactions.
-- [ ] **48. `testing`** [core] — `#[test]`/`#[should_panic]`; `assert_eq!`;
+- [x] **48. `testing`** [core] — `#[test]`/`#[should_panic]`; `assert_eq!`;
   unit vs integration tests; `cargo test`; doc-tests; parametrize-by-hand.
-- [ ] **49. `ffi`** [core] — `extern "C"`; calling libc (`abs`/`strlen`); C
+- [x] **49. `ffi`** [core] — `extern "C"`; calling libc (`abs`/`strlen`); C
   calling Rust (`#[no_mangle]`); `repr(C)`; the safety contract.
-- [ ] **50. `deployment`** [core] — cross-compile (`--target`); `musl` static
+- [x] **50. `deployment`** [core] — cross-compile (`--target`); `musl` static
   binaries; Docker multi-stage (scratch/distroless); binary size; CI gates.
 
 ---

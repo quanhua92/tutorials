@@ -1,0 +1,80 @@
+reqwest_client.rs — Phase 8 bundle (web member).
+Every response below comes from a reqwest client hitting an
+in-process axum mock on 127.0.0.1:0 (loopback; port never printed).
+
+
+======================================================================
+SECTION A — GET JSON: builder -> send -> Response -> .json::<T>()
+======================================================================
+  // `Client::get(url)` returns a RequestBuilder; `.send().await` fires
+  // it over the pooled connection and yields a `Response`; then
+  // `.json::<T>()` deserializes the body via serde_json.
+  let resp = client.get(url).send().await?;   // url = mock + "/json"
+  GET /json -> 200 OK  decoded msg.msg = "hi"
+[check] GET /json returns 200 OK: OK
+[check] deserialized struct field == "hi": OK
+
+======================================================================
+SECTION B — POST JSON: .json(&payload) serializes; mock echoes; decode
+======================================================================
+  // `.json(&body)` serializes any serde::Serialize type AND sets the
+  // `Content-Type: application/json` header for you.
+  let resp = client.post(url).json(&payload).send().await?;
+  POST /echo {name:"widget",qty:7} -> 200 OK  echoed name="widget" qty=7
+[check] POST /echo returns 200 OK: OK
+[check] echoed payload name == "widget": OK
+[check] echoed payload qty == 7: OK
+
+======================================================================
+SECTION C — status + error_for_status: 4xx/5xx become Err
+======================================================================
+  // `.send()` is Ok for a 404 too — the HTTP call itself succeeded;
+  // the error is encoded in `Response::status()`. `.error_for_status()`
+  // converts any 4xx/5xx into an `Err` so the `?` operator propagates it.
+  let res = client.get(url).send().await?.error_for_status();
+  GET /missing -> 404 Not Found  (send() is Ok; the 404 is in the status)
+[check] GET /missing returns 404 Not Found: OK
+  resp.error_for_status() -> Err
+[check] error_for_status() turns a 404 Response into an Err: OK
+
+======================================================================
+SECTION D — ClientBuilder::timeout: the #1 production rule (always set one)
+======================================================================
+  // The DEFAULT Client has NO timeout (docs: "Default is no timeout").
+  // In production ALWAYS set one via the builder — a hung server would
+  // otherwise hang your caller forever. The timeout is TOTAL: from the
+  // start of the connect until the response body is fully read.
+  Client::builder().timeout(1s) -> GET /json -> 200 OK
+[check] a 1s timeout does not fire against an instant response: OK
+  Client::builder().timeout(50ms) -> GET /slow -> Err (is_timeout=true)
+[check] a 50ms total timeout fires against a 250ms-slow server: OK
+[check] the timeout error reports is_timeout() == true: OK
+
+======================================================================
+SECTION E — a retry loop: fail-twice-then-ok mock recovers on attempt 3
+======================================================================
+  // The `/flaky` mock returns 503 for the first 2 calls, then 200.
+  // `retry_transient(3, ..)` re-issues the GET on any non-2xx until it
+  // either sees a success or exhausts the budget. The shared mock
+  // counter is the authoritative witness of how many calls happened.
+  retry_transient(3) on /flaky -> attempts=3, success=true, final_status=Some(200)
+  the mock saw 3 handler calls (one per attempt)
+[check] the flaky mock eventually recovered (success): OK
+[check] recovered after exactly 3 attempts: OK
+[check] final_status on success is 200 OK: OK
+[check] the mock counter agrees: 3 handler calls: OK
+
+======================================================================
+SECTION F — Client reuse: ONE pooled client across many calls
+======================================================================
+  // `Client` holds an internal connection pool wrapped in an `Arc`, so
+  // you should build ONE and reuse it (do NOT wrap it in your own Arc).
+  // Cloning a Client is cheap — it bumps the inner Arc and SHARES the pool.
+  call #1 -> 200 OK msg="hi"    call #2 -> 200 OK msg="hi"
+[check] a second call via the SAME client succeeds (200): OK
+[check] both calls via one client decoded msg == "hi": OK
+[check] Client::clone() shares the pool: a cloned client's call also succeeds: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

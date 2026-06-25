@@ -1,0 +1,76 @@
+tokio_runtime.rs — Phase 7 bundle (async member).
+Every value below is computed by this file.
+
+
+======================================================================
+SECTION A — #[tokio::main] + tokio::spawn -> JoinHandle
+======================================================================
+  // `#[tokio::main]` expands to building a multi-thread runtime and
+  // calling .block_on() on `async fn main`. It is NOT magic — it is:
+  //   Builder::new_multi_thread().enable_all().build().block_on(main)
+  // The async main itself runs as a task on the runtime, NOT as a
+  // worker; you `tokio::spawn` real worker tasks from it.
+  let h: JoinHandle<i32> = tokio::spawn(async { 42 });
+  h.await -> Ok(42)
+[check] tokio::spawn(async { 42 }).await yields Ok(42): OK
+[check] spawned task is a TASK (green thread): its value comes back via the handle: OK
+
+======================================================================
+SECTION B — a panicking task -> JoinHandle.await is Err (JoinError)
+======================================================================
+  // tokio CATCHES a task panic and surfaces it as Err(JoinError),
+  // so ONE panicking task does NOT tear down the whole runtime.
+  // (The panic message still hits stderr; it is NOT in this stdout.)
+  let h = tokio::spawn(async { panic!("boom inside a task") });
+  panicking_task.await -> is_err() = true
+[check] a panicked task's JoinHandle.await is Err (JoinError), not an abort: OK
+
+======================================================================
+SECTION C — spawn_blocking offloads SYNC work off the async thread
+======================================================================
+  // A blocking/sync call inside an async fn STALLS the executor
+  // thread: no other task on that worker can make progress until it
+  // returns. spawn_blocking moves it to a DEDICATED blocking pool.
+  // Signature: F: FnOnce() -> R + Send + 'static  (a sync closure!)
+  let h = tokio::task::spawn_blocking(|| 7 * 6);
+  spawn_blocking(|| 7*6).await -> Ok(42)
+[check] spawn_blocking(|| 7*6).await yields Ok(42): OK
+[check] spawn_blocking returns the SAME shape as spawn (JoinHandle<R>): OK
+
+======================================================================
+SECTION D — tokio::time::timeout races a future against a deadline
+======================================================================
+  // timeout(d, future) -> Result<T, Elapsed>. If the future does not
+  // finish within d, it is CANCELED and you get Err(Elapsed).
+  // We assert the VARIANT only — never the elapsed wall-clock.
+  let r = tokio::time::timeout(Duration::from_millis(1), pending::<()>());
+  timeout(1ms, never_completes).await -> is_err() = true
+[check] timeout(tiny, never_completes) -> Err(Elapsed): OK
+  let r = tokio::time::timeout(Duration::from_secs(60), async { 99 });
+  timeout(60s, immediate).await -> Ok(99)
+[check] timeout(long, immediate_future) -> Ok(99) (instant future wins the race): OK
+
+======================================================================
+SECTION E — tokio::time::sleep is the async analog of thread::sleep
+======================================================================
+  // sleep(d).await YIELDS the task back to the executor until d has
+  // elapsed, then resumes — other tasks run during the wait. This is
+  // the cooperative scheduling contract: `.await` is the yield point.
+  // We assert a flag set AFTER, never the wall-clock duration.
+  after sleep(1ms).await: done = true
+[check] flag set to true after sleep(tiny).await completes: OK
+
+======================================================================
+SECTION F — N concurrent tasks -> collect (Mutex<Vec>), SORT, assert the SET
+======================================================================
+  // Task interleaving is nondeterministic, so we NEVER print from
+  // tasks in scheduling order. Each task pushes its value into a
+  // shared Mutex<Vec>; after joining ALL tasks we SORT and print from
+  // main. The sorted SET is invariant; the arrival order is not.
+  5 tasks each pushed i*i; sorted results = [0, 1, 4, 9, 16]
+[check] 5 tasks' results collected + sorted == [0, 1, 4, 9, 16]: OK
+[check] exactly 5 values were collected (one per joined task): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

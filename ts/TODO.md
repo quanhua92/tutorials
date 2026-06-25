@@ -25,7 +25,7 @@
 
 | Phase | Theme | Member | Bundles | Status |
 |---|---|---|---|---|
-| 1 | Language Foundations | core | 8 | ⬜ pending |
+| 1 | Language Foundations | core | 8 | ✅ done (8/8, 460 checks) |
 | 2 | Type System & Generics | core | 8 | ⬜ pending |
 | 3 | Memory & Object Semantics | core | 6 | ⬜ pending |
 | 4 | Concurrency & the Event Loop | core | 7 | ⬜ pending |
@@ -34,7 +34,7 @@
 | 7 | Async Runtime, HTTP & Realtime | web | 5 | ⬜ pending |
 | 8 | Web, DB & Production | web + db | 6 | ⬜ pending |
 | — | Companion walkthroughs | hono/drizzle/ioredis | 22 | ⬜ pending |
-| | **Total** | | **52 + 22** | **0/52 built** |
+| | **Total** | | **52 + 22** | **8/52 built** |
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3's
 value/reference leans on Phase 1's primitives; Phase 4's event loop leans on

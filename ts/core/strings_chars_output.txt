@@ -1,0 +1,164 @@
+strings_chars.ts — Phase 1 bundle.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: a JS String is an IMMUTABLE sequence of UTF-16 CODE UNITS.
+.length counts code units (not code points, not graphemes). That
+single fact explains every surrogate-pair surprise below.
+
+======================================================================
+SECTION A — One primitive, immutable; typeof "string"; literal interning
+======================================================================
+form            : typeof
+----------------:--------
+""          : string
+"hello"     : string
+"`template`": string
+"a"+"b"     : string
+String(42)  : string
+[check] typeof "" === "string": OK
+[check] typeof "hello" === "string": OK
+[check] typeof `template` === "string": OK
+[check] "s" === `s` (template with no interpolation === literal): OK
+[check] 'a' === "a" === `a` (all three quote forms are the same value): OK
+[check] identical literals are === ("abc" === "abc"): OK
+[check] a built string is === to the same literal ("abc" built === "abc"): OK
+[check] strings copy on assignment: b stays "abc" after a = "xyz": OK
+"abc".replace("b","X") -> "aXc" (a NEW string)
+original unchanged     -> "abc" (immutable)
+[check] "abc".replace("b","X") === "aXc" (returns a new string): OK
+[check] original is unchanged after .replace: OK
+[check] "abc".replace("z","X") === "abc" (no match -> same content): OK
+attempt target[0]="X" -> threw TypeError? true
+target after attempt  -> "abc" (immutable)
+[check] s[0]="X" throws TypeError in strict mode (strings are read-only): OK
+[check] target is "abc" after the failed mutation: OK
+
+======================================================================
+SECTION B — .length & bracket indexing count UTF-16 CODE UNITS (the trap)
+======================================================================
+text   .length   why
+----   -------   ---
+"a"        1    U+0061 fits in one BMP code unit
+"𝔸"        2    U+1D538 needs a surrogate pair (2 code units)
+[check] "a".length === 1 (BMP code unit): OK
+[check] "𝔸".length === 2 (astral -> surrogate pair): OK
+
+"𝔸".charAt(0) -> "\ud835" (U+D835, the HIGH surrogate)
+"𝔸".charAt(1) -> "\udd38" (U+DD38, the LOW surrogate)
+  neither half renders on its own — indexing SPLIT the symbol
+[check] "𝔸".charAt(0) === "\uD835" (the high surrogate): OK
+[check] "𝔸".charAt(1) === "\uDD38" (the low surrogate): OK
+[check] "𝔸"[0] is NOT "𝔸" (indexing returns a half-surrogate): OK
+
+surrogate math for U+1D538: high=U+D835 low=U+DD38
+[check] surrogate formula: high unit === 0xD835: OK
+[check] surrogate formula: low unit === 0xDD38: OK
+[check] String.fromCharCode(0xD835, 0xDD38) === "𝔸": OK
+
+======================================================================
+SECTION C — Code POINTS: codePointAt/fromCodePoint; [...s] vs split("")
+======================================================================
+"𝔸".charCodeAt(0)   -> U+D835 (the CODE UNIT)
+"𝔸".codePointAt(0) -> U+1D538 (the CODE POINT, pair combined)
+[check] "𝔸".charCodeAt(0) === 0xD835 (the code unit): OK
+[check] "𝔸".charCodeAt(1) === 0xDD38 (the second code unit): OK
+[check] "𝔸".codePointAt(0) === 0x1D538 (the code point): OK
+
+String.fromCodePoint(0x1D538)  -> "𝔸"
+String.fromCharCode(0xD835, 0xDD38) -> "𝔸"
+String.fromCharCode(0x1D538)  -> "픸" (WRONG: only the low 16 bits 0xD538)
+[check] String.fromCodePoint(0x1D538) === "𝔸": OK
+[check] String.fromCharCode(0x1D538) !== "𝔸" (it truncates to 16 bits): OK
+
+THE HEADLINE: same string, two ways to make an array
+  [..."𝔸"].length      -> 1  (CODE POINTS — iterator combines the pair)
+  "𝔸".split("").length -> 2  (CODE UNITS — pair split in half)
+  [..."𝔸"]             -> ["𝔸"]
+  "𝔸".split("")        -> ["\ud835","\udd38"]  (two broken surrogates)
+[check] [..."𝔸"].length === 1 (the string iterator yields code points): OK
+[check] "𝔸".split("").length === 2 (split yields code units — the trap): OK
+[check] for...of yields the whole "𝔸" (iterator combines surrogates): OK
+[check] [..."𝔸"].length is the correct code-point count (use this, not .length): OK
+
+======================================================================
+SECTION D — Grapheme clusters: code points joined by ZWJ; Intl.Segmenter
+======================================================================
+"👨‍👩‍👧"
+  .length         = 8   (8 UTF-16 code units)
+  [...s].length   = 5   (5 code points)
+  code points     = U+1F468 U+200D U+1F469 U+200D U+1F467
+                   (👨 + ZWJ + 👩 + ZWJ + 👧 — joined into ONE grapheme)
+[check] "👨‍👩‍👧".length === 8 (UTF-16 code units): OK
+[check] [..."👨‍👩‍👧"].length === 5 (code points: man,ZWJ,woman,ZWJ,girl): OK
+
+new Intl.Segmenter().segment("👨‍👩‍👧") -> 1 grapheme cluster(s)
+  first grapheme  = "👨‍👩‍👧" (the whole family, one unit)
+[check] Intl.Segmenter counts "👨‍👩‍👧" as 1 grapheme cluster: OK
+[check] the single grapheme equals the whole family string: OK
+
+"é" (precomposed)   .length=1 codePoints=1
+"é" (decomposed) .length=2 codePoints=2
+  visually the same glyph, but precomposed !== decomposed: false
+  .normalize("NFC") reconciles them: true
+[check] precomposed !== decomposed (different code points, same glyph): OK
+[check] .normalize("NFC") makes decomposed === precomposed: OK
+
+======================================================================
+SECTION E — Method greatest hits + tagged template literals (frozen raw)
+======================================================================
+slice / substring negative-index behavior:
+  "abcdef".slice(-2)    -> "ef"   (from the end)
+  "abcdef".slice(-4,-2) -> "cd"  (range from the end)
+  "abcdef".substring(-2)-> "abcdef" (negatives treated as 0)
+[check] "ab".slice(-1) === "b": OK
+[check] "abcdef".slice(-4,-2) === "cd": OK
+[check] substring(-2) treats negative as 0: OK
+
+search / membership:
+  "hello".includes("ell")   -> true
+  "hello".indexOf("ell")    -> 1
+  "hello".indexOf("xyz")    -> -1   (absent -> -1)
+  "hello".startsWith("hel") -> true
+  "hello".endsWith("llo")   -> true
+[check] "hello".includes("ell") === true: OK
+[check] "hello".indexOf("xyz") === -1: OK
+[check] includes is case-sensitive ("Hello".includes("h") === false): OK
+
+pad / repeat:
+  "x".padStart(3, ".")   -> "..x"
+  "x".padEnd(3, "-")     -> "x--"
+  "ab".repeat(3)         -> "ababab"
+[check] "x".padStart(3,".") === "..x": OK
+[check] "ab".repeat(3) === "ababab": OK
+
+at() (ES2022, supports negative index):
+  "abc".at(-1) -> "c"   (last code unit)
+  "abc".at(0)  -> "a"
+  "abc".at(5)  -> undefined   (out of range -> undefined)
+[check] "abc".at(-1) === "c": OK
+[check] "abc".at(5) === undefined (out of range): OK
+
+replace vs replaceAll:
+  "aaa".replace("a","X")    -> "Xaa"   (first only)
+  "aaa".replaceAll("a","X") -> "XXX"   (every match)
+[check] "aaa".replace("a","X") === "Xaa" (first match only): OK
+[check] "aaa".replaceAll("a","X") === "XXX": OK
+
+trim family:
+  "  hi  ".trim()      -> "hi"
+  "  hi  ".trimStart() -> "hi  "
+  "  hi  ".trimEnd()   -> "  hi"
+[check] "  hi  ".trim() === "hi": OK
+
+tagged template: inspectTag`x${1}y${2}z`
+  {"strings":["x","y","z"],"raw":["x","y","z"],"values":[1,2],"frozen":true,"rawFrozen":true,"stringsLen":3}
+[check] tagged: strings === ["x","y","z"]: OK
+[check] tagged: values === [1,2]: OK
+[check] tagged: strings array is FROZEN: OK
+[check] tagged: strings.raw is FROZEN: OK
+[check] tagged: strings.length === substitutions + 1 (3 fragments): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,172 @@
+errors_exceptions.ts — Phase 1 bundle.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: JS is throw-based (like Python), NOT return-error (like Go).
+Anything can be thrown (always throw an Error); errors propagate up the
+call stack until caught; finally ALWAYS runs (even on return/throw).
+
+======================================================================
+SECTION A — throw ANYTHING + try/catch/finally + finally ALWAYS runs
+======================================================================
+throw <anything> (legal, but only Error is correct):
+  throw "string-thrown" -> caught === "string-thrown"? true
+  typeof caught value  -> string   (NOT an Error)
+[check] throw "x" -> caught value === "x" (a string, anti-pattern): OK
+[check] caught string is NOT an instanceof Error: OK
+  throw 42             -> caught === 42?        true
+[check] throw 42 -> caught value === 42 (a number): OK
+  throw {code:7}       -> caught.code === 7?    true
+[check] throw {code:7} -> caught object retains .code === 7: OK
+
+try/catch/finally normal flow (no throw):
+  sequence: try -> finally
+[check] normal flow: try -> finally (catch skipped): OK
+
+finally runs even when try RETURNS:
+  try { return 1 } finally { sideEffect() } -> returned 1, sideEffect ran? true
+[check] finally runs on try-return (before the value escapes): OK
+
+finally runs even when try THROWS:
+  try { throw } finally { sideEffect() } -> sideEffect ran? true
+[check] finally runs on try-throw (before the throw propagates): OK
+
+GOTCHA: finally's return OVERRIDES try's return:
+  try { return "from-try" } finally { return "from-finally" } -> "from-finally"
+[check] finally return overrides try return (returns "from-finally"): OK
+
+======================================================================
+SECTION B — Error object + custom subclasses (the .name gotcha, instanceof)
+======================================================================
+new Error('boom'):
+  .name    = "Error"
+  .message = "boom"
+  typeof .stack = string
+  .stack first line = "Error: boom"
+[check] new Error("boom").message === "boom": OK
+[check] new Error("boom").name === "Error": OK
+[check] Error.prototype.name === "Error": OK
+[check] typeof e.stack === "string": OK
+[check] e.stack includes "Error:" (V8 first line: "Error: <msg>"): OK
+[check] e.stack includes "at " (V8 stack-frame prefix): OK
+
+Built-in Error subclasses (each sets its own .name):
+  TypeError        .name="TypeError"  instanceof Error? true
+[check] TypeError.name === "TypeError": OK
+[check] TypeError instanceof Error: OK
+  RangeError       .name="RangeError"  instanceof Error? true
+[check] RangeError.name === "RangeError": OK
+[check] RangeError instanceof Error: OK
+  SyntaxError      .name="SyntaxError"  instanceof Error? true
+[check] SyntaxError.name === "SyntaxError": OK
+[check] SyntaxError instanceof Error: OK
+  ReferenceError   .name="ReferenceError"  instanceof Error? true
+[check] ReferenceError.name === "ReferenceError": OK
+[check] ReferenceError instanceof Error: OK
+  URIError         .name="URIError"  instanceof Error? true
+[check] URIError.name === "URIError": OK
+[check] URIError instanceof Error: OK
+
+Custom subclass MyError extends Error:
+  new MyError("custom").name    = "MyError"
+  new MyError("custom").message = "custom"
+  myErr instanceof MyError = true
+  myErr instanceof Error   = true
+[check] MyError sets .name === "MyError" (the fix): OK
+[check] myErr instanceof MyError: OK
+[check] myErr instanceof Error (subclass passes through): OK
+
+THE .name GOTCHA: subclass WITHOUT this.name = ... :
+  new NamelessError("x").name = "Error"  (inherited "Error" — wrong!)
+[check] NamelessError without this.name inherits "Error" (the gotcha): OK
+[check] but nameless instanceof NamelessError still works: OK
+
+Conditional handling via instanceof (EAFP style):
+  risky(-1)=RangeError:negative
+  risky(0)=TypeError:zero
+  risky(5)=5
+[check] instanceof dispatches RangeError vs TypeError correctly: OK
+
+======================================================================
+SECTION C — Error.cause chaining (ES2022) + rethrow identity preservation
+======================================================================
+Error.cause (ES2022):
+  root    = Error("disk full")
+  wrapped = Error("save failed", { cause: root })
+  wrapped.cause === root?  true
+  wrapped.cause.message   = "disk full"
+[check] wrapped.cause === root (identity preserved): OK
+[check] wrapped.cause.message === root.message: OK
+
+Walking a 3-layer cause chain (each .cause is the prior error):
+  Error: boot failed
+  Error: readConfig failed
+  Error: ENOENT: file missing
+[check] cause chain walks 3 layers deep: OK
+[check] cause chain root is the ENOENT error: OK
+
+cause can carry structured data (not just an Error):
+  err.cause = {"code":"E_INVALID","fields":["email","age"]}
+[check] cause can be a plain object (structured data): OK
+
+Re-throw preserves identity (throw e keeps the original):
+  inner caught === original? true
+  outer caught === original? true
+  inner caught === outer caught? true
+[check] re-thrown error is the SAME identity at inner catch: OK
+[check] re-thrown error is the SAME identity at outer catch: OK
+[check] inner and outer caught the IDENTICAL object: OK
+
+Wrapping makes a NEW object (identity changes; cause preserves root):
+  wrapped error === original?      false
+  wrapped error.cause === original? true
+[check] wrapping produces a NEW error (identity differs): OK
+[check] but wrapped.cause === original (root reachable): OK
+
+======================================================================
+SECTION D — catch-without-binding + non-Error normalization + propagation
+======================================================================
+catch without a binding (ES2019):
+  isValidJSON('{"a":1}')  = true
+  isValidJSON("not json") = false
+[check] isValidJSON accepts valid JSON: OK
+[check] isValidJSON rejects invalid JSON: OK
+
+Safe normalization (turn any thrown value into an Error):
+  throw "oops"                 -> Error: "oops"  (cause kept? true)
+[check] throw "oops" normalizes to an Error: OK
+  throw 42                     -> Error: "42"  (cause kept? true)
+[check] throw 42 normalizes to an Error: OK
+  throw {code:1}               -> Error: "[object Object]"  (cause kept? true)
+[check] throw {code:1} normalizes to an Error: OK
+  throw new TypeError('t')     -> TypeError: "t"  (cause kept? true)
+[check] throw new TypeError('t') normalizes to an Error: OK
+
+Propagation: C throws -> B (no catch) -> A catches:
+  a() caught: Error: "from-C"
+  stack frame count = 10  (throw site + call chain)
+  stack mentions function a? true
+[check] propagated error message is 'from-C' (thrown in c, caught in a): OK
+[check] stack recorded the call chain (>1 frame): OK
+
+======================================================================
+SECTION E — TypeScript `never`: the type of 'never returns'
+======================================================================
+fail(msg): never  —  always throws, returns nothing:
+  fail("boom from fail()") -> threw: Error: "boom from fail()"
+[check] fail() throws at runtime (its TYPE is never; runtime behavior = throw): OK
+
+never is assignable to EVERY type (verified by `just typecheck`):
+  (see neverIsBottomType(): `const x: string = fail("...")` typechecks,
+   because never is assignable to every type. Not executed at runtime.)
+[check] never is assignable to string/number/boolean/object (tsc-verifiable above): OK
+
+Exhaustive narrowing: fail() as the exhaustive-switch fallback:
+  area({kind:"circle", r:2}) = 12.566371  (PI * 4)
+  area({kind:"square", s:3}) = 9
+[check] area(circle r=2) = PI * 4 (exhaustive narrowing works): OK
+[check] area(square s=3) = 9: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

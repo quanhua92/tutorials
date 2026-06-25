@@ -25,12 +25,21 @@ function check(description: string, ok: boolean): void {
   console.log(`[check] ${description}: OK`);
 }
 
-// TODO: sectionA, sectionB, ... each prints a banner + a readable block + checks.
+// === REPLACE THE DEMO SECTION BELOW WITH YOUR REAL SECTIONS ===
+// Each section: prints a sectionBanner, a readable block of values, then
+// check() asserts for every invariant. Delete this demo once you add your own.
+
+function sectionA(): void {
+  sectionBanner("A — DEMO (replace me)");
+  const two: number = 1 + 1;
+  console.log(`1 + 1 = ${two}`);
+  check("1 + 1 === 2", two === 2);
+}
 
 function main(): void {
   console.log("__STEM__.ts — bundle.");
   console.log("Every value below is computed by this file.");
-  // sectionA();
+  sectionA();
   sectionBanner("DONE — all sections printed");
 }
 

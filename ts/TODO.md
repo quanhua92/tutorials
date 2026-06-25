@@ -33,8 +33,8 @@
 | 6 | Serialization, Validation & Metaprogramming | metaprog | 5 | ✅ done (5/5, 199 checks) |
 | 7 | Async Runtime, HTTP & Realtime | web | 5 | ✅ done (5/5, 202 checks) |
 | 8 | Web, DB & Production | web + db | 6 | ✅ done (6/6, 233 checks) |
-| — | Companion walkthroughs | hono/drizzle/ioredis | 22 | ⬜ pending |
-| | **Total** | | **52 + 22** | **52/52 built** ✅ — walkthroughs next |
+| — | Companion walkthroughs | hono/drizzle/ioredis | 22 | ✅ done (22/22) |
+| | **Total** | | **52 + 22** | **ALL DONE — 52/52 bundles + 22/22 walkthroughs** ✅ |
 
 > ### 🔖 RESUME POINT (coordinator handoff)
 > **State:** Phases 1–3 ✅ done (committed `c8e7661`→`d4fa0c4`); Phase 4 ◑ — `event_loop`

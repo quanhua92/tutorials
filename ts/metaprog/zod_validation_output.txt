@@ -1,0 +1,191 @@
+zod_validation.ts — Phase 6 bundle (metaprog member).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: TS types are ERASED at runtime. Zod makes ONE schema the
+single source of truth for BOTH the compile-time type (z.infer) AND
+the runtime validation (parse) — closing the trust-boundary hole.
+
+======================================================================
+SECTION A — z.object + parse vs safeParse (throw vs result)
+======================================================================
+Schema:
+  const User = z.object({
+    id:    z.number(),
+    name:  z.string(),
+    email: z.string().email(),
+  });
+
+User.parse(valid + unknown 'junk' key):
+  -> {"id":1,"name":"ada","email":"ada@ex.com"}   (unknown keys STRIPPED by default)
+[check] parse returns the valid object (unknown keys stripped): OK
+
+User.parse({id:1, name:'ada'})  // missing required 'email'
+  -> THROWS ZodError (instanceof z.ZodError: true)
+[check] .parse throws on invalid input: OK
+[check] thrown error is instanceof z.ZodError: OK
+[check] thrown constructor name is 'ZodError': OK
+
+User.safeParse(valid):
+  -> success=true, data={"id":2,"name":"bob","email":"bob@ex.com"}
+[check] safeParse(valid).success === true: OK
+
+User.safeParse({id:'oops', name:7})  // wrong types + missing email:
+  -> success=false
+     error.issues = [{"code":"invalid_type","path":["id"],"message":"Expected number, received string"},{"code":"invalid_type","path":["name"],"message":"Expected string, received number"},{"code":"invalid_type","path":["email"],"message":"Required"}]
+[check] safeParse(invalid).success === false: OK
+[check] error.issues has 3 issues (id, name, email): OK
+[check] issue codes include 'invalid_type': OK
+[check] the 'email' missing-field issue has code 'invalid_type': OK
+[check] the 'email' issue message is 'Required': OK
+
+await User.spa(valid)  // .spa = async alias for safeParse:
+  -> success=true, data={"id":3,"name":"cara","email":"cara@ex.com"}
+[check] .spa (safeParseAsync) returns the same success shape, awaited: OK
+
+======================================================================
+SECTION B — z.infer (THE payoff: one schema = compile type + runtime check)
+======================================================================
+Schema:
+  const Product = z.object({
+    id:         z.number().int().positive(),
+    title:      z.string().min(1).max(200),
+    priceCents: z.number().int().nonnegative(),
+    tags:       z.array(z.string()),
+  });
+  type ProductType = z.infer<typeof Product>;
+
+[compile-time] assertType<Equal<z.infer<typeof Product>, Expected>>(true)
+  -> tsc passes: the derived type EQUALS the hand-written shape.
+
+[runtime] Product.safeParse(unknown) -> narrowed, no `as` cast:
+  p = {"id":42,"title":"Mug","priceCents":999,"tags":["kitchen"]}
+[check] parsed value is assignable to z.infer<Product> (no `as`): OK
+
+Boundary pattern (the SAFE alternative to `as`):
+  const r = Product.safeParse(JSON.parse(text));
+  if (r.success) { r.data;  // type: Product, validated }
+  else            { r.error; // type: ZodError, structured }
+[check] z.infer + safeParse replace the lying `as` at trust boundaries: OK
+
+======================================================================
+SECTION C — primitives, refinements, optional/nullable/default, nesting
+======================================================================
+Primitive refinements:
+  z.string().min(2).max(5).parse("abc")   -> "abc"
+  z.number().int().parse(7)               -> 7
+  z.number().positive().parse(3)          -> 3
+[check] z.string().min(2) accepts "abc": OK
+[check] z.string().min(2) rejects "a" (too_small): OK
+[check] z.number().int() accepts 7: OK
+[check] z.number().int() rejects 1.5: OK
+[check] z.number().positive() accepts 3: OK
+[check] z.number().positive() rejects -1: OK
+[check] z.number().int().nonnegative() rejects 1.5 AND -1: OK
+
+String formats:
+  z.string().email().parse("a@b.com")  -> "a@b.com"
+  z.string().url().parse("https://x.io") -> "https://x.io"
+[check] z.string().email() accepts "a@b.com": OK
+  z.string().email() rejects "not-an-email" -> code=invalid_string
+[check] z.string().email() reject issue code is 'invalid_string': OK
+[check] z.string().url() accepts "https://x.io": OK
+
+optional / nullable / default:
+  .optional()  parse({})              -> {}
+  .nullable()  parse({middle:null})   -> {"middle":null}
+  .default()   parse({})              -> {"role":"guest"}   (default filled)
+[check] .optional() accepts missing key: OK
+[check] .optional() accepts explicit undefined: OK
+[check] .nullable() accepts null: OK
+[check] .default() fills 'guest' when missing: OK
+
+Nested schema (object/array/enum/literal/union/record):
+  Person.parse(sample) -> ok, address.zip=12345, nicks.length=2
+[check] nested object parses: OK
+[check] array element schema applied: OK
+  favoriteColor='purple' -> code=invalid_enum_value, path=["favoriteColor"]
+[check] enum reject code is 'invalid_enum_value': OK
+  signature='y' -> code=invalid_literal
+[check] literal reject code is 'invalid_literal': OK
+  z.array(z.string()).parse(['ok',5,'ok']) -> path=[1], code=invalid_type
+[check] array element error path points at index 1: OK
+[check] z.union accepts number: OK
+[check] z.union accepts string: OK
+[check] z.union rejects boolean: OK
+
+======================================================================
+SECTION D — discriminatedUnion (tagged union narrowing) + transforms + refine
+======================================================================
+discriminatedUnion:
+  parse({kind:'circle',radius:3}) -> {"kind":"circle","radius":3}
+  parse({kind:'square',side:4})   -> {"kind":"square","side":4}
+[check] discriminatedUnion parses the circle arm: OK
+[check] discriminatedUnion parses the square arm: OK
+  parse({kind:'triangle',...}) -> code=invalid_union_discriminator, path=["kind"]
+[check] bad discriminator code is 'invalid_union_discriminator': OK
+[check] bad discriminator path points at 'kind': OK
+[check] bad discriminator yields exactly ONE issue (not one per arm): OK
+
+transform:
+  z.string().transform(s => s.length).parse("hello") -> 5 (typeof number)
+[check] transform output is a number (not the input string): OK
+  z.string().min(1).transform(...).parse("Hello World") -> {"original":"Hello World","slug":"hello-world"}
+[check] transform changes the output shape to an object: OK
+
+refine (custom validation):
+  password.safeParse("alllowercase") -> 2 issue(s):
+    custom: "must contain a digit"
+    custom: "must contain an uppercase letter"
+[check] refine attaches 'custom' issues for each failed predicate: OK
+[check] refine accepts a strong password: OK
+
+superRefine (multi-issue):
+  safeParse(['a','a','a']) -> 2 issues: [at most 2 items, duplicates not allowed]
+[check] superRefine emits both the too_big and duplicate issues: OK
+
+refine with path (cross-field check):
+  safeParse({password:'a',confirm:'b'}) -> path=["confirm"], msg="passwords do not match"
+[check] refine path attaches the issue to 'confirm': OK
+
+======================================================================
+SECTION E — coerce (boundary parsing) + error.format()/flatten() + cross-language
+======================================================================
+coerce (boundary string -> typed number):
+  z.coerce.number().int().min(1).max(65535).parse("8080") -> 8080 (typeof number)
+[check] coerce turns '8080' into the number 8080: OK
+[check] coerce still runs refinements ('abc' fails .int()): OK
+[check] coerce rejects out-of-range ('99999' fails .max): OK
+[check] z.number() (no coerce) rejects the string '5': OK
+
+error.format() (nested tree, one _errors[] per level):
+  top._errors        = []
+  email._errors      = ["Invalid email"]
+  profile._errors    = []
+  profile.name._errors  = ["String must contain at least 2 character(s)"]
+  profile.age._errors   = ["Number must be greater than or equal to 0"]
+[check] format().email._errors lists the email message: OK
+[check] format().profile.name._errors lists the name message: OK
+[check] format().profile.age._errors lists the age message: OK
+[check] format().top._errors is empty (errors are on leaves): OK
+
+error.flatten() (two buckets):
+  formErrors  = []
+  fieldErrors = {"a":["Expected number, received string"],"b":["Required"]}
+[check] flatten().fieldErrors.a lists the 'a' message: OK
+[check] flatten().fieldErrors.b lists the 'b' missing message: OK
+
+Single source of truth (schema = type + runtime check):
+  WRITE:   const S = z.object({...})            // one definition
+  COMPILE: type T = z.infer<typeof S>           // derived TS type
+  RUNTIME: S.parse(unknown) -> T  |  ZodError   // validated value
+  BOUNDARY: S.safeParse(req.body)               // narrows unknown
+
+Cross-language: this is the JS answer to
+  - Rust serde #[derive(Deserialize)] (one struct -> typed deser)
+  - Go struct-tag validation (field tags -> runtime checks)
+[check] zod closes the TS type-erasure hole at trust boundaries: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

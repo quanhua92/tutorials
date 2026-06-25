@@ -1,0 +1,177 @@
+build_tooling.ts — Phase 6 bundle (member: metaprog).
+Every config value below is READ from the repo's own tsconfig files via
+node:fs and ASSERTED — nothing spawned, nothing hand-computed. Type
+erasure is observed at runtime (typeof); bundlers/sourcemaps are documented.
+
+======================================================================
+SECTION A — The toolchain split & the type-erasure proof
+======================================================================
+Type-erasure proof (run via tsx = esbuild strips types):
+  const answer: number = 42   -> typeof answer = number
+  const u:      User     = {} -> typeof u      = object   (interface User is GONE)
+  const a:      Alias    = {} -> typeof a      = object   (type Alias is GONE)
+  There is no "number"/"User"/"Alias" string at runtime — typeof
+  returns one of the 8 JS runtime strings only (see VALUES_TYPES_COERCION).
+[check] typeof answer === "number" (annotation erased, value remains): OK
+[check] typeof u === "object" (interface User leaves NO runtime trace): OK
+[check] typeof a === "object" (type Alias leaves NO runtime trace): OK
+
+The "runs in tsx but fails tsc" trap (mechanism):
+  const n: number = ("1" as number)  -> typeof n = string   value = "1"
+  tsx/esbuild RAN this (no type-check); tsc would REJECT `as number` from
+  string->number as unsound. THIS is why `just typecheck` is a separate gate.
+[check] tsx ran a string-as-number assignment (typeof n === "string", NOT number): OK
+[check] value survived as the string "1" (erasure keeps the value, drops the type): OK
+
+The three toolchain roles (tsc | tsx/esbuild | tsup):
+  tsc --noEmit        TYPECHECK gate (vet)        emits nothing; exits non-zero on error
+  tsx file.ts         RUN (dev)                   esbuild erases types in-memory; no .js
+  tsup / esbuild      BUNDLE (publish)           emits .js + .d.ts + .map to dist/
+  ONLY tsc checks types. tsx/esbuild ERASE types without checking.
+
+======================================================================
+SECTION B — tsconfig.json is the build contract (read tsconfig.base.json)
+======================================================================
+Read: /Volumes/data/workspace/tutorials/ts/tsconfig.base.json  (the repo's shared base, read via node:fs)
+Parsed compilerOptions (the CONTRACT every member inherits):
+  target                 = "ES2023"
+[check] base.target === "ES2023": OK
+  module                 = "NodeNext"
+  moduleResolution       = "NodeNext"
+[check] base.module === "NodeNext": OK
+[check] base.moduleResolution === "NodeNext": OK
+  lib                    = ["ES2023"]
+[check] base.lib[0] === "ES2023": OK
+  types                  = ["node"]
+[check] base.types includes "node": OK
+  strict                 = true
+  noUncheckedIndexedAccess = true
+  exactOptionalPropertyTypes = true
+  noImplicitOverride     = true
+  noFallthroughCasesInSwitch = true
+  noImplicitReturns      = true
+  noUnusedLocals         = true
+  noUnusedParameters     = true
+[check] base.strict === true: OK
+[check] base.noUncheckedIndexedAccess === true: OK
+[check] base.exactOptionalPropertyTypes === true: OK
+[check] base.noImplicitOverride === true: OK
+[check] base.noFallthroughCasesInSwitch === true: OK
+[check] base.noImplicitReturns === true: OK
+[check] base.noUnusedLocals === true: OK
+[check] base.noUnusedParameters === true: OK
+  esModuleInterop        = true
+  forceConsistentCasingInFileNames = true
+  skipLibCheck           = true
+  isolatedModules        = true
+  verbatimModuleSyntax   = false
+  noEmit                 = true
+[check] base.esModuleInterop === true: OK
+[check] base.forceConsistentCasingInFileNames === true: OK
+[check] base.skipLibCheck === true: OK
+[check] base.isolatedModules === true: OK
+[check] base.verbatimModuleSyntax === false (type imports auto-elided): OK
+[check] base.noEmit === true (tsc is a TYPECHECK gate, not an emitter): OK
+
+======================================================================
+SECTION C — extends inheritance, moduleResolution, isolatedModules, type imports
+======================================================================
+Read: /Volumes/data/workspace/tutorials/ts/metaprog/tsconfig.json  (this member's tsconfig, read via node:fs)
+  extends                = "../tsconfig.base.json"
+  include                = ["*.ts"]
+  compilerOptions.types  = ["node"]
+  compilerOptions.lib    = ["ES2023","ESNext.decorators"]
+[check] member.extends === "../tsconfig.base.json" (inheritance link): OK
+[check] member.include === ["*.ts"]: OK
+
+extends inheritance proof (read both files, reason about the merge):
+  member redeclares strict? false   (absent => inherits base)
+  base.strict === true?    true   (=> effective member strict === true)
+[check] member does NOT redeclare strict (inherits base via extends): OK
+[check] base.strict === true (so the member's effective strict === true): OK
+
+lib is REPLACED (not merged) under extends — the member repeats ES2023:
+  member.lib includes "ES2023"?           true   (re-declared, else lost)
+  member.lib includes "ESNext.decorators"? true   (Phase 6 metaprog needs it)
+[check] member.lib re-declares "ES2023" (else extends would DROP it): OK
+[check] member.lib adds "ESNext.decorators" (for TC39 decorators): OK
+
+moduleResolution NodeNext (modern; per-file ESM/CJS via package.json):
+  effective moduleResolution = "NodeNext"
+  metaprog/package.json "type": "module" => this file is ESM =>
+  import.meta.url is available (used above to resolve the config paths).
+[check] effective moduleResolution === "NodeNext": OK
+
+isolatedModules + verbatimModuleSyntax (the erasure-safety pair):
+  isolatedModules: true   -> each file must transform standalone (per-file esbuild)
+  verbatimModuleSyntax: false  -> tsc auto-elides type-only imports (no forced `import type`)
+[check] isolatedModules === true (per-file transform requirement): OK
+[check] verbatimModuleSyntax === false (auto-elide; not strict import-type enforcement): OK
+
+type vs value (the `import type` boundary, observed locally):
+  type Port = 8080; const realPort: Port = 8080;
+  -> typeof realPort = number   value = 8080   (Port alias is gone; value kept)
+[check] typeof realPort === "number" (type alias Port erased; value kept): OK
+[check] realPort === 8080 (the value survives erasure): OK
+
+======================================================================
+SECTION D — Bundlers (tsup/esbuild): .js + .d.ts + sourcemap anatomy
+======================================================================
+A publishable TS library's build output (tsup/esbuild, documented):
+  dist/<name>.js       type-erased JS (esbuild strips annotations/interfaces)
+  dist/<name>.d.ts     DECLARATION emit (declaration:true) — consumer's tsc reads it
+  dist/<name>.js.map   SOURCEMAP — maps emitted .js line -> original .ts line
+
+Why .d.ts: TS types are ERASED from the .js (Section A), so a consumer's
+tsc could not see them. The .d.ts ships the type surface separately. This
+is the whole reason `declaration: true` exists — it does NOT affect the .js.
+
+Why sourcemaps: a stack trace in dist/index.js line 42 is useless without
+the original .ts. The .map lets devtools/debuggers reconstruct the .ts line.
+
+Constructed SourceMap v3 (deterministic example, NOT spawned):
+  version: 3
+  file:    "index.js"
+  sources: ["../src/index.ts"]
+  sourcesContent: ["const x: number = 1;"]
+  names:   []
+  mappings: "AAAA"   (VLQ-encoded segments)
+[check] sourcemap version === 3 (the only spec version): OK
+[check] mappings "AAAA" decodes to [0,0,0,0]: OK
+
+VLQ decode demos (the mapping grammar):
+  decodeVlq("AAAA") = [0,0,0,0]   (genCol0,src0,line0,col0)
+  decodeVlq("gB")   = [16]   (a single value 16 — col delta)
+  Grammar: segments separated by ','; lines by ';'. Each segment is a
+  group of 1|4|5 VLQ values (genCol [,srcIdx,srcLine,srcCol [,nameIdx]]).
+[check] decodeVlq("gB") === [16] (VLQ sign/magnitude, base64-continued): OK
+
+======================================================================
+SECTION E — Choosing the tool per task + cross-language build splits
+======================================================================
+Pick the tool by the TASK (deterministic decision table):
+  task                  tool                       why
+  --------------------  -------------------------  -----------------------------------
+  dev / run             tsx file.ts               esbuild erases types in-memory; no .js artifact
+  CI typecheck gate     tsc --noEmit              the ONLY step that checks types; exits non-zero on error
+  emit declarations     tsc --emitDeclarationOnly .d.ts for consumers (declaration:true)
+  publish / bundle      tsup / esbuild            .js + .d.ts + .map into dist/
+  project references    tsc --build               incremental, builds referenced projects in order
+[check] dev-run uses tsx (esbuild erase + run, no artifact): OK
+[check] CI gate uses tsc --noEmit (typecheck only): OK
+[check] publish uses tsup/esbuild (bundle .js + .d.ts + .map): OK
+
+import.meta.url — the ESM 'where am I?' (used above to find the configs):
+  import.meta.url -> file://...metaprog/build_tooling.ts
+  (CJS equivalent: __dirname/__filename, injected by the module wrapper.)
+[check] import.meta.url is a string (available in ESM, Node-set): OK
+
+Cross-language build splits (the same problem, three ecosystems):
+  TS   : tsc (check) | tsx/esbuild (run) | tsup (bundle)   [this bundle]
+  Rust : cargo build (compile) | build.rs (codegen)        [../rust/BUILD_CONFIG.md]
+  Go   : go build | //go:build tags | -ldflags -X          [../go/BUILD_LDFLAGS_GENERATE.md]
+  Each splits 'configure / generate / check / emit' across distinct tools.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

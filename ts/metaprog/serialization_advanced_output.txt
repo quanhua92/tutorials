@@ -1,0 +1,140 @@
+serialization_advanced.ts — Phase 6 bundle (metaprog/).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Theme: plain JSON loses Date/Map/Set/undefined/BigInt. superjson's
+{json, meta} envelope + a zod schema restore typed, validated
+round-trips — the runtime JS analog of Rust's serde.
+
+======================================================================
+SECTION A — The JSON gaps recap + the native escape hatch (toJSON/replacer)
+======================================================================
+JSON.stringify({d: new Date(0)}) -> {"d":"1970-01-01T00:00:00.000Z"}
+JSON.parse(...) .d typeof        -> string  (a STRING, not a Date)
+parsed .d is a Date instance?    -> false
+[check] JSON.stringify Date -> quoted ISO string: OK
+[check] plain JSON.parse does NOT revive Date (comes back a string): OK
+[check] parsed Date is NOT a Date instance (type info LOST): OK
+JSON.stringify({m: new Map(...)}) -> {"m":{}}   (data LOST)
+JSON.stringify({s: new Set(...)}) -> {"s":{}}   (data LOST)
+[check] plain JSON turns Map into {} (data lost): OK
+[check] plain JSON turns Set into {} (data lost): OK
+JSON.stringify({a: undefined, b:1}) -> {"b":1}   (key 'a' OMITTED)
+[check] plain JSON omits undefined keys from objects: OK
+JSON.stringify({b: 1n})          -> THROWS TypeError
+[check] plain JSON THROWS TypeError on BigInt: OK
+{x: {toJSON: () => 42}} stringify -> {"x":42}   (return value replaces object)
+[check] custom toJSON() return value is serialized: OK
+replacer converts Map to entries  -> {"m":[["k",1]]}
+[check] function replacer serializes a Map to entries: OK
+
+Summary of the JSON boundary (each loss is a gap superjson closes):
+  Date      -> ISO string (no auto-revive)
+  Map/Set   -> {} (internal slots; data LOST)
+  undefined -> omitted from objects
+  BigInt    -> THROWS TypeError
+  Native hatch: toJSON() + replacer (manual, per call site).
+
+======================================================================
+SECTION B — superjson: the {json, meta} envelope + typed round-trips
+======================================================================
+SuperJSON.stringify({d: new Date(0)}) ->
+  {"json":{"d":"1970-01-01T00:00:00.000Z"},"meta":{"values":{"d":["Date"]},"v":1}}
+SuperJSON.parse(wire).d instanceof Date -> true
+SuperJSON.parse(wire).d.getTime()       -> 0
+[check] superjson wire is the {json, meta} envelope: OK
+[check] superjson round-trips Date: parse(stringify).d instanceof Date: OK
+[check] superjson round-trips Date: getTime() === 0 (value preserved): OK
+
+serialize() decomposes the envelope (both halves are JSON-compatible):
+  json : {"d":"1970-01-01T00:00:00.000Z","m":[["k",1]],"arr":["1970-01-01T00:00:00.000Z"]}
+  meta : {"values":{"d":["Date"],"m":["map"],"arr.0":["Date"]},"v":1}
+[check] envelope .json carries the rewritten values: OK
+[check] envelope .meta.values maps each path to its type: OK
+[check] nested path 'arr.0' records the Date type: OK
+
+Type         : round-trips?  : meta tag
+------------- : ------------- : --------
+Date         : true      : ["Date"]
+Map          : true      : ["map"]
+Set          : true      : ["set"]
+BigInt       : true      : ["bigint"]
+URL          : true      : ["URL"]
+Error        : true      : ["Error"]
+RegExp       : true      : ["regexp"]
+undefined    : true      : ["undefined"]
+[check] superjson round-trips Map (instanceof Map, get() works): OK
+[check] superjson round-trips Set (instanceof Set, size preserved): OK
+[check] superjson round-trips BigInt (typeof bigint, value preserved): OK
+[check] superjson round-trips URL (instanceof URL, href preserved): OK
+[check] superjson round-trips Error (instanceof Error, message preserved): OK
+[check] superjson round-trips RegExp (instanceof RegExp, source+flags preserved): OK
+[check] superjson round-trips undefined (stays undefined, not omitted): OK
+[check] superjson stringify is deterministic (byte-identical re-run, fixed dates): OK
+
+======================================================================
+SECTION C — zod + superjson: revive untrusted JSON, THEN validate -> typed
+======================================================================
+outgoing (typed)    : {"id":7,"name":"deploy","at":"1970-01-01T00:00:00.000Z","tags":["prod","v2"]}
+superjson wire      : {"json":{"id":7,"name":"deploy","at":"1970-01-01T00:00:00.000Z","tags":["prod","v2"]},"meta":{"values":{"at":["Date"]},"v":1}}
+SuperJSON.parse wire: revived .at instanceof Date -> true
+[check] SuperJSON.parse revives .at back to a real Date: OK
+[check] zod safeParse accepts the revived value: OK
+validated .id       : 7 (number)
+validated .name     : deploy (string)
+validated .at       : 1970-01-01T00:00:00.000Z (Date)
+validated .tags     : ["prod","v2"] (string[])
+[check] validated data: id is number: OK
+[check] validated data: at is Date: OK
+[check] validated data: tags is string[] of length 2: OK
+
+rejection path (missing 'name', string 'at'):
+  safeParse.success  -> false
+  issues             -> ["name: Required","at: Expected date, received string"]
+[check] zod rejects invalid payload (safeParse.success === false): OK
+[check] zod reports the missing 'name' field: OK
+
+======================================================================
+SECTION D — JSON Schema from zod (DOCUMENTED; hand-built, no extra dep)
+======================================================================
+zod schema:
+  z.object({ id: z.number(), name: z.string(),
+            tags: z.array(z.string()), note: z.string().optional() })
+emitted JSON-Schema shape (hand-built emitter, no zod-to-json-schema dep):
+  {"type":"object","properties":{"id":{"type":"number"},"name":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"note":{"type":"string"}},"required":["id","name","tags"]}
+[check] emitted top-level type is object: OK
+[check] 'note' is NOT required (optional field omitted from required[]): OK
+[check] 'name' IS required: OK
+[check] emitted shape lists id/name/tags/note properties: OK
+[check] tags emits as an array shape: OK
+
+Documentation note (NOT imported here):
+  - zod-to-json-schema  : community pkg, full emitter for zod v3.
+  - z.toJSONSchema()    : built-in emitter arriving in zod v4.
+  This bundle imports neither; the schema is the single source of
+  truth, and the emitted JSON Schema is the OpenAPI / cross-lang contract.
+
+======================================================================
+SECTION E — Choosing a strategy + the cross-language (Rust serde) contrast
+======================================================================
+Strategy          | Round-trips types? | Validates? | Both ends need       | Use when
+------------------|--------------------|------------|----------------------|--------------------------------
+plain JSON        | NO (Date->string)  | NO         | nothing              | simple, trusted, JSON-subset only
+superjson         | YES (meta envelope)| NO         | superjson on both    | full-fidelity JS<->JS wire
+zod (parse)       | via transform      | YES        | zod on consumer      | validate untrusted input
+superjson + zod   | YES + YES          | YES        | both libs on consumer| typed, validated, reviving pipeline
+JSON Schema       | contract only      | (external) | a validator per lang | cross-language / OpenAPI contract
+
+Cross-language contrast (🔗 ../rust/SERDE_ADVANCED.md):
+  Rust serde #[derive(Serialize, Deserialize)] is COMPILE-TIME typed:
+    the (de)serializer is generated from the type; a DateTime round-trips
+    as a DateTime with NO runtime revival and NO extra 'meta' envelope.
+  JS types are ERASED at runtime, so JSON sees none of them. superjson's
+  `meta` map + zod's runtime schema are the JS ANALOG: they re-add at
+  runtime what the type system cannot carry across the boundary.
+[check] strategy table has 5 rows (plain/superjson/zod/both/schema): OK
+[check] superjson+zod is the only row that BOTH round-trips types AND validates: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

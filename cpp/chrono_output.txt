@@ -1,0 +1,118 @@
+chrono.cpp — Phase 5 bundle (chrono / CHRONO).
+Every FIXED value below is computed by this file. No now() value is
+printed. Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free.
+
+======================================================================
+SECTION A — duration: count + unit ratio (std::ratio)
+======================================================================
+The predefined duration typedefs (helper types in <chrono>).
+Period is a compile-time std::ratio (sec/tick); only the count is stored.
+  typedef          sizeof   Period (sec/tick)      1 unit .count()
+  --------------   ------   ---------------------   --------------
+  nanoseconds         8    ratio<1, 1000000000>         1
+  microseconds        8    ratio<1, 1000000>           1
+  milliseconds        8    ratio<1, 1000>              1
+  seconds             8    ratio<1>                    1
+  minutes             8    ratio<60>                   1
+  hours               8    ratio<3600>                 1
+[check] 1h == 60min == 3600s  (same interval, different units): OK
+[check] 1min == 60s == 60000ms: OK
+[check] 1s == 1000ms == 1000000us == 1000000000ns: OK
+[check] (500ms).count() == 500  (raw tick count, no scaling): OK
+[check] (1h).count() == 1  (the count is in HOURS, the unit): OK
+
+WIDENING (s -> ms, exact) needs no cast:  milliseconds m = 1s;  m.count() = 1000
+[check] milliseconds m = 1s;  m.count() == 1000 (implicit widening): OK
+
+NARROWING needs duration_cast, which TRUNCATES toward zero:
+    duration_cast<seconds>(1500ms).count() = 1   (500ms dropped)
+    duration_cast<seconds>(999ms).count()  = 0   (< 1s, rounds to 0)
+[check] duration_cast<seconds>(1500ms) == 1s (truncates 500ms): OK
+[check] duration_cast<seconds>(999ms) == 0s (truncates to zero): OK
+[check] 1500ms < 2s  (cross-unit comparison < ): OK
+
+======================================================================
+SECTION B — time_point: epoch + duration (deterministic arithmetic)
+======================================================================
+Default steady_clock::time_point sits at the epoch:
+    epoch.time_since_epoch().count() = 0 ns
+[check] default time_point is at the epoch (time_since_epoch == 0): OK
+
+time_point arithmetic (all off the fixed epoch):
+    (epoch + 7s) - (epoch + 2s) = 5 s   [tp - tp -> duration]
+    (epoch + 7s) - 5s == (epoch + 2s) : true   [tp - d -> tp]
+[check] tp + d -> tp :  epoch + 2s has time_since_epoch 2s: OK
+[check] tp - tp -> d :  (epoch+7s) - (epoch+2s) == 5s: OK
+[check] tp - d -> tp :  (epoch+7s) - 5s == (epoch+2s): OK
+[check] tp + d + d :  epoch + 2s + 3s == epoch + 5s: OK
+[check] duration ('how long') vs time_point ('when') are distinct concepts: OK
+
+======================================================================
+SECTION C — the three clocks (is_steady is a compile-time constant)
+======================================================================
+clock                   is_steady   tick period      note
+----------------------  ----------  ---------------  ----------------------------------
+system_clock            false       1 / 1000000    wall clock; to/from time_t
+steady_clock            true        1 / 1000000000 MONOTONIC; for measuring durations
+high_resolution_clock   true        1 / 1000000000 may alias system | steady
+[check] steady_clock::is_steady == true  (mandated by the standard): OK
+
+system_clock::is_steady is implementation-defined (here: false); we do NOT
+portably assert it. NEVER use system_clock to measure a duration — it can
+jump (NTP, daylight-saving, the user sets the clock). Use steady_clock.
+
+high_resolution_clock identity on THIS toolchain (compile-time):
+    is_same_v<high_resolution_clock, steady_clock> : true
+    is_same_v<high_resolution_clock, system_clock> : false
+[check] high_resolution_clock is an alias of steady_clock OR system_clock (impl-defined): OK
+
+system_clock <-> time_t round-trip of a FIXED epoch (no now()):
+    from_time_t(0) then to_time_t(.) = 0  (0 == 1970-01-01 00:00:00 UTC)
+[check] system_clock from_time_t(0) <-> to_time_t round-trips to 0: OK
+
+======================================================================
+SECTION D — measuring a duration (steady_clock) + C++20 calendar
+======================================================================
+Measured a steady_clock interval around a 1ms sleep:
+    (t1 > t0)               : true   [monotonic ordering, always true]
+    (elapsed >= 1ms)        : true   [the count itself is NOT printed]
+[check] steady_clock is monotonic: t1 (later) > t0 (earlier): OK
+[check] measured duration >= the 1ms sleep  (boolean only; value never printed): OK
+[check] a measured duration is a duration (tp - tp -> d), not a time_point: OK
+
+C++20 calendar (FIXED dates, deterministic):
+    year{2021}/January/15  -> year=2021  month=1  day=15
+    weekday of 2021-01-15  == Friday : true   (c_encoding=5)
+[check] year{2021}/January/15 -> year 2021, month January, day 15: OK
+[check] 2021-01-15 was a Friday: OK
+    2021-01-15 + months{1} -> year=2021  month=2  day=15
+[check] 2021-01-15 + months{1} == 2021-02-15: OK
+    weekday of 1970-01-01 (Unix epoch) == Thursday : true
+[check] the Unix epoch 1970-01-01 was a Thursday: OK
+
+======================================================================
+SECTION E — rounding (C++17), sleep_for, and the time-zone caveat
+======================================================================
+1750ms (1.75 s) through the four conversions:
+    duration_cast<seconds> : 1 s   (truncate toward zero)
+    floor<seconds>         : 1 s   (toward -infinity)
+    ceil<seconds>          : 2 s   (toward +infinity)
+    round<seconds>         : 2 s   (nearest, ties to even)
+[check] duration_cast<seconds>(1750ms) == 1s (truncates): OK
+[check] floor<seconds>(1750ms) == 1s: OK
+[check] ceil<seconds>(1750ms) == 2s: OK
+[check] round<seconds>(1750ms) == 2s (nearest): OK
+[check] round<seconds>(2500ms) == 2s  (ties to EVEN, not away-from-zero): OK
+[check] floor/ceil/round never overflow the result range (here, all in 0..3 s): OK
+[check] sleep_for(2ms) blocked for >= 2ms (boolean; value not printed): OK
+
+Time-zone availability, detected with the feature-test macro:
+    __cpp_lib_chrono == 201611
+    C++20 calendar + time zones need >= 201907; current_zone()/zoned_time are
+    ABSENT on this toolchain (Apple system libc++ ships no IANA tzdb).
+[check] __cpp_lib_chrono is at least the C++17 value 201611 (floor/ceil/round): OK
+[check] detected C++20 time-zone availability via the macro (no absent function called): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

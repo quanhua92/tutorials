@@ -1,0 +1,152 @@
+containers_sequence.cpp — Phase 5 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — std::vector: contiguous, growable, capacity/reserve
+======================================================================
+std::vector<int> v;   -> size=0  capacity=0
+
+push_back 1..10 — capacity growth sequence (impl-defined):
+  after push_back( 1): size= 1  capacity= 1  <- reallocated (capacity grew)
+  after push_back( 2): size= 2  capacity= 2  <- reallocated (capacity grew)
+  after push_back( 3): size= 3  capacity= 4  <- reallocated (capacity grew)
+  after push_back( 4): size= 4  capacity= 4
+  after push_back( 5): size= 5  capacity= 8  <- reallocated (capacity grew)
+  after push_back( 6): size= 6  capacity= 8
+  after push_back( 7): size= 7  capacity= 8
+  after push_back( 8): size= 8  capacity= 8
+  after push_back( 9): size= 9  capacity=16  <- reallocated (capacity grew)
+  after push_back(10): size=10  capacity=16
+final v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+[check] vector grew to size 10 after 10 push_backs: OK
+[check] capacity >= size (never less): OK
+[check] capacity is monotonic non-decreasing across push_backs: OK
+
+w.reserve(100); -> size=0  capacity=100 (size unchanged, capacity is now >= 100)
+after 100 push_backs within the reservation: capacity=100 (UNCHANGED — no reallocation)
+[check] reserve(100) gave capacity >= 100: OK
+[check] 100 push_backs within reserve() did NOT reallocate (capacity fixed): OK
+
+v[0]=1  v[9]=10   (operator[]: unchecked — OOB is UB)
+calling v.at(10) on a size-10 vector (index 10 is OOB)...
+  caught std::out_of_range: "vector"
+[check] v.at(10) threw std::out_of_range (defined, catchable): OK
+[check] v[0] == 1 and v[9] == 10 (operator[] in-bounds is fine): OK
+
+s.reserve(1000); s.push_back(7); s.shrink_to_fit();
+  capacity: 1000 -> 1  (shrink_to_fit is a non-binding hint; here it shrunk)
+[check] after shrink_to_fit, capacity >= size still holds: OK
+
+======================================================================
+SECTION B — ITERATOR INVALIDATION: reallocation invalidates ALL
+======================================================================
+std::vector<int> v = {10,20,30}; auto it = v.begin()+1;
+  *it (valid) = 20   (it points at v[1])
+  capacity before = 3
+  after 1 push_back(s) capacity: 3 -> 6  (REALLOCATED)
+  *** `it` is now INVALIDATED — the buffer moved. We do NOT
+      read *it (that would be UB). The value 20 was COPIED to
+      the new buffer, reachable via the SAFE index v[1].
+  v[1] (safe, by index) = 20
+[check] reallocation changed capacity (the trigger): OK
+[check] after realloc, the value 20 survived via the safe index v[1]: OK
+[check] the invalidated iterator `it` was NOT read (UB avoided in verified path): OK
+
+reserve(8) first, then push 3 more: capacity stays 8 (no realloc)
+  *wit (STILL valid — no reallocation happened) = 200
+[check] reserve(8) kept capacity fixed across 3 in-reserve push_backs: OK
+[check] the iterator captured after reserve() stayed valid & readable: OK
+
+before erase: e = [1, 2, 3, 4, 5]
+after  e.erase(begin()+2) (removed value 3): e = [1, 2, 4, 5]
+  iterators at/after begin()+2 are INVALIDATED; we read e only
+  via fresh begin()/operator[] (safe).
+[check] erase(begin()+2) removed exactly the element 3: OK
+
+======================================================================
+SECTION C — std::array (fixed, no decay) + std::deque (O(1) front+back)
+======================================================================
+std::array<int,3> a = {1,2,3};
+  a.size() = 3   (knows its size — unlike a C array)
+  sizeof(a) = 12  (== 3 * sizeof(int) = 12; NOT pointer-sized 8)
+  a.front()=1  a.back()=3  a[1]=2  a.data()=non-null
+[check] std::array<int,3>::size() == 3: OK
+[check] std::array does NOT decay: sizeof(a) == 3*sizeof(int) (not sizeof(int*)): OK
+  copy: std::array<int,3> b = a; b[0]=99; -> a[0]=1 (untouched), b[0]=99
+[check] std::array is value-semantic: mutating a copy leaves the original alone: OK
+
+std::deque<int> d; d.push_back(2); d.push_front(1); d.push_back(3);
+  d = [1, 2, 3]   (push_front put 1 at the front in O(1))
+  d.front()=1  d.back()=3  d[1]=2 (operator[] is O(1))
+  vector equivalent: v.insert(begin(),1) is O(n) (shifts all); vd = [1,2,3]
+[check] deque push_front placed 1 at the front in O(1): OK
+[check] deque supports O(1) operator[] random access: OK
+[check] deque size is 3 after 2 push_back + 1 push_front: OK
+
+======================================================================
+SECTION D — std::list / forward_list: node, O(1) insert, stable iter
+======================================================================
+std::list<int> l = {1,2,4}; auto lit = next(begin()); // -> 2
+l.insert(lit, 99);  -> l = [1, 99, 2, 4]; *lit (STILL valid) = 2
+l.push_back(5);     -> *lit (STILL valid — no realloc) = 2
+l.erase(node holding 99); -> *lit (STILL valid — only erased node dies) = 2
+l.erase(lit); (erased the node lit pointed at) -> lit is now INVALIDATED; not read.
+  last safe value read from lit (before erase) = 2
+  final l = [1, 4, 5]
+[check] list: insert(99)+erase(99)+erase(lit=2) net-left the list as {1,4,5}: OK
+[check] list: the last safe value read from `lit` before its erase was 2: OK
+
+splice: x={10,20}, y={30,40,50}; auto spit = y node 40;
+  x.splice(x.end(), y, spit);  -> x = [10, 20, 40], y = [30, 50]
+  *spit (STILL valid — now observes the node in x) = 40
+[check] splice moved node 40 out of y (y lost it): OK
+[check] splice moved node 40 into x: OK
+[check] spit stayed valid across splice (now points in x): OK
+
+std::forward_list<int> fl = {3,4}; fl.push_front(2); fl.push_front(1);
+  fl = [1, 2, 3, 4]   (singly-linked; push_front only; NO push_back; NO size())
+[check] forward_list push_front built {1,2,3,4}: OK
+
+======================================================================
+SECTION E — invalidation rules + emplace_back + the choice matrix
+======================================================================
+ITERATOR INVALIDATION (per cppreference, Containers library):
+  container       insertion                                  erasure
+  --------------  ----------------------------------------   ------------------------------------------
+  vector          realloc -> ALL; else at/after the point   erased + at/after (incl end())
+  deque           at ends -> only end(); middle -> ALL      all EXCEPT erased (end() may invalidate)
+  list            ALL iterators stay valid (no realloc)     only the ERASED element
+  forward_list    ALL iterators stay valid                  only the ERASED element
+  array           N/A (fixed size — cannot insert/erase)    N/A
+
+The headline contrasts:
+  * vector REALLOCATION invalidates EVERY iterator/pointer/reference.
+  * list erase invalidates ONLY the erased node (everything else stable).
+
+emplace_back(1,2) constructs in place; push_back(Point(3,4)) /
+push_back({5,6}) build a temp then move it in. Result is identical:
+  pv = [(1,2), (3,4), (5,6)]
+[check] emplace_back(1,2) placed Point(1,2): OK
+[check] push_back(Point(3,4)) placed Point(3,4): OK
+[check] push_back({5,6}) placed Point(5,6): OK
+
+CHOICE MATRIX (which container wins when):
+  need...                                   pick
+  ----------------------------------------  ----------------------
+  default / contiguous / cache-friendly      std::vector
+  fixed size known at compile time           std::array<T,N>
+  O(1) push/pop at BOTH ends                 std::deque
+  O(1) insert/erase in the MIDDLE + stable   std::list
+    iterators, minimal memory overhead       std::forward_list
+
+Rule of thumb: reach for std::vector unless you have a measured reason
+not to — its contiguous storage is cache-friendly and push_back is
+amortized O(1). std::array for fixed sizes; std::deque for front+back;
+std::list only when iterator stability or frequent middle insert/erase
+dominates (and even then, benchmark against vector first).
+[check] vector is the default choice (contiguous, amortized-O(1) push_back): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

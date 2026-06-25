@@ -1,0 +1,138 @@
+string_stringview.cpp — Phase 5 bundle.
+std::string (OWNED, growable, SSO) vs std::string_view (NON-OWNING borrow).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — std::string: owned, growable, value-semantic
+======================================================================
+sizeof(std::string)      = 24 bytes (FIXED: the inline SSO buffer)
+
+std::string s = "hello";  -> s="hello"  size=5  length=5
+after push_back('!')+append(" world")+="?"+" ok":
+  s="hello! world? ok"  size=16
+
+s.substr(2,5) = "llo! "  (a NEW std::string; ALLOCATES if not SSO)
+  original s is UNCHANGED: "hello! world? ok"
+
+s.find("world")   = 7   (index of substring)
+s.find("missing") = 18446744073709551615  (== npos == 18446744073709551615 when absent)
+s.rfind("o")      = 14   (index of LAST 'o')
+
+"ACD".insert(1,"B").erase(2,1) = "ABD"
+std::string("ab") + "cd" + 'e' = "abcde"  (NEW string)
+
+s.c_str() = "hello! world? ok"  (null-terminated; s.size()=16, strlen=16)
+
+VALUE semantics: std::string copied = original; copied += "XXX";
+  original="AAA"  (UNCHANGED: copy was independent)
+  copied  ="AAAXXX"
+[check] std::string: size() == length(): OK
+[check] std::string grows under push_back/append/+=: OK
+[check] std::string::substr returns a NEW string (original unchanged): OK
+[check] std::string::find returns index when present (pos1==7): OK
+[check] std::string::find returns npos when absent (pos2==npos): OK
+[check] std::string::rfind finds the LAST occurrence (pos3==14): OK
+[check] std::string::insert/erase mutate in place (t=="ABD"): OK
+[check] std::string operator+ concatenates into a new string (cat=="abcde"): OK
+[check] std::string is VALUE-semantic: a copy is INDEPENDENT of its source: OK
+[check] std::string::c_str is null-terminated (strlen == size): OK
+
+======================================================================
+SECTION B — SSO: short strings INLINE, sizeof FIXED, threshold impl-defined
+======================================================================
+sizeof(std::string) = 24 bytes (the SAME for an empty or a long string)
+
+empty (size=0):  data INSIDE the object  (inline=1)
+"hi"  (size=2):  data INSIDE the object  (inline=1)
+100x  (size=100): data OUTSIDE the object  (inline=0)
+
+SSO threshold on this stdlib (first length that HEAP-allocates) = 23
+  (impl-defined: libc++ ~22 here; libstdc++ ~15; MSVC ~15)
+
+The win: an empty or short std::string makes ZERO heap allocations.
+Long strings (n >= 23) heap-allocate, just like std::vector<char>.
+[check] sizeof(std::string) is FIXED regardless of content: OK
+[check] empty string's data() is INSIDE the object (SSO): OK
+[check] short "hi" string's data() is INSIDE the object (SSO): OK
+[check] long 100-char string's data() is OUTSIDE the object (heap): OK
+[check] SSO threshold is > 0 (the stdlib really does inline short strings): OK
+[check] SSO threshold is <= sizeof(std::string) (inline buffer fits in the object): OK
+
+======================================================================
+SECTION C — std::string_view: non-owning borrow; O(1) copy/substr
+======================================================================
+sizeof(std::string_view) = 16 bytes  (a pointer + a length)
+sizeof(std::string)      = 24 bytes  (the SSO object)
+
+v1(owner)        : "hello world"  size=11
+v2("hello world") : "hello world"  size=11  (C-string literal)
+v3(v1)           : "hello world"  size=11  (view of a view)
+
+v1.substr(6,5) = "world"  (a NEW VIEW into the SAME buffer; NO alloc)
+view.data() points INTO owner's buffer: 1  (no copy was made)
+
+lenView(std::string_view) accepts ALL of these without allocating:
+  std::string        -> 11
+  "literal"         -> 7
+  std::string_view   -> 11
+  operator""sv     -> 5
+
+"  pad  ".remove_prefix(2).remove_suffix(2) = "pad"  (in-place trim)
+[check] sizeof(string_view) == sizeof(void*) + sizeof(size_t) (two words): OK
+[check] string_view is smaller than (or equal to) std::string: OK
+[check] string_view::substr is O(1): mid points INTO owner's buffer (no copy): OK
+[check] string_view::substr yields the expected slice (mid == "world"): OK
+[check] cheap-pass idiom: f(string_view) accepts const char* (lenView("literal")==7): OK
+[check] cheap-pass idiom: f(string_view) accepts std::string (lenView(owner)==11): OK
+[check] remove_prefix/remove_suffix shrink the view in place (trim == "pad"): OK
+
+======================================================================
+SECTION D — DANGLING-view trap + string<->view conversions
+======================================================================
+SAFE: std::string owner = "..."; std::string_view v = owner;
+  owner outlives v -> v="the owner lives"  (read is well-defined)
+
+The #1 string_view bug (DOCUMENTED; the read is gated behind -DDEMO_UB):
+  std::string_view dangling;
+  { std::string temp = "temp"; dangling = temp; }  // temp destroyed here
+  // dangling is now DANGLING — reading it is UNDEFINED BEHAVIOR
+  (inside the inner scope: dangling="temp" — valid while temp lives)
+  (DEMO_UB not defined: the UB read is correctly omitted from this build.)
+
+string -> string_view : IMPLICIT  (cheap; borrows the buffer)
+  std::string s="owned"; std::string_view sv = s;  -> sv="owned"
+
+string_view -> string : EXPLICIT  (allocates; copies the bytes)
+  std::string from_view(sv);  -> from_view="owned"  (independent copy)
+  from_view += "!" -> "owned!";  sv and s UNCHANGED (independent storage)
+[check] SAFE pattern: owner outlives the view (safe == "the owner lives"): OK
+[check] string -> string_view is implicit (sv == "owned"): OK
+[check] string_view -> string is an explicit, independent copy: OK
+[check] the verified path NEVER reads the dangling view (no UB; sanitizer-clean): OK
+
+======================================================================
+SECTION E — UTF-8 is byte-based (no codepoint awareness) + literals
+======================================================================
+std::string utf8 = "h\xc3\xa9llo";  (h, U+00E9 'e' as 2 bytes, l, l, o)
+  utf8.size()       = 6  (BYTES — not codepoints!)
+  utf8Codepoints()  = 5  (we counted lead bytes ourselves)
+  bytes (hex): 68 c3 a9 6c 6c 6f
+
+std::string_view uv(utf8);
+  uv.size()         = 6  (identical to utf8.size() — same bytes)
+  uv[1]             = 0xc3  (the FIRST byte of 'é', not 'é' itself)
+
+using namespace std::literals;
+  "owned"s   -> type=std::string  size=5
+  "borrow"sv -> type=std::string_view  size=6  (points at static storage)
+[check] UTF-8 byte-based: utf8.size() == 6 (not 5): OK
+[check] UTF-8 codepoint count (manual lead-byte scan) == 5: OK
+[check] string_view sees the same bytes as the string (uv.size()==6): OK
+[check] string_view indexes BYTES: uv[1] is the first byte of 'é' (0xc3): OK
+[check] operator""s yields std::string (size 5): OK
+[check] operator""sv yields std::string_view (size 6): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

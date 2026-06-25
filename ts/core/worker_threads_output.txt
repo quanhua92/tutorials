@@ -1,0 +1,109 @@
+worker_threads.ts — Phase 4 bundle (core member).
+Each Worker is a SEPARATE V8 isolate (own loop + heap). postMessage COPIES;
+output is COLLECTED from workers, SORTED, and printed ONLY by main.
+Nothing is hand-computed; workers never print.
+
+======================================================================
+SECTION A — worker_threads basics + the __filename self-worker idiom
+======================================================================
+MAIN thread role:
+  isMainThread === true   (this file is running as MAIN)
+  typeof Worker   === function
+  __filename (ESM, via fileURLToPath): /Volumes/data/workspace/tutorials/ts/core/worker_threads.ts
+
+WORKER thread role (collected from the worker, printed by main):
+  worker.isMainThread === false   (FALSE — separate isolate)
+  worker.hasParentPort === true
+  worker echoed workerData.id === 7
+  worker exited with code 0
+[check] worker.isMainThread === false (worker is a separate role): OK
+[check] worker.hasParentPort === true: OK
+[check] worker received workerData (id echoed back === 7): OK
+[check] worker exited code 0 after posting once (no listener held it alive): OK
+[check] main.isMainThread === true (main thread): OK
+
+======================================================================
+SECTION B — postMessage COPIES (structured clone): the isolation payoff
+======================================================================
+MAIN before spawn:
+  obj.x === 1, obj.nested.a === 10
+
+WORKER reported (it mutated ITS cloned copy):
+  worker.obj.x === 2   (mutated to 2)
+  worker.obj.nested.a === 99   (mutated to 99, deep)
+[check] worker DID mutate its own copy (reportedX === 2): OK
+[check] clone is DEEP (nested.a also mutated in worker's copy === 99): OK
+
+MAIN after worker finished (THE PAYOFF — main's original is untouched):
+  obj.x === 1   (still 1: postMessage gave the worker a COPY)
+  obj.nested.a === 10   (still 10: deep clone isolation)
+[check] main.obj.x still === 1 (postMessage COPIED, did not share): OK
+[check] main.obj.nested.a still === 10 (deep copy, nested untouched): OK
+
+structuredClone() is the SAME machinery, exposed standalone (ES2022):
+  clone.x mutated to 555, but obj.x still 1
+[check] structuredClone produces an independent deep copy (obj.x still 1): OK
+
+======================================================================
+SECTION C — MessagePort two-way channel + transferable ArrayBuffer (zero-copy)
+======================================================================
+MessagePort round-trip (main ping -> worker pong), collected + sorted:
+  pong:ping-1
+  pong:ping-2
+[check] both pings got a pong (collected count === 2): OK
+[check] pong payload is the echoed ping (sorted[0] === 'pong:ping-1'): OK
+port-owner worker terminated by main -> exit code 1
+[check] worker.terminate() resolves with the exit code (1): OK
+
+Transferable ArrayBuffer (ownership MOVES, zero-copy):
+  main before transfer: ab.byteLength === 8, view[0] === 1234
+  worker received:     byteLength === 8, first === 1234
+[check] worker received the FULL buffer (byteLength 8, not copied): OK
+[check] worker read the value main wrote (first === 1234): OK
+  main AFTER transfer: ab.byteLength === 0   (DETACHED -> 0, ownership moved)
+[check] ArrayBuffer detached in sender after transfer (byteLength === 0): OK
+
+======================================================================
+SECTION D — collect+sort determinism (N workers) + lifecycle (exit/error/terminate)
+======================================================================
+Spawned 5 workers; each posted back id -> id*id. Collected + sorted:
+  worker#1 -> 1
+  worker#2 -> 4
+  worker#3 -> 9
+  worker#4 -> 16
+  worker#5 -> 25
+[check] collected exactly N results: OK
+[check] results sorted ascending by id (first.id === 1): OK
+[check] compute is correct (id 5 -> 25): OK
+
+Lifecycle — exit codes collected + sorted (0 = clean exit):
+  [0, 0, 0, 0, 0]
+[check] every fire-and-forget worker exited code 0: OK
+[check] sorted result SET matches expected (deterministic, order-independent): OK
+
+======================================================================
+SECTION E — when to use workers + SharedArrayBuffer preview + cross-language
+======================================================================
+SharedArrayBuffer (SHARED memory, NOT copied):
+  worker wrote arr[3] = 42 into the SAME buffer
+  main reads mainView[3] === 42   (visible: same memory, no copy)
+[check] SharedArrayBuffer is shared (main sees worker's write, value 42): OK
+
+When to reach for worker_threads (vs async I/O on the event loop):
+  CPU-bound hashing/crypto     : YES — escapes the single thread      (pbkdf2, bcrypt, sha256 over big input)
+  image / signal processing    : YES — true parallel compute          (FFT, resize, filter over a big buffer)
+  big pure compute             : YES — parallel JS across cores       (matrix multiply, search, simulation)
+  file / network I/O           : NO — async I/O is already concurrent (fs.promises, fetch, net (libuv pool))
+  DB queries (await)           : NO — I/O-bound, not CPU-bound        (workers add overhead, no gain)
+  thousands of tiny tasks      : NO — workers are HEAVY (~tens of MB) (use the event loop / a task pool)
+[check] guidance: CPU-bound work is the worker_threads use-case (>=1 YES row): OK
+
+Cost + cross-language contrast (the DEFAULT memory model):
+  JS worker_threads : separate V8 isolate, ~tens of MB each, COPY by default
+  Go goroutines     : ~KB stack, SHARE address space, coordinate via CHANNELS
+  Rust OS threads   : SHARE memory, gated by Send/Sync ownership (compile-time)
+[check] the JS default is COPY (opposite of Go/Rust SHARE): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

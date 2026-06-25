@@ -1,0 +1,141 @@
+timers_io.ts — Phase 4 bundle (the timer + I/O macrotask sources).
+Every interleaving below is captured by THIS file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: timer FIRING ORDER is deterministic (spec + libuv phases);
+ABSOLUTE ms are NOT. We collect labels into an array in firing order,
+print after drain, assert ORDER + COUNT only (never ms), and cancel
+every timer before main returns so the process exits deterministically.
+
+======================================================================
+SECTION A — setTimeout / setInterval / clear* (timer APIs + macrotask nature)
+======================================================================
+setTimeout(fn, delay, ...args) forwards extra args verbatim:
+  setTimeout((a, b) => cb(`a=${a},b=${b}`), 0, "x", 99)
+  callback received -> "a=x,b=99"
+[check] setTimeout forwards extra args (arg1="x", arg2=99) to the callback: OK
+
+setInterval REPEATS; clearInterval stops it (count asserted, not ms):
+  let n = 0;
+  const iv = setInterval(() => { n++; log(`tick-${n}`); if (n >= 3) clearInterval(iv); }, 1);
+  fires observed -> ["tick-1","tick-2","tick-3"]
+[check] setInterval fired exactly 3 times then clearInterval stopped it (no 4th): OK
+
+clearTimeout cancels a pending timer (the callback NEVER runs):
+  const t = setTimeout(() => log.push('fired'), 0);
+  clearTimeout(t);   // cancel before it fires
+  callback ran? -> NO (cancelled)
+[check] clearTimeout cancelled the timer (callback never fired): OK
+
+setTimeout(0) is a MACROTASK: a microtask ALWAYS preempts it:
+  log.push('sync');                                // runs NOW (on stack)
+  setTimeout(() => log.push('timeout'), 0);        // queues a MACROTASK
+  Promise.resolve().then(() => log.push('promise'));// queues a MICROTASK
+  collected firing order -> ["sync","promise","timeout"]
+  => microtask drains BEFORE the next macrotask. (delay is a THRESHOLD, not a guarantee.)
+[check] setTimeout(0) macrotask fires AFTER sync AND the promise microtask: OK
+
+======================================================================
+SECTION B — FIRING ORDER: the three queues (nextTick > microtask > macrotask)
+======================================================================
+Node has THREE callback queues, drained in FIXED priority order:
+  1. nextTick queue  (process.nextTick)        — Node-only, HIGHEST priority
+  2. microtask queue (Promise.then/queueMicrotask)
+  3. macrotask queue (setTimeout/setImmediate/I/O)
+  Both nextTick + microtask queues drain TO EMPTY between macrotasks.
+
+Scheduled from INSIDE a setTimeout macrotask (the deterministic context):
+  process.nextTick(() => log.push('nextTick'));       // queue 1
+  Promise.resolve().then(() => log.push('promise'));  // queue 2 (FIFO)
+  queueMicrotask(() => log.push('queueMicrotask'));   // queue 2 (FIFO)
+  setImmediate(() => log.push('setImmediate'));       // queue 3 (macrotask)
+  log.push('sync');
+  collected firing order -> ["sync","nextTick","promise","queueMicrotask","setImmediate"]
+  => sync runs first; nextTick drains before microtask; macrotask runs LAST.
+  NOTE: setImmediate vs setTimeout(0) is the ONE non-deterministic pair (§C).
+[check] nextTick > microtask > macrotask (sync, nextTick, promise, queueMicrotask, setImmediate): OK
+
+CAVEAT (top-level / async-resumption): at the very TOP LEVEL of a script,
+or inside an async RESUMPTION (after `await`), V8's microtask checkpoint can
+drain the promise queue BEFORE nextTick, flipping that pair. The macrotask
+context above is the documented, deterministic one.
+[check] nextTick-before-microtask is reproducible from a macrotask context (caveat documented): OK
+
+======================================================================
+SECTION C — setImmediate (check) vs setTimeout(0) (timers): the phase caveat
+======================================================================
+setImmediate -> CHECK phase;  setTimeout(0) -> TIMERS phase (both macrotasks).
+Main-module order is NON-deterministic (observed this run, NOT asserted):
+  setImmediate(() => log.push('setImmediate'));
+  setTimeout(() => log.push('setTimeout(0)'), 0);
+  observed order this run -> ["setImmediate","setTimeout(0)"]   (could be either!)
+[check] main-module setImmediate-vs-setTimeout(0) is non-deterministic (observed, not asserted): OK
+
+INSIDE AN I/O CYCLE (poll-phase callback): setImmediate is ALWAYS first:
+  fs.access(".", () => {                       // I/O callback -> POLL phase
+    setImmediate(() => log.push('setImmediate'));  // this tick's CHECK phase
+    setTimeout(() => log.push('setTimeout(0)'), 0);// next tick's TIMERS phase
+  });
+  collected firing order -> ["setImmediate","setTimeout(0)"]
+  => check phase runs at the END of this tick; setTimeout(0)'s 1ms clamp pushes
+     it into the NEXT tick's timers phase. setImmediate always wins here.
+[check] inside an I/O cycle: setImmediate fires before setTimeout(0) (deterministic): OK
+
+======================================================================
+SECTION D — libuv phase model + AbortSignal.timeout(ms) (modern)
+======================================================================
+Node.js (libuv) loop phases — each tick walks them in this order:
+  timers -> pending callbacks -> idle/prepare -> poll -> check -> close -> (repeat)
+  setTimeout / setInterval : timers phase   (callbacks whose threshold elapsed)
+  most I/O callbacks       : poll phase      (fs/net/DNS — retrieve new I/O events)
+  setImmediate             : check phase     (runs right AFTER poll)
+  socket/stream 'close'    : close phase
+  nextTick + microtasks    : drained BETWEEN every phase (not a phase)
+  (libuv >= 1.45 / Node >= 20: timers run only AFTER poll within a tick.)
+[check] libuv phase order: timers -> pending -> poll -> check -> close (microtasks between): OK
+
+AbortSignal.timeout(ms) (Node 17.3+ / browsers): a SELF-ABORTING signal.
+  const signal = AbortSignal.timeout(20);   // internal timer, auto-aborts
+  // after ~20ms: signal.aborted === true; reason is a TimeoutError DOMException
+  signal.aborted           -> true
+  signal.reason instanceof -> DOMException
+  signal.reason.name       -> "TimeoutError"
+[check] AbortSignal.timeout(20) self-aborts (signal.aborted === true): OK
+[check] reason is a DOMException named "TimeoutError": OK
+[check] fresh AbortController.signal.aborted === false (before abort): OK
+
+A manual AbortController aborts EARLY with a programmer-chosen reason:
+  const ac = new AbortController();
+  const sig2 = ac.signal;                       // aborted === false
+  ac.abort(new Error("user cancelled"));        // abort now, custom reason
+  sig2.aborted        -> true
+  sig2.reason.message -> "user cancelled"
+[check] manual AbortController.abort() sets aborted + propagates the custom reason: OK
+
+======================================================================
+SECTION E — I/O via libuv poll phase + thread pool + "don't block the loop"
+======================================================================
+Async I/O is OFFLOADED (the JS thread never blocks WAITING):
+  - sockets/epoll/kqueue: OS kernel async -> callback queued for POLL phase
+  - blocking syscalls (fs/dns.lookup/crypto/zlib): libuv THREAD POOL (4 default)
+
+fs.readFile is async — the callback runs LATER (in the poll phase):
+  fs.readFile(new URL("./package.json", import.meta.url), "utf8", (err, data) => {
+    const pkg = JSON.parse(data);   // <- runs in POLL phase, after sync stack
+  });
+  callback received pkg.name -> "tutorials-ts-core"
+[check] fs.readFile callback fired asynchronously and received the file data: OK
+
+A synchronous busy-loop DELAYS every queued timer (proof by ORDER, not ms):
+  setTimeout(() => log.push('timeout-fired'), 0);   // queued (macrotask)
+  log.push('timeout-scheduled');                    // sync, now
+  for (let k = 0; k < 5_000_000; k++) sum += k;     // sync CPU work BLOCKS
+  log.push(`after-busy-loop-sum=${sum}`);            // sync, still before timeout
+  collected firing order -> ["timeout-scheduled","after-busy-loop-sum=12499997500000","timeout-fired"]
+  => 'timeout-fired' appears LAST: it was delayed past ALL the sync work.
+  => CPU-heavy code must be chunked or moved to a worker (🔗 WORKER_THREADS).
+[check] blocking delays the timer: 'timeout-fired' fires AFTER the busy-loop (last): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,186 @@
+regex.ts — Phase 5 bundle (Standard Library Essentials).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: JS RegExp is a BACKTRACKING engine (PCRE-ish) — expressive
+(\1, lookaround) but ReDoS-vulnerable. Go/Rust use RE2 (linear, no
+backtracking). That trade-off is the headline of this bundle.
+
+======================================================================
+SECTION A — Literal vs constructor, the 7 flags, and the method surface
+======================================================================
+literal source: \d{4}-\d{2}  flags: ""
+ctor    source: \d{4}-\d{2}  flags: ""
+[check] literal and constructor match the same input: OK
+[check] literal source === ctor source: OK
+
+Flag effects (each is a check'd invariant):
+  /abc/i      .test("ABC")     -> true        (i: case-insensitive)
+  /^bar$/m    .test("foo\nbar")-> true       (m: ^/$ at line bounds)
+  /^bar$/     .test("foo\nbar")-> false       (no m: ^/$ only at ends)
+  /a.b/s      .test("a\nb")    -> true        (s: . matches \n)
+  /a.b/       .test("a\nb")    -> false       (no s: . does NOT match \n)
+[check] /abc/i is case-insensitive: OK
+[check] m makes ^ match at each line boundary: OK
+[check] without m, ^ matches only at the very start: OK
+[check] s (dotAll): . matches \n: OK
+[check] without s: . does NOT match \n: OK
+
+flags are normalized (sorted) regardless of literal order:
+  /x/igy.flags  -> "giy"
+  /x/yig.flags  -> "giy"   (same as above)
+[check] flags are always sorted canonically: OK
+
+String methods vs RegExp methods:
+  match  (no g) -> ["2024-06","2024","06"]   (full match + captures)
+  match  (g)    -> ["a1","b2"]        (g: strings only, groups LOST)
+  search        -> 6   (index of first match, or -1)
+  split        -> ["a","b","","c"]        (regex as separator)
+  replace      -> "a_a"        (replace all with g)
+  replaceAll   -> "a_a_a"        (replaceAll REQUIRES a global pattern)
+  test         -> true   (boolean)
+  exec         -> ["123"]   (match array or null)
+[check] match (no g) returns [full, g1, g2, ...]: OK
+[check] match (g) returns only the full matches (groups lost): OK
+[check] search returns the match index: OK
+[check] split with regex keeps empty fields: OK
+[check] exec returns the first match (captured): OK
+
+======================================================================
+SECTION B — Named groups, lookahead/lookbehind, backreferences
+======================================================================
+named exec: ["2024-06","2024","06"]
+  groups.year  = 2024
+  groups.month = 06
+[check] named group year === '2024': OK
+[check] named group month === '06': OK
+[check] named group also available positionally: OK
+
+lookahead (?= dollars): ["50","50"]   (' dollars' NOT captured)
+  negative (?!bar) on 'foobar': null
+  negative (?!bar) on 'foobaz': ["foo"]
+[check] lookahead asserts without consuming: OK
+[check] negative lookahead rejects 'foobar': OK
+[check] negative lookahead accepts 'foobaz': OK
+
+lookbehind (?<=\$) on '$100 and $200': ["100","200"]   (digits after each $)
+  negative (?<!\$) on 'price 9 $10': ["9","0"]   (9 AND a leaked '0'!)
+    note: '10' is rejected (its '1' IS after $), but the '0' alone
+    is preceded by '1' (not $), so it matches — lookbehind subtlety.
+[check] lookbehind matches digits after each $: OK
+[check] negative lookbehind matches '9' and the leaked '0': OK
+
+backreference \1 on 'hello hello': ["hello hello","hello"]   (\1 repeats group 1)
+backreference \1 on 'hello world': null   (no repeat -> no match)
+[check] backreference matches the repeated word: OK
+[check] backreference fails when the word is not repeated: OK
+[check] backreference compiles in JS (RE2 would REJECT it): OK
+
+======================================================================
+SECTION C — exec + the stateful lastIndex loop, replace-with-function, escapeRegExp
+======================================================================
+exec+g loop over 'a1b2c3': ["1","2","3"]   (lastIndex reset to 0)
+[check] exec+g loop collects every digit: OK
+[check] exec+g resets lastIndex to 0 after exhausting: OK
+
+THE TRAP — reusing a global regex in test():
+  test #1 on '1a': true   (lastIndex -> 1)
+  test #2 on '1a': false  (lastIndex -> 0)  <-- alternates!
+[check] global test() is stateful: #1 true: OK
+[check] global test() is stateful: #2 false (lastIndex moved past): OK
+
+matchAll (stateless, g required): 2 matches
+  [0]: 2024-06 year=2024 month=06
+  [1]: 2025-01 year=2025 month=01
+[check] matchAll yields one entry per match: OK
+[check] matchAll exposes named groups per match: OK
+  matchAll+d indices: [[0,7],[0,4],[5,7]]  groups[2]=[5,7]
+[check] matchAll with d exposes [start,end] pairs: OK
+
+replace with a function: 'a1 b2 c3'.replace(/(\w)(\d)/g, (m,p1,p2) => p2+p1)
+  -> "1a 2b 3c"   (each capture pair swapped)
+[check] replace function receives positional captures: OK
+
+escapeRegExp (escape metacharacters in runtime input):
+  input:  "2+2"
+  escaped:"2\\+2"
+  new RegExp(escaped).test('2+2'): true
+  WITHOUT escaping, new RegExp('2+2').test('2+2'): false  ('+' means '1 or more 2')
+[check] escaped regex matches the literal string: OK
+[check] unescaped '2+2' matches '222' too (the '+' quantifier leak): OK
+[check] escaped regex does NOT match '222': OK
+
+======================================================================
+SECTION D — Unicode: the u flag, \p{} property escapes, the emoji trap, the v flag
+======================================================================
+astral char '😀': .length === 2 (two surrogate code units)
+  /^.$/.test('😀')    : false   (no u: '.' matches ONE surrogate half -> splits the pair)
+  /^.$/u.test('😀')   : true   (u: '.' matches the WHOLE code point)
+[check] without u, '.' splits an astral surrogate pair: OK
+[check] with u, '.' matches the whole code point: OK
+
+\p{} Unicode property escapes (require u or v):
+  /^\p{Letter}$/u.test('é')   : true   ('é' IS a Letter in any script)
+  /^\p{Letter}$/u.test('5')   : false   ('5' is NOT a Letter)
+  /^\p{Number}$/u.test('5')   : true   ('5' IS a Number)
+[check] \p{Letter} matches accented Latin: OK
+[check] \p{Letter} rejects a digit: OK
+
+THE EMOJI TRAP — \p{Emoji} is broader than you think:
+  /^\p{Emoji}$/u.test('5')             : true   (digits have the Emoji property!)
+  /^\p{Emoji}$/u.test('#')             : true   ('#' too)
+  /^\p{Emoji_Presentation}$/u.test('5'): false   ('5' is NOT emoji-presented)
+  /^\p{Emoji_Presentation}$/u.test('😀'): true   ('😀' IS)
+[check] \p{Emoji} matches the digit '5' (the trap): OK
+[check] \p{Emoji_Presentation} does NOT match '5': OK
+[check] \p{Emoji_Presentation} matches '😀': OK
+
+the v flag (unicodeSets, ES2024) — set notation in classes:
+  [\p{Letter}--[aeiouAEIOU]]/v.test('H'): true   (consonant)
+  [\p{Letter}--[aeiouAEIOU]]/v.test('e'): false   (subtracted vowel)
+  [\p{Letter}&&\p{ASCII}]/v.test('a'): true   (intersection: ASCII letter)
+  [\p{Letter}&&\p{ASCII}]/v.test('é'): false   (non-ASCII)
+[check] v flag subtraction removes vowels: OK
+[check] v flag intersection: 'a' is ASCII AND Letter: OK
+[check] v flag intersection: 'é' is NOT ASCII: OK
+  new RegExp('x','uv') throws: true   (v supersedes u; both is a SyntaxError)
+[check] u and v flags are mutually exclusive: OK
+
+======================================================================
+SECTION E — Catastrophic backtracking / ReDoS (DOCUMENTED SAFELY) + the RE2 contrast
+======================================================================
+Evil pattern: new RegExp('^(a+)+b$')   (overlapping quantifiers)
+  compiles in JS? true   (JS ACCEPTS it — RE2 would match it in LINEAR time)
+  .test('aaab')  : true   (TINY input: matches, instant)
+  .test('aaaa!') : false  (TINY input: fails, instant)
+  .test('aaaaaa'): false  (TINY input: fails, instant — but scales EXPONENTIALLY with n)
+[check] evil pattern compiles in JS (backtracking engine allows it): OK
+[check] evil pattern matches a tiny 'aaab': OK
+[check] evil pattern fails a tiny 'aaaa!': OK
+
+Theoretical worst-case backtrack partitions = 2^(n-1)  (pure math; NOT run):
+  n= 5 a's ->          16 partitions
+  n=10 a's ->         512 partitions
+  n=15 a's ->       16384 partitions
+  n=20 a's ->      524288 partitions
+  n=25 a's ->    16777216 partitions
+  n=30 a's ->   536870912 partitions
+[check] partitions DOUBLE per added 'a' (exponential): OK
+[check] n=25 already ~16.7 million partitions (a hang): OK
+
+Cross-language contrast (the design choice):
+  JS RegExp       : BACKTRACKING engine -> supports \1, lookahead, lookbehind;
+                    worst case is EXPONENTIAL (ReDoS-vulnerable).
+  Go regexp       : RE2 -> LINEAR time, NO backtracking; REFUSES \1 / lookaround.
+  Rust regex crate: RE2-style -> LINEAR time, NO backtracking; REFUSES \1 / lookaround.
+  => JS \1 (above, Section B) is ILLEGAL in Go/Rust regex.
+  See ../go/REGEXP.md and ../rust (the safety-by-design contrast).
+[check] backreference compiles in JS but is unrepresentable in RE2 (Go/Rust): OK
+
+Mitigations (documented): timeout via worker_thread+AbortController;
+  flatten overlapping quantifiers ((a+)+ -> a+); use the `re2` npm
+  binding or a Rust/Go validator for untrusted input.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

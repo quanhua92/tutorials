@@ -1,0 +1,157 @@
+concurrency_patterns.ts — Phase 4 bundle (Concurrency & the Event Loop).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. We assert result SETS/ORDER and invariants (max-in-flight,
+signal.aborted, FIFO order) — never wall-clock timing. Every promise
+settles, every listener is removed, every held timer is cleared before
+main returns, so the process exits deterministically with no handles.
+
+======================================================================
+SECTION A — Concurrency pool / semaphore: limit(n) = bounded parallelism
+======================================================================
+UNBOUNDED — bare Promise.all over 5 tasks (no limiter):
+  await Promise.all([t1..t5])         -> [1,2,3,4,5]
+  max-in-flight                       -> 5   (all 5 fired at once)
+[check] unbounded Promise.all: max-in-flight === 5: OK
+[check] unbounded Promise.all result (input order) [1,2,3,4,5]: OK
+
+BOUNDED — same 5 tasks through limit(2):
+  await Promise.all(ids.map(id => limit2(makeTask(id)))) -> [1,2,3,4,5]
+  max-in-flight                       -> 2   (capped at 2)
+[check] limit(2) bounds concurrency: max-in-flight === 2: OK
+[check] limit(2) result set (input order) [1,2,3,4,5]: OK
+
+limit(1) === serial execution (degenerate pool of size 1):
+  await Promise.all(ids.map(id => limit1(makeTask(id)))) -> [1,2,3,4,5]
+  max-in-flight                       -> 1
+[check] limit(1) serializes: max-in-flight === 1: OK
+[check] limit(1) result set (input order) [1,2,3,4,5]: OK
+
+THE takeaway: limit(n) bounds CONCURRENCY without changing the RESULT set.
+  Promise.all  = unbounded fan-out (fires everything at once)
+  limit(n) + Promise.all = bounded fan-out (at most n in flight; same results)
+[check] pool/semaphore demonstrated (unbounded, limit(2), limit(1)): OK
+
+======================================================================
+SECTION B — AbortController/AbortSignal + propagation + any + timeout
+======================================================================
+[check] new AbortController().signal.aborted === false: OK
+[check] after ac.abort(reason): signal.aborted === true: OK
+[check] abort reason is preserved on signal.reason: OK
+[check] ac.abort() with no arg → default reason.name === "AbortError": OK
+
+Op rejects when its signal aborts (listener fires):
+  cancellableOp(ac.signal, 1); ac.abort(new Error("late-cancelled"))
+  -> "caught:late-cancelled"  (op rejected, never resolved "done")
+[check] observing op rejects on late abort: "caught:late-cancelled": OK
+
+Op rejects SYNCHRONOUSLY when given an already-aborted signal:
+  ac.abort(...); cancellableOp(ac.signal, 2) -> "caught:pre-cancelled"
+[check] pre-aborted signal → op rejects synchronously: "caught:pre-cancelled": OK
+
+Op resolves normally when the signal never aborts:
+  cancellableOp(ac.signal, 3)            -> "op3:done"
+[check] op resolves when not aborted: "op3:done": OK
+
+Cancellation PROPAGATION — one abort cascades to many ops (the Go-context analog):
+  3 ops share one signal; ac.abort(new Error("parent-cancelled"))
+  results (input order) -> ["op1:parent-cancelled","op2:parent-cancelled","op3:parent-cancelled"]
+[check] one abort rejects all 3 sharing ops with the same reason: OK
+[check] AbortSignal.any: combined.aborted === false before any input aborts: OK
+[check] AbortSignal.any: combined.aborted === true after c1.abort(): OK
+[check] AbortSignal.any: combined.reason === c1's reason (first-to-abort wins): OK
+[check] AbortSignal.timeout(1): not aborted at construction: OK
+[check] AbortSignal.timeout(1): aborted === true after firing: OK
+[check] AbortSignal.timeout reason.name === "TimeoutError": OK
+
+AbortSignal.any([s1,s2]) (Node 20+) + AbortSignal.timeout(ms):
+  AbortSignal.any([s1,s2]) -> aborts when ANY input aborts (first-to-abort reason wins)
+  AbortSignal.timeout(ms) -> auto-aborts after ms; reason.name === "TimeoutError"
+[check] AbortSignal.any + AbortSignal.timeout demonstrated: OK
+
+======================================================================
+SECTION C — EventEmitter: emit/on/once/off, sync dispatch, throw, leak trap
+======================================================================
+emit/on — emit dispatches SYNCHRONOUSLY to every registered listener:
+  on("event", x => received.push(x)); emit("event","a"); emit("event","b");
+  received -> ["a","b"]
+[check] emit fires on() listeners: received === ["a","b"]: OK
+
+emit() is SYNCHRONOUS — the listener runs DURING emit(), before the next line:
+  trace    -> ["before-emit","listener-ran:sync","after-emit"]
+  received -> ["sync"]
+[check] sync dispatch: listener runs during emit() (["before-emit","listener-ran:sync","after-emit"]): OK
+[check] once() fires exactly once across two emits: OK
+[check] once() auto-removes the listener (listenerCount === 0 after firing): OK
+[check] off() removes the listener: only the first emit fires (count === 1): OK
+[check] off === removeListener (alias): OK
+[check] two listeners registered on 'e': listenerCount === 2: OK
+[check] removeAllListeners('e') clears them: post-emit count stays at 2: OK
+[check] ...listenerCount('e') === 0 after removeAllListeners: OK
+
+THROW in a listener — propagates SYNCHRONOUSLY out of emit(); rest are skipped:
+  on("boom", () => { throw new Error("listener-threw") }); on("boom", () => second++)
+  try { emit("boom") } catch -> "listener-threw"
+  second listener called -> false
+[check] throw in listener propagates from emit(): caught "listener-threw": OK
+[check] ...subsequent listeners NOT called after a throw: OK
+
+Listener-leak trap — forgetting removeListener keeps the closure firing:
+  attach(1); emit("data",7); attach(2); emit("data",8);  // req1 listener NEVER removed
+  leakedBuf -> [1007,1008,2008]   (req1 listener fires on req2's data)
+[check] leak symptom: req1 listener fires on req2's emit (1008 should not be here): OK
+  FIX: detach1() before attachFixed(2) -> fixedBuf = [1007,2008]
+[check] fix: removeListener isolates requests ([1007, 2008]): OK
+[check] EventEmitter: emit/on/once/off/removeAllListeners + throw + leak demonstrated: OK
+
+======================================================================
+SECTION D — Async queue (producer/consumer) + async mutex
+======================================================================
+AsyncQueue FIFO — push() before next() (values buffered):
+  push("a"); push("b"); await next(); await next()
+  -> "a", "b"
+[check] FIFO: push(a),push(b) → next()=a, next()=b: OK
+
+AsyncQueue — next() BEFORE push() (consumer awaits producer):
+  const p = next();   // pending
+  push("late");       // producer resolves the pending consumer
+  await p -> "late"
+[check] next() before push() resolves when value arrives: "late": OK
+
+AsyncQueue — mixed push/next preserves FIFO order:
+  push(1); push(2); next(); next(); next(); push(3) -> [1,2,3]
+[check] FIFO across mixed push/next: [1,2,3]: OK
+
+AsyncMutex — serializes async SECTIONS (max-in-section === 1):
+  3 sections via mutex.run(async () => { ... await yield0() ... })
+  max-in-section -> 1
+  section order  -> ["start1","end1","start2","end2","start3","end3"]
+[check] mutex serializes async sections: max-in-section === 1: OK
+[check] mutex section order strictly serialized: [start1,end1,start2,end2,start3,end3]: OK
+[check] async queue + async mutex demonstrated: OK
+
+======================================================================
+SECTION E — Retry / backoff + cross-language model
+======================================================================
+Retry/backoff — succeeds after 2 failures (3rd attempt), 5-attempt cap:
+  retry(fn, attempts=5, delayMs=0); fn throws on calls 1,2; returns "ok" on call 3
+  -> result "ok"; total calls = 3
+[check] retry succeeds on 3rd attempt: result "ok", calls === 3: OK
+
+Retry/backoff — exhausts attempt cap → rejects with the LAST error:
+  retry(fnThatAlwaysThrows, attempts=3, delayMs=0)
+  -> caught "always-3"; total calls = 3
+[check] retry rejects with last error after cap: "always-3", calls === 3: OK
+
+Cross-language model (full treatment in CONCURRENCY_PATTERNS.md):
+  JS AbortController : cancellation BROADCAST — one signal → many ops;
+                       AbortSignal.any([s1,s2]) composes (Node 20+).
+  Go context.Context : cancellation TREE — parent → children propagation;
+                       context.WithCancel(parent) nests (⟷ AbortSignal.any).
+  Go worker pool     : goroutines + channels; JS: limit(n) + Promise.all.
+  Rust tokio mpsc    : bounded multi-producer/single-consumer channel;
+                       JS AsyncQueue is the analog (push/next, FIFO).
+[check] cross-language model summarized: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

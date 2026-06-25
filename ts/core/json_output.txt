@@ -1,0 +1,130 @@
+json.ts — Phase 5 bundle (Standard Library Essentials).
+JSON.stringify / JSON.parse round-trip the JSON SUBSET of JS values;
+everything outside that subset is dropped, coerced, or throws. Every
+value below is computed by this file; the .md guide pastes it verbatim.
+
+Reminder: JSON has NO type metadata. stringify erases types (Date -> string);
+parse returns untyped data. Revival is a manual, opt-in hook (the reviver).
+
+======================================================================
+SECTION A — The JSON subset: round-trip + what is NOT in JSON
+======================================================================
+original              : { a:1, b:"x", c:[true,null] }
+JSON.stringify(orig)  : {"a":1,"b":"x","c":[true,null]}
+typeof serialized     : string   (stringify ALWAYS returns a string)
+re-stringify(parsed)  : {"a":1,"b":"x","c":[true,null]}
+[check] round-trip lossless: re-stringify === original stringify: OK
+[check] roundtrip.a === 1 (number): OK
+[check] roundtrip.b === "x" (string): OK
+[check] roundtrip.c[0] === true (boolean): OK
+[check] roundtrip.c[1] === null: OK
+[check] roundtrip.c.length === 2: OK
+
+Values OUTSIDE the JSON subset (each behavior is the engine's verdict):
+  {a:undefined, b:fn, c:Symbol, d:1} -> {"d":1}   (a/b/c OMITTED; d kept)
+[check] undefined/fn/Symbol omitted from objects -> '{"d":1}': OK
+  [undefined, fn, Symbol, 1]        -> [null,null,null,1]   (each -> null; index kept)
+[check] undefined/fn/Symbol -> null in arrays: OK
+  [Map, Set, RegExp]                -> [{},{},{}]   (each -> {}; data LOST)
+[check] Map/Set/RegExp -> {} (internal slots, no own props): OK
+  [Infinity, -Infinity, NaN]        -> [null,null,null]   (each -> null)
+[check] Infinity/-Infinity/NaN -> null: OK
+  {[Symbol(..)]: "hidden"} property -> {"normal":1}   (symbol keys NEVER serialized)
+[check] symbol-keyed properties ignored: OK
+
+======================================================================
+SECTION B — Date.toJSON: the silent type erasure (and the reviver fix)
+======================================================================
+new Date(0)                  -> "1970-01-01T00:00:00.000Z"
+typeof (parsed back)         -> string   <-- a STRING, not a Date!
+[check] JSON.stringify(new Date(0)) === '"1970-01-01T00:00:00.000Z"': OK
+[check] Date.toJSON === toISOString (ISO-8601 UTC): OK
+{created: new Date(0)} -> {"created":"1970-01-01T00:00:00.000Z"}
+parsed.created instanceof Date -> false   (type info LOST)
+typeof parsed.created          -> string
+[check] parsed Date is NOT a Date instance (type erased): OK
+[check] parsed Date is a string: OK
+
+with reviver: parsed.created instanceof Date -> true
+with reviver: parsed.created.getTime()       -> 0
+[check] reviver revives ISO string -> Date instance: OK
+[check] revived Date.getTime() === 0 (round-trip restored): OK
+
+======================================================================
+SECTION C — The hooks: replacer (allowlist + transform) + toJSON + space
+======================================================================
+replacer allowlist ["a","c"]  -> {"a":1,"c":3}   (only a,c kept; b/secret dropped)
+[check] array replacer is an allowlist -> '{"a":1,"c":3}': OK
+replacer fn uppercases str    -> {"greet":"HI","n":3}
+[check] function replacer transforms -> '{"greet":"HI","n":3}': OK
+replacer fn drops "secret"    -> {"a":1,"b":2,"c":3}
+[check] replacer returning undefined omits the key: OK
+{toJSON: ()=>42}              -> 42   (return value replaces the object)
+[check] custom toJSON return value is serialized: OK
+space=2 (2-space pretty-print):
+{
+  "a": 1,
+  "b": {
+    "c": 2
+  }
+}
+[check] space=2 indents nested objects (leading 2-space "a"): OK
+space="\t" (tab indent):
+{
+	"a": 1,
+	"b": {
+		"c": 2
+	}
+}
+[check] space="\t" indents with a tab: OK
+
+======================================================================
+SECTION D — Failure modes: circular/BigInt throw; key quoting + ordering
+======================================================================
+cyclic object stringify -> true
+  error                 -> TypeError: Converting circular structure to JSON
+    --> starting at object with constructor 'Object'
+    --- property 'self' closes the circle
+[check] circular reference throws TypeError: OK
+BigInt stringify         -> true
+  error                 -> TypeError: Do not know how to serialize a BigInt
+[check] BigInt throws TypeError: OK
+[check] JSON.stringify(Infinity) === "null": OK
+[check] JSON.stringify(NaN) === "null": OK
+[check] JSON.stringify(-Infinity) === "null": OK
+Infinity/NaN/-Infinity all -> "null" (see [check]s above)
+{validIdent, "2", name, "1"} -> {"1":1,"2":2,"validIdent":1,"name":"x"}
+  (ALL keys double-quoted; integer keys "1","2" reordered ascending first)
+[check] all keys double-quoted; integer keys first: OK
+
+======================================================================
+SECTION E — Security (parse is safe vs eval) + cross-language contract
+======================================================================
+untrusted input: {"evil":"alert(1)","ok":true}
+parsed .evil     -> "alert(1)"   (a plain string; alert was NOT called)
+parsed .ok       -> true
+[check] JSON.parse treats alert(1) as a plain string (no execution): OK
+
+Malformed inputs (each -> SyntaxError):
+  trailing comma     "{\"a\":1,}" -> SyntaxError
+[check] trailing comma throws SyntaxError: OK
+  single quotes      "{'a':1}"    -> SyntaxError
+[check] single quotes throws SyntaxError: OK
+  bare identifier    "{a:1}"      -> SyntaxError
+[check] bare identifier throws SyntaxError: OK
+  trailing junk      "1 2"        -> SyntaxError
+[check] trailing junk throws SyntaxError: OK
+
+Note: deeply-nested JSON (e.g. tens of thousands of nested arrays/objects)
+can overflow the call stack -> RangeError. Depth is NOT spec'd; cap input
+size in production.
+
+Cross-language serialization contract:
+  JS   : JSON.stringify/parse — DYNAMIC, untyped, no schema at compile time.
+         Type info is lost (Date -> string); revival is manual (reviver).
+  Go   : encoding/json — struct TAGS drive field mapping; typed at compile time.
+  Rust : serde #[derive(Serialize, Deserialize)] — FULLY compile-time typed.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

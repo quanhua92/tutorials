@@ -1,0 +1,150 @@
+async_await.ts — Phase 4 bundle (Concurrency & the Event Loop).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Resolution ORDER is deterministic (microtask FIFO);
+serial-vs-parallel is measured in async STEPS, never ms.
+Every rejected promise is caught; all promises settle before main returns.
+
+======================================================================
+SECTION A — async returns a Promise; await unwraps; resumes as a microtask
+======================================================================
+An async function ALWAYS returns a Promise:
+    async function returnsOne() { return 1 }
+    returnsOne()                  -> Promise (instanceof Promise: true)
+    await returnsOne()            -> 1   (the unwrapped value)
+[check] returnsOne() is a Promise (instanceof): OK
+[check] await returnsOne() === 1 (return wrapped in Promise.resolve): OK
+
+await UNWRAPS a promise to its value:
+    await Promise.resolve(5)      -> 5
+[check] await Promise.resolve(5) === 5: OK
+
+await resumes as a MICROTASK — after sync code, BEFORE setTimeout(0):
+    order = ["sync-start","sync-end","after-await","timeout"]
+[check] order is ["sync-start","sync-end","after-await","timeout"] (microtask before macrotask): OK
+
+await on a non-thenable yields it unchanged; await on a thenable assimilates:
+    await 5                        -> 5
+    (await {}) === {}              -> true   (identity preserved)
+    await thenable { then: r=>r(99) } -> 99   (assimilated)
+[check] await 5 === 5 (non-thenable passed through): OK
+[check] (await obj) === obj (identity preserved for non-thenable): OK
+[check] await thenable === 99 (thenable assimilated): OK
+
+======================================================================
+SECTION B — Error propagation (throw → reject → try/catch) + forgotten-await bug
+======================================================================
+throw inside an async fn REJECTS; try/catch around await catches it:
+    async function throwsInside() { throw new Error("thrown-in-async") }
+    try { await throwsInside() } catch(e) { ... }
+    -> caught, e.message = "thrown-in-async"
+[check] throw in async rejects; try/catch around await catches "thrown-in-async": OK
+
+await on a rejected promise throws the reason at the await point:
+    await Promise.reject(new Error("rejected-value"))  [inside try]
+    -> caught, e.message = "rejected-value"
+[check] await of a rejected promise is caught as "rejected-value": OK
+
+THE forgotten-await silent bug (no error — just a Promise where a value was wanted):
+    async function computeValue() { return 7 }
+    const forgotten  = computeValue();   // NO await
+    const remembered = await computeValue();
+    forgotten  instanceof Promise -> true   (NOT 7 — a Promise<number>)
+    forgotten  === 7             -> false   (silent: x is a Promise, not the value)
+    remembered === 7             -> true   (await recovers the value)
+    String(forgotten)            -> "[object Promise]"   (the silent symptom in real code)
+[check] forgotten await: x is a Promise (instanceof), NOT the value: OK
+[check] forgotten await: String(x) === '[object Promise]' (the silent symptom): OK
+[check] await recovers the value: remembered === 7: OK
+
+======================================================================
+SECTION C — THE serial-vs-parallel trap: await-in-loop (serial) vs Promise.all (parallel)
+======================================================================
+SERIAL — `for (c of costs) { await job(c) }` — each job completes before the next:
+    costs = [3, 2, 2]   (A=3, B=2, C=2 async steps of work each)
+    serialLog =
+        "A:hop1/3"
+        "A:hop2/3"
+        "A:hop3/3"
+        "A:done"
+        "B:hop1/2"
+        "B:hop2/2"
+        "B:done"
+        "C:hop1/2"
+        "C:hop2/2"
+        "C:done"
+    serialSteps (async steps elapsed) = 7
+[check] serial log is CLUSTERED (all of A, then all of B, then all of C): OK
+
+PARALLEL — `await Promise.all([job(), job(), job()])` — jobs interleave per step:
+    parallelLog =
+        "A:hop1/3"
+        "B:hop1/2"
+        "C:hop1/2"
+        "A:hop2/3"
+        "B:hop2/2"
+        "B:done"
+        "C:hop2/2"
+        "C:done"
+        "A:hop3/3"
+        "A:done"
+    parallelSteps (async steps elapsed) = 3
+[check] parallel log is INTERLEAVED (step 1: A,B,C hop1; step 2: A,B,C hop2 + B,C done; step 3: A done): OK
+
+THE payoff — serial spans MORE async steps than parallel (sum vs max):
+    serialSteps   = 7   (≈ sum of costs 3+2+2 = 7)
+    parallelSteps = 3   (≈ max of costs = 3)
+[check] SERIAL spans MORE steps than PARALLEL (await-in-loop is the trap; Promise.all the fix): OK
+[check] both strategies produce the same values [3,2,2]: OK
+
+THE FIX — fan out independent work with Promise.all(items.map(asyncFn)):
+    // BAD (serial — slow):   for (const x of items) { await fetch(x) }
+    // GOOD (parallel — fast): await Promise.all(items.map(x => fetch(x)))
+[check] Promise.all(items.map(fn)) is the parallel fix for independent async work: OK
+
+======================================================================
+SECTION D — Top-level await (ESM) + await on non-promises/thenables + precedence
+======================================================================
+Top-level await (ESM) — awaited at MODULE scope, before main() ran:
+    // at module top level:
+    const TOP_LEVEL_AWAITED = await Promise.resolve("top-level-await-works");
+    TOP_LEVEL_AWAITED -> "top-level-await-works"
+[check] top-level await works in this ESM bundle: TOP_LEVEL_AWAITED === "top-level-await-works": OK
+
+await desugars to .then — these two forms are equivalent:
+    Promise.resolve(1).then(x => x + 1).then(x => x * 10)        -> 20
+    { const x = await P(1); const y = await P(x+1); return y*10 } -> 20
+[check] await desugars to .then: both forms yield 20: OK
+
+Expression precedence — parenthesize each await (unambiguous, recommended):
+    const sum     = (await a) + (await b);  -> 30   (a=10, b=20)
+    const doubled = (await a) * 2;          -> 20
+    // TRAP: `await a ** 2` is a SyntaxError — write `(await a) ** 2`
+[check] (await a) + (await b) === 30: OK
+[check] (await a) * 2 === 20: OK
+
+======================================================================
+SECTION E — go() [err,data] idiom + no-cancellation (AbortSignal) + cross-language
+======================================================================
+THE go() idiom — try/catch around await -> a returned [err, data] tuple:
+    const [err, data] = await go(Promise.resolve(42));
+      -> [null, 42]
+    const [err, data] = await go(Promise.reject(new Error("go-failed")));
+      -> ["go-failed", undefined]
+[check] go() success: [null, 42]: OK
+[check] go() failure: err.message === "go-failed", data === undefined: OK
+
+An awaited promise is NOT cancellable — AbortSignal is the cancellation story:
+    // a Promise has NO .cancel(); abort the SIGNAL passed to the work instead
+    before abort: ac.signal.aborted -> false
+    after  abort: ac.signal.aborted -> true  ;  'abort' listener fired -> true
+[check] AbortController.abort() sets signal.aborted and fires the abort listener: OK
+
+Cross-language model (full treatment in ASYNC_AWAIT.md):
+  JS async fn  : EAGER — body runs to the first await immediately; returns a Promise.
+  Rust async fn: LAZY  — returns an INERT Future; nothing runs until an executor POLLS it.
+  Python async : async def + await driven by an event loop (asyncio.run) — closest sibling.
+[check] cross-language model summarized: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,109 @@
+shared_memory_atomics.ts — Phase 4 bundle (core member).
+SharedArrayBuffer is the ONLY shared-memory primitive in JS. Workers write to
+the SAB (NEVER print); main reads after all join. Atomics make the results
+DETERMINISTIC; plain writes DATA-RACE. Nothing is hand-computed.
+
+======================================================================
+SECTION A — SharedArrayBuffer is SHARED (not copied): worker write visible to main
+======================================================================
+SharedArrayBuffer + Int32Array view (created on MAIN):
+  sab.byteLength          === 32
+  view.length             === 8   (32 bytes / 4 per int32)
+  view[SLOT_VALUE] before === 0
+[check] sab.byteLength === 32 (8 int32 slots * 4 bytes): OK
+[check] view.length === 8: OK
+
+Worker wrote view[0] = 42 into the SAME buffer (passed via workerData):
+  main reads view[0]      === 42   (visible: shared memory, NO copy)
+  worker exited code       0
+[check] worker write to SAB is VISIBLE to main (view[0] === 42): OK
+[check] worker exited code 0: OK
+
+After passing the SAB to a worker, main's reference is STILL valid:
+  sab.byteLength still    === 32   (NOT detached — SAB is shared)
+[check] main's SAB is NOT detached after passing (byteLength still 32): OK
+
+======================================================================
+SECTION B — the DATA RACE: plain (non-atomic) += loses updates (nondeterministic)
+======================================================================
+Spawning 4 workers; each does view[0] += 1 x 1000 with PLAIN writes:
+  (plain += is load+add+store — NOT atomic; concurrent stores clobber)
+
+Expected (CORRECT counter): 4000
+Plain-write race final value: NONDETERMINISTIC (lost updates) — bounded in [0, 4000]
+  (exact value NOT printed: it varies per run — run `just run` again to see it change)
+[check] racy total <= N*iters (never exceeds a correct counter, 4000): OK
+[check] racy total >= 0 (starts at 0, only increments): OK
+[check] all 4 racy workers exited code 0: OK
+
+======================================================================
+SECTION C — Atomics.add/load/store (deterministic) + compareExchange (CAS)
+======================================================================
+Atomics.add — atomic read-modify-write (N=4 workers x 1000 adds each):
+  Expected (N*iters): 4000
+  Atomics.add total : 4000   (EXACT — no lost updates, every run)
+[check] Atomics.add total === N*iters (4000, deterministic): OK
+[check] all 4 atomic workers exited code 0: OK
+
+Atomics.store / Atomics.load — ordered single-cell ops:
+  Atomics.store(view, 1, 1234) -> 1234   (returns the stored value)
+  Atomics.load(view, 1)        -> 1234
+[check] Atomics.store returns the value stored (1234): OK
+[check] Atomics.load reads back the stored value (1234): OK
+
+Atomics.compareExchange — CAS (compare-and-swap):
+  start view[2]=5; compareExchange(view,2, expected=5, value=10)
+    -> returned 5 (old matched expected -> SWAPPED), view[2] now 10
+[check] CAS success: returned old (5) when expected matched: OK
+[check] CAS success: cell updated to 10: OK
+  start view[2]=10; compareExchange(view,2, expected=5, value=99)
+    -> returned 10 (old != expected -> NO swap), view[2] still 10
+[check] CAS failure: returned current (10) when expected did NOT match: OK
+[check] CAS failure: cell UNCHANGED (still 10, no write): OK
+
+======================================================================
+SECTION D — Atomics.wait / Atomics.notify (futex-like synchronization)
+======================================================================
+Atomics.wait/notify handoff (worker waits on cell 0; main sets 7 + notifies):
+  (browsers forbid wait on main; Node allows it but blocks the event loop -> WORKER waits)
+  main: Atomics.store(view, 0, 7) then Atomics.notify(view, 0, 1)
+  worker observed view[0] === 7 after waking (handoff OK)
+  worker exit code: 0
+[check] wait/notify handoff: worker observed main's value (7): OK
+[check] wait/notify handoff: worker did NOT time out (wait returned ok or not-equal): OK
+[check] waiter worker exited code 0: OK
+[check] Atomics.notify returned a non-negative count (spec guarantee): OK
+
+======================================================================
+SECTION E — memory ordering (sequentially consistent by default) + cross-language
+======================================================================
+The Atomics API surface (all seq-consistent; RMW ops return the OLD value):
+  Atomics.load(ta, i)                atomic read (ordered)
+  Atomics.store(ta, i, v)            atomic write (ordered); returns v
+  Atomics.add(ta, i, v)              atomic RMW; returns OLD value
+  Atomics.sub(ta, i, v)              atomic RMW; returns OLD value
+  Atomics.and/or/xor(ta, i, v)       atomic bitwise RMW; returns OLD
+  Atomics.exchange(ta, i, v)         atomic swap; returns OLD value
+  Atomics.compareExchange(ta, i, e, v) CAS; returns OLD (swaps only if old===e)
+  Atomics.wait(ta, i, v, t?)         block while ta[i]===v (futex); worker-side
+  Atomics.notify(ta, i, count)       wake up to count waiters; returns # woken
+  Atomics.isLockFree(n)              true if size-n ops are hardware-atomic
+
+Atomics.add returns the OLD value (atomic read-modify-write):
+  store(view,0,100); add(view,0,5) -> returned 100; cell now 105
+[check] Atomics.add returns the OLD value (100): OK
+[check] cell is now 105 after the add: OK
+  exchange(view,0,999) -> returned 105 (old); cell now 999
+[check] Atomics.exchange returns OLD (105) and swaps to 999: OK
+  Atomics.isLockFree(4) -> true   (int32 ops are natively atomic in V8)
+[check] Atomics.isLockFree(4) === true (int32 is natively atomic): OK
+
+Cross-language — shared-memory concurrency primitives:
+  JS SharedArrayBuffer + Atomics : shared mem; Atomics seq-consistent by default (no ordering choice)
+  Go sync/atomic                 : atomic Int32/Pointer/Uintptr + CAS; explicit happens-before memory model
+  Rust std::sync::atomic         : AtomicUsize etc.; you MUST pick Ordering (SeqCst/Acq/Rel/Relaxed)
+[check] all three languages model shared-memory atomics (3 rows): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

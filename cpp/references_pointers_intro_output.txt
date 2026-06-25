@@ -1,0 +1,135 @@
+references_pointers_intro.cpp — Phase 1 bundle #2.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — By VALUE (a copy): mutation invisible to the caller
+======================================================================
+A by-VALUE parameter is a COPY of the argument. Mutating it inside the
+function NEVER touches the caller's original. That is why value semantics
+are safe-by-default — and (for large types) exactly why references exist.
+
+int original = 10;  mutate_by_value(original) returned 999;
+    -> original is still 10 (the COPY was mutated, not the original)
+[check] by-value: mutating the param did NOT change the caller's original (still 10): OK
+
+Tracker::copies after pass-by-VALUE = 1  (copy constructor ran once)
+[check] pass-by-value invoked the copy constructor exactly once (copies == 1): OK
+Tracker::copies after pass-by-REF   = 0  (no copy: it is an alias)
+[check] pass-by-reference invoked the copy constructor zero times (copies == 0): OK
+
+======================================================================
+SECTION B — Lvalue reference `&`: an ALIAS (non-null, non-reseatable)
+======================================================================
+An lvalue reference T& is an ALIAS for an existing object. It MUST bind to
+a valid object at initialization, can NEVER be null, and can NEVER be
+reseated (rebound) — "reassigning" it actually assigns THROUGH it.
+
+int x = 1;  int& r = x;  r = 5;  -> x = 5  (r is an alias of x)
+[check] lvalue reference: `r = 5` changed x through the alias (x == 5): OK
+&r == &x ?  YES   (a reference shares its referent's address)
+[check] a reference and its referent have the SAME address (&r == &x): OK
+
+int y = 7;  r = y;   (NOT a rebind: assigns THROUGH) -> x = 7, &r==&x ? YES
+[check] references are non-reseatable: `r = y` stored y's value into x (x == 7): OK
+[check] after `r = y` the reference STILL aliases x (&r == &x): OK
+
+int counter = 41;  increment_by_ref(counter);  -> counter = 42
+[check] non-const T& out-parameter: counter was mutated by the callee (== 42): OK
+try_parse_pos("1234", parsed) -> ok = 1, parsed = 1234
+[check] out-parameter filled in by reference (parsed == 1234): OK
+[check] out-parameter reports failure on non-digits ("12a" -> false): OK
+
+======================================================================
+SECTION C — const reference `const T&`: binds temporaries (lifetime-ext)
+======================================================================
+A const T& can bind to a TEMPORARY, and doing so EXTENDS the temporary's
+lifetime to that of the reference. This is the cheap read-only-pass idiom.
+A non-const T& CANNOT bind to a temporary (documented: a compile error).
+
+const std::string& s = std::string("temp");  -> s = "temp", len = 4
+[check] const T& binds a temporary AND extends its lifetime (s == "temp"): OK
+[check] the lifetime-extended temporary is intact (length == 4): OK
+
+const std::string& cn = name("alice");  -> cn = "alice", len = 5
+[check] const T& also binds an lvalue with no copy (cn == "alice"): OK
+
+(const T& is read-only: `cn = "bob";` would be a compile error — not run.)
+[check] const T& is read-only (mutation through it is rejected at compile time): OK
+
+length_of(name) = 5;  length_of(std::string("rvalue")) = 6  (no copy)
+[check] const T& param reads an lvalue without copying (len == 5): OK
+[check] const T& param reads a temporary without copying (len == 6): OK
+
+int&& rr = 42;  rr = 7;  -> rr = 7  (rvalue reference — move semantics is P3)
+[check] rvalue reference T&& binds a prvalue and is mutable (rr == 7): OK
+
+======================================================================
+SECTION D — Pointer `*`: an ADDRESS (nullable, reassignable)
+======================================================================
+A pointer T* holds the ADDRESS of an object. Unlike a reference it may be
+NULL (nullptr), it is REASSIGNABLE, and you dereference it with `*`/`->`.
+Dereferencing a NULL pointer is UNDEFINED BEHAVIOR (documented below).
+
+int x = 1;  int* p = &x;  *p = 5;  -> x = 5, (p == &x) ? YES
+[check] pointer: `*p = 5` changed x through the address (x == 5): OK
+[check] pointer holds the object's address (p == &x): OK
+
+int* np = nullptr;  -> (np == nullptr) ? YES   (a pointer CAN be null)
+[check] a pointer may be null (np == nullptr): OK
+
+int y = 9;  p = &y;   (repointed) -> *p = 9, (p == &y) ? YES, (p == &x) ? NO
+[check] pointer is reassignable: p now points at y (p == &y): OK
+[check] after reassignment p no longer points at x (p != &x): OK
+[check] repointed pointer reads the new object (*p == 9): OK
+
+int* q = &x;  int** pp = &q;  **pp = 7;  -> x = 7, (pp == &q) ? YES
+[check] pointer-to-pointer: `**pp = 7` reached x through two levels (x == 7): OK
+[check] int** pp holds the address of the int* (pp == &q): OK
+
+const int* cp = &z;  int* const fixed = &z;  *fixed = 50;  -> *cp = 50, z = 50
+[check] pointer-to-const reads but does not write through it (*cp == 50): OK
+[check] const-pointer-to-int is writable through (*fixed = 50 -> z == 50): OK
+
+The NULL-DEREFERENCE trap (*nullptr) is UNDEFINED BEHAVIOR — documented,
+never executed in the verified path (gated behind -DDEMO_UB).
+[check] null-deref UB trap documented (NEVER dereferenced in the verified path): OK
+    (DEMO_UB not defined: the null-deref is correctly omitted from this build.)
+
+======================================================================
+SECTION E — The choice (value/ref/ptr) + dangling UB + cross-language
+======================================================================
+Decision table — pick the reference kind from what you NEED:
+
+kind            copied?  alias?  nullable?  reseatable?  owns?
+---------------  ------  ------  --------  -----------  ----
+T   (value)        YES    no       no          no        YES (own storage)
+T&  (lref)         no     YES      no          no         no  (borrows)
+const T&           no     YES      no          no         no  (read borrow)
+T*  (pointer)      no     YES     YES         YES         no  (borrows)
+T&& (rref)         no     YES      no          no         no  (move — P3)
+[check] decision table printed (5 reference kinds): OK
+
+Rules of thumb:
+  * Pass/return by VALUE when you want a cheap, independent copy.
+  * Use T& (or const T&) when the object ALWAYS exists and you want to
+    avoid a copy — prefer references whenever the binding is never null.
+  * Use T* when the target may be ABSENT (nullable) or may CHANGE (reseat),
+    or when you iterate arrays / do low-level address arithmetic.
+
+The DANGLING reference/pointer trap: if the referent's lifetime ends but the
+reference/pointer is still used, the behavior is UNDEFINED. The classic case
+is returning a T& to a local — documented, gated behind -DDEMO_UB.
+[check] dangling-reference UB trap documented (referent must outlive the reference): OK
+    (DEMO_UB not defined: the dangling-ref demo is correctly omitted.)
+
+Cross-language (the 5-language curriculum):
+  C++ (here): value / & reference / * pointer — you choose; no GC; UB if wrong
+  Rust      : value / & borrow / &mut borrow — compiler CHECKS lifetimes; no UB
+  Go        : value / * pointer ONLY (no references) — GC; no UB
+  TS/JS     : primitives by value / shared object ref under GC — no UB
+[check] cross-language reference/pointer comparison printed: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

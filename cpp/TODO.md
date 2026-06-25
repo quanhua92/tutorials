@@ -27,7 +27,7 @@
 
 | Phase | Theme | Bundles | Status |
 |---|---|---|---|
-| 1 | Language Foundations | 8 | ⬜ pending |
+| 1 | Language Foundations | 8 | ✅ done (8/8, 233 checks) |
 | 2 | Templates & Concepts | 7 | ⬜ pending |
 | 3 | Memory, Ownership & Move Semantics | 7 | ⬜ pending |
 | 4 | Concurrency & the Memory Model | 6 | ⬜ pending |
@@ -36,7 +36,7 @@
 | 7 | Error Handling, UB & Idioms | 5 | ⬜ pending |
 | 8 | Build, Tooling & Production | 6 | ⬜ pending |
 | — | Companion walkthroughs (Boost.Asio/Crow/redis-plus-plus) | ~18 | ⬜ pending |
-| | **Total** | **51 + ~18** | **0/51 built** |
+| | **Total** | **51 + ~18** | **8/51 built** |
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3's
 move semantics leans on Phase 1's value/reference/pointer; Phase 4's memory

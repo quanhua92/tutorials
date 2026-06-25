@@ -1,0 +1,121 @@
+const_qualifiers.cpp — Phase 1 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — const object + const T& param (const correctness begins)
+======================================================================
+(1) const int ci = 42;  -> ci = 42
+    (a later `ci = 7;` is a COMPILE ERROR — documented, not run)
+[check] const object holds its initialized value (ci == 42): OK
+
+(2) plus_one(const int& x): from lvalue n=10 -> 11; from temp 99 -> 100
+[check] const T& binds an lvalue (plus_one(10) == 11): OK
+[check] const T& binds a temporary/rvalue (plus_one(99) == 100): OK
+[check] const T& did NOT mutate the lvalue argument (n still 10): OK
+
+(3) namespace-scope `const int k = ..;` has INTERNAL linkage in C++
+    (vs external in C). Share one def across TUs with `inline constexpr`.
+[check] namespace-scope const has internal linkage in C++ (documented, cppreference): OK
+
+======================================================================
+SECTION B — const member function + the viral cascade + mutable
+======================================================================
+(1) const Widget cw;  cw.inspect() = 0  (const method OK on const object)
+    (cw.mutate(5) would be a COMPILE ERROR: non-const method on a const object)
+[check] const member function is callable on a const object (cw.inspect() == 0): OK
+
+(2) Widget mw;  mw.mutate(7);  mw.inspect() = 7
+    (const methods are callable on non-const objects too; the reverse is not)
+[check] non-const method callable on a non-const object (mw.data set to 7): OK
+
+(3) mutable int inspect_count: cw.inspect_count 1 -> 3 (delta=2)
+    (a const method mutated a `mutable` member of a CONST object — by design)
+[check] mutable member was mutated INSIDE a const method on a const object (delta == 2): OK
+
+======================================================================
+SECTION C — THE const-POSITION rule (read right-to-left)
+======================================================================
+Read pointer declarations RIGHT-TO-LEFT. `const` binds to what is on its
+LEFT; if leftmost it binds RIGHT (the 'const-West' quirk). The consistent
+style is 'East const' (always put const on the RIGHT of what it constifies):
+    const int* p  ==  int const* p     (the SAME type: pointer to const int)
+
+(1) const int* p1 = &a;  p1 = &b;  -> *p1 = 20  (p reassigned; *p read-only via p)
+    a = 55; p1 = &a;  -> *p1 = 55  (a is NOT const; only *p1 is read-only VIA p1)
+[check] const int* is reassignable (p1 now points at a; *p1 == 55): OK
+[check] const int* == int const* (the SAME type): OK
+
+(2) int* const p2 = &a;  *p2 = 99;  -> a = 99  (p fixed; *p mutable)
+[check] int* const: *p is mutable (a mutated to 99 via p2): OK
+[check] int* const: p itself is fixed (p2 == &a): OK
+
+(3) const int* const p3 = &a;  -> *p3 = 99  (BOTH locked: *p read-only AND p fixed)
+[check] const int* const: *p read-only and p fixed (*p3 == 99, p3 == &a): OK
+[check] const int* const == int const* const (the SAME type): OK
+
+    spelling                pointee (*p)    pointer (p)
+    ----------------------   -----------     -----------
+    const int*  (= int const*)   READ-ONLY    reassignable
+    int* const                  mutable      FIXED
+    const int* const            READ-ONLY    FIXED
+
+TOP-LEVEL vs LOW-LEVEL const (auto / template argument deduction):
+    const int ci=7;  auto x = ci;     -> int         (top-level const STRIPPED)
+    const int* p=&ci; auto y = p;     -> const int*  (low-level  const KEPT)
+    int* const cp=&a; auto z = cp;    -> int*        (top-level const STRIPPED)
+    derived values: x=7, *y=7, *z=99
+[check] auto strips top-level const on a value (const int -> int): OK
+[check] auto keeps low-level const (const int* stays const int*): OK
+[check] auto strips top-level const on a pointer (int* const -> int*): OK
+
+======================================================================
+SECTION D — constexpr / consteval / constinit (the compile-time family)
+======================================================================
+(1) constexpr int N = factorial(5);  -> N = 120
+    int arr[N]; (N as array bound) -> sizeof(arr) = 480 bytes; sum(0..119) = 7140
+[check] constexpr factorial(5) == 120 (computed at compile time): OK
+[check] constexpr N is usable as an array bound (arr has N elements): OK
+[check] constexpr implies const: N is immutable (== 120): OK
+
+(2) consteval int compile_time_only(int);   constexpr sq = compile_time_only(7);
+    -> sq = 49   (consteval: the call is FORCED to compile time)
+[check] consteval function forced to compile time (compile_time_only(7) == 49): OK
+
+(3) constinit int g_seed = 100;   (constant-initialized, NOT const)
+    g_seed before = 100;  after `g_seed = 999;` -> 999   (mutable, unlike constexpr)
+[check] constinit does NOT imply const (g_seed mutated 100 -> 999): OK
+    (`constinit int bad = some_runtime_fn();` is ILL-FORMED — documented)
+[check] constinit requires a constant initializer (documented: dynamic init is ill-formed): OK
+
+    specifier    applies to   implies const?   enforces
+    ----------   ----------   --------------   --------------------------------------
+    const        object/ref   YES              immutability after init (runtime)
+    constexpr    var/fn       YES (var)        value computable at COMPILE TIME
+    consteval    fn           n/a (it is a fn) every call MUST run at compile time
+    constinit    static var   NO               CONSTANT init only (no dynamic init)
+
+======================================================================
+SECTION E — const-correctness discipline (qual-conv, const_cast danger)
+======================================================================
+(1) int* -> const int* is IMPLICIT (qualification conversion, safe):
+    const int* ro = mut;  -> *ro = 5  (a read-only view of a mutable int)
+[check] qualification conversion int* -> const int* is implicit (*ro == 5): OK
+    const_cast<int&>(*ro) = 8;  -> x = 8   (defined: the underlying object x is non-const)
+[check] const_cast is defined when the underlying object is non-const (x == 8): OK
+    (`const int k=1; const_cast<int&>(k)=2;` is UNDEFINED BEHAVIOR — documented)
+[check] const_cast on a truly-const object is UB (documented, not run): OK
+
+(2) const is VIRAL: a const method can only call const methods on *this;
+    a const T& only flows to const T& params. Add const EARLY and OFTEN.
+[check] const-correctness is viral / cascading (documented, isocpp FAQ): OK
+
+(3) Cross-language immutability models:
+    C++ :  const/opt-in; `mutable` escape hatch; const-METHOD concept; viral.
+    Go  :  `const` = COMPILE-TIME constants ONLY (not a general immutability marker).
+    Rust:  `let` immutable by DEFAULT; `mut` OPTS IN (the inverse default).
+[check] cross-language immutability models documented (C++ vs Go vs Rust): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

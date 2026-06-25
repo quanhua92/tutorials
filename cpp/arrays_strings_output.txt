@@ -1,0 +1,118 @@
+arrays_strings.cpp — Phase 1 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — C-style array T[N]: decays to T*, loses size; OOB is UB
+======================================================================
+int carr[5] = {10,20,30,40,50};
+  sizeof(carr)                = 20  (= 5 * sizeof(int)=20)
+  sizeof(carr)/sizeof(carr[0]) = 5  (the manual size trick)
+  carr[0]=10  carr[4]=50  (valid indices 0..4)
+
+sizeofDecayedParam(carr) = 8  (== sizeof(int*)=8 — size LOST on pass!)
+[check] C-array: sizeof(carr) == 5 * sizeof(int): OK
+[check] C-array: sizeof(carr)/sizeof(carr[0]) == 5 (size trick in defining scope): OK
+[check] C-array DECAYS: sizeof(param) == sizeof(int*) (size lost on pass): OK
+
+carr[5] / carr[99] would be OUT-OF-BOUNDS -> UNDEFINED BEHAVIOR
+  (C-arrays have NO bounds check; the verified path never reads OOB.)
+  (DEMO_UB not defined: the OOB read is correctly omitted from this build.)
+[check] C-array OOB access is UB (documented; not executed in verified path): OK
+
+======================================================================
+SECTION B — std::array<T,N>: size-aware, .at() throws, no decay
+======================================================================
+std::array<int,3> a = {1,2,3};
+  a.size()   = 3
+  sizeof(a)  = 12  (= 3 * sizeof(int)=12 — NO overhead vs C-array)
+  a[0]=1  a[1]=2  a[2]=3
+
+std::array<int,3> b = a;  b[0] = 99;  -> a[0]=1 (copy is independent)
+std::get<2>(a) = 3  (compile-time-checked index)
+a.at(99) -> threw std::out_of_range: YES  (CHECKED access)
+arraySize(a) = 3  (passed by const& — size PRESERVED, no decay)
+
+a[99] would be UNCHECKED OOB -> UB (use .at() for checked access)
+[check] std::array: a.size() == 3: OK
+[check] std::array: sizeof(a) == 3 * sizeof(int) (no overhead vs C-array): OK
+[check] std::array: copy is independent (b[0]=99 did not change a[0]): OK
+[check] std::array: std::get<2>(a) == 3 (compile-time-checked): OK
+[check] std::array: a.at(99) threw std::out_of_range (runtime-checked): OK
+[check] std::array: no decay — arraySize(a) preserved size == 3: OK
+[check] std::array: operator[] OOB is UB (documented; not executed): OK
+
+======================================================================
+SECTION C — std::string: OWNED growable; UTF-8 counts BYTES
+======================================================================
+std::string s = "hello";
+  s.size()=5  s.length()=5  (length == size)
+after s.push_back('!'); s.append(" world"); s+='?';
+  s = "hello! world?"  s.size()=13
+
+std::string s2 = s;  s2[0] = 'X';  -> s[0]='h' (independent copy)
+s.substr(0,5) = "hello"   s.find("world") = 7
+
+std::string utf8 = "\xc3\xa9";  (UTF-8 for U+00E9)
+  utf8.size() = 2  (BYTES, not characters — no built-in unicode)
+  utf8[0] = 0xc3  utf8[1] = 0xa9  (two bytes)
+
+s.c_str() -> const char* (null-terminated, C-interop); strlen(s.c_str())=13
+[check] string: s after appends == "hello! world?" (size 13): OK
+[check] string: s.size() == s.length(): OK
+[check] string: copy is independent (s2[0]='X' left s[0]='h'): OK
+[check] string: s.substr(0,5) == "hello": OK
+[check] string: s.find("world") == 7: OK
+[check] string: UTF-8 U+00E9 is 2 BYTES (utf8.size()==2): OK
+[check] string: utf8 bytes are 0xC3 0xA9: OK
+[check] string: strlen(s.c_str()) == s.size() (no embedded null): OK
+
+======================================================================
+SECTION D — std::string_view: NON-OWNING borrow; dangling-view UB trap
+======================================================================
+std::string_view sv1 = "literal";  (borrows a string literal)
+  sv1.size()   = 7
+  sizeof(sv1)  = 16  (data pointer + length)
+  sv1 = "literal"
+
+std::string s = "hello world";  std::string_view sv2 = s;
+  sv2.size() = 11   sv2.substr(0,5) = "hello"
+  sv2 == "hello world": YES   (sv2 == s.c_str()): YES
+
+sizeof(std::string_view) = 16  (== sizeof(char*)+size_t = 16 — a borrow)
+
+TRAP: std::string_view sv = std::string("temp");  <- DANGLING
+  the temporary string dies at the ';'; sv dangles -> reading sv is UB
+  (documented only; the verified path never reads a dangling view)
+  (DEMO_UB not defined: the dangling-view UB read is correctly omitted.)
+[check] string_view: sv1 (from literal) size == 7: OK
+[check] string_view: sv2 == "hello world": OK
+[check] string_view: sv2.substr(0,5) == "hello": OK
+[check] string_view: sizeof == sizeof(char*) + sizeof(size_t) (ptr+len): OK
+[check] string_view: dangling-view read is UB (documented; not executed): OK
+
+======================================================================
+SECTION E — Decision guide: which sequence kind to use when
+======================================================================
+C-array T[N]         : avoid in modern C++; decays & loses size.
+std::array<T,N>      : fixed size KNOWN at compile time.
+std::string          : you OWN & grow the text.
+std::string_view     : READ-ONLY borrow (cheap param); never outlive source.
+std::vector<T> (P5)  : size GROWS at runtime. (see ITERATORS_RANGES)
+
+Ownership axis (low -> high):
+  string_view (borrows, may dangle)  <  C-array (decays, loses size)
+  < std::array (owns fixed)  <  std::string (owns, growable)
+
+Cross-language analogues:
+  Go slice    = ptr+len+cap, GROWABLE  -> C++ std::vector<T> is the analog
+  Rust &str   = NON-OWNING borrow      -> C++ std::string_view is the analog
+  Rust String = OWNED, growable        -> C++ std::string is the analog
+  JS string   = immutable UTF-16, NO UB -> C++ std::string is mutable bytes
+[check] decision: string_view is non-owning (sizeof small, ~2 words): OK
+[check] decision: std::array has NO overhead vs C-array (same sizeof): OK
+[check] decision: std::string is OWNED (concatenation grows, size reflects): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

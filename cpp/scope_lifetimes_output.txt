@@ -1,0 +1,154 @@
+scope_lifetimes.cpp — Phase 1 bundle.
+SCOPE (visible) vs STORAGE DURATION (born/dies). RAII preview = dtor at }.
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — Block scope, name hiding, namespaces
+======================================================================
+SCOPE = where a NAME is visible (for name lookup). It is INDEPENDENT of
+storage duration (Section E). The kinds: block, function-parameter, namespace,
+class, enumeration, lambda, template-parameter. Here: block + namespace.
+
+(1) BLOCK scope: a name inside { } is visible only inside that block
+    inside block: block_local = 42
+[check] block_local is visible inside its block (== 42): OK
+    after }: block_local is out of scope (referencing it = compile error)
+[check] block_local out of scope after } (reference would be a compile error): OK
+
+(2) NAME HIDING: an inner `x` hides the outer `x` (outer is unchanged)
+    inner x = 20  (hides outer; outer still exists, just not by this name)
+[check] inner x hides outer x (inner == 20): OK
+    after inner block: outer x = 10  (the outer object was never touched)
+[check] outer x is unchanged after the hiding block exits (== 10): OK
+
+(3) POINT OF DECLARATION (locus): a name is in scope right after its declarator
+    struct Node { Node* next; };  -> self-referential member compiles (locus rule)
+[check] point-of-declaration: a type can self-refer (Node{nullptr}.next == nullptr): OK
+
+(4) NAMESPACE scope + nesting (qualified names: N::M::name)
+    physics::c                  = 299792458  (m/s; speed of light)
+    physics::units::km_per_ly   = 9460730472580  (km per light-year)
+[check] nested namespace access: physics::c == 299792458: OK
+[check] nested namespace access: physics::units::km_per_lightyear == 9460730472580: OK
+
+(5) ANONYMOUS namespace => INTERNAL linkage (visible in this TU only)
+    demo::internal_value = 7  (lives in a nested unnamed namespace)
+[check] anonymous-namespace member is accessible within its TU (== 7): OK
+
+======================================================================
+SECTION B — Automatic storage: born at decl, destroyed at } (RAII preview)
+======================================================================
+Automatic-storage locals are BORN at their declaration and DESTROYED at the
+enclosing block's closing }. For a class type the DESTRUCTOR runs right there,
+in REVERSE order of construction (LIFO). This deterministic scope-bound cleanup
+IS RAII (Resource Acquisition Is Initialization). Full RAII is P3; this is the
+preview that establishes the mechanism.
+
+  entering outer block
+    [ctor] a        acquired  (live instances now = 1)
+    [ctor] b        acquired  (live instances now = 2)
+      --- innermost point: a and b both alive ---
+[check] both ScopedTrace instances alive at the innermost point (live == 2): OK
+    [dtor] b        released at scope exit (live = 1)
+  after inner block: b destroyed; live now = 1
+[check] inner ScopedTrace b was destroyed at its block's } (live == 1): OK
+    [dtor] a        released at scope exit (live = 0)
+  after outer block: a destroyed; live now = 0
+[check] outer ScopedTrace a was destroyed at its block's } (live == 0): OK
+[check] RAII preview: destructors ran in REVERSE order of construction (b before a) — LIFO: OK
+
+A local is BORN at its declaration (not at block entry). Referencing it before
+the declarator is a compile error. The destructor always runs at the block's }.
+[check] automatic object: born at decl, destroyed at } (the RAII guarantee): OK
+
+======================================================================
+SECTION C — Static storage: file-scope + static locals (first-call init)
+======================================================================
+Static-storage objects are born ONCE and live until PROGRAM EXIT. Two flavors:
+file-scope (born before main, in definition order) and static LOCALS (born on
+first call through the declaration, then skipped). Destructors run in reverse
+order of construction at program shutdown.
+
+(1) FILE-SCOPE variable: static storage; born before main, dies at program exit
+    file_scope_calls after increment = 1  (persists for the whole run)
+[check] file-scope int has static storage (file_scope_calls == 1 after one increment): OK
+
+(2) STATIC LOCAL (make_id): one instance, born on first call, persists
+    make_id() x3 = 1001, 1002, 1003  (first-call init; counter persists across calls)
+[check] static local persists across calls: make_id() x3 == 1001, 1002, 1003: OK
+
+(3) ADDRESS stability: a static local has ONE address across calls
+    addr_of_static() called twice -> same address? YES (one shared instance)
+[check] static local has a stable address across calls (p1 == p2): OK
+
+(4) STATIC-INIT ORDER FIASCO — documented (a single-TU bundle cannot show it)
+    Dynamic-init ORDER of static-storage objects ACROSS translation units is
+    UNSPECIFIED. If TU A's init reads TU B's static before B is initialized, the
+    value is indeterminate -> UB. WITHIN a TU the order is well-defined (top-to-
+    bottom). Cures: 'construct on first use' (a static local, like make_id) or
+    C++20 `constinit` (force static — not dynamic — initialization).
+[check] static-init order fiasco documented (cross-TU dynamic init order is unspecified): OK
+
+======================================================================
+SECTION D — Dynamic storage (new/delete) + the return-T&-to-local UB trap
+======================================================================
+DYNAMIC storage: an object created by `new` lives on the heap until YOU
+explicitly `delete` it. There is NO automatic cleanup — the destructor does
+NOT run at scope exit. This is exactly why smart pointers (P3) exist.
+
+(1) new/delete: int* heap = new int(42);  -> *heap = 42 (lives on the heap)
+[check] dynamic-storage int holds its value (*heap == 42): OK
+[check] new/delete balanced and pointer nulled (no leak; no double-delete risk): OK
+
+(2) The POINTER `heap` has AUTOMATIC storage; the OBJECT `*heap` has DYNAMIC.
+    The dtor of *heap runs at `delete`, not at scope exit. std::unique_ptr (P3)
+    binds that delete to a scope — the RAII fix for raw new/delete.
+
+(3) Return by VALUE is SAFE: make_greeting("world") = "hello, world"
+[check] return-by-value: caller received a valid owning object ("hello, world"): OK
+
+(4) The DANGLING-REFERENCE trap: returning T& to a local is UB — documented,
+    gated behind -DDEMO_UB (never run by just run/out/check/sanitize).
+[check] return-T&-to-local UB trap documented (referent must outlive the reference): OK
+    (DEMO_UB not defined: the dangling-ref demo is correctly omitted.)
+
+======================================================================
+SECTION E — The 4 storage durations + cross-language
+======================================================================
+SCOPE (where a NAME is visible) and STORAGE DURATION (when the OBJECT lives)
+are INDEPENDENT. A block-scoped name can have STATIC storage (a static local);
+a namespace-scoped name ALWAYS has static storage. The four durations:
+
+duration    keyword        born                            dies
+----------  -------------  ------------------------------  ------------------------------
+automatic   (default)      at the declaration              at the enclosing block's }
+static      static/extern  before main / on first call     program exit (dtor: reverse)
+thread      thread_local   at the declaration              at the thread's exit
+dynamic     new            at the `new` expression         at the explicit `delete`
+[check] 4 storage durations table printed: OK
+
+All four in one scope:
+    int          auto_v = 1;  -> 1   (automatic)
+    static int   stat_v = 2;  -> 2   (static; persists across calls — see Section C)
+    thread_local tls_v  = 3;  -> 3   (thread; one per thread)
+    int*         dyn_v  = new int(4);  -> 4   (dynamic; lives until delete)
+[check] all four storage durations demonstrated (1 + 2 + 3 + 4 == 10; *dyn_v read only pre-delete): OK
+[check] no UB: *dyn_v was never read after delete (value captured beforehand): OK
+
+RAII = the destructor runs EXACTLY at scope exit (automatic storage). This is
+C++'s deterministic-cleanup idiom — NO garbage collector needed. Full RAII
+(smart pointers, locks, files) lands in P3; Section B was the preview.
+[check] RAII = deterministic scope-bound destruction (no GC): OK
+
+Cross-language (the 5-language curriculum):
+  C++ (here): scope determines lifetime for automatic storage; dtor at };
+              RAII; no GC; UB if a ref/ptr outlives its referent
+  Rust      : LIFETIMES checked at COMPILE time (no dangling possible);
+              Drop trait == C++ destructor; no GC; no UB
+  Go        : block scope YES; deterministic dtors NO (GC + `defer`);
+              `defer` runs at FUNCTION (not block) exit — closest to RAII
+[check] cross-language scope/lifetime comparison printed: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

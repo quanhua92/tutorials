@@ -1,0 +1,121 @@
+variadic_templates.cpp — Phase 2 bundle.
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — Parameter packs: accepts 0+ args; sizeof...(pack)
+======================================================================
+template <typename... Ts> arity(const Ts&... args) { return sizeof...(args); }
+arity()              = 0   <- EMPTY pack (zero args accepted)
+arity(1)             = 1
+arity(1, 2.0, "x")   = 3   <- heterogeneous types, ONE signature
+[check] empty pack:  arity() == 0: OK
+[check] one arg:     arity(1) == 1: OK
+[check] three args:  arity(1, 2.0, "x") == 3: OK
+
+sizeof...(pack) is a constant expression: constexpr n = arity(1,2,3) = 3
+  -> int arr[n]; compiles (a runtime value could not be an array bound)
+[check] sizeof...(args) usable as array bound (n == 3): OK
+
+Non-type pack  template <auto... Ns>  sizeof...(Ns)
+nttp_count<1, 2UL, 'a'>() = 3   (int, unsigned long, char in ONE pack)
+[check] non-type pack nttp_count<1,2UL,'a'>() == 3: OK
+
+======================================================================
+SECTION B — RECURSIVE idiom (pre-C++17): base case + head/tail
+======================================================================
+void join_rec() { return ""; }                          // base case
+template <typename T, typename... Ts>                    // recursive case
+std::string join_rec(const T& head, const Ts&... rest);
+
+join_rec()               = ""    (empty pack -> base case)
+join_rec(42)             = "42"
+join_rec(1, 2.5, "hello") = "1, 2.5, hello"   (head + ", " + tail, recursed)
+[check] recursive base case: join_rec() == "": OK
+[check] recursive single:    join_rec(42) == "42": OK
+[check] recursive walk:      join_rec(1,2.5,"hello") == "1, 2.5, hello": OK
+
+======================================================================
+SECTION C — FOLD EXPRESSIONS (C++17): collapse a pack in one line
+======================================================================
+(args + ...)  unary RIGHT fold  : E1 + (E2 + (E3 + ...))
+(... + args)  unary LEFT  fold  : ((E1 + E2) + E3) + ...
+
+sum_right(1,2,3,4) = (args + ...) = 10
+sum_left (1,2,3,4) = (... + args) = 10   (+ is associative: same result)
+[check] unary right fold: (1+2+3+4 via (args+...)) == 10: OK
+[check] unary left  fold: (1+2+3+4 via (...+args)) == 10: OK
+
+(args && ...)  unary right fold over && : all-true
+(args || ...)  unary right fold over || : any-true
+all_true(true,true,false) = false
+all_true(true,true)       = true
+any_true(false,false,true)= true
+any_true(false,false)     = false
+[check] all_true(true,true,false) == false: OK
+[check] all_true(true,true) == true: OK
+[check] any_true(false,false,true) == true: OK
+[check] any_true(false,false) == false: OK
+
+EMPTY-pack unary folds (the ONLY 3 legal operators):
+  all_true()        = (args && ...) with 0 args = true   (identity for &&)
+  any_true()        = (args || ...) with 0 args = false  (identity for ||)
+[check] empty pack: (args && ...) == true: OK
+[check] empty pack: (args || ...) == false: OK
+
+BINARY fold with init: (args + ... + 0)  -> init when pack is empty
+  sum_empty_safe(1,2,3) = (args + ... + 0) = 6
+  sum_empty_safe()      = (args + ... + 0) = 0   (empty -> the init 0)
+[check] binary fold non-empty: sum_empty_safe(1,2,3) == 6: OK
+[check] binary fold empty:     sum_empty_safe() == 0  (init value): OK
+
+======================================================================
+SECTION D — Pack EXPANSION in other contexts: tuple, comma-fold, fwd
+======================================================================
+(1) std::tuple<Ts...> from a pack (args... expands in the ctor call):
+    std::tuple<int,double,const char*> t = make_tup(1, 2.5, "hi");
+    std::get<0>(t) = 1
+    std::get<1>(t) = 2.5
+    std::get<2>(t) = hi
+    std::tuple_size = 3  (== sizeof...(Ts))
+[check] tuple pack expansion: get<0> == 1: OK
+[check] tuple pack expansion: get<1> == 2.5: OK
+[check] tuple pack expansion: tuple_size == sizeof...(pack) == 3: OK
+
+(2) Comma-fold  (fn(args), ...) : call fn on each, left-to-right
+    collect_each(10, 2.5, "z") = [10, 2.5, z]
+    collect_each()             = 0 elements  (empty pack -> void())
+[check] comma-fold collect_each(10,2.5,"z") has 3 elements: OK
+[check] comma-fold order preserved: [0]=="10": OK
+[check] comma-fold order preserved: [2]=="z": OK
+[check] comma-fold empty pack -> 0 elements: OK
+
+(3) Perfect forwarding PREVIEW (full treatment: MOVE_SEMANTICS, P3):
+    template <typename... Ts> void f(Ts&&... args) { g(forward<Ts>(args)...); }
+    forward_to_target(string("yo"), 42) -> sink = ("yo", 42)
+[check] perfect forwarding: string passed through: OK
+[check] perfect forwarding: int passed through: OK
+
+======================================================================
+SECTION E — The 4 fold forms (direction + init matter)
+======================================================================
+Pack = {10, 3, 1}, operator = '-'  (NOT associative -> forms diverge):
+
+  form  syntax              expansion              result
+  ----  -----------------   ---------------------  ------
+  (1)   (args - ...)        E1-(E2-(...-EN))       8   (10-(3-1))
+  (2)   (... - args)        ((E1-E2)-...)-EN       6   ((10-3)-1)
+  (3)   (args - ... - 100)  E1-(...-(EN-100))      -92   (10-(3-(1-100)))
+  (4)   (100 - ... - args)  ((100-E1)-...)-EN      86   (((100-10)-3)-1)
+[check] form 1 unary right:  (args - ...) == 8: OK
+[check] form 2 unary left:   (... - args) == 6: OK
+[check] form 3 binary right: (args - ... - 100) == -92: OK
+[check] form 4 binary left:  (100 - ... - args) == 86: OK
+
+32 binary operators may fold: + - * / % ^ & | << >> == != <= >= && || ,
+  (and += -= *= ... ->* etc.). In a BINARY fold, both ops must match.
+[check] this file exercises fold over +, &&, ||, and ,  (all legal fold operators): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

@@ -1,0 +1,179 @@
+type_deduction.cpp — Phase 2 bundle.
+Every deduced type below is verified at COMPILE TIME with
+std::is_same_v<...>; its boolean is printed (NOT typeid().name()).
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free.
+
+======================================================================
+SECTION A — auto basics & the STRIP rule (top-level const/& stripped)
+======================================================================
+auto x = i (i == 5):
+  decltype(x) is int                                         : true
+[check] decltype(x) is int: OK
+
+const int& r = i;  auto a = r;  a = 999;
+  -> a = 999, i = 5   (a is a COPY; i untouched by the strip)
+[check] auto a = r made a COPY (a = 999 left i == 5): OK
+  decltype(a) is int (NOT const int& — the famous strip)   : true
+[check] decltype(a) is int (NOT const int& — the famous strip): OK
+  decltype(a) is NOT const int&                              : true
+[check] decltype(a) is NOT const int&: OK
+
+The strip is systematic (top-level const and & both vanish):
+  const int ci = 7;  auto b = ci;  -> b = 7
+  int& ri = i;       auto c = ri;  -> c = 5
+  auto b = ci  -> int (top-level const stripped)             : true
+[check] auto b = ci  -> int (top-level const stripped): OK
+  auto c = ri  -> int (the & stripped)                       : true
+[check] auto c = ri  -> int (the & stripped): OK
+
+Mental model: plain `auto` deduces a BY-VALUE type (a copy).
+[check] plain auto always yields a value type (copy semantics): OK
+
+======================================================================
+SECTION B — Keeping cv/refs: auto& / const auto& / decltype (no strip)
+======================================================================
+Setup: int i = 5; int& ri = i;
+
+auto& a3 = ri;
+  decltype(a3) is int& (auto& kept the mutable ref)          : true
+[check] decltype(a3) is int& (auto& kept the mutable ref): OK
+a3 = 11 (mutated THROUGH the alias)  -> i = 11
+[check] auto& a3 = ri is a real alias (a3 = 11 set i == 11): OK
+
+const auto& a4 = r;   -> read-only borrow (idiom)
+  decltype(a4) is const int&                                 : true
+[check] decltype(a4) is const int&: OK
+
+decltype(expr) = the DECLARED type, NOTHING stripped:
+  decltype(r)  is const int& (no strip)                      : true
+[check] decltype(r)  is const int& (no strip): OK
+  decltype(ci) is const int (no strip)                       : true
+[check] decltype(ci) is const int (no strip): OK
+  decltype(i)  is int (no strip)                             : true
+[check] decltype(i)  is int (no strip): OK
+  decltype(ri) is int& (no strip)                            : true
+[check] decltype(ri) is int& (no strip): OK
+
+======================================================================
+SECTION C — decltype(auto) (transparent) + the PAREN TRAP
+======================================================================
+decltype(auto) da1 = r   (r is const int&):
+  decltype(da1) is const int& (transparent — unlike plain auto) : true
+[check] decltype(da1) is const int& (transparent — unlike plain auto): OK
+decltype(auto) da2 = i   (i is int):
+  decltype(da2) is int                                       : true
+[check] decltype(da2) is int: OK
+
+THE PAREN TRAP — decltype(i) vs decltype((i)):
+  decltype(i)   is int   (unparenthesized -> declared type)  : true
+[check] decltype(i)   is int   (unparenthesized -> declared type): OK
+  decltype((i)) is int&  (parenthesized -> lvalue expr -> T&) : true
+[check] decltype((i)) is int&  (parenthesized -> lvalue expr -> T&): OK
+
+decltype(auto) da3 = (i);   (parenthesized initializer):
+  decltype(da3) is int& (paren trap via decltype(auto))      : true
+[check] decltype(da3) is int& (paren trap via decltype(auto)): OK
+
+The paren trap applies to const too:
+  decltype(ci)   is const int  (declared type)               : true
+[check] decltype(ci)   is const int  (declared type): OK
+  decltype((ci)) is const int& (parenthesized -> lvalue expr) : true
+[check] decltype((ci)) is const int& (parenthesized -> lvalue expr): OK
+
+======================================================================
+SECTION D — range-for (copy vs borrow) + return-type deduction
+======================================================================
+(1) for (auto x : v) { x += 1000; copy_sum += x; }   -> COPIES
+    v[0]=10  v[1]=20  v[2]=30   (v untouched)
+    copy_sum = 3060   (1010 + 1020 + 1030 = 3060; x held 1000 + element)
+[check] for(auto x:v) COPIES: v[0] still 10 after x += 1000: OK
+[check] for(auto x:v) COPIES: copy_sum == 3060 (x was a local copy): OK
+
+(2) for (auto& x : v) { x += 5; }   -> ALIASES (v changed)
+    v[0]=15  v[1]=25  v[2]=35
+[check] for(auto& x:v) ALIASES: v[0] now 15 after x += 5: OK
+
+(3) for (const auto& x : v) { sum += x; }   -> read-only BORROW
+    sum = 75   (15 + 25 + 35 = 75)
+[check] for(const auto& x:v) borrows: sum == 75: OK
+  auto copy of v[0] is int (the range-for copy form)         : true
+[check] auto copy of v[0] is int (the range-for copy form): OK
+  const auto& of v[0] is const int& (the range-for borrow idiom) : true
+[check] const auto& of v[0] is const int& (the range-for borrow idiom): OK
+
+Return-type deduction   (int n = 7):
+    int bv = by_value_return(n);    -> bv = 7
+    double tr = trailing_return(2,3); -> tr = 6.0
+[check] by_value_return(n) == 7 (auto return, by value): OK
+[check] trailing_return(2,3) == 6.0: OK
+  decltype(by_value_return(n)) is int   (auto return STRIPS the &) : true
+[check] decltype(by_value_return(n)) is int   (auto return STRIPS the &): OK
+  decltype(trailing_return(2,3)) is double (trailing return) : true
+[check] decltype(trailing_return(2,3)) is double (trailing return): OK
+  decltype(ref_return(n)) is int&  (decltype(auto) PRESERVES the &) : true
+[check] decltype(ref_return(n)) is int&  (decltype(auto) PRESERVES the &): OK
+
+ref_return(n) = 99;   -> n = 99   (returns int&, so writable)
+[check] decltype(auto) return is a real ref (ref_return(n)=99 set n == 99): OK
+
+======================================================================
+SECTION E — The deduction-rules matrix + std::declval
+======================================================================
+Deduction matrix (every cell is std::is_same_v-verified):
+initializer   | auto       | auto&       | const auto&   | decltype()
+--------------+------------+-------------+---------------+------------
+int i         | int        | int&        | const int&    | int
+  [i]  auto        -> int                                    : true
+[check] [i]  auto        -> int: OK
+  [i]  auto&       -> int&                                   : true
+[check] [i]  auto&       -> int&: OK
+  [i]  const auto& -> const int&                             : true
+[check] [i]  const auto& -> const int&: OK
+  [i]  decltype(i) -> int                                    : true
+[check] [i]  decltype(i) -> int: OK
+const int ci  | int        | const int&  | const int&    | const int
+  [ci] auto        -> int (const STRIPPED!)                  : true
+[check] [ci] auto        -> int (const STRIPPED!): OK
+  [ci] auto&       -> const int&                             : true
+[check] [ci] auto&       -> const int&: OK
+  [ci] const auto& -> const int&                             : true
+[check] [ci] const auto& -> const int&: OK
+  [ci] decltype(ci)-> const int (no strip)                   : true
+[check] [ci] decltype(ci)-> const int (no strip): OK
+int& ri       | int        | int&        | const int&    | int&
+  [ri] auto        -> int (ref STRIPPED!)                    : true
+[check] [ri] auto        -> int (ref STRIPPED!): OK
+  [ri] auto&       -> int&                                   : true
+[check] [ri] auto&       -> int&: OK
+  [ri] const auto& -> const int&                             : true
+[check] [ri] const auto& -> const int&: OK
+  [ri] decltype(ri)-> int& (no strip)                        : true
+[check] [ri] decltype(ri)-> int& (no strip): OK
+const int& r  | int        | const int&  | const int&    | const int&
+  [r]  auto        -> int (const AND & STRIPPED!)            : true
+[check] [r]  auto        -> int (const AND & STRIPPED!): OK
+  [r]  auto&       -> const int&                             : true
+[check] [r]  auto&       -> const int&: OK
+  [r]  const auto& -> const int&                             : true
+[check] [r]  const auto& -> const int&: OK
+  [r]  decltype(r) -> const int& (no strip)                  : true
+[check] [r]  decltype(r) -> const int& (no strip): OK
+
+auto&& is a FORWARDING reference (collapses by value category):
+  auto&& rr1 = i;    -> decltype(rr1) bound, i is lvalue
+  auto&& rr2 = 42;   -> decltype(rr2) bound, 42 is prvalue
+  auto&& rr1 = i  (lvalue)   -> int&  (collapsed)            : true
+[check] auto&& rr1 = i  (lvalue)   -> int&  (collapsed): OK
+  auto&& rr2 = 42 (prvalue)  -> int&& (rvalue ref)           : true
+[check] auto&& rr2 = 42 (prvalue)  -> int&& (rvalue ref): OK
+
+std::declval<T>() — fabricate a T (as T&&) in an UNEVALUATED context:
+  std::declval<Widget>().compute() -> int                    : true
+[check] std::declval<Widget>().compute() -> int: OK
+  std::declval<int>()  -> int&& (add_rvalue_reference_t<int>) : true
+[check] std::declval<int>()  -> int&& (add_rvalue_reference_t<int>): OK
+[check] std::declval used only in decltype (unevaluated) — never evaluated: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

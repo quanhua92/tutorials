@@ -1,0 +1,88 @@
+casts.cpp — Phase 2 bundle.
+The FOUR named casts + why the C-style cast is avoided.
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — static_cast (related-type conversions)
+======================================================================
+(1) static_cast<double>(5) = 5.000000   (int -> double, widening)
+(2) static_cast<int>(2.900000) = 2   (double -> int TRUNCATES toward zero)
+(3) static_cast<Color>(1) -> static_cast<int> back = 1   (== Color::Green)
+(4) void* round-trip: *static_cast<int*>(void*) = 7   (deref as ORIGINAL type)
+(5) static_cast<Animal*>(&dog) upcast -> non-null (safe; same as implicit)
+[check] static_cast<double>(5) == 5.0: OK
+[check] static_cast<int>(2.9) == 2 (truncates toward zero): OK
+[check] static_cast<Color>(1) round-trips to int 1 (Color::Green): OK
+[check] void* round-trip deref equals original (7): OK
+[check] static_cast upcast Dog* -> Animal* is non-null: OK
+
+======================================================================
+SECTION B — dynamic_cast (runtime-checked polymorphic downcast)
+======================================================================
+(1) pa points at a Dog; dynamic_cast<Dog*>(pa) -> non-null (correct downcast)
+(2) a Dog is not a Cat; dynamic_cast<Cat*>(pa) -> nullptr (nullptr = SAFE failure)
+(3) dynamic_cast<Cat&>(Animal& to a Dog) threw std::bad_cast -> caught (SAFE; reference form always throws on failure)
+[check] dynamic_cast<Dog*>(Animal* to Dog) succeeded (non-null): OK
+[check] dynamic_cast<Cat*>(Animal* to Dog) returned nullptr (safe failure): OK
+[check] dynamic_cast<Cat&>(Animal& to Dog) threw std::bad_cast (safe failure): OK
+
+======================================================================
+SECTION C — const_cast (add/strip const) + the truly-const UB trap
+======================================================================
+(1) const_cast<const int*>(&n) reads 11   (adding const; trivial)
+(2) int n=11; const int& cref=n; int& m=const_cast<int&>(cref); m=99;
+    -> n is now 99 (SAFE: n itself was never declared const)
+(3) THE TRAP (NOT executed): const int k=5; const_cast<int&>(k)=...;
+    k is TRULY const -> writing through the de-consted ref is UNDEFINED
+    BEHAVIOR (see the #ifdef DEMO_UB block; never built by default).
+[check] const_cast can ADD const (cp aliases n): OK
+[check] const_cast stripped const from a non-const object; n is now 99: OK
+[check] const_cast-then-modify of a truly-const object is UB (documented, not run): OK
+    (DEMO_UB not defined: the truly-const write is correctly omitted.)
+
+======================================================================
+SECTION D — reinterpret_cast (bit reinterpret) + the aliasing UB
+======================================================================
+(1) reinterpret_cast<uintptr_t>(&x) -> back to int*;
+    round-trip preserves the value (*p2 == x == 16909060); address NOT printed (ASLR).
+(2) std::memcpy(&x) into unsigned char[4] (aliasing-safe): 04 03 02 01  (little-endian: low byte first)
+(3) THE UB (NOT dereffed): float* fp = reinterpret_cast<float*>(&int);
+    `fp` exists, but reading *fp would be STRICT-ALIASING UB (int != float).
+[check] reinterpret_cast round-trip: int* -> uintptr_t -> int* preserves value: OK
+[check] round-trip pointer points back at the same object (identity): OK
+[check] x == 0x01020304 == 16909060: OK
+[check] little-endian byte[0] == 0x04 (low byte first on this platform): OK
+[check] aliasing int-as-float deref is UB (documented; *fp never read): OK
+    (DEMO_UB not defined: the aliasing deref is correctly omitted.)
+
+======================================================================
+SECTION E — AVOID the C-style cast (it silently picks the worst)
+======================================================================
+The C-style cast `(T)x` is NOT one cast. The compiler tries, in order:
+    (a) const_cast<T>
+    (b) static_cast<T>  (+ derived<->base extensions)
+    (c) static_cast<T> then const_cast<T>
+    (d) reinterpret_cast<T>   <-- the dangerous one
+    (e) reinterpret_cast<T> then const_cast<T>
+and picks the FIRST that compiles — even if that is (d)/(e). It is not
+auditable: a reader cannot tell which cast actually ran. Prefer the four
+NAMED casts (self-documenting + greppable).
+(1) (double)5 = 5.000000   vs   static_cast<double>(5) = 5.000000
+    (same here: for a numeric conversion both resolve to static_cast)
+(2) `(float*)&int` and `reinterpret_cast<float*>(&int)` compile identically;
+    the C-style form HIDES that it is a reinterpret_cast. (Not dereffed.)
+(3) CROSS-LANGUAGE (no runtime here; see the .md):
+    - Rust `as`: numeric only, COMPILE-CHECKED (e.g. `5_i32 as f64`).
+      `From`/`Into` are infallible + checked; `TryFrom`/`TryInto` return
+      `Result`. There is NO safe-Rust equivalent of reinterpret_cast or
+      const_cast — the UB-prone casts are impossible without `unsafe`.
+    - TypeScript `as`: COMPILE-TIME ONLY, fully ERASED at runtime (no
+      check, no conversion, no emitted code). It is a hint to the type
+      checker, not a value transformation.
+[check] (double)5 == static_cast<double>(5) for a numeric conversion: OK
+[check] C-style (float*)&int equals reinterpret_cast<float*>(&int) (not dereffed): OK
+[check] named casts are preferred over the C-style cast (documented rule): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

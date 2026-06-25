@@ -35,8 +35,8 @@
 | 6 | Compile-time Computation & Metaprogramming | 5 | ✅ done (5/5, 143 checks) |
 | 7 | Error Handling, UB & Idioms | 5 | ✅ done (5/5, 155 checks) |
 | 8 | Build, Tooling & Production | 6 | ✅ done (6/6, ~283 checks) |
-| — | Companion walkthroughs (Boost.Asio/Crow/redis-plus-plus) | ~18 | ⬜ pending |
-| | **Total** | **51 + ~18** | **51/51 built** ✅ — walkthroughs next |
+| — | Companion walkthroughs (Boost.Asio/Crow/redis-plus-plus) | 18 | ✅ done (18/18) |
+| | **Total** | **51 + ~18** | **ALL DONE — 51/51 bundles + 18/18 walkthroughs** ✅ |
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3's
 move semantics leans on Phase 1's value/reference/pointer; Phase 4's memory

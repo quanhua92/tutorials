@@ -1,0 +1,172 @@
+free_space_map.py - reference impl. All numbers below feed FREE_SPACE_MAP.md.
+BLCKSZ=8192  FSM_CATEGORIES=256  FSM_CAT_STEP=32  N_PAGES=8  N_NODES=15
+
+========================================================================
+  SECTION A: build the FSM for 8 pages  (free space -> category -> tree)
+========================================================================
+Constants: BLCKSZ=8192, FSM_CATEGORIES=256, FSM_CAT_STEP=32 bytes/category
+
+Each page's free space is folded to a 1-byte category (floor(fs/32), capped at 255):
+
+| page | free space (B) | category = floor(fs/32) | bucket >= (B) |
+|------|----------------|--------------------------|--------------|
+| 0    | 1000           | 31                       | 992          |
+| 1    | 3000           | 93                       | 2976         |
+| 2    | 500            | 15                       | 480          |
+| 3    | 4500           | 140                      | 4480         |
+| 4    | 200            | 6                        | 192          |
+| 5    | 6000           | 187                      | 5984         |
+| 6    | 800            | 25                       | 800          |
+| 7    | 3500           | 109                      | 3488         |
+
+Stack the leaf categories into a MAX-TREE (each internal node = max of its two children). Stored as a heap-array of 15 bytes:
+
+        [0]=187 (root)
+      [1]=140            [2]=187
+    [3]= 93        [4]=140        [5]=187        [6]=109
+  [7]= 31 (page 0)    [8]= 93 (page 1)    [9]= 15 (page 2)    [10]=140 (page 3)    [11]=  6 (page 4)    [12]=187 (page 5)    [13]= 25 (page 6)    [14]=109 (page 7)
+
+Flat array  tree[15] = [187, 140, 187, 93, 140, 187, 109, 31, 93, 15, 140, 6, 187, 25, 109]
+Root (tree[0]) = 187  =  MAX category in the whole table  = page 5's free space (the emptiest page).
+
+========================================================================
+  SECTION B: search  --  "I need 2000 bytes"  ->  O(log N) descent
+========================================================================
+1. need_cat = floor(2000 / 32) = 62
+
+2. Read root tree[0] = 187 >= 62?  YES -> a fitting page exists.
+   (This O(1) check is the whole point of keeping a max-tree: the
+    root alone answers 'does ANY page have room?')
+
+3. Descend, always stepping to a child whose value >= 62 (prefer left = lower page #):
+
+     node tree[0] = 187  (root)  OK
+     node tree[1] = 140  (internal)  OK
+     node tree[3] = 93   (internal)  OK
+     node tree[8] = 93   (leaf -> page 1)  OK
+
+4. RESULT: insert into page 1  (free space = 3000 B, category 93).
+   Visited 4 tree nodes out of 15 total  -> O(log N), NOT O(N) page reads.
+
+QUANTIZATION NOTE: category is a floor in 32-byte buckets, so the FSM
+guarantees the found page has >= cat_to_space(62) = 1984 B, not strictly >= 2000 B. A category-62
+page could hold as little as 1984 B; PostgreSQL therefore RE-CHECKS
+the real free space (pd_upper - pd_lower) on the page before insert,
+and if stale, lowers the leaf and retries. The FSM is a fast FILTER,
+not an exact account. In this example page 1 has 3000 B >= 2000 B, fine.
+
+[check] found page 1: cat 93 >= 62 AND 3000 B >= 1984 B (FSM guarantee) AND 3000 B >= 2000 B (example):  OK
+
+========================================================================
+  SECTION C: update  --  insert a tuple in page 3, bubble the max UP
+========================================================================
+Insert a 3000-byte tuple into page 3.
+  page 3 free space: 4500 B (cat 140)  ->  1500 B (cat 46)
+
+BEFORE update, the tree was:
+        [0]=187 (root)
+      [1]=140            [2]=187
+    [3]= 93        [4]=140        [5]=187        [6]=109
+  [7]= 31 (page 0)    [8]= 93 (page 1)    [9]= 15 (page 2)    [10]=140 (page 3)    [11]=  6 (page 4)    [12]=187 (page 5)    [13]= 25 (page 6)    [14]=109 (page 7)
+
+AFTER setting leaf and bubbling max up to the root (stop on no-change):
+        [0]=187 (root)
+      [1]= 93            [2]=187
+    [3]= 93        [4]= 46        [5]=187        [6]=109
+  [7]= 31 (page 0)    [8]= 93 (page 1)    [9]= 15 (page 2)    [10]= 46 (page 3)    [11]=  6 (page 4)    [12]=187 (page 5)    [13]= 25 (page 6)    [14]=109 (page 7)
+
+BUBBLE-UP path (nodes recomputed): [10, 4, 1]
+  leaf tree[10] = 46
+  tree[4] = max(tree[9]=15, tree[10]=46) = 46
+  tree[1] = max(tree[3]=93, tree[4]=46) = 93  <- unchanged, STOP
+
+Tree mutated in place: tree = [187, 93, 187, 93, 46, 187, 109, 31, 93, 15, 46, 6, 187, 25, 109]
+
+[check] every internal node == max(children) after update:  OK
+
+Consequence: page 3 is no longer a great target. Search 4000 B now:
+  need_cat(4000) = 125; search now returns page 5 (free space 6000 B, cat 187).
+  (before the update, the same query returned page 3; now its category 46 < 125 so the tree correctly routes elsewhere.)
+
+========================================================================
+  SECTION D: the array representation  (FSM page = header + flat byte heap-array)
+========================================================================
+The tree from Section A-C is NOT a pile of pointers. It is a single
+8 KB page laid out as:
+
+    +---------------------------+  byte 0
+    | FSMPageHeaderData         |     (one int: fp_next_slot, the
+    |   fp_next_slot (int32)    |      round-robin search hint)
+    +---------------------------+  byte ~8
+    | fp_nodes[0..N_NODES-1]    |     the max-tree as a flat byte
+    |   root, then internal,    |      array -- no child pointers!
+    |   then the 8 leaves       |
+    +---------------------------+
+
+Indices are computed arithmetically (the binary-heap trick), so there
+are NO pointers -- just byte offsets:
+
+    parent(i)     = (i - 1) // 2
+    left_child(i) = 2*i + 1
+    right_child(i)= 2*i + 2
+
+For our 8-leaf tree the 15 bytes on disk are:
+
+    index:     0    1    2    3    4    5    6    7    8    9   10   11   12   13   14
+    value:   187   93  187   93   46  187  109   31   93   15   46    6  187   25  109
+    role:   root    .    .    .    .    .    .   L0   L1   L2   L3   L4   L5   L6   L7
+  (role: root | . = internal | Lk = leaf for page k)
+
+Worked index math:
+  page 0 -> leaf index 7, parent index 3 = max(tree[7]=31, tree[8]=93) = 93
+  page 1 -> leaf index 8, parent index 3 = max(tree[7]=31, tree[8]=93) = 93
+  page 5 -> leaf index 12, parent index 5 = max(tree[11]=6, tree[12]=187) = 187
+
+Why a flat array? Locality + zero per-child pointer overhead: the
+whole tree for ~8 pages fits in 15 contiguous bytes, so a
+search streams through one cache line after another with no chasing.
+
+[check] parent(child(i)) == i for all internal nodes:  OK
+
+========================================================================
+  SECTION E: extension  --  millions of pages -> a 3-level tree of FSM pages
+========================================================================
+One FSM page is itself an 8 KB page. After the 8-byte header,
+the tree array holds ~(BLCKSZ-header)/2 = 4092 leaf bytes,
+so ONE FSM page tracks the free space of ~4092 heap pages.
+
+To scale beyond a single FSM page, PostgreSQL stacks FSM pages into the
+SAME max-tree idea, but ACROSS pages -- a tree of trees (the _fsm fork):
+
+        +-----------------------+   level 2 (root FSM page, blk 0)
+        | root FSM page         |     leaves = best(root) of each L1 page
+        +-----------+-----------+
+        |level-1 FSM|  ...      |   level 1
+        +-----+-----+-----+-----+
+        |L0 FSM|L0 FSM| ... |   |   level 0 (bottom)
+        +--...--+--...--+
+        heap pages (each leaf = one heap page's category)
+
+Invariants cross the page boundary exactly like within a page:
+  - a level-0 FSM page's ROOT value is copied into a LEAF of its parent
+    (level-1) page; a level-1 root is copied into a leaf of the root page.
+  - search walks DOWN through the page tree, updating bubbles UP the same way.
+
+How many levels are needed for the largest possible relation?
+
+  fanout F ~ 4092 heap pages per FSM page
+  F^1 = 4,092  pages
+  F^2 = 16,744,464  pages
+  F^3 = 68,518,346,688  pages   >  2^32 - 1 = 4,294,967,295
+
+  -> THREE levels cover the maximum relation size (4092^3 = 68,518,346,688 > 2^32). Postgres fixes the tree height at 3.
+
+Storage cost: ONE byte per heap page on disk (the leaf), plus the upper
+levels which add only ~1/F + 1/F^2 + ... overhead. So a 1 TB table of
+~130M pages pays ~130 MB for a complete, O(log N)-searchable free map.
+
+[check] 4092^3 = 68,518,346,688 > 2^32-1 = 4,294,967,295:  OK  (3 levels are sufficient)
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

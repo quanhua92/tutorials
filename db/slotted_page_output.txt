@@ -1,0 +1,228 @@
+slotted_page.py - reference impl. All numbers below feed SLOTTED_PAGE.md.
+Real PostgreSQL page = 8192 B; printable sim page = 128 B (same structure).
+
+========================================================================
+  SECTION A: the slotted-page layout  (header + line pointers + free + tuples)
+========================================================================
+A real PostgreSQL page is 8192 B; we use a 128-B page with the IDENTICAL
+structure so every byte offset is printable. Header=24 B (same as real),
+line pointer=4 B (same as real), toy tuple header=4 B (real ~= 24).
+
+
+Canonical 5-tuple page  (page_size=128, pd_lower=44, pd_upper=88, free=44):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   NORMAL   -> tuple[ 112.. 119) "Bob" (7 B)
+  [  32..  36)  LP[3 ]   NORMAL   -> tuple[ 103.. 112) "Carol" (9 B)
+  [  36..  40)  LP[4 ]   NORMAL   -> tuple[  95.. 103) "Dave" (8 B)
+  [  40..  44)  LP[5 ]   NORMAL   -> tuple[  88..  95) "Eve" (7 B)
+  [  44..  88)  FREE     contiguous gap (44 B)   <- pd_lower .. pd_upper
+  [  88..  95)  TUPLE    item #5 "Eve" (7 B)  [hdr 4 + payload 3]
+  [  95.. 103)  TUPLE    item #4 "Dave" (8 B)  [hdr 4 + payload 4]
+  [ 103.. 112)  TUPLE    item #3 "Carol" (9 B)  [hdr 4 + payload 5]
+  [ 112.. 119)  TUPLE    item #2 "Bob" (7 B)  [hdr 4 + payload 3]
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+
+Read it bottom-to-top on the tuple side: tuples fill from the END of the
+page backward (Eve is last in -> closest to the free gap), while line
+pointers fill from the header forward. The free gap is the meat in the
+sandwich: pd_lower chases pd_upper until they meet -> page full.
+  [check] canonical page tiles [0, page_size): hdr(24) + ptr(20) + tup(40) + hole(0) + free(44) = 128 == page_size(128)  ->  OK
+
+========================================================================
+  SECTION B: insert 5 tuples one at a time  (line pointers grow ->, tuples grow <-)
+========================================================================
+Watch the two cursors close in on each other after every insert:
+  pd_lower climbs (new line pointer +4 B on the LEFT),
+  pd_upper drops  (new tuple carved on the RIGHT).
+
+  legend:  H=header  i=line pointer  .=free  T=tuple
+
+  insert #1 "Alice" (payload 5 -> tuple 9 B):  item #1, lower=28, upper=119, free=91
+    HHHHHHHHHHHii...........................................TTTT
+  insert #2 "Bob" (payload 3 -> tuple 7 B):  item #2, lower=32, upper=112, free=80
+    HHHHHHHHHHHiiii.....................................TTTTTTTT
+  insert #3 "Carol" (payload 5 -> tuple 9 B):  item #3, lower=36, upper=103, free=67
+    HHHHHHHHHHHiiiiii...............................TTTTTTTTTTTT
+  insert #4 "Dave" (payload 4 -> tuple 8 B):  item #4, lower=40, upper=95, free=55
+    HHHHHHHHHHHiiiiiiii..........................TTTTTTTTTTTTTTT
+  insert #5 "Eve" (payload 3 -> tuple 7 B):  item #5, lower=44, upper=88, free=44
+    HHHHHHHHHHHiiiiiiiiii....................TTTTTTTTTTTTTTTTTTT
+
+Final state:
+
+After 5 inserts  (page_size=128, pd_lower=44, pd_upper=88, free=44):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   NORMAL   -> tuple[ 112.. 119) "Bob" (7 B)
+  [  32..  36)  LP[3 ]   NORMAL   -> tuple[ 103.. 112) "Carol" (9 B)
+  [  36..  40)  LP[4 ]   NORMAL   -> tuple[  95.. 103) "Dave" (8 B)
+  [  40..  44)  LP[5 ]   NORMAL   -> tuple[  88..  95) "Eve" (7 B)
+  [  44..  88)  FREE     contiguous gap (44 B)   <- pd_lower .. pd_upper
+  [  88..  95)  TUPLE    item #5 "Eve" (7 B)  [hdr 4 + payload 3]
+  [  95.. 103)  TUPLE    item #4 "Dave" (8 B)  [hdr 4 + payload 4]
+  [ 103.. 112)  TUPLE    item #3 "Carol" (9 B)  [hdr 4 + payload 5]
+  [ 112.. 119)  TUPLE    item #2 "Bob" (7 B)  [hdr 4 + payload 3]
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+
+The two fronts met in the middle leaving a 44-B free gap. More inserts would keep shrinking it until pd_lower >= pd_upper
+(no room for a pointer + a tuple) -> the page is full and a new page is
+allocated. This two-ended scheme is why slotted pages pack rows densely
+AND stay O(1) addressable by item number.
+  [check] after 5 inserts: hdr(24) + ptr(20) + tup(40) + hole(0) + free(44) = 128 == page_size(128)  ->  OK
+
+========================================================================
+  SECTION C: delete item #3 (Carol)  ->  hole, then VACUUM reclaims it
+========================================================================
+STEP 1 - delete item #3 ("Carol"). Its line pointer flips NORMAL -> DEAD;
+the tuple bytes become a HOLE. Crucially, the CONTIGUOUS free gap does NOT
+grow, because Carol sat in the MIDDLE of the tuple area - it is not next to
+the free gap. Reclaiming it needs a compaction (what VACUUM does).
+
+
+After delete item #3  (page_size=128, pd_lower=44, pd_upper=88, free=44):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   NORMAL   -> tuple[ 112.. 119) "Bob" (7 B)
+  [  32..  36)  LP[3 ]   DEAD     -> hole [ 103.. 112) (dead, 9 B)
+  [  36..  40)  LP[4 ]   NORMAL   -> tuple[  95.. 103) "Dave" (8 B)
+  [  40..  44)  LP[5 ]   NORMAL   -> tuple[  88..  95) "Eve" (7 B)
+  [  44..  88)  FREE     contiguous gap (44 B)   <- pd_lower .. pd_upper
+  [  88..  95)  TUPLE    item #5 "Eve" (7 B)  [hdr 4 + payload 3]
+  [  95.. 103)  TUPLE    item #4 "Dave" (8 B)  [hdr 4 + payload 4]
+  [ 103.. 112)  HOLE     dead bytes (9 B)  dead tuple (hole)
+  [ 112.. 119)  TUPLE    item #2 "Bob" (7 B)  [hdr 4 + payload 3]
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+  [check] after delete: hdr(24) + ptr(20) + tup(31) + hole(9) + free(44) = 128 == page_size(128)  ->  OK
+
+  contiguous free gap: 44 -> 44 B  (UNCHANGED)
+  dead holes now:      9 B  (Carol's tuple, reclaimable)
+  total reclaimable:   44 (gap) + 9 (holes) = 53 B
+
+STEP 2 - VACUUM compaction (PageRepairFragmentation): slide LIVE tuples to
+the top so the hole vanishes, turning DEAD line pointers UNUSED. The hole
+bytes flow back into the single contiguous free gap.
+
+
+After VACUUM compact  (page_size=128, pd_lower=44, pd_upper=97, free=53):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   NORMAL   -> tuple[ 112.. 119) "Bob" (7 B)
+  [  32..  36)  LP[3 ]   UNUSED   -> (reclaimable slot)
+  [  36..  40)  LP[4 ]   NORMAL   -> tuple[ 104.. 112) "Dave" (8 B)
+  [  40..  44)  LP[5 ]   NORMAL   -> tuple[  97.. 104) "Eve" (7 B)
+  [  44..  97)  FREE     contiguous gap (53 B)   <- pd_lower .. pd_upper
+  [  97.. 104)  TUPLE    item #5 "Eve" (7 B)  [hdr 4 + payload 3]
+  [ 104.. 112)  TUPLE    item #4 "Dave" (8 B)  [hdr 4 + payload 4]
+  [ 112.. 119)  TUPLE    item #2 "Bob" (7 B)  [hdr 4 + payload 3]
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+  [check] after compact: hdr(24) + ptr(20) + tup(31) + hole(0) + free(53) = 128 == page_size(128)  ->  OK
+
+  contiguous free gap: 44 -> 53 B  (GREW by the hole)
+  dead holes now:      0 B
+  Note item #3's slot is now UNUSED but still occupies 4 B (only TRAILING
+  unused slots are dropped), so pd_lower did not shrink. A future insert
+  reuses that slot without growing the pointer array.
+
+========================================================================
+  SECTION D: HOT update  (update "Bob"->"Bobby"; old LP -> REDIRECT, no index touch)
+========================================================================
+Start from a 3-tuple page. An UPDATE that (a) keeps the new row on the SAME
+page and (b) changes no indexed column is a HOT (Heap-Only Tuples) update:
+the new version is just appended and the OLD line pointer REDIRECTS to it,
+so PostgreSQL never touches the indexes.
+
+
+Before update (3 tuples)  (page_size=128, pd_lower=36, pd_upper=103, free=67):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   NORMAL   -> tuple[ 112.. 119) "Bob" (7 B)
+  [  32..  36)  LP[3 ]   NORMAL   -> tuple[ 103.. 112) "Carol" (9 B)
+  [  36.. 103)  FREE     contiguous gap (67 B)   <- pd_lower .. pd_upper
+  [ 103.. 112)  TUPLE    item #3 "Carol" (9 B)  [hdr 4 + payload 5]
+  [ 112.. 119)  TUPLE    item #2 "Bob" (7 B)  [hdr 4 + payload 3]
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+  [check] before update: hdr(24) + ptr(12) + tup(25) + hole(0) + free(67) = 128 == page_size(128)  ->  OK
+
+UPDATE item #2 "Bob"(7 B) -> "Bobby"(9 B): does NOT fit in the old slot,
+so the new version is appended at the end of the tuple area and item #2
+becomes a REDIRECT pointer to the new item.
+
+
+After HOT update  (page_size=128, pd_lower=40, pd_upper=94, free=54):
+  [   0..  24)  HEADER   PageHeaderData (24 B): pd_lower, pd_upper, LSN, ...
+  [  24..  28)  LP[1 ]   NORMAL   -> tuple[ 119.. 128) "Alice" (9 B)
+  [  28..  32)  LP[2 ]   REDIRECT -> REDIRECT to item #4
+  [  32..  36)  LP[3 ]   NORMAL   -> tuple[ 103.. 112) "Carol" (9 B)
+  [  36..  40)  LP[4 ]   NORMAL   -> tuple[  94.. 103) "Bobby" (9 B)
+  [  40..  94)  FREE     contiguous gap (54 B)   <- pd_lower .. pd_upper
+  [  94.. 103)  TUPLE    item #4 "Bobby" (9 B)  [hdr 4 + payload 5]
+  [ 103.. 112)  TUPLE    item #3 "Carol" (9 B)  [hdr 4 + payload 5]
+  [ 112.. 119)  HOLE     dead bytes (7 B)  redirect dead bytes
+  [ 119.. 128)  TUPLE    item #1 "Alice" (9 B)  [hdr 4 + payload 5]
+  [check] after update: hdr(24) + ptr(16) + tup(27) + hole(7) + free(54) = 128 == page_size(128)  ->  OK
+
+  HOT redirect chain:  item #2  --REDIRECT-->  item #4 ("Bobby")
+  indexes still point at item #2; they are NEVER updated. A sequential
+  scan follows the redirect to the latest version for free.
+  old "Bob" bytes [ 112.. 119) are now a dead hole (7 B) - reclaimed by the next VACUUM (section C).
+  free gap: 67 -> 54 B  (new tuple + its pointer cost 13 B; the hole is reclaimed later).
+
+If the new version did NOT fit on the page, this would NOT be HOT: the row
+would move to another page and EVERY index on the table would need a new
+(page, item) entry. HOT exists to dodge exactly that cost.
+
+========================================================================
+  SECTION E: max tuples per page  =  floor( (page_size - header) / (ip + tuple) )
+========================================================================
+For uniformly-sized rows, each row costs one 4-B line pointer PLUS its tuple,
+so the page holds at most:
+
+    max_tuples = floor( (page_size - header_size) / (ip_size + tuple_size) )
+
+This is an UPPER bound: real capacity is a bit lower because of MAXALIGN
+padding on tuple headers and free-space fragmentation from deletes.
+
+--- tiny 128-B simulation page (header=24, ip=4, toy tuple-hdr=4) ---
+| payload | tuple = hdr+payload | ip+tuple | max tuples | free left |
+|---------|---------------------|----------|------------|-----------|
+|       3 |                   7 |       11 |          9 |         5 |
+|       5 |                   9 |       13 |          8 |         0 |
+|      12 |                  16 |       20 |          5 |         4 |
+|      20 |                  24 |       28 |          3 |        20 |
+
+--- real PostgreSQL 8 KB page (header=24, ip=4, tuple-hdr=24) ---
+| payload (B) | tuple = 24+payload | ip+tuple | max tuples | rows/MB*1000 |
+|-------------|--------------------|----------|------------|--------------|
+|           0 |                 24 |       28 |        291 |        37248 |
+|           8 |                 32 |       36 |        226 |        28928 |
+|          40 |                 64 |       68 |        120 |        15360 |
+|         100 |                124 |      128 |         63 |         8064 |
+|         232 |                256 |      260 |         31 |         3968 |
+|        1000 |               1024 |     1028 |          7 |          896 |
+
+Sanity checks (asserted):
+  [check] tiny page, tuple=9 B: 8 tuples  (fills the 128-B page exactly)  OK
+  [check] 8 KB page, tuple=32 B: 226 tuples                                     OK
+  [check] 8 KB page, tuple=256 B: 31 tuples                                     OK
+
+Big picture: small rows pack hundreds per 8 KB page; a 1 KB row fits only ~7.
+Row width directly sets table size and scan cost - this is why DBAs watch
+tuple width and why PostgreSQL stores TOAST pointers for wide values.
+
+========================================================================
+  GOLD - the canonical 5-tuple page (slotted_page.html recomputes this)
+========================================================================
+dims:        page_size=128  header=24  ip=4  tuple_hdr=4
+payloads:    ['Alice', 'Bob', 'Carol', 'Dave', 'Eve']
+tuple sizes: [9, 7, 9, 8, 7]
+pd_lower:    44
+pd_upper:    88
+free_space:  44
+partition:   header=24 + pointers=20 + tuples=40 + holes=0 + free=44 = 128
+[check] gold invariant total == page_size (128):      OK
+[check] gold free_space == 44  (the .html gold scalar):      OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

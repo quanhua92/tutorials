@@ -1,0 +1,184 @@
+tuple_format.py - reference impl. All numbers below feed TUPLE_FORMAT.md.
+MAXALIGN = 8  | byte order = little-endian
+
+========================================================================
+  SECTION A: fixed-length columns and alignment padding
+========================================================================
+Fixed-length types have a typlen AND a typalign. The column is
+placed at the next offset that is a multiple of typalign, inserting
+PADDING bytes before it.
+
+| type        | typlen | typalign | bytes needed |
+|-------------|--------|----------|--------------|
+| bool        |      1 |        1 |            1 |
+| smallint    |      2 |        2 |            2 |
+| integer     |      4 |        4 |            4 |
+| bigint      |      8 |        8 |            8 |
+| double      |      8 |        8 |            8 |
+| timestamp   |      8 |        8 |            8 |
+| date        |      4 |        4 |            4 |
+
+Worked: pack three fixed columns, one row, no NULLs.
+  cols = [('a','integer'), ('b','bigint'), ('c','integer')]
+natts=3  has_null=False  bitmap_bytes=0  t_hoff=24  total_size=44
+
+ off   len  kind    label                     note
+----  ----  ------  ------------------------  ----
+   0    23  header  HeapTupleHeaderData       (t_xmin..t_hoff)
+  23     1  hpad    MAXALIGN padding          pad header to 8
+  24     4  data    a (integer)               
+  28     4  pad     pad b                     align 8B
+  32     8  data    b (bigint)                
+  40     4  data    c (integer)               
+
+bytes wasted on padding: 5 / 44  (11.4%)
+
+Observe the 1-byte header pad (MAXALIGN) and the 4-byte pad before
+the bigint (it must land on an 8-byte boundary). Section D shows how
+reordering removes some of this.
+
+[check] t_hoff==24 and total==44:  OK
+
+========================================================================
+  SECTION B: variable-length columns (text/varchar) - varlena headers
+========================================================================
+A varlena carries its own length in a 1-byte or 4-byte header.
+
+| payload chars | total bytes | header | header byte (LE) | align |
+|---------------|-------------|--------|------------------|-------|
+|             2 |           3 |      1 | 0x07             |     1 |
+|             5 |           6 |      1 | 0x0d             |     1 |
+|           126 |         127 |      1 | 0xff             |     1 |
+|           127 |         131 |      4 | 0c 02 00 00      |     4 |
+|           128 |         132 |      4 | 10 02 00 00      |     4 |
+|           200 |         204 |      4 | 30 03 00 00      |     4 |
+
+RULE: total <= 127 bytes  ->  1-byte header, NO alignment.
+      total  > 127 bytes  ->  4-byte header, align to 4 bytes ('i').
+The 1-byte-header exemption is the single biggest space saver in a
+Postgres row: a 'status'='OK' column packs with zero padding.
+
+TOAST: if a varlena is bigger than ~2 KiB it is moved OUT of the
+tuple and replaced by an 18-byte pointer:
+   1 B : 0x01 marker (VARATT_IS_1B_E)
+   1 B : tag (18 = VARTAG_ON_DISK)
+  16 B : varatt_external {va_rawsize, va_extinfo, va_valueid,
+                          va_tableoid}  (4 B each, little-endian)
+  = 18 bytes total, no matter how huge the real value.
+
+[check] a 5000-char text -> in-tuple pointer is 18 bytes (modeled):  OK
+        (in this simulator TOASTed values are reported as 18 B; the
+         real value lives in the pg_toast table, off-page.)
+[check] total_size==42:  OK
+
+========================================================================
+  SECTION C: NULL values - the null bitmap, 0 data bytes
+========================================================================
+A NULL column stores NOTHING in the data area. Instead a bit is
+cleared in the null bitmap (1 byte per 8 columns, only present when
+HEAP_HASNULL is set).
+
+Example: [('a','integer'),('b','bigint'),('c','integer')] with
+         b = NULL.
+
+natts=3  has_null=True  bitmap_bytes=1  t_hoff=24  total_size=32
+
+ off   len  kind    label                     note
+----  ----  ------  ------------------------  ----
+   0    23  header  HeapTupleHeaderData       (t_xmin..t_hoff)
+  23     1  bitmap  NULL bitmap               1 bit/col; 1=present 0=NULL
+  24     4  data    a (integer)               
+  28     0  null    b                         NULL: 0 data bytes
+  28     4  data    c (integer)               
+
+bytes wasted on padding: 0 / 32  (0.0%)
+
+Note: t_hoff is STILL 24. With <=8 columns the 1-byte bitmap pads
+into the same MAXALIGN chunk as the header, so NULLs cost nothing in
+header overhead here. The bigint's 8 bytes simply disappear.
+
+null bitmap byte = 0x05  (bit0=a present, bit2=c present, bit1=b NULL)
+[check] bitmap byte==0x05 and total==32:  OK
+
+========================================================================
+  SECTION D: alignment waste - column ORDER changes the tuple size
+========================================================================
+Same columns, same values, different ORDER -> different total size.
+The classic: [int4, int8, int4] vs [int8, int4, int4].
+
+BAD order  [int4, int8, int4]:
+  natts=3  has_null=False  bitmap_bytes=0  t_hoff=24  total_size=44
+
+   off   len  kind    label                     note
+  ----  ----  ------  ------------------------  ----
+     0    23  header  HeapTupleHeaderData       (t_xmin..t_hoff)
+    23     1  hpad    MAXALIGN padding          pad header to 8
+    24     4  data    x (integer)               
+    28     4  pad     pad y                     align 8B
+    32     8  data    y (bigint)                
+    40     4  data    z (integer)               
+
+  bytes wasted on padding: 5 / 44  (11.4%)
+
+GOOD order [int8, int4, int4]:
+  natts=3  has_null=False  bitmap_bytes=0  t_hoff=24  total_size=40
+
+   off   len  kind    label                     note
+  ----  ----  ------  ------------------------  ----
+     0    23  header  HeapTupleHeaderData       (t_xmin..t_hoff)
+    23     1  hpad    MAXALIGN padding          pad header to 8
+    24     8  data    y (bigint)                
+    32     4  data    x (integer)               
+    36     4  data    z (integer)               
+
+  bytes wasted on padding: 1 / 40  (2.5%)
+
+BAD  total = 44 bytes
+GOOD total = 40 bytes
+saving by reordering: 4 bytes/row
+
+WHY: in [int4, int8, int4], the int8 needs an 8-byte boundary, so 4
+bytes of pad are inserted before it (after the first int4 at 28).
+Putting the 8-byte-aligned bigint FIRST (at offset 24, already
+aligned) removes that pad entirely. RULE OF THUMB: order columns by
+descending alignment (8B first, then 4B, then 2B, then 1B).
+
+[check] BAD==44, GOOD==40, delta==4:  OK
+
+At 10,000,000 rows this is 38 MiB of pure padding waste. Multiply across every table in a DB.
+
+========================================================================
+  SECTION E: WORKED EXAMPLE  CREATE TABLE t(a int, b text, c bigint, d boolean)
+========================================================================
+INSERT INTO t VALUES (42, 'hello', 9999999999, true);
+
+natts=4  has_null=False  bitmap_bytes=0  t_hoff=24  total_size=49
+
+ off   len  kind    label                     note
+----  ----  ------  ------------------------  ----
+   0    23  header  HeapTupleHeaderData       (t_xmin..t_hoff)
+  23     1  hpad    MAXALIGN padding          pad header to 8
+  24     4  data    a (integer)               
+  28     6  data    b (text)                  
+  34     6  pad     pad c                     align 8B
+  40     8  data    c (bigint)                
+  48     1  data    d (bool)                  
+
+bytes wasted on padding: 7 / 49  (14.3%)
+
+Byte-by-byte (little-endian, the on-disk format):
+
+0000  e8 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |................|
+0010  01 00 04 00 02 08 18 00 2a 00 00 00 0d 68 65 6c  |........*....hel|
+0020  6c 6f 00 00 00 00 00 00 ff e3 0b 54 02 00 00 00  |lo.........T....|
+0030  01                                               |.|
+
+GOLD: total tuple size = 49 bytes   (this is the value tuple_format.html recomputes in JS)
+GOLD: header fields -> t_hoff=24, t_infomask=0x0802, t_infomask2=4
+
+[check] total==49, t_hoff==24, a==42, b header==0x0d, c==9999999999, d==1:  OK
+[check] GOLD scalar total_size==49 reproduces from compute_layout():  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

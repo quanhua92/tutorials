@@ -1,0 +1,220 @@
+heap_vs_clustered.py - reference impl. All numbers below feed HEAP_VS_CLUSTERED.md.
+Heap (PostgreSQL) vs Clustered/IOT (MySQL InnoDB). I/O = distinct pages read per op.
+
+
+========================================================================
+  SECTION A: the HEAP model  (unordered heap file; indexes store TIDs)
+========================================================================
+PostgreSQL stores the table as a HEAP: rows are appended to unordered
+pages in INSERT order. There is NO physical sort by PK. Here the 5 rows
+were inserted as Eve, Alice, Carol, Bob, Dave -> heap page order is NOT
+PK order. (1 tuple/page is exaggerated so a range scan's random reads are
+visible; a real 8 KB page holds hundreds of rows - see SLOTTED_PAGE.md.)
+
+  HEAP FILE  (the table itself; unordered):
+    page | PK | name  | city    | TID = (page, off)
+    -----|----|-------|---------|-----------------
+    H0   |  5 | Eve   | El Paso | (H0, 0)
+    H1   |  1 | Alice | Austin  | (H1, 0)
+    H2   |  3 | Carol | Cairo   | (H2, 0)
+    H3   |  2 | Bob   | Berlin  | (H3, 0)
+    H4   |  4 | Dave  | Dublin  | (H4, 0)
+
+  The heap is the WHOLE table. Indexes are SEPARATE files that merely
+  store a PHYSICAL pointer (the TID) back into these pages.
+
+  SECONDARY INDEX on `name`  (a separate B-tree; leaf = name -> TID):
+    name  | -> TID (heap location)
+    ------|---------------------
+    Alice | H1
+    Bob   | H3
+    Carol | H2
+    Dave  | H4
+    Eve   | H0
+
+  KEY POINT: the index leaf holds NO row data - only a TID. To read the
+  city you must follow the TID and read the HEAP page. The PK index is just
+  another such index (pk -> TID); in a heap, the PK gets NO special physical
+  treatment. Every index lookup ends with exactly one extra heap read.
+
+[check] heap rows unordered by PK: page order PKs = [5, 1, 3, 2, 4] != sorted [1, 2, 3, 4, 5]  ->  OK
+
+========================================================================
+  SECTION B: the CLUSTERED / IOT model  (rows live IN the PK B-tree leaf)
+========================================================================
+MySQL InnoDB stores the table AS the primary-key B-tree: the LEAF pages
+hold the FULL rows, in PK order. There is no separate heap - the PK index
+IS the table. (SQL Server calls this a CLUSTERED index; Oracle an
+index-organized table / IOT; PostgreSQL does NOT do this - it always heaps.)
+
+  PK B-TREE LEAF (page CL) = the table, rows sorted by PK:
+    PK | name  | city
+    ---|-------|---------
+     1 | Alice | Austin
+     2 | Bob   | Berlin
+     3 | Carol | Cairo
+     4 | Dave  | Dublin
+     5 | Eve   | El Paso
+
+  Contrast with Section A: the same 5 rows, but now they are STORED IN
+  PK order, physically clustered. A PK lookup lands directly on the row.
+
+  SECONDARY INDEX on `name`  (leaf = name -> PK VALUE, not a TID):
+    name  | -> PK (logical handle)
+    ------|--------------------
+    Alice | 1
+    Bob   | 2
+    Carol | 3
+    Dave  | 4
+    Eve   | 5
+
+  KEY POINT: the secondary leaf stores the PK VALUE, a LOGICAL handle,
+  NOT a physical address. Why? Because B-tree SPLITS physically move rows
+  between pages - a stored TID would instantly go stale. The PK never
+  changes on a split, so storing the PK keeps secondary indexes stable.
+  The price: reading the row costs a SECOND full PK-tree traversal
+  (Section D).
+
+[check] clustered leaf is PK-sorted: PKs = [1, 2, 3, 4, 5] == [1, 2, 3, 4, 5]  ->  OK
+
+========================================================================
+  SECTION C: PK point lookup  (heap pays an extra heap read; clustered does not)
+========================================================================
+Lookup PK = 3 ("Carol").
+
+  HEAP       : descend PK index  [PKR -> PKL]  ->  TID = H2,
+                then read heap page H2  ->  row = (3, 'Carol', 'Cairo')
+                trace: PKR -> PKL -> H2    I/O = 3
+  CLUSTERED  : descend PK B-tree [CR -> CL]  ->  row is IN the leaf
+                trace: CR -> CL    I/O = 2
+
+  -> CLUSTERED wins by 1: the index leaf already holds the full row,
+     so there is no separate heap fetch. For a heap, the PK index is just
+     an index; its leaf carries only (pk -> TID), so you ALWAYS pay one
+     more page read to get the actual columns.
+
+  [check] heap_pk_io = 3 == h+1 = 2+1 = 3        OK
+  [check] clus_pk_io = 2 == h   = 2               OK
+
+========================================================================
+  SECTION D: secondary index lookup  (heap wins; clustered walks the PK tree twice)
+========================================================================
+Look up `name` = "Carol" via the secondary index.
+
+  HEAP       : descend sec index  [SR -> SL]  ->  TID = H2,
+                then read heap page H2  ->  row = (3, 'Carol', 'Cairo')
+                trace: SR -> SL -> H2    I/O = 3
+  CLUSTERED  : descend sec index  [CSR -> CSL]  ->  PK = 3,
+                then re-walk the PK B-tree CR -> CL to fetch the row
+                trace: CSR -> CSL -> CR -> CL    I/O = 4
+
+  -> HEAP wins by 1: the secondary leaf stores a PHYSICAL TID, so one
+     heap read fetches the row. The clustered secondary leaf stores only
+     the PK VALUE, so it must launch a SECOND full PK-tree traversal
+     (CR -> CL) to get the actual row.
+
+  WHO WINS WHEN:
+     * Clustered wins PK-driven workloads (OLTP by id, range scans on PK).
+     * Heap wins when you read through MANY secondary indexes (each one
+       avoids the second tree walk) and when the PK is mutable.
+
+  [check] heap_sec_io = 3 == h_sec+1       = 2+1 = 3   OK
+  [check] clus_sec_io = 4 == h_sec+h_pk     = 2+2 = 4   OK
+
+========================================================================
+  SECTION E: PK range scan  (heap = random I/O per row; clustered = sequential)
+========================================================================
+Range scan PK in [2, 4]  (rows: Bob, Carol, Dave).
+
+  HEAP       : descend PK index [PKR -> PKL], then for EACH row in
+                range fetch its heap page: H3 -> H2 -> H4
+                trace: PKR -> PKL -> H3 -> H2 -> H4    I/O = 5
+                page access order = ['H3', 'H2', 'H4']  -> RANDOM (3,2,4),
+                non-sequential: adjacent PKs are NOT physically adjacent.
+  CLUSTERED  : descend PK B-tree [CR -> CL]; the rows Bob, Carol, Dave
+                sit CONTIGUOUSLY in leaf CL -> a single sequential scan.
+                trace: CR -> CL    I/O = 2
+
+  -> CLUSTERED wins by 3 (and the gap WIDENS with range size): on a heap
+     every row is a separate RANDOM page read because rows with adjacent PKs
+     are scattered across the heap in INSERT order. On a clustered table the
+     rows are physically adjacent in the leaf, so the scan is SEQUENTIAL
+     (cache-friendly, prefetchable). This is THE main reason clustered/IOT
+     tables are preferred for range queries on the PK.
+
+  [check] heap_range_io = 5 == h + k = 2 + 3 = 5          OK
+  [check] clus_range_io = 2 == h       = 2                OK
+
+========================================================================
+  SECTION F: UPDATE behavior  (heap MVCC vs clustered in-place / page split)
+========================================================================
+Two UPDATE cases expose the deepest structural difference.
+
+CASE 1 - UPDATE a NON-key column  ("Carol" city Cairo -> Cairo2):
+
+  HEAP       (PostgreSQL MVCC): write a brand-new tuple VERSION at a fresh
+                heap location (new page, new TID). The OLD version stays in
+                place with t_ctid pointing at the new one. Cost = 1 heap WRITE
+                (+ the old version, reclaimed later by VACUUM). If no indexed
+                column changed and it fits the page this is a HOT update:
+                the old line pointer REDIRECTs and NO index is touched.
+                (SLOTTED_PAGE.md Section D).  heap writes = 1.
+
+  CLUSTERED  (InnoDB): the PK is unchanged, so the row STAYS at its leaf
+                position - an IN-PLACE update of the record inside leaf CL.
+                No page split, no row movement, secondary indexes untouched
+                (they store the PK, which did not change).  clus writes = 1.
+  -> Roughly EVEN for a non-key update (1 write each). MVCC keeps the old
+     version around; InnoDB also versions (undo log) - both are MVCC engines.
+
+CASE 2 - UPDATE the PRIMARY KEY  ("Carol" PK 3 -> 6):
+
+  HEAP       : the row's heap LOCATION is unaffected by a PK change. The new
+                tuple version is written as usual; only the PK INDEX entry
+                changes (delete pk=3, insert pk=6). No structural change to
+                the heap, no page split possible (heaps never split).
+                Secondary indexes store TIDs: untouched if HOT, else updated.
+
+  CLUSTERED  : the PK IS the physical position. Changing 3 -> 6 means DELETE
+                the row from its old leaf slot and INSERT it at the new PK
+                position. If the target leaf is FULL this forces a PAGE SPLIT:
+                half the rows move to a NEW page and a separator is pushed up.
+                WORSE: every secondary index leaf that stored PK=3 for this
+                row must be rewritten to PK=6 (they store the PK!). Demo of
+                the split mechanics (a capacity-3 leaf, insert {nk}):
+                  full leaf = [10, 20, 30]
+                  insert 25 -> overflow -> merged [10, 20, 25, 30]
+                  split -> left [10, 20] | right [25, 30]  (separator 25 up)
+                  page WRITES = 3  (rewrite left + new right + parent)
+                  + 1 secondary-index update per secondary index on the table
+  -> This is WHY InnoDB primary keys should be IMMUTABLE and MONOTONIC (e.g.
+     AUTO_INCREMENT): appends hit only the rightmost leaf, so splits are rare
+     and secondary indexes never need rewriting. A mutable/random PK on a
+     clustered table causes splits + cascading secondary-index updates.
+
+  [check] split demo writes = 3 == 3   OK
+
+========================================================================
+  GOLD - I/O counts for every operation  (heap_vs_clustered.html recomputes this)
+========================================================================
+  canonical index height h = 2  (root -> leaf)
+
+  | operation             | heap I/O | clustered I/O | winner      |
+  |-----------------------|----------|---------------|-------------|
+  | PK point lookup (3)   |   3     |       2       | clustered   |
+  | secondary lookup      |   3     |       4       | heap        |
+  | PK range scan [2..4]  |   5     |       2       | clustered   |
+
+  heap_pk_io=3  clus_pk_io=2  |  heap_sec_io=3  clus_sec_io=4  |  heap_range_io=5  clus_range_io=2
+
+  GOLD identity (one PK + one secondary lookup):
+    heap   total = heap_pk + heap_sec = 3 + 3 = 6
+    clus   total = clus_pk + clus_sec = 2 + 4 = 6
+    -> with h_pk = h_sec = 2: 2(h+1) = 2h+2 = 6  and  3h = 6  -> EQUAL total work, spent differently.
+
+  [check] heap_pk=3 clus_pk=2 heap_sec=3 clus_sec=4 heap_rng=5 clus_rng=2  ->  OK
+  [check] heap(PK+sec)==6 == clus(PK+sec)==6 == 6  ->  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,186 @@
+page_eviction.py - reference impl. All numbers below feed PAGE_EVICTION.md.
+SEQ = [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5]   N_FRAMES = 4   LRU-K K = 2
+
+========================================================================
+  SECTION A: LRU  --  evict the page whose LAST USE is oldest
+========================================================================
+Pool = 4 frames. Reference string = [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5]
+
+On every access we update that page's recency. Eviction = resident page with the oldest recency.
+
+| step | access | result | buffer (LRU -> MRU)        | evicted |
+|------|--------|--------|----------------------------|---------|
+|  1   |   1    | miss  | 1                          | -       |
+|  2   |   2    | miss  | 1  2                       | -       |
+|  3   |   3    | miss  | 1  2  3                    | -       |
+|  4   |   4    | miss  | 1  2  3  4                 | -       |
+|  5   |   1    | HIT   | 2  3  4  1                 | -       |
+|  6   |   2    | HIT   | 3  4  1  2                 | -       |
+|  7   |   5    | miss  | 4  1  2  5                 | 3       |
+|  8   |   1    | HIT   | 4  2  5  1                 | -       |
+|  9   |   2    | HIT   | 4  5  1  2                 | -       |
+|  10  |   3    | miss  | 5  1  2  3                 | 4       |
+|  11  |   4    | miss  | 1  2  3  4                 | 5       |
+|  12  |   5    | miss  | 2  3  4  5                 | 1       |
+
+LRU: 4 hits / 12 accesses = hit rate 33.3%  (8 faults -> 8 disk reads).
+Evictions hit the pages that were unused the longest: 3, 4, 5, then 1. Crucially page 1 and 2 STAY (they are touched again at steps 5,6) because their recency is refreshed on every hit.
+
+[check] LRU hits == 4:  OK
+
+========================================================================
+  SECTION B: CLOCK (second chance)  --  1 reference bit + a sweeping hand
+========================================================================
+Pool = 4 frames arranged in a ring, hand starts at slot 0.
+
+HIT  -> set the page's reference bit = 1 (hand does not move).
+MISS -> if a slot is free, take it; else sweep: bit=1 -> clear and advance; bit=0 -> evict.
+
+| step | access | result | ring (slot:page(rbit))                          | hand | sweep                              | evicted |
+|------|--------|--------|-------------------------------------------------|------|------------------------------------|---------|
+|  1   |   1    | miss  | [0]1(r1)  [1].(r0) <-hand  [2].(r0)  [3].(r0)   |  1   | -                                  | -       |
+|  2   |   2    | miss  | [0]1(r1)  [1]2(r1)  [2].(r0) <-hand  [3].(r0)   |  2   | -                                  | -       |
+|  3   |   3    | miss  | [0]1(r1)  [1]2(r1)  [2]3(r1)  [3].(r0) <-hand   |  3   | -                                  | -       |
+|  4   |   4    | miss  | [0]1(r1) <-hand  [1]2(r1)  [2]3(r1)  [3]4(r1)   |  0   | -                                  | -       |
+|  5   |   1    | HIT   | [0]1(r1) <-hand  [1]2(r1)  [2]3(r1)  [3]4(r1)   |  0   | -                                  | -       |
+|  6   |   2    | HIT   | [0]1(r1) <-hand  [1]2(r1)  [2]3(r1)  [3]4(r1)   |  0   | -                                  | -       |
+|  7   |   5    | miss  | [0]5(r1)  [1]2(r0) <-hand  [2]3(r0)  [3]4(r0)   |  1   | cleared slot0:1, cleared slot1:2, cleared slot2:3, cleared slot3:4, evict slot0:1 | 1       |
+|  8   |   1    | miss  | [0]5(r1)  [1]1(r1)  [2]3(r0) <-hand  [3]4(r0)   |  2   | evict slot1:2                      | 2       |
+|  9   |   2    | miss  | [0]5(r1)  [1]1(r1)  [2]2(r1)  [3]4(r0) <-hand   |  3   | evict slot2:3                      | 3       |
+|  10  |   3    | miss  | [0]5(r1) <-hand  [1]1(r1)  [2]2(r1)  [3]3(r1)   |  0   | evict slot3:4                      | 4       |
+|  11  |   4    | miss  | [0]4(r1)  [1]1(r0) <-hand  [2]2(r0)  [3]3(r0)   |  1   | cleared slot0:5, cleared slot1:1, cleared slot2:2, cleared slot3:3, evict slot0:5 | 5       |
+|  12  |   5    | miss  | [0]4(r1)  [1]5(r1)  [2]2(r0) <-hand  [3]3(r0)   |  2   | evict slot1:1                      | 1       |
+
+CLOCK: 2 hits / 12 accesses = hit rate 16.7%  (10 faults).
+
+WHY CLOCK ties FIFO here (2 hits, same as FIFO): at step 7 *every* frame's reference bit is still 1 (1 and 2 were just hit at steps 5,6; 3 and 4 were freshly loaded). The hand therefore sweeps ALL four frames, clearing every bit, and then evicts page 1 -- exactly FIFO's oldest-loaded choice. The 'second chance' gave no one a second chance because nobody's bit had decayed to 0 yet. On longer reference strings the bits decay and CLOCK pulls ahead of FIFO toward LRU.
+
+[check] CLOCK hits == 2:  OK
+
+========================================================================
+  SECTION C: LRU-K (K=2)  --  evict the page whose 2nd-to-last use is oldest
+========================================================================
+Pool = 4 frames, K = 2. Each page remembers its last 2 access times; the history PERSISTS across eviction.
+
+Eviction key = backward K-distance = now - (K-th most recent access).
+A page seen fewer than K times has K-distance = infinity (a 'new' page, evicted before any page seen twice).
+
+| step | access | result | resident   | evicted | candidate backward-K-distances (page: history -> kth, dist)        |
+|------|--------|--------|------------|---------|------------------------------------------------------------|
+|  1   |   1    | miss  | [1]        | -       | -                                                          |
+|  2   |   2    | miss  | [1, 2]     | -       | -                                                          |
+|  3   |   3    | miss  | [1, 2, 3]  | -       | -                                                          |
+|  4   |   4    | miss  | [1, 2, 3, 4] | -       | -                                                          |
+|  5   |   1    | HIT   | [1, 2, 3, 4] | -       | -                                                          |
+|  6   |   2    | HIT   | [1, 2, 3, 4] | -       | -                                                          |
+|  7   |   5    | miss  | [1, 2, 4, 5] | 3       | 1:[1, 5] kth=1 d=6  2:[2, 6] kth=2 d=5  3:[3] kth=-inf d=inf  4:[4] kth=-inf d=inf |
+|  8   |   1    | HIT   | [1, 2, 4, 5] | -       | -                                                          |
+|  9   |   2    | HIT   | [1, 2, 4, 5] | -       | -                                                          |
+|  10  |   3    | miss  | [1, 2, 3, 5] | 4       | 1:[5, 8] kth=5 d=5  2:[6, 9] kth=6 d=4  4:[4] kth=-inf d=inf  5:[7] kth=-inf d=inf |
+|  11  |   4    | miss  | [1, 2, 3, 4] | 5       | 1:[5, 8] kth=5 d=6  2:[6, 9] kth=6 d=5  3:[3, 10] kth=3 d=8  5:[7] kth=-inf d=inf |
+|  12  |   5    | miss  | [1, 2, 4, 5] | 3       | 1:[5, 8] kth=5 d=7  2:[6, 9] kth=6 d=6  3:[3, 10] kth=3 d=9  4:[4, 11] kth=4 d=8 |
+
+LRU-2: 4 hits / 12 accesses = hit rate 33.3%  (8 faults).
+
+The eviction decisions (3, 4, 5, then 3 again) follow the OLDEST 2nd-to-last access. Note step 11: plain LRU would evict page 3, but LRU-2 remembers page 3 was used at step 10 (history [3,10]) so its 2nd access is recent; instead page 5 -- seen only once -- is evicted. The persistent history is what makes LRU-K resistant to scan pollution: a page touched twice is 'known' and protected even after being evicted.
+
+[check] LRU-2 hits == 4:  OK
+
+========================================================================
+  SECTION D: hit-rate comparison  +  Belady MIN (optimal) lower bound
+========================================================================
+All policies run on the SAME reference string [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5] with 4 frames.
+
+| policy | hits | faults (= disk reads) | hit rate |
+|--------|------|-----------------------|----------|
+| FIFO   | 2    | 10                    | 16.7%    |
+| CLOCK  | 2    | 10                    | 16.7%    |
+| LRU    | 4    | 8                     | 33.3%    |
+| LRU-2  | 4    | 8                     | 33.3%    |
+| OPT    | 6    | 6                     | 50.0%    |
+
+Read the table top to bottom as 'better':
+  - FIFO (2) and CLOCK (2) tie on this short string -- see Section B for why CLOCK degenerates to FIFO here.
+  - LRU and LRU-2 (4) do better: they keep the repeatedly-used pages 1 and 2 alive.
+  - OPT (6) is the theoretical ceiling: with 4 frames you cannot do better than 6 hits on this string, because 6 pages appear and 2 are referenced at least twice.
+
+Belady's anomaly [1]: FIFO is the policy that can produce MORE faults with MORE frames. On THIS string, FIFO faults drop from 9 (3 frames) to 10 (4 frames) when going 3 -> 4 frames -- i.e. giving FIFO a bigger cache makes it WORSE. LRU and OPT never show this anomaly (they have the 'stack property').
+
+[check] FIFO=2 CLOCK=2 LRU=4 LRU-2=4 OPT=6 for SEQ [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5], N=4:  OK
+[check] .html recomputes LRU=4, CLOCK=2, LRU-2=4 on the identical inputs:  see page_eviction.html gold badge.
+
+========================================================================
+  SECTION E: dirty pages  --  evicting a modified page costs a WRITE
+========================================================================
+A page loaded for reading is CLEAN. A page modified in RAM is DIRTY: evicting it forces a flush (one extra disk WRITE) before the frame can be reused. A clean eviction is free. So two pools with identical hit rates can have very different I/O cost if one dirties more pages.
+
+Same string [1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5], but each access is R or W:  ops = ['W', 'R', 'W', 'R', 'R', 'W', 'W', 'R', 'R', 'W', 'R', 'R']
+
+We run LRU with a dirty set. On a WRITE the page becomes dirty; on a dirty EVICTION we pay 1 write; on a clean eviction we pay 0.
+
+| step | access | op | result | evicted | dirty? | running reads | running writes |
+|------|--------|----|--------|---------|--------|---------------|----------------|
+|  1   |   1    | W  | miss  | -       | -      | 1             | 0              |
+|  2   |   2    | R  | miss  | -       | -      | 2             | 0              |
+|  3   |   3    | W  | miss  | -       | -      | 3             | 0              |
+|  4   |   4    | R  | miss  | -       | -      | 4             | 0              |
+|  5   |   1    | R  | HIT   | -       | -      | 4             | 0              |
+|  6   |   2    | W  | HIT   | -       | -      | 4             | 0              |
+|  7   |   5    | W  | miss  | 3       | flush  | 5             | 1              |
+|  8   |   1    | R  | HIT   | -       | -      | 5             | 1              |
+|  9   |   2    | R  | HIT   | -       | -      | 5             | 1              |
+|  10  |   3    | W  | miss  | 4       | clean  | 6             | 1              |
+|  11  |   4    | R  | miss  | 5       | flush  | 7             | 2              |
+|  12  |   5    | R  | miss  | 1       | flush  | 8             | 3              |
+
+Totals: 8 disk READS (the faults) + 3 disk WRITES (dirty evictions) = 11 I/Os.
+
+Contrast with an ALL-READ workload (every access 'R'): the SAME LRU policy would still fault 8 times (8 reads) but pay ZERO eviction writes, because no page is ever dirty. The 3 writes here are pure write-amplification from dirtying pages 1, 3 and 5 then evicting them before the next checkpoint.
+
+In a real engine this is why dirty pages are flushed by a BACKGROUND process (checkpointer / background writer) rather than at eviction time: amortise the writes off the foreground query, and evictions can then usually reuse a clean frame.
+
+[check] reads == 8 (one per fault) AND writes == 3 (dirty evictions: pages 3, 5, 1):  OK
+
+========================================================================
+  SECTION F: PostgreSQL specifics  --  the scan ring (bulk-read 256 KB)
+========================================================================
+A sequential scan can touch millions of pages once each. If those pages entered the shared buffer pool and competed under the normal clock-sweep, one big scan would FLUSH the whole cache, evicting the genuinely hot pages. PostgreSQL prevents this with a SCAN RING: a small private set of frames, reused FIFO, that the scan reads into INSTEAD of the main pool. The hot pages never see the scan.
+
+Real sizes [4]:
+  bulk-READ  ring: 256 KB  = 32 pages   (seq scans that don't fit in cache)
+  bulk-WRITE ring: 16 MB   = 2048 pages (COPY, CREATE TABLE AS, mat. view)
+  VACUUM     ring: 256 KB  = 32 pages   (autovacuum)
+
+Worked illustration (tiny numbers so it fits on a page):
+  Main pool = 8 frames, hot pages = [1, 2], a scan of 10 cold pages (100..109), then the hot pages are touched again.
+
+  WITHOUT a ring (scan enters the pool, LRU):
+    | step | access | result | buffer (LRU -> MRU) |
+    |  1   | 1      | miss | 1 |
+    |  2   | 2      | miss | 1  2 |
+    |  3   | 100    | miss | 1  2  100 |
+    |  4   | 101    | miss | 1  2  100  101 |
+    |  5   | 102    | miss | 1  2  100  101  102 |
+    |  6   | 103    | miss | 1  2  100  101  102  103 |
+    |  7   | 104    | miss | 1  2  100  101  102  103  104 |
+    |  8   | 105    | miss | 1  2  100  101  102  103  104  105 |
+    |  9   | 106    | miss | 2  100  101  102  103  104  105  106 |
+    |  10  | 107    | miss | 100  101  102  103  104  105  106  107 |
+    |  11  | 108    | miss | 101  102  103  104  105  106  107  108 |
+    |  12  | 109    | miss | 102  103  104  105  106  107  108  109 |
+    |  13  | 1      | miss | 103  104  105  106  107  108  109  1 |
+    |  14  | 2      | miss | 104  105  106  107  108  109  1  2 |
+
+    -> after the scan the hot pages [1, 2] have been evicted; their re-accesses are 0/2 hits.
+
+  WITH a 2-frame ring (scan pages go into the ring, FIFO):
+    main pool only ever holds the hot pages [1, 2]; the scan's 10 pages cycle through the 2-frame ring and never touch the pool.
+    -> the hot re-accesses are 2/2 hits.
+
+  PUNCHLINE: hot-set hit rate after the scan = 0% (no ring)  vs  100% (ring).  The ring confines a terabyte-sized scan to 2 frames in the toy model (32 frames / 256 KB in real PostgreSQL), leaving the rest of the cache intact.
+
+[check] no-ring hot hits == 0 AND ring hot hits == 2:  OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

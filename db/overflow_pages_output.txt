@@ -1,0 +1,185 @@
+overflow_pages.py - reference impl. All numbers feed OVERFLOW_PAGES.md.
+pure Python stdlib. Deterministic inputs.
+
+==========================================================================
+  SECTION A: the ~2 KB threshold and the storage lineage
+==========================================================================
+A database page is a fixed-size suitcase (PostgreSQL default 8 KB).
+A tuple should stay small so many fit per page. PostgreSQL's rule:
+
+  TOAST_TUPLE_THRESHOLD = 2000 bytes  (~2 KB)
+  If a tuple would exceed this, its biggest varlena columns are
+  toasted (compressed and/or moved out of line) until it fits.
+
+| storage era   | idea                                        | fits in page? |
+|---------------|---------------------------------------------|---------------|
+| inline        | value jammed into the main tuple            | only if < ~2 KB |
+| overflow      | value on linked overflow pages; tuple holds a pointer | yes (pointer) |
+| TOAST         | compress first, then chunk into a side table; 18-byte ptr | yes (ptr)     |
+
+The threshold is not magic: it is ~MaxHeapTupleSize/4, so ~4 toasted
+tuples can still share an 8 KB page with room for the small columns.
+
+[check] threshold is ~2 KB: True -> OK
+
+==========================================================================
+  SECTION B: compression attempt (pglz concept)
+==========================================================================
+Before moving a value out of line, PostgreSQL tries to SHRINK it with
+pglz (a Lempel-Ziv variant). Modeled here as greedy LZ77. pglz rule:
+keep the compressed form ONLY if it is strictly smaller than raw.
+
+| pattern       | raw (B) | compressed (B) | ratio  | compressed? | toasted?* |
+|---------------|---------|----------------|--------|-------------|-----------|
+| repetitive    | 2500    | 67             | 37.31  | yes         | no        |
+| text-like     | 2600    | 171            | 15.20  | yes         | no        |
+| random (xorshift) | 3000    | 3000           | 1.00   | no          | yes       |
+
+* 'toasted' here = stored out of line (would not fit inline with the
+  base tuple). Repetitive data shrinks below the threshold and could
+  even stay inline; random data barely compresses and must be moved.
+
+LESSON: compression is a free win for repetitive blobs and a no-op
+for random blobs. That is why TOAST tries compress FIRST, chunk SECOND.
+
+==========================================================================
+  SECTION C: chunking - slice the (compressed) value into a TOAST table
+==========================================================================
+Gold payload: 58229 raw bytes (58.23 KB), semi-structured JSON-ish log lines.
+After pglz:    13388 stored bytes (13.39 KB)  [compressed=True]
+
+Stored size 13388 B > TOAST_TUPLE_THRESHOLD 2000 B -> MUST be chunked.
+
+num_chunks = ceil(13388 / 2000) = 7
+
+TOAST table  pg_toast_<oid>  schema:
+    chunk_id   Oid    -- same for all chunks of one value
+    chunk_seq  int4   -- 0,1,2,...  (the glue order)
+    chunk_data bytea  -- up to TOAST_MAX_CHUNK_SIZE bytes
+
+| chunk_id | chunk_seq | chunk_data (B) | full row (B) |
+|----------|-----------|----------------|--------------|
+| 4321     | 0         | 2000           | 2040         |
+| 4321     | 1         | 2000           | 2040         |
+| 4321     | 2         | 2000           | 2040         |
+| 4321     | 3         | 2000           | 2040         |
+| 4321     | 4         | 2000           | 2040         |
+| 4321     | 5         | 2000           | 2040         |
+| 4321     | 6         | 1388           | 1428         |
+
+Total chunk storage = sum of full row sizes = 13668 B (13.67 KB).
+
+[check] num_chunks == ceil(stored/chunk_size) == ceil(13388/2000) == 7: OK
+
+==========================================================================
+  SECTION D: the 18-byte varlena pointer (the tag in the suitcase)
+==========================================================================
+When a value is toasted, the main tuple NO LONGER holds the bytes.
+It holds an 18-byte external pointer (PostgreSQL varatt_external):
+
+| field           | bytes | value (this example)        |
+|-----------------|-------|-----------------------------|
+| va_header       | 2     | external-marker (on-disk)   |
+| va_toastrelid   | 4     | 16432 (pg_toast_16432) |
+| va_valueid      | 4     | 4321 (chunk_id for all chunks)  |
+| va_size         | 4     | 13388 (compressed, low bit=flag) |
+| va_rawsize      | 4     | 58229 (uncompressed len)|
+|-----------------|-------|-----------------------------|
+| TOTAL in tuple  | 18     | replaces 58229 raw bytes (58.23 KB)
+
+So the 58,229-byte value is represented in the main tuple by just 18 bytes - a 3235x shrink in the hot path.
+
+SELECTs that do not project this column never follow the pointer -
+they never pay the chunk-read cost. THAT is the point of out-of-line.
+
+[check] pointer footprint == 18 bytes: OK
+
+==========================================================================
+  SECTION E: retrieval (detoast) - glue chunks, then decompress
+==========================================================================
+To read a toasted value back, PostgreSQL must:
+
+  1. read the 18-byte pointer from the main tuple
+  2. fetch all 7 chunks WHERE chunk_id = 4321
+     ORDER BY chunk_seq   <- this is the expensive part
+  3. concatenate chunk_data in chunk_seq order
+  4. if va_size says compressed: pglz-decompress the glued bytes
+
+Round-trip check: detoasted bytes == original raw bytes? True
+  original  : 58229 bytes
+  recovered : 58229 bytes
+  chunk reads: 7  (= num_chunks; often 7 random I/Os if not cached)
+
+COST: detoasting a value split across N chunks is N index lookups +
+N page reads in pg_toast_<oid>, plus a decompress. For a value that
+fanned out into many chunks this is dramatically more expensive than
+reading an inline value. This is why EXTERNAL (no compression) can be
+SLOWER to read than EXTENDED (compress first -> fewer chunks) even
+though it skips the decompress step: more chunks = more reads.
+
+[check] detoast round-trip == raw: OK
+
+==========================================================================
+  SECTION F: the four TOAST strategies (column attstorage)
+==========================================================================
+Each column has a strategy (attstorage). The four values:
+
+| strategy | code | compress? | out-of-line? | typical use                    | resulting storage        |
+|----------|------|-----------|--------------|------------------------------|--------------------------|
+| PLAIN    | 0    | no        | no           | fixed-size types, small varlena    | inline, always           |
+| EXTERNAL | 1    | no        | yes          | blob columns where decompress cost matters more than size | out-of-line, uncompressed |
+| EXTENDED | 2    | yes       | yes          | DEFAULT for most varlena (text, bytea, jsonb) | compress, then out-of-line if still big |
+| MAIN     | 3    | yes       | last resort  | values you want inline if at all possible | compress; keep inline; move out-of-line only if forced |
+
+EXTENDED is the default and almost always right: compress first (a
+free win for repetitive data), and only pay the chunk-read cost if the
+value is genuinely huge. EXTERNAL trades space for decompress-CPU and
+is used for blobs that are already compressed (e.g. JPEG) where pglz
+would do nothing but the column is read often. MAIN tries hard to keep
+a value inline (in the main tuple, possibly compressed) and only
+overflows as a last resort.
+
+Same gold payload under each strategy:
+  raw=58229 B, pglz=13388 B (compressed=True), threshold=2000 B
+
+| strategy | bytes in main tuple | chunks | detoast reads | notes
+|----------|---------------------|--------|---------------|-----
+| PLAIN    | 58229               | 0      | 0             | raw inline; bloats every scan
+| EXTERNAL | 18                  | 30     | 30            | raw -> out-of-line
+| EXTENDED | 18                  | 7      | 7             | compressed -> out-of-line
+| MAIN     | 13388               | 0      | 0             | compressed inline (forced)
+
+PLAIN is shown for contrast only: a 58,229-byte value inline would
+make the tuple far exceed the page - PostgreSQL would in fact refuse
+such a tuple. The other three all keep the main tuple tiny; they
+differ in compression and in read cost (number of chunk reads).
+
+==========================================================================
+  GOLD VALUES (pinned for overflow_pages.html)
+==========================================================================
+payload        : 58229 raw bytes  (58.23 KB)
+compressed     : 13388 stored bytes  (compressed=True)
+num_chunks     : 7  (= ceil(13388/2000))
+pointer        : 18 bytes in main tuple
+chunk reads    : 7  (detoast cost)
+total storage  : base(60) + pointer(18) + 7 chunk rows = 13746 bytes  (13.75 KB)
+
+[check] num_chunks == ceil(stored/chunk_size): OK
+[check] pointer == 18 bytes: OK
+[check] total_storage == base + pointer + sum(chunk rows): OK
+[check] detoast(raw) == payload: OK
+
+GOLD scalars (copy into overflow_pages.html):
+  GOLD_RAW_LEN      = 58229
+  GOLD_STORED_LEN   = 13388
+  GOLD_COMPRESSED   = true
+  GOLD_NUM_CHUNKS   = 7
+  GOLD_TOTAL_BYTES  = 13746
+  GOLD_POINTER      = 18
+  GOLD_CHUNK_SIZES  = [2000, 2000, 2000, 2000, 2000, 2000, 1388]
+  GOLD_TOASTREL_OID = 16432
+  GOLD_VALUE_OID    = 4321
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

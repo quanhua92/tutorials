@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page Eviction — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:180px;accent-color:var(--green);vertical-align:middle}
+  input[type=text]{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+                   padding:4px 8px;font-size:.82rem;font-family:ui-monospace,monospace;width:240px}
+  .val{color:var(--green);font-weight:700;min-width:2ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.6rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .gold{color:var(--gold)}
+  .readout .muted{color:var(--muted)}
+
+  /* ===== buffer pool row ===== */
+  #ringWrap{position:relative;margin:14px 4px 6px;height:124px}
+  #hand{position:absolute;top:0;width:0;height:0;left:0;
+        border-left:9px solid transparent;border-right:9px solid transparent;
+        border-bottom:15px solid var(--gold);
+        transition:left .2s ease, opacity .15s;opacity:0;filter:drop-shadow(0 0 4px rgba(241,196,15,.6))}
+  #handLabel{position:absolute;top:-18px;left:0;transform:translateX(-50%);color:var(--gold);
+             font-size:.7rem;font-weight:700;transition:left .2s ease, opacity .15s;opacity:0;white-space:nowrap}
+  .slot{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;
+        width:78px;height:96px;margin:0 6px;border-radius:9px;border:2px solid #30363d;
+        background:#0d1117;vertical-align:top;transition:background .15s,border-color .15s,transform .1s;position:relative}
+  .slot .pg{font-family:ui-monospace,monospace;font-size:1.5rem;font-weight:700;color:var(--ink);line-height:1}
+  .slot .sub{font-size:.62rem;color:var(--muted);margin-top:5px;font-family:ui-monospace,monospace;min-height:.74rem}
+  .slot .rbit{position:absolute;top:7px;right:9px;width:9px;height:9px;border-radius:50%;background:#2a2f37;border:1px solid #404653}
+  .slot.empty .pg{color:#404653}
+  .slot.newpage{animation:pop .3s ease}
+  @keyframes pop{0%{transform:scale(.6)}60%{transform:scale(1.12)}100%{transform:scale(1)}}
+  .slot.flash{background:#3a2f12 !important;border-color:var(--orange) !important}
+  .slot.flash .rbit{background:#5a3a12 !important}
+
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.76rem;margin-top:.6rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+
+  /* ===== counters ===== */
+  .counters{display:flex;gap:1.4rem;flex-wrap:wrap;margin-top:.7rem}
+  .ctr{background:#0a0e14;border:1px solid #30363d;border-radius:7px;padding:.4rem .8rem;min-width:96px}
+  .ctr .k{color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}
+  .ctr .v{font-size:1.3rem;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .ctr .v.hit{color:var(--green)} .ctr .v.miss{color:var(--red)}
+
+  /* ===== access log ===== */
+  #log{max-height:148px;overflow-y:auto;background:#0a0e14;border:1px solid #30363d;border-radius:6px;
+       margin-top:.5rem;font-family:ui-monospace,monospace;font-size:.74rem}
+  #log div{padding:2px 10px;color:var(--muted);font-variant-numeric:tabular-nums}
+  #log div.cur{background:#3a2f12;color:var(--gold);font-weight:700}
+  #log div .h{color:var(--green)} #log div .m{color:var(--red)}
+
+  /* ===== comparison bars ===== */
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.25rem 0}
+  .barwrap .lab{width:74px;color:var(--ink);font-size:.8rem;font-family:ui-monospace,monospace}
+  .barwrap .track{flex:1;height:18px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px;transition:width .25s}
+  .barwrap .num{width:120px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--muted)}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Page Eviction — buffer-pool replacement, interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/db/PAGE_EVICTION.md">PAGE_EVICTION.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/db/page_eviction.py">page_eviction.py</a></h1>
+  <div class="sub">A 4-frame buffer pool meets the reference string <code>[1,2,3,4,1,2,5,1,2,3,4,5]</code>. Switch the
+    <b style="color:var(--green)">policy</b> (LRU / CLOCK / LRU-2) and <b>step</b> through the accesses: watch which page each one evicts — and how the
+    <b style="color:var(--gold)">clock hand</b> sweeps the ring clearing reference bits. Hit counts are recomputed live in JS from the
+    <i>identical</i> inputs as <code>page_eviction.py</code>. &nbsp;|&nbsp; Lineage: FIFO → LRU → CLOCK → LRU-K.</div>
+
+  <!-- ===== PANEL 1: THE SIMULATOR ===== -->
+  <h2>① The buffer pool — switch policy, step the access stream</h2>
+  <div class="panel">
+    <div class="controls">
+      <span class="micro" style="width:100%;margin:0 0 .2rem"><b>Policy:</b></span>
+      <button id="bLru" class="active">LRU</button>
+      <button id="bClock">CLOCK (2nd chance)</button>
+      <button id="bLru2">LRU-2</button>
+    </div>
+    <div class="controls" style="margin-top:.6rem">
+      <label>frames N <input type="range" id="nSlider" min="3" max="8" value="4"><span class="val" id="nVal">4</span></label>
+      <label>reference string <input type="text" id="seqInput" value="1,2,3,4,1,2,5,1,2,3,4,5"></label>
+    </div>
+    <div class="controls" style="margin-top:.6rem">
+      <button id="bReset">⏮ reset</button>
+      <button id="bPrev">◀ step back</button>
+      <button id="bNext">step ▶</button>
+      <button id="bEnd">end ⏭</button>
+      <span class="micro">step <span id="stepNum" class="val" style="color:var(--ink)">0</span> / <span id="stepTot">12</span></span>
+    </div>
+
+    <div id="ringWrap"><div id="hand"></div><div id="handLabel">hand</div></div>
+    <div class="legend" id="legend"></div>
+
+    <div class="counters">
+      <div class="ctr"><div class="k">hits so far</div><div class="v hit" id="cHits">0</div></div>
+      <div class="ctr"><div class="k">misses so far</div><div class="v miss" id="cMiss">0</div></div>
+      <div class="ctr"><div class="k">hit rate</div><div class="v" id="cRate">—</div></div>
+      <div class="ctr"><div class="k">evicted</div><div class="v" id="cEvict" style="font-size:1.1rem">—</div></div>
+    </div>
+
+    <div class="readout" id="readout"></div>
+
+    <div class="micro" style="margin:.6rem 0 .2rem">access log (gold = current step):</div>
+    <div id="log"></div>
+  </div>
+
+  <!-- ===== PANEL 2: COMPARISON ===== -->
+  <h2>② Same string, all policies — watch the eviction behaviour differ</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> change <b>N</b> or the <b>reference string</b> above; this table recomputes every policy's
+      hit count live. OPT (Belady MIN) is the unbeatable lower bound; FIFO can show Belady's anomaly (more frames → more faults).</div>
+    <div id="bars"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches page_eviction.py (SEQ = 1,2,3,4,1,2,5,1,2,3,4,5, N = 4: LRU = 4, CLOCK = 2, LRU-2 = 4).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth algorithms, copied verbatim from page_eviction.py ===== */
+const DEF_SEQ=[1,2,3,4,1,2,5,1,2,3,4,5];
+const NEG=-1e9, POS=1e9;
+
+function lruTrace(seq,n){
+  const last={}, res=new Set(), steps=[];
+  for(let i=0;i<seq.length;i++){
+    const p=seq[i], t=i+1, hit=res.has(p); let ev=null;
+    if(hit){ last[p]=t; }
+    else{
+      if(res.size>=n){ ev=[...res].sort((a,b)=>(last[a]-last[b])||(a-b))[0]; res.delete(ev); delete last[ev]; }
+      res.add(p); last[p]=t;
+    }
+    const order=[...res].sort((a,b)=>(last[a]-last[b])||(a-b));
+    steps.push({t,page:p,hit,ev,order});
+  }
+  return steps;
+}
+function clockTrace(seq,n){
+  const slots=new Array(n).fill(null), bits=new Array(n).fill(0); let hand=0; const steps=[];
+  for(let i=0;i<seq.length;i++){
+    const p=seq[i], t=i+1; let idx=-1;
+    for(let j=0;j<n;j++) if(slots[j]===p){idx=j;break;}
+    const hit=idx!==-1; let ev=null; const sweep=[];
+    if(hit){ bits[idx]=1; }
+    else{
+      let free=-1; for(let k=0;k<n;k++){ const ii=(hand+k)%n; if(slots[ii]===null){free=ii;break;} }
+      if(free!==-1){ slots[free]=p; bits[free]=1; hand=(free+1)%n; }
+      else{
+        while(true){
+          const i2=hand;
+          if(bits[i2]===1){ sweep.push({i:i2,pg:slots[i2],act:'cleared'}); bits[i2]=0; hand=(hand+1)%n; }
+          else{ ev=slots[i2]; sweep.push({i:i2,pg:slots[i2],act:'evict'}); slots[i2]=p; bits[i2]=1; hand=(i2+1)%n; break; }
+        }
+      }
+    }
+    steps.push({t,page:p,hit,ev,slots:[...slots],bits:[...bits],hand,sweep});
+  }
+  return steps;
+}
+function lrukTrace(seq,n,k=2){
+  const hist={}, res=new Set(), steps=[];
+  const kth=q=>{const h=hist[q]||[]; return h.length>=k?h[h.length-k]:NEG;};
+  const first=q=>{const h=hist[q]||[]; return h.length?h[0]:POS;};
+  for(let i=0;i<seq.length;i++){
+    const p=seq[i], t=i+1; let h=hist[p]||[]; h.push(t); if(h.length>k) h=h.slice(h.length-k); hist[p]=h;
+    const hit=res.has(p); let ev=null, cand=null;
+    if(!hit){
+      if(res.size>=n){
+        cand=[...res].sort((a,b)=>a-b).map(q=>({q,h:[...hist[q]],kth:kth(q)}));
+        ev=[...res].sort((a,b)=>(kth(a)-kth(b))||(first(a)-first(b))||(a-b))[0];
+        res.delete(ev);
+      }
+      res.add(p);
+    }
+    const hs={}; for(const q of res) hs[q]=[...(hist[q]||[])];
+    steps.push({t,page:p,hit,ev,resident:[...res].sort((a,b)=>a-b),hist:hs,cand});
+  }
+  return steps;
+}
+function fifoTrace(seq,n){
+  const q=[], res=new Set(), steps=[];
+  for(let i=0;i<seq.length;i++){
+    const p=seq[i], t=i+1, hit=res.has(p); let ev=null;
+    if(!hit){ if(res.size>=n){ev=q.shift(); res.delete(ev);} q.push(p); res.add(p); }
+    steps.push({t,page:p,hit});
+  }
+  return steps;
+}
+function optTrace(seq,n){
+  const res=new Set(), steps=[];
+  const nu=(q,after)=>{ for(let j=after;j<seq.length;j++) if(seq[j]===q) return j; return POS; };
+  for(let i=0;i<seq.length;i++){
+    const p=seq[i], t=i+1, hit=res.has(p); let ev=null;
+    if(!hit){ if(res.size>=n){ ev=[...res].sort((a,b)=>(nu(b,i+1)-nu(a,i+1))||(a-b))[0]; res.delete(ev);} res.add(p); }
+    steps.push({t,page:p,hit});
+  }
+  return steps;
+}
+function hitsOf(tr){ return tr.filter(s=>s.hit).length; }
+
+/* ===== gold check vs page_eviction.py ===== */
+const gN=4, gSeq=DEF_SEQ;
+const gLru=hitsOf(lruTrace(gSeq,gN)), gClock=hitsOf(clockTrace(gSeq,gN)), gLruk=hitsOf(lrukTrace(gSeq,gN,2));
+const goldOk = (gLru===4 && gClock===2 && gLruk===4);
+
+/* ===== app state ===== */
+let algo='lru', n=4, seq=DEF_SEQ.slice(), trace=[], cur=-1, animToken=0;
+
+function parseSeq(s){
+  const a=(s.match(/-?\d+/g)||[]).map(Number).filter(x=>Number.isInteger(x));
+  return a.length?a:DEF_SEQ.slice();
+}
+function rebuild(){
+  n=+document.getElementById('nSlider').value;
+  seq=parseSeq(document.getElementById('seqInput').value);
+  if(algo==='lru') trace=lruTrace(seq,n);
+  else if(algo==='clock') trace=clockTrace(seq,n);
+  else trace=lrukTrace(seq,n,2);
+  cur=-1;
+  document.getElementById('stepTot').textContent=seq.length;
+  buildRing();
+  renderLog();
+  goto(0);
+  renderBars();
+}
+function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+/* ===== ring (DOM slots) ===== */
+const ringWrap=document.getElementById('ringWrap');
+function buildRing(){
+  // keep hand elements, (re)build slots
+  ringWrap.querySelectorAll('.slot').forEach(e=>e.remove());
+  for(let i=0;i<n;i++){
+    const d=document.createElement('div'); d.className='slot empty'; d.dataset.i=i;
+    d.innerHTML='<div class="rbit"></div><div class="pg">·</div><div class="sub"></div>';
+    ringWrap.appendChild(d);
+  }
+}
+function slotEls(){ return ringWrap.querySelectorAll('.slot'); }
+function slotCenter(i){ const e=ringWrap.querySelectorAll('.slot')[i]; if(!e) return 0; return e.offsetLeft+e.offsetWidth/2; }
+
+function lerp(a,b,f){ return Math.round(a+(b-a)*f); }
+function recencyColor(rank,count){          // 0=LRU dim -> count-1=MRU bright
+  const f=count<=1?1:rank/(count-1);
+  return `rgb(${lerp(192,39,f)},${lerp(57,174,f)},${lerp(43,96,f)})`;
+}
+
+/* place the hand pointer (CLOCK only) */
+function moveHand(i,show){
+  const hand=document.getElementById('hand'), lab=document.getElementById('handLabel');
+  const target=ringWrap.querySelectorAll('.slot')[i];
+  if(!target){ hand.style.opacity=0; lab.style.opacity=0; return; }
+  const left=target.offsetLeft+target.offsetWidth/2;
+  hand.style.left=(left-9)+'px'; hand.style.top=(target.offsetTop-20)+'px';
+  lab.style.left=left+'px'; lab.style.top=(target.offsetTop-38)+'px';
+  hand.style.opacity=show?1:0; lab.style.opacity=show?1:0;
+}
+
+/* apply the resting visual state for a step (final state) */
+function applyStep(step){
+  const els=ringWrap.querySelectorAll('.slot');
+  for(let i=0;i<n;i++){
+    const el=els[i], wasNew=el.classList.contains('newpage');
+    el.className='slot'+(wasNew?' newpage':'');   // keep pop animation class one cycle
+    el.querySelector('.sub').textContent='';
+    if(algo==='clock'){
+      const pg=step.slots[i], bit=step.bits[i];
+      el.querySelector('.pg').textContent = pg===null?'·':pg;
+      el.classList.toggle('empty', pg===null);
+      el.querySelector('.rbit').style.background = bit? '#f1c40f' : '#2a2f37';
+      el.style.borderColor = (pg!==null&&i===step.hand&&!step.hit)? '#f1c40f' : '#30363d';
+    } else {
+      // lru / lru2 : fill slots with resident pages in order
+      let order;
+      if(algo==='lru') order=step.order;
+      else { // lru2: order resident by last access ascending (oldest last-use leftmost)
+        order=[...step.resident].sort((a,b)=>(step.hist[a].slice(-1)[0]-step.hist[b].slice(-1)[0])||(a-b));
+      }
+      const count=order.length;
+      const pg=order[i];
+      el.querySelector('.pg').textContent = (pg===undefined)?'·':pg;
+      el.classList.toggle('empty', pg===undefined);
+      if(pg===undefined){ el.style.borderColor='#30363d'; el.querySelector('.rbit').style.background='#2a2f37'; }
+      else if(algo==='lru'){
+        el.style.borderColor=recencyColor(i,count);
+        el.querySelector('.rbit').style.background=recencyColor(i,count);
+        el.querySelector('.sub').textContent='';     // recency shown by color only
+      } else { // lru2
+        const h=step.hist[pg];
+        el.querySelector('.sub').textContent='@'+h.join(',');
+        const seen2=h.length>=2;
+        el.style.borderColor = seen2? '#27ae60' : '#e67e22';
+        el.querySelector('.rbit').style.background = seen2? '#27ae60' : '#e67e22';
+      }
+    }
+  }
+  if(algo==='clock') moveHand(step.hand,true);
+  else moveHand(0,false);
+}
+
+/* CLOCK sweep animation: hand slides across cleared slots, then settles */
+async function animateClockSweep(step){
+  const my=++animToken;
+  // start from pre-step hand: approximate by stepping through sweep entries
+  for(const e of step.sweep){
+    if(my!==animToken) return;
+    moveHand(e.i,true);
+    const el=ringWrap.querySelectorAll('.slot')[e.i];
+    if(e.act==='cleared' && el){
+      el.classList.add('flash');
+      el.querySelector('.rbit').style.background='#2a2f37';   // bit cleared
+    }
+    await wait(190);
+    if(my!==animToken) return;
+    if(el) setTimeout(()=>el.classList.remove('flash'),120);
+  }
+  if(my!==animToken) return;
+  applyStep(step);   // final state (victim replaced)
+  const v=ringWrap.querySelectorAll('.slot').length;
+  const evEl=Array.from(ringWrap.querySelectorAll('.slot')).find(e=>+e.querySelector('.pg').textContent===step.page);
+  if(evEl){ evEl.classList.add('newpage'); }
+}
+
+/* ===== goto a step ===== */
+function goto(i){
+  i=Math.max(-1,Math.min(seq.length-1,i));   // -1 = empty start
+  cur=i;
+  document.getElementById('stepNum').textContent=i+1;
+  if(i<0){ applyEmpty(); renderReadout(null); renderCounters(-1); renderLogCur(); return; }
+  const step=trace[i];
+  animToken++;   // cancel any running sweep animation
+  if(algo==='clock' && step.sweep.length>0){
+    applyStep(step);                       // show resting state immediately as a base
+    // reset bits to pre-sweep for animation realism: clear the just-placed victim slot temporarily
+    animateClockSweep(step);
+  } else {
+    applyStep(step);
+    if(!step.hit && step.ev!==null){        // pop the newly loaded page
+      const el=Array.from(ringWrap.querySelectorAll('.slot'))
+        .find(e=>+e.querySelector('.pg').textContent===step.page);
+      if(el){ el.classList.add('newpage'); setTimeout(()=>el&&el.classList.remove('newpage'),320); }
+    }
+  }
+  renderReadout(step);
+  renderCounters(i);
+  renderLogCur();
+}
+function applyEmpty(){
+  const els=ringWrap.querySelectorAll('.slot');
+  els.forEach(el=>{ el.className='slot empty'; el.querySelector('.pg').textContent='·';
+    el.querySelector('.sub').textContent=''; el.style.borderColor='#30363d'; el.querySelector('.rbit').style.background='#2a2f37'; });
+  moveHand(0,false);
+}
+
+/* ===== readout + counters ===== */
+function renderCounters(i){
+  const upto = i<0?[]: trace.slice(0,i+1);
+  const h=upto.filter(s=>s.hit).length, m=upto.length-h;
+  document.getElementById('cHits').textContent=h;
+  document.getElementById('cMiss').textContent=m;
+  document.getElementById('cRate').textContent = upto.length? ((h/upto.length*100).toFixed(1)+'%') : '—';
+  const step=i<0?null:trace[i];
+  document.getElementById('cEvict').textContent = (step&&step.ev!==null)? step.ev : '—';
+}
+function renderReadout(step){
+  const el=document.getElementById('readout');
+  if(!step){ el.innerHTML='<span class="muted">press “step ▶” to start.</span>'; return; }
+  const tag = step.hit? '<span class="">HIT</span>' : '<span class="bad">MISS</span>';
+  let extra='';
+  if(algo==='clock'){
+    if(step.sweep.length){
+      extra='hand swept: '+step.sweep.map(s=>s.act==='cleared'?`clear slot${s.i}:${s.pg}`:`evict slot${s.i}:${s.pg}`).join(' → ')
+        +' &nbsp;→&nbsp; placed <b>'+step.page+'</b> (r1), hand→slot'+step.hand;
+    } else if(step.hit){ extra='reference bit of the page set to <b>1</b>; hand stays.'; }
+    else { extra='free slot → placed <b>'+step.page+'</b> (r1); hand→slot'+step.hand+'.'; }
+  } else if(algo==='lru'){
+    extra = step.ev!==null ? ('evicted <b>'+step.ev+'</b> (least-recently-used). ') : 'loaded into a free frame. ';
+    extra += 'buffer LRU→MRU: <b>'+step.order.join(' ')+'</b>';
+  } else { // lru2
+    if(step.cand){
+      extra='candidates (backward 2-distance): '+step.cand.map(c=>{
+        const kth=c.kth===NEG?'-∞':c.kth; const d=c.kth===NEG?'∞':(step.t-c.kth);
+        return `${c.q}:${c.h.join(',')} (kth=${kth},d=${d})`; }).join(' &nbsp; ');
+      extra += '<br>→ evicted <b>'+step.ev+'</b> (oldest 2nd-to-last; ∞ = seen<2 = evict-first).';
+    } else if(step.hit) extra='hit — history refreshed.';
+    else extra='loaded into a free frame.';
+  }
+  el.innerHTML=`step ${step.t}: access <b style="color:var(--ink)">${step.page}</b> → ${tag} &nbsp; ${extra}`;
+}
+
+/* ===== access log ===== */
+function renderLog(){
+  const log=document.getElementById('log'); let html='';
+  trace.forEach((s,idx)=>{
+    const cls=s.hit?'h':'m', lab=s.hit?'HIT':'miss'+(s.ev!==null?` (evict ${s.ev})`:'');
+    html+=`<div data-i="${idx}">${String(s.t).padStart(2)}: p${s.page} → <span class="${cls}">${lab}</span></div>`;
+  });
+  log.innerHTML=html;
+  log.querySelectorAll('div').forEach(d=>d.addEventListener('click',()=>goto(+d.dataset.i)));
+}
+function renderLogCur(){
+  const log=document.getElementById('log');
+  log.querySelectorAll('div').forEach(d=>d.classList.toggle('cur',+d.dataset.i===cur));
+  const c=log.querySelector('div.cur');
+  if(c) c.scrollIntoView({block:'nearest'});
+}
+
+/* ===== legend ===== */
+function renderLegend(){
+  const el=document.getElementById('legend');
+  if(algo==='clock'){
+    el.innerHTML='<span><i class="sw" style="background:#f1c40f"></i>reference bit = 1</span>'
+      +'<span><i class="sw" style="background:#2a2f37;border:1px solid #404653"></i>bit = 0 (evict when hand reaches)</span>'
+      +'<span>▲ gold = clock hand</span>';
+  } else if(algo==='lru'){
+    el.innerHTML='<span><i class="sw" style="background:#c0392b"></i>LRU (evict next)</span>'
+      +'<span><i class="sw" style="background:#27ae60"></i>MRU (just used)</span>'
+      +'<span>slots shown LRU → MRU, left to right</span>';
+  } else {
+    el.innerHTML='<span><i class="sw" style="background:#27ae60"></i>seen ≥2 (hot/known)</span>'
+      +'<span><i class="sw" style="background:#e67e22"></i>seen &lt;2 (new, evict-first)</span>'
+      +'<span>“@t1,t2” = last 2 access steps (persistent history)</span>';
+  }
+}
+
+/* ===== comparison bars ===== */
+function renderBars(){
+  const policies=[
+    {name:'FIFO',  f:()=>hitsOf(fifoTrace(seq,n)), c:'#8e7cc3'},
+    {name:'CLOCK', f:()=>hitsOf(clockTrace(seq,n)), c:'#e67e22'},
+    {name:'LRU',   f:()=>hitsOf(lruTrace(seq,n)),  c:'#27ae60'},
+    {name:'LRU-2', f:()=>hitsOf(lrukTrace(seq,n,2)),c:'#2980b9'},
+    {name:'OPT',   f:()=>hitsOf(optTrace(seq,n)),  c:'#f1c40f'},
+  ];
+  const total=seq.length;
+  let html='';
+  policies.forEach(p=>{
+    const h=p.f(), pct=total? (h/total*100):0;
+    html+=`<div class="barwrap"><span class="lab">${p.name}</span>`
+      +`<span class="track"><span class="fill" style="width:${pct}%;background:${p.c}"></span></span>`
+      +`<span class="num">${h}/${total} hits (${pct.toFixed(1)}%)</span></div>`;
+  });
+  html+=`<div class="micro" style="margin-top:.45rem">OPT is the unbeatable Belady-MIN lower bound. `
+    +`On the default string N=4: FIFO=2, CLOCK=2, LRU=4, LRU-2=4, OPT=6 (matches page_eviction.py Section D).</div>`;
+  document.getElementById('bars').innerHTML=html;
+}
+
+/* ===== events ===== */
+function setAlgo(a){
+  algo=a;
+  ['Lru','Clock','Lru2'].forEach(k=>document.getElementById('b'+k).classList.toggle('active', a==={Lru:'lru',Clock:'clock',Lru2:'lru2'}[k]));
+  renderLegend(); rebuild();
+}
+document.getElementById('bLru').addEventListener('click',()=>setAlgo('lru'));
+document.getElementById('bClock').addEventListener('click',()=>setAlgo('clock'));
+document.getElementById('bLru2').addEventListener('click',()=>setAlgo('lru2'));
+document.getElementById('nSlider').addEventListener('input',e=>{ document.getElementById('nVal').textContent=e.target.value; });
+document.getElementById('nSlider').addEventListener('change',rebuild);
+document.getElementById('seqInput').addEventListener('change',rebuild);
+document.getElementById('bReset').addEventListener('click',()=>goto(-1));
+document.getElementById('bPrev').addEventListener('click',()=>goto(cur-1));
+document.getElementById('bNext').addEventListener('click',()=>goto(cur+1));
+document.getElementById('bEnd').addEventListener('click',()=>goto(seq.length-1));
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(e.key==='ArrowRight'){goto(cur+1);e.preventDefault();}
+  if(e.key==='ArrowLeft'){goto(cur-1);e.preventDefault();}
+});
+
+/* ===== gold badge ===== */
+const chk=document.getElementById('check');
+chk.textContent = goldOk ? 'check: OK — LRU=4, CLOCK=2, LRU-2=4 on SEQ, N=4 (matches page_eviction.py)' : 'check: FAIL — mismatch!';
+chk.style.borderColor = goldOk?'#27ae60':'#c0392b';
+chk.style.color = goldOk?'#27ae60':'#c0392b';
+chk.style.background = goldOk?'#1c3a25':'#3a1414';
+
+/* ===== init ===== */
+renderLegend();
+rebuild();
+</script>
+</body>
+</html>

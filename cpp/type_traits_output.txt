@@ -1,0 +1,219 @@
+type_traits.cpp — Phase 6 bundle.
+Compile-time TYPE INTROSPECTION (queries -> bool) + TRANSFORMATION (maps -> type).
+Every value below is a COMPILE-TIME constant; asserted via std::is_same_v + the boolean.
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — Primary categories + the _v (C++17) bool shortcut
+======================================================================
+PRIMARY CATEGORY TRAITS (each returns a compile-time bool):
+
+trait                              result
+---------------------------------- ------
+is_integral_v<int>                 true
+is_integral_v<bool>                true   (bool IS integral)
+is_integral_v<char>                true
+is_integral_v<std::size_t>         true   (size_t is an integer typedef)
+is_integral_v<double>              false   (floats are NOT integral)
+is_integral_v<std::string>         false
+is_floating_point_v<float>         true
+is_floating_point_v<double>        true
+is_floating_point_v<int>           false
+is_class_v<MyClass>                true
+is_class_v<std::string>            true   (string is a class)
+is_class_v<int>                    false
+is_class_v<MyEnum>                 false   (enums are NOT classes)
+is_pointer_v<int*>                 true
+is_pointer_v<std::string*>         true
+is_pointer_v<int>                  false
+is_pointer_v<int&>                 false   (references are NOT pointers)
+is_enum_v<MyEnum>                  true
+is_array_v<int[5]>                 true
+is_union_v<MyUnion>                true
+is_void_v<void>                    true
+
+The _v shortcut vs the old ::value form (identical bool):
+  C++11:  std::is_integral<int>::value   = true
+  C++17:  std::is_integral_v<int>        = true   (same bool, less typing)
+[check] is_integral_v<int> == true: OK
+[check] is_integral_v<bool> == true (bool IS integral): OK
+[check] is_integral_v<double> == false (floats are not integral): OK
+[check] is_floating_point_v<double> == true: OK
+[check] is_class_v<std::string> == true: OK
+[check] is_pointer_v<int*> == true: OK
+[check] is_pointer_v<int&> == false (a reference is not a pointer): OK
+[check] is_enum_v<MyEnum> == true: OK
+[check] is_integral<int>::value == is_integral_v<int> (the two forms agree): OK
+
+======================================================================
+SECTION B — Type relations (is_same / is_base_of / is_convertible)
+======================================================================
+is_same_v<T, U> (type equality — cv-qualifiers make distinct types):
+  is_same_v<int, int>            = true
+  is_same_v<int, const int>      = false   (const matters!)
+  is_same_v<int, int&>           = false   (a reference is a distinct type)
+  is_same_v<int, unsigned int>   = false   (signedness matters)
+  is_same_v<int, std::int32_t>   = true   (int32_t is a typedef of int here)
+
+is_base_of_v<Base, Derived> (inheritance — incl. private/ambiguous):
+  is_base_of_v<Base, Derived>    = true   (Derived : Base)
+  is_base_of_v<Derived, Base>    = false   (reversed: false)
+  is_base_of_v<Base, Base>       = true   (a class is a base of ITSELF)
+  is_base_of_v<Base, Other>      = false   (unrelated)
+
+is_convertible_v<From, To> (IMPLICIT conversion only — no casts):
+  is_convertible_v<Derived*, Base*> = true   (upcast is implicit)
+  is_convertible_v<Base*, Derived*> = false   (downcast needs static_cast)
+  is_convertible_v<int, double>     = true   (numeric promotion)
+  is_convertible_v<double, int>     = true   (narrowing, but still implicit)
+  is_convertible_v<std::string, int> = false
+[check] is_same_v<int, int>: OK
+[check] is_same_v<int, const int> == false (cv makes distinct types): OK
+[check] is_same_v<int, std::int32_t> == true on this LP64 ABI: OK
+[check] is_base_of_v<Base, Derived>: OK
+[check] is_base_of_v<Derived, Base> == false (reversed): OK
+[check] is_base_of_v<Base, Base> == true (reflexive): OK
+[check] is_convertible_v<Derived*, Base*> (implicit upcast): OK
+[check] is_convertible_v<Base*, Derived*> == false (downcast needs static_cast): OK
+
+======================================================================
+SECTION C — Type TRANSFORMATIONS (yield a type; assert via is_same_v)
+======================================================================
+cv-qualifier additions / removals (assert via is_same_v):
+  remove_const_t<const int>          == int        ? true
+  remove_volatile_t<volatile int>    == int        ? true
+  remove_cv_t<const volatile int>    == int        ? true
+  add_const_t<int>                   == const int  ? true
+  add_cv_t<int>                      == const vola ? true
+
+reference additions / removals:
+  remove_reference_t<int&>           == int        ? true
+  remove_reference_t<int&&>          == int        ? true
+  add_lvalue_reference_t<int>        == int&       ? true
+  add_rvalue_reference_t<int>        == int&&      ? true
+
+pointer addition:
+  add_pointer_t<int>                 == int*       ? true
+  remove_pointer_t<int*>             == int        ? true
+
+decay_t<T> — simulates passing T BY VALUE to a template:
+  decay_t<int>                       == int        ? true
+  decay_t<int&>                      == int        ? true   (ref stripped)
+  decay_t<int&&>                     == int        ? true   (rref stripped)
+  decay_t<const int&>                == int        ? true   (cv AND ref stripped)
+  decay_t<int[5]>                    == int*       ? true   (array -> pointer)
+  decay_t<int(int)>                  == int(*)(int)? true   (function -> fn-ptr)
+  decay_t<int[4][2]>                 == int(*)[2]  ? true   (one level only)
+
+remove_cvref_t (C++20) — the modern shortcut for cv+ref stripping:
+  remove_cvref_t<const int&>         == int        ? true
+  remove_cvref_t<int&&>              == int        ? true
+
+The _t shortcut vs the old ::type form (identical type):
+  C++11:  std::remove_const<const int>::type   == int ? true
+  C++14:  std::remove_const_t<const int>       == int ? true
+[check] remove_const_t<const int> == int: OK
+[check] remove_cv_t<const volatile int> == int: OK
+[check] remove_reference_t<int&> == int: OK
+[check] remove_reference_t<int&&> == int: OK
+[check] add_const_t<int> == const int: OK
+[check] add_pointer_t<int> == int*: OK
+[check] decay_t<const int&> == int (cv AND ref stripped): OK
+[check] decay_t<int[5]> == int* (array decays to pointer): OK
+[check] decay_t<int(int)> == int(*)(int) (function decays to fn-ptr): OK
+[check] decay_t<int[4][2]> == int(*)[2] (one level only): OK
+[check] remove_cvref_t<const int&> == int (C++20 shortcut): OK
+[check] remove_const<T>::type == remove_const_t<T> (the two forms agree): OK
+
+======================================================================
+SECTION D — Composite categories + property queries (rank / extent)
+======================================================================
+COMPOSITE category traits (unions of the primary categories):
+  is_arithmetic_v<int>          = true   (integral OR floating_point)
+  is_arithmetic_v<double>       = true
+  is_arithmetic_v<bool>         = true   (bool is integral -> arithmetic)
+  is_arithmetic_v<int*>         = false   (pointers are NOT arithmetic)
+  is_arithmetic_v<std::string>  = false
+
+  is_object_v<int>              = true   (an int IS an object)
+  is_object_v<int&>             = false   (references are NOT objects)
+  is_object_v<void>             = false   (void is incomplete)
+
+  is_scalar_v<int>              = true
+  is_scalar_v<MyEnum>           = true   (enums are scalars)
+  is_scalar_v<int*>             = true
+
+PROPERTY QUERIES (return std::size_t — a dimension, not a bool):
+  rank_v<int>                   = 0   (not an array -> 0 dimensions)
+  rank_v<int[10]>               = 1   (1-dimensional)
+  rank_v<int[3][4]>             = 2   (2-dimensional)
+  rank_v<int[2][3][4]>          = 3   (3-dimensional)
+
+  extent_v<int, 0>              = 0   (not an array -> 0)
+  extent_v<int[10]>             = 10   (== extent_v<int[10], 0>)
+  extent_v<int[3][4], 0>        = 3
+  extent_v<int[3][4], 1>        = 4   (the inner dimension)
+  extent_v<int[3], 5>           = 0   (no such dimension -> 0)
+
+sizeof the array TYPES (the extent product * sizeof element):
+  sizeof(int[10])    = 40   (10 * 4)
+  sizeof(int[3][4])  = 48   (3 * 4 * 4)
+[check] is_arithmetic_v<int>: OK
+[check] is_arithmetic_v<double>: OK
+[check] is_arithmetic_v<bool> (bool is arithmetic): OK
+[check] is_arithmetic_v<int*> == false (pointers are not arithmetic): OK
+[check] is_object_v<int>: OK
+[check] is_object_v<int&> == false (references are not objects): OK
+[check] is_scalar_v<MyEnum> (enums are scalars): OK
+[check] rank_v<int> == 0 (not an array): OK
+[check] rank_v<int[10]> == 1: OK
+[check] rank_v<int[3][4]> == 2: OK
+[check] extent_v<int[3][4], 1> == 4: OK
+[check] extent_v<int> == 0 (not an array): OK
+[check] sizeof(int[3][4]) == 3 * 4 * sizeof(int): OK
+
+======================================================================
+SECTION E — The implementation trick + _v/_t history + traits vs concepts
+======================================================================
+(1) A HAND-ROLLED is_my_integral<T> (primary = false_type + specializations):
+    is_my_integral<int>::value         = true   (specialization hit)
+    is_my_integral<long>::value        = true   (specialization hit)
+    is_my_integral<double>::value      = false   (PRIMARY template: false)
+    is_my_integral<std::string>::value = false   (PRIMARY template: false)
+[check] hand-rolled is_my_integral<int>::value (specialization matches): OK
+[check] hand-rolled is_my_integral<double>::value == false (primary template wins): OK
+
+(2) The _v / _t SHORTCUTS vs the old ::value / ::type forms:
+    QUERY  (-> bool):
+      C++11:  std::is_integral<int>::value              = true
+      C++17:  std::is_integral_v<int>                   = true   (variable template)
+    TRANSFORM (-> type):
+      C++11:  std::remove_const<const int>::type == int ? true
+      C++14:  std::remove_const_t<const int>      == int ? true   (alias template)
+[check] is_integral<int>::value == is_integral_v<int>: OK
+
+(3) TRAITS vs CONCEPTS (C++20): the modern replacement for category/relation traits
+    trait (bool)                       concept (constraint)            same answer?
+    ----------------------------------  -----------------------------  -------------
+    is_integral_v<int>           = true   std::integral<int>           = true   true
+    is_integral_v<double>        = false  std::integral<double>        = false  true
+    is_base_of_v<Base,Derived>   = true   std::derived_from<Derived,Base> = true   true
+    is_convertible_v<Derived*,Base*> = true   std::convertible_to<Derived*,Base*> = true   true
+
+    static_assert(std::integral<int>);                       passes
+    static_assert(!std::integral<double>);                    passes
+    static_assert(std::derived_from<Derived, Base>);         passes
+    static_assert(std::convertible_to<Derived*, Base*>);     passes
+
+    -> Concepts give NAMED constraint-failure diagnostics instead of an
+       SFINAE substitution-failure wall of template spew. But they cannot
+       REPLACE transformations (remove_const_t, decay_t) — there is no
+       'remove_const concept'; traits remain the type-level compute layer.
+[check] std::integral<int> (concept form) == is_integral_v<int>: OK
+[check] std::integral<double> == false (matches the trait): OK
+[check] std::derived_from<Derived, Base> == is_base_of_v<Base, Derived>: OK
+[check] std::convertible_to<Derived*, Base*> == is_convertible_v<Derived*, Base*>: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

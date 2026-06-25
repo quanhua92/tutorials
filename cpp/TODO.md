@@ -32,11 +32,11 @@
 | 3 | Memory, Ownership & Move Semantics | 7 | ✅ done (7/7, 286 checks) |
 | 4 | Concurrency & the Memory Model | 6 | ✅ done (6/6, 138 checks) |
 | 5 | Standard Library Essentials | 7 | ✅ done (7/7, 234 checks) |
-| 6 | Compile-time Computation & Metaprogramming | 5 | ⬜ pending |
+| 6 | Compile-time Computation & Metaprogramming | 5 | ✅ done (5/5, 143 checks) |
 | 7 | Error Handling, UB & Idioms | 5 | ⬜ pending |
 | 8 | Build, Tooling & Production | 6 | ⬜ pending |
 | — | Companion walkthroughs (Boost.Asio/Crow/redis-plus-plus) | ~18 | ⬜ pending |
-| | **Total** | **51 + ~18** | **35/51 built** |
+| | **Total** | **51 + ~18** | **40/51 built** |
 
 **Reading order is the phase order.** Each phase assumes the prior — Phase 3's
 move semantics leans on Phase 1's value/reference/pointer; Phase 4's memory

@@ -1,0 +1,121 @@
+sfinae_enable_if.cpp — Phase 6 bundle (SFINAE / enable_if / void_t).
+Every value below is computed by this file. Compiled -std=c++23
+-O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — the SFINAE rule: ill-formed immediate-context substitution is dropped
+======================================================================
+probe(T, typename T::value_type* = nullptr)   // overload #1
+probe(...)                                     // overload #2 (fallback)
+
+probe(std::vector<int>) -> #1 VIABLE: T::value_type names a type (overload #1 selected)
+probe(42)               -> #2 FALLBACK: T::value_type ill-formed -> #1 SFINAE-DROPPED -> #2 runs
+[check] probe(vector<int>) selects #1 (vector<int>::value_type is int): OK
+[check] probe(42) selects #2 (int has no value_type; #1 was SFINAE-dropped): OK
+[check] the drop is SILENT (no compile error) — that IS the SFINAE rule: OK
+
+Substitution occurs in: the function type (return + all params),
+template-parameter declarations, the partial-specialization arg list;
+expressions since C++11; the explicit specifier since C++20.
+Only IMMEDIATE-CONTEXT failures are SFINAE; later errors are HARD.
+[check] SFINAE applies only in the immediate context (cppreference rule): OK
+
+======================================================================
+SECTION B — std::enable_if: conditionally enable a template (return-type form)
+======================================================================
+std::enable_if<B, T=void>::type  exists (== T) iff B is true; absent otherwise.
+  is_integral_v<int>          = true   -> integral  half<int>    VIABLE
+  is_integral_v<double>       = false  -> integral  half<double> DROPPED
+  is_floating_point_v<double> = true   -> floating half<double> VIABLE
+[check] is_integral_v<int> true -> integral half<int> viable: OK
+[check] is_integral_v<double> false -> integral half<double> SFINAE-dropped: OK
+[check] is_floating_point_v<double> true -> floating half<double> viable: OK
+
+half(10)  = 5    (integral  overload: 10/2)
+half(3.0) = 1.500000    (floating overload: 3.0/2)
+[check] half(10) == 5 (integral overload selected): OK
+[check] half(3.0) == 1.5 (floating overload selected): OK
+[check] the integral overload was DROPPED for 3.0 (the floating one ran instead): OK
+
+With NO floating overload, half(3.0) would be a HARD compile error
+(no viable function) — not silently wrong. That is the SFINAE contract.
+[check] half(3.0) drops the integral overload (documented): OK
+
+======================================================================
+SECTION C — the 4 enable_if positions + void_t (C++17) detection
+======================================================================
+The 4 places to put enable_if (all enabled for int here):
+  (1) return type:               pos1_return(7)   = 7
+  (2) function parameter:        pos2_param(7)    = (2) function-parameter position
+  (3) non-type template param:   pos3_nontype(7)  = (3) non-type template-parameter position (default value)
+  (4) default template-type arg: pos4_defaultarg(7) = (4) default template-type-argument position
+[check] (1) return-type position runs for int: OK
+[check] (2) function-parameter position runs for int: OK
+[check] (3) non-type template-param position runs for int: OK
+[check] (4) default template-type-arg position runs for int: OK
+
+Tradeoffs:
+  (1) return type: classic; NOT usable for constructors/destructors.
+  (2) parameter:   NOT usable for most operator overloads (fixed arity).
+  (3) non-type tpl: CAN discriminate two overloads (distinct default vals).
+  (4) default arg:  CANNOT discriminate two overloads -> redeclaration trap.
+[check] only the non-type position (3) cleanly discriminates two overloads: OK
+
+void_t (C++17) detection idiom (primary=false_type; specialization via void_t=true_type):
+  has_value_type<vector<int>>::value = true
+  has_value_type<int>::value         = false
+  has_size<vector<int>>::value       = true
+  has_size<int>::value               = false
+  has_iterator_category<int*>::value = true
+  has_iterator_category<int>::value  = false
+[check] has_value_type<vector<int>> true (vector has ::value_type): OK
+[check] has_value_type<int> false (int has no ::value_type): OK
+[check] has_size<vector<int>> true (.size() is well-formed): OK
+[check] has_size<int> false (int has no .size()): OK
+[check] has_iterator_category<int*> true (int* is an iterator): OK
+[check] has_iterator_category<int> false (int is not an iterator): OK
+[check] void_t works for BOTH type detection and expression detection: OK
+
+======================================================================
+SECTION D — the famously-bad SFINAE errors + if constexpr (modern alternative)
+======================================================================
+SFINAE error messages leak template internals (the famous 'wall'):
+  error: no type named 'type' in 'std::enable_if<false, int>'
+    -> followed by ~30-50 lines of nested substitution/instantiation.
+  That wall is THE reason C++20 concepts and C++17 if constexpr exist.
+  (A late / AFTER-instantiation error is NOT SFINAE — it is a HARD error.)
+
+if constexpr (C++17) replaces enable_if-overload-sets for in-body branching:
+  describe_modern<int>()    -> if constexpr: T is integral (other branches discarded, NOT instantiated)
+  describe_modern<double>() -> if constexpr: T is floating-point (other branches discarded)
+[check] describe_modern<int> takes the integral branch: OK
+[check] describe_modern<double> takes the floating-point branch: OK
+[check] the discarded branch was NOT instantiated (if constexpr, C++17): OK
+
+======================================================================
+SECTION E — prefer concepts (C++20) for new code; cross-language
+======================================================================
+The concept equivalent of enable_if — one line, named constraint:
+  template <std::integral T>        T half_concept(T x) { return x / 2; }
+  template <std::floating_point T>  T half_concept(T x) { return x / 2; }
+  half_concept(10)  = 5
+  half_concept(3.0) = 1.500000
+[check] half_concept(10) == 5 (integral concept overload): OK
+[check] half_concept(3.0) == 1.5 (floating concept overload): OK
+[check] std::integral<double> is false (concept cleanly excludes it): OK
+
+Modern guidance (cppreference 'Alternatives'): PREFER concepts (C++20) and
+if constexpr (C++17) — and tag dispatch — OVER SFINAE/enable_if. Use
+static_assert if you only want a conditional compile-time error.
+[check] cppreference: concepts / if constexpr / tag dispatch preferred over SFINAE: OK
+
+Cross-language: compile-time conditional types / constraints ---
+  C++ (this):   std::enable_if<cond, T>::type   (SFINAE; pre-concepts, messy)
+  C++ modern:   template <std::integral T>        (concept: the replacement)
+  TS:           T extends U ? X : Y              (conditional types; clean)
+  Rust:         trait bounds (no SFINAE; traits are the clean model)
+[check] TS conditional types are the closest sibling (same idea, cleaner syntax): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

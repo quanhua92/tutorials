@@ -1,0 +1,133 @@
+constexpr_consteval.cpp — Phase 6 bundle (Compile-time Computation).
+Compile-time-ness is PROVEN by using results as array bounds & template args.
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — constexpr variable & function (compile OR run)
+======================================================================
+(1) constexpr VARIABLE: computed at compile time, usable as an array
+    bound AND a template argument (a runtime value is forbidden there).
+    constexpr int N = factorial(5);  -> N = 120
+    int arr[N]{};                    -> sizeof(arr) = 480 bytes
+    CompileTimeInt<factorial(3)>     -> 6  (factorial(3) as a template arg)
+[check] constexpr factorial(5) == 120: OK
+[check] constexpr N usable as an array bound (arr has N elements): OK
+[check] constexpr factorial(3) usable as a template argument (== 6): OK
+
+(2) constexpr FUNCTION: ALSO callable with a NON-constant argument
+    (a `volatile` read is never a constant expression -> forces a runtime
+    evaluation; the compiler may still fold it, but the call is well-formed).
+    volatile int source = 7; int n = source; factorial(n) = 5040
+[check] constexpr factorial(7) callable with a runtime arg, == 5040: OK
+
+(3) constexpr implies const: a later `N = 0;` would be a compile error.
+[check] constexpr implies const: N is immutable and == 120: OK
+
+======================================================================
+SECTION B — consteval (C++20): immediate function, compile-time ONLY
+======================================================================
+(1) consteval: EVERY call MUST produce a compile-time constant. Proven by
+    using the result as an array bound and as a template argument.
+    consteval int square(int);   constexpr sq = square(7);  -> sq = 49
+    int arr2[square(4)]{};       -> sizeof(arr2) = 64 bytes
+    CompileTimeInt<square(5)>    -> 25  (square(5) as a template arg)
+    fourth_power(2) = square(square(2)) -> 16  (consteval calls consteval)
+[check] consteval square(7) == 49 (computed at compile time): OK
+[check] consteval square(4) usable as an array bound (arr2 has 16 elements): OK
+[check] consteval square(5) usable as a template argument (== 25): OK
+[check] consteval fourth_power(2) == 16 (consteval propagates up): OK
+
+(2) consteval vs constexpr (the headline contrast):
+    constexpr  -> compile-time OR runtime  (the caller's arguments decide)
+    consteval  -> compile-time ONLY        (a runtime-arg call is ill-formed)
+[check] consteval is compile-time-only (vs constexpr's compile-OR-run): OK
+
+(3) Calling a consteval fn with a RUNTIME arg is ILL-FORMED (documented;
+    NOT in this build — a file containing it would not compile):
+        int r = square(runtime_n);
+        // error: call to immediate function 'square' is not a constant
+        //        expression (the arg is not usable at compile time)
+[check] consteval runtime-arg call is a compile error (documented, not built): OK
+
+======================================================================
+SECTION C — constinit (C++20): constant-init a static (mutable)
+======================================================================
+(1) constinit asserts CONSTANT initialization (no dynamic init) for a static
+    or thread-local variable — the C++20 fix for the static-init-order fiasco.
+    (That it COMPILES already proves constant init; a dynamic init would be
+     ill-formed. The runtime value confirms it.)
+    g_seed    (constinit, constant-init)        = 42
+    g_computed (constinit via a constexpr fn)   = 100
+[check] constinit g_seed constant-initialized to 42: OK
+[check] constinit g_computed = base_seed() == 100 (constant-init via constexpr fn): OK
+
+(2) constinit does NOT imply const (unlike constexpr) — the variable stays
+    MUTABLE, so it can be assigned later at runtime:
+    after `g_seed = 999;` -> g_seed = 999
+[check] constinit does NOT imply const (g_seed mutated 42 -> 999): OK
+
+(3) constinit CANNOT combine with constexpr, and a dynamic (runtime) init is
+    ill-formed (documented; NOT in this build — would not compile):
+        int runtime_fn();
+        constinit int bad = runtime_fn();   // ERROR: requires a constant init
+        constexpr constinit int x = 0;      // ERROR: constexpr & constinit clash
+[check] constinit forbids dynamic init and pairing with constexpr (documented): OK
+
+======================================================================
+SECTION D — constexpr ctors (literal types) & the C++14->23 loosening
+======================================================================
+(1) A constexpr-constructible type (a "literal type") can be created at
+    compile time and used in constant expressions (array bounds, template args):
+    constexpr Point p1(3,4), p2(1,2);  p1.dot(p2) = 11
+    int arr3[p1.dot(p2)]{};            -> sizeof(arr3) = 44 bytes
+    CompileTimeInt<p1.dot(p2)>         -> 11
+[check] constexpr Point::dot computed at compile time: (3,4).(1,2) == 11: OK
+[check] constexpr Point::dot usable as an array bound (arr3 has 11 elements): OK
+[check] constexpr Point::dot usable as a template argument (== 11): OK
+
+(2) C++14+ relaxation: a constexpr function may use local variables & loops
+    (C++11 required a single return statement):
+    constexpr int sum_squares(5) = 55  (loop + local `acc` in a constexpr fn)
+[check] C++14 relaxed constexpr: sum_squares(5) == 55 (loops/locals allowed): OK
+
+(3) The constexpr loosening, by feature-test macro (this compiler):
+    __cpp_constexpr = 202211L
+        200704L C++11  (constexpr)
+        201304L C++14  (relaxed: loops/locals)
+        201603L C++17  (constexpr lambda)
+        201907L C++20  (trivial default-init; asm in constexpr fns)
+        202002L C++20  (change the active union member)
+        202110L C++23  (non-literal vars, labels, goto in constexpr fns)
+        202207L C++23  (relax some constexpr restrictions)
+        202211L C++23  (static constexpr vars in constexpr fns)
+    __cpp_consteval  = 202211L  (201811L C++20; 202211L C++23 propagate-up)
+    __cpp_constinit  = 201907L  (201907L C++20)
+    __cpp_constexpr_dynamic_alloc = 201907L  (201907L C++20: constexpr new)
+[check] __cpp_constexpr >= 201907L (this compiler supports at least C++20 relaxed constexpr): OK
+
+======================================================================
+SECTION E — if constexpr (preview, P6#39) + cross-language
+======================================================================
+(1) if constexpr (C++17): compile-time branch DISCARD — the untaken branch
+    is not even instantiated. (Full treatment: IF_CONSTEXPR, P6#39.)
+    describe_type(42)   = integral
+    describe_type(3.14) = floating-point
+    describe_type(ptr)  = other  (int* is neither integral nor floating)
+[check] if constexpr: int is 'integral': OK
+[check] if constexpr: double is 'floating-point': OK
+[check] if constexpr: int* is 'other': OK
+
+(2) Cross-language compile-time evaluation (info; this is a C++ bundle):
+    C++  constexpr  -> compile-OR-run  (the caller's arguments decide)
+    C++  consteval  -> compile-ONLY    (a runtime-arg call is ill-formed)
+    C++  constinit  -> constant-init a static (SIOF fix; NOT const)
+    Rust const fn   -> callable from a const context; its body is restricted
+                       to constant expressions (stricter than C++ constexpr).
+                       See ../rust
+    TS / JS         -> NO compile-time VALUE evaluation; types erased at runtime
+    Go   const      -> compile-time CONSTANTS only (untyped), not general fns
+[check] cross-language summary printed (Rust const fn / TS none / Go const-only): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

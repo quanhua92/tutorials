@@ -1,0 +1,149 @@
+promises.ts — Phase 4 bundle (Concurrency & the Event Loop).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Resolution ORDER is deterministic (microtask FIFO);
+TIMING is never asserted. Every rejected promise has a .catch.
+
+======================================================================
+SECTION A — States, the executor runs SYNC, and chaining returns NEW promises
+======================================================================
+States:
+  new Promise(() => {})            -> pending (never settles)
+  race vs fulfilled sentinel        -> "sentinel-won"  (pending did NOT settle)
+[check] a never-resolving promise is pending (sentinel wins the race): OK
+  Promise.resolve(42)               -> fulfilled, value 42
+[check] Promise.resolve(42) is fulfilled with 42: OK
+  Promise.reject(new Error("boom")) -> rejected, reason "boom"
+[check] Promise.reject is rejected; .catch observes reason "boom": OK
+
+The executor runs SYNCHRONOUSLY (then handler runs later, as a microtask):
+  execTrace =
+    "executor-runs-sync"
+    "after-new-Promise"
+    "after-.then-call"
+    "then-fires:7"
+[check] executor runs before construction returns; .then fires after all sync code: OK
+
+Chaining — each .then returns a NEW promise:
+    pRoot = Promise.resolve(1)                       -> 1
+    pA    = pRoot.then(x => x + 1)                   -> 2   (a NEW promise)
+    pB    = pA.then(x => x * 2)                      -> 4
+[check] pRoot, pA, pB are distinct objects (each .then returns a NEW promise): OK
+[check] chained value propagation: [pRoot,pA,pB] === [1,2,4]: OK
+
+======================================================================
+SECTION B — .then handlers are MICROTASKS; value propagation; throw → reject
+======================================================================
+.then is a MICROTASK — fires after sync code, BEFORE setTimeout(0):
+  order = ["sync","promise","timeout"]
+[check] order is ["sync","promise","timeout"] (microtask before macrotask): OK
+
+Microtask FIFO — handlers fire in registration order, before any macrotask:
+  fifo = [1,2,3]
+[check] microtask FIFO order: [1,2,3]: OK
+
+Value propagation + thenable assimilation (return a promise → unwrap it):
+  Promise.resolve(1).then(x => x + 1)                       -> 2
+  Promise.resolve(1).then(() => Promise.resolve("inner"))  -> "inner"  (unwrapped)
+  Promise.resolve(thenable)  [thenable resolves 99]        -> 99  (assimilated)
+[check] value propagation: x => x + 1 yields 2: OK
+[check] returning a promise unwraps it: yields "inner": OK
+[check] Promise.resolve(thenable) assimilates: yields 99: OK
+
+throw in .then → rejection caught by .catch; .finally passes value through:
+  ...then(() => { throw new Error("kaboom") }).catch(e => e.message) -> "kaboom"
+  Promise.resolve("value").finally(() => {})                      -> "value"
+[check] throw in .then rejects; .catch observes "kaboom": OK
+[check] .finally passes the fulfillment value through unchanged: OK
+
+Worked trace: Promise.resolve(1).then(x => x + 1).then(x => x * 2) → 4
+    step 0  Promise.resolve(1)                          -> 1
+    step 1  .then(x => x + 1)  [input 1]           -> 2
+    step 2  .then(x => x * 2)  [input 2]           -> 4
+[check] 3-link chain value propagation: final value === 4: OK
+
+======================================================================
+SECTION C — Promise.all (input order, first-reject) + Promise.allSettled (never rejects)
+======================================================================
+Promise.all — result is in INPUT order (completion order was reversed 3,2,1):
+  inputs settled as d3=30, d2=20, d1=10
+  await Promise.all([d1, d2, d3]) -> [10,20,30]
+[check] Promise.all preserves INPUT order: [10,20,30]: OK
+
+Promise.all short-circuits on the FIRST rejection:
+  inputs: r2 resolves 200, r1 rejects "first-reject"
+  await Promise.all([r1, r2]).catch(e => e.message) -> "first-reject"
+[check] Promise.all rejects with the first rejection reason: OK
+
+Promise.all([]) -> []  (vacuously fulfilled)
+[check] Promise.all([]) === []: OK
+
+Promise.allSettled — never rejects; describes every outcome:
+  [0] { status: "fulfilled", value: "ok" }
+  [1] { status: "rejected",  reason: "bad" }
+  [2] { status: "fulfilled", value: 42 }
+[check] allSettled length matches input length: OK
+[check] allSettled[0] fulfilled value "ok": OK
+[check] allSettled[1] rejected reason "bad": OK
+[check] allSettled[2] fulfilled value 42: OK
+[check] allSettled never rejects — all-reject input yields two rejected entries: OK
+
+======================================================================
+SECTION D — Promise.race (first settle) + Promise.any (first fulfill, AggregateError)
+======================================================================
+Promise.race — first to SETTLE wins (others ignored):
+  fast resolves "fast" before slow -> race -> "fast"
+[check] race returns the first settled value: "fast": OK
+
+Promise.race short-circuits on rejection if it settles first:
+  rejection settles before fulfillment -> race rejects -> "race-rejected-first"
+[check] race rejects when a rejection settles first: OK
+
+Promise.any — first FULFILL wins (rejections ignored until then):
+  [reject, resolve "winner", reject] -> any -> "winner"
+[check] any returns the first fulfillment: "winner": OK
+
+Promise.any — ALL reject → AggregateError (holds every reason):
+    AggregateError.errors -> ["a","b","c"]
+[check] any all-reject yields AggregateError with all reasons [a,b,c]: OK
+
+THE combinator matrix (the payoff table):
+  Promise.all        all fulfill -> array (INPUT order)   | any reject -> first reject reason (short-circuit)
+  Promise.allSettled all settle  -> [{status,value|reason}] | NEVER rejects
+  Promise.race       first SETTLE (fulfill OR reject) wins | the rest ignored (NOT cancelled)
+  Promise.any        first FULFILL wins                     | all reject -> AggregateError(reasons)
+[check] matrix: 4 combinators demonstrated: OK
+
+======================================================================
+SECTION E — Unhandled rejections (always .catch) + resolve/reject + non-cancellable
+======================================================================
+Unhandled rejections — a rejected promise with NO .catch is flagged by Node:
+  Promise.reject(new Error("orphaned-rejection"))  [NO .catch]
+  -> process 'unhandledRejection' fired, reason.message = "orphaned-rejection"
+[check] unhandled rejection captured by the process listener: reason "orphaned-rejection": OK
+
+The fix — attach .catch synchronously (no unhandled-rejection event):
+  Promise.reject(new Error("handled-rejection")).catch(e => e.message)
+    -> caught (handled), reason = "handled-rejection"
+[check] attaching .catch makes the rejection handled: caught "handled-rejection": OK
+
+Promise.resolve / Promise.reject — quick settled promises:
+  await Promise.resolve("quick-ok")            -> "quick-ok"
+  await Promise.reject(new Error("quick-bad")) -> "quick-bad"  (via .catch)
+[check] Promise.resolve("quick-ok") yields "quick-ok": OK
+[check] Promise.reject observed via .catch yields "quick-bad": OK
+
+Promises are NOT cancellable — AbortSignal/AbortController is the story:
+  // a Promise has no .cancel(); abort the SIGNAL passed to the work instead
+  before abort: ac.signal.aborted -> false
+  after  abort: ac.signal.aborted -> true  ;  'abort' listener fired -> true
+[check] AbortController.abort() sets signal.aborted and fires the abort listener: OK
+
+Cross-language model (full treatment in PROMISES.md):
+  JS Promise  : EAGER   — the executor runs at construction; settles once.
+  Rust Future  : LAZY    — inert until an executor (.await) polls it.
+  asyncio Task : scheduled onto a loop; a coroutine wrapped into a Task.
+[check] cross-language model summarized: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

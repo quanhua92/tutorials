@@ -1,0 +1,131 @@
+event_loop.ts — Phase 4 bundle #1 (the foundational concurrency bundle).
+Every interleaving below is captured by THIS file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: JS is SINGLE-THREADED. The event loop runs ONE macrotask,
+drains ALL microtasks, then picks the next macrotask — forever. Every
+ordering below is collected into an array in firing order, then printed
+after all queued callbacks drain (collect-then-print => byte-identical).
+We assert ORDER only, never timing durations (ms are non-reproducible).
+
+======================================================================
+SECTION A — Single thread, one call stack, "run-to-completion"
+======================================================================
+Run-to-completion (MDN's canonical example):
+  const p = Promise.resolve(); let i = 0;
+  p.then(() => { i += 1; record(`first: i=${i}`); });
+  p.then(() => { i += 1; record(`second: i=${i}`); });
+  collected firing order -> ["first: i=1","second: i=2"]
+  (a preemptive scheduler could interleave -> both would see i=2;)
+  (JS NEVER preempts mid-statement -> each callback runs to completion.)
+[check] run-to-completion: order is [first i=1, second i=2] (never interleaved): OK
+
+The event loop's ONE rule (run one task, drain ALL microtasks, repeat):
+  step 1: pick ONE macrotask (task) -> run to completion (stack empties)
+  step 2: drain the ENTIRE microtask queue (incl. microtasks queued by microtasks)
+  step 3: (browser only) render, if it is time
+  step 4: repeat from step 1
+[check] single thread: only ONE macrotask runs at a time (stack empties between tasks): OK
+
+======================================================================
+SECTION B — THE payoff: microtask before macrotask (collect-then-print)
+======================================================================
+THE classic interleaving (sync vs setTimeout(0) vs Promise.then):
+  log.push('sync');                                  // runs NOW (on stack)
+  setTimeout(() => log.push('timeout'), 0);          // queues a MACROTASK
+  Promise.resolve().then(() => log.push('micro'));   // queues a MICROTASK
+  collected firing order -> ["sync","micro","timeout"]
+  => microtask drains BEFORE the next macrotask. Promise.then ALWAYS beats setTimeout(0).
+[check] microtask before macrotask: order is [sync, micro, timeout]: OK
+
+Microtasks scheduling microtasks (the drain is EXHAUSTIVE):
+  // step(n) pushes `micro-n` then, if n<3, queues step(n+1) as a microtask
+  setTimeout(() => chained.push('timeout'), 0);
+  Promise.resolve().then(() => step(1));
+  collected firing order -> ["micro-1","micro-2","micro-3","timeout"]
+  => ALL three microtasks drain before the single macrotask fires.
+[check] chained microtasks all drain before the macrotask: OK
+
+======================================================================
+SECTION C — queueMicrotask, process.nextTick (Node), and microtask starvation
+======================================================================
+queueMicrotask schedules a MICROTASK (same queue as Promise.then):
+  setTimeout(() => qm.push('timeout'), 0);
+  queueMicrotask(() => qm.push('queueMicrotask'));
+  qm.push('sync');
+  collected firing order -> ["sync","queueMicrotask","timeout"]
+[check] queueMicrotask runs after sync, before the setTimeout macrotask: OK
+
+process.nextTick (Node-only) runs BEFORE Promise.then (higher priority):
+  // scheduled from inside a setTimeout (macrotask) callback:
+  process.nextTick(() => nt.push('nextTick'));       // Node-only queue
+  Promise.resolve().then(() => nt.push('microtask')); // microtask queue
+  nt.push('sync');
+  collected firing order -> ["sync","nextTick","microtask"]
+  => nextTick queue drains before the microtask queue (Node-specific).
+  CAVEAT: at top level / inside an async resumption the order can flip
+          (V8's microtask checkpoint drains promises first there).
+[check] process.nextTick fires before Promise.then (macrotask context, Node): OK
+
+Microtask starvation mechanism (FINITE demo — an INFINITE chain hangs):
+  // feed() pushes `micro-n` then, if n<3, queueMicrotask(feed) again
+  setTimeout(() => starve.push('macrotask-finally'), 0);
+  queueMicrotask(feed);
+  collected firing order -> ["micro-1","micro-2","micro-3","macrotask-finally"]
+  => the macrotask waits until the ENTIRE microtask chain drains.
+  => if feed() always re-queued itself, the macrotask would NEVER fire.
+[check] finite microtask chain fully drains before the macrotask (starvation mechanism): OK
+
+======================================================================
+SECTION D — The Node.js (libuv) loop phases: setImmediate vs setTimeout(0)
+======================================================================
+Node.js (libuv) loop phases — each tick walks them in this order:
+  timers -> pending callbacks -> idle/prepare -> poll -> check -> close -> (repeat)
+  setTimeout/setInterval : timers phase
+  most I/O callbacks     : poll phase
+  setImmediate           : check phase (runs right AFTER poll)
+  microtasks + nextTick  : drained BETWEEN phases (not a phase)
+[check] setImmediate runs in the check phase (after poll, before the next tick's timers): OK
+
+Inside an I/O cycle (poll-phase callback), setImmediate ALWAYS precedes setTimeout(0):
+  fs.readFile(file, () => {                       // poll-phase callback
+    setTimeout(() => log.push('setTimeout(0)'), 0); // next tick's timers
+    setImmediate(() => log.push('setImmediate'));   // this tick's check
+  });
+  collected firing order -> ["setImmediate","setTimeout(0)"]
+  => from an I/O cycle, setImmediate is DETERMINISTICALLY first.
+  CAVEAT: from the MAIN MODULE the order is NON-DETERMINISTIC (not asserted).
+[check] inside an I/O cycle: setImmediate fires before setTimeout(0) (deterministic): OK
+
+process.nextTick fires BEFORE setImmediate (despite the misleading names):
+  setImmediate(() => ni.push('setImmediate'));  // check phase, next tick
+  process.nextTick(() => ni.push('nextTick'));   // after current op (this tick)
+  collected firing order -> ["nextTick","setImmediate"]
+  => Node docs: 'the names should be swapped' — but won't change (npm breakage).
+[check] process.nextTick fires before setImmediate: OK
+
+======================================================================
+SECTION E — Blocking the loop (don't!) + why async I/O scales
+======================================================================
+A synchronous busy-loop DELAYS a queued setTimeout (proof by ORDER):
+  setTimeout(() => log.push('timeout-fired'), 0); // queued (macrotask)
+  log.push('timeout-scheduled');                  // sync, now
+  for (let k = 0; k < 5_000_000; k++) sum += k;   // sync CPU work BLOCKS
+  log.push(`after-busy-loop-sum=${sum}`);       // sync, still before timeout
+  collected firing order -> ["timeout-scheduled","after-busy-loop-sum=12499997500000","timeout-fired"]
+  => 'timeout-fired' appears LAST: it was delayed past ALL the sync work.
+  => this is WHY CPU-heavy code must be chunked or moved to a worker (🔗 WORKER_THREADS).
+[check] blocking delays the timer: 'timeout-fired' fires AFTER the busy-loop (last): OK
+
+Why async I/O scales on ONE thread (Node.js docs):
+  - I/O is offloaded to the OS kernel (async) and to libuv's thread pool
+    (for inherently-blocking ops: fs, dns.lookup, some crypto).
+  - The JS thread registers a callback and moves on immediately;
+    it never blocks WAITING for I/O.
+  - On completion the kernel/pool pushes the callback to the POLL queue;
+    the loop resumes it in the poll phase. (🔗 TIMERS_IO, Phase 4.)
+[check] Node scales via async I/O offload (OS kernel + libuv thread pool), not thread-per-connection: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

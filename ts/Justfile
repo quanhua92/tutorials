@@ -1,0 +1,106 @@
+# ts/Justfile — bundle runner & verification harness for the pnpm workspace.
+#
+# Each bundle is a standalone .ts file run directly via `tsx` (esbuild, no
+# compile step, no artifact left behind). Bundles live in dep-tier member dirs
+# (core/ for Phases 1–5, metaprog/ for P6, web/ + db/ for P7–8). The Justfile
+# locates the member dir (where <name>.ts / <name>.md / <name>_output.txt live)
+# automatically by stem.
+#
+# Common:
+#   just run values_types_coercion   # run a bundle
+#   just out  values_types_coercion   # (re)capture its _output.txt
+#   just check values_types_coercion  # verify ONE (run + [check] count + typecheck + output)
+#   just sweep                        # verify ALL bundles
+#   just list                         # list every bundle stem + its member
+#   just fmt [name]                   # prettier --write one (or all)
+#   just typecheck [name]             # tsc --noEmit one bundle's member (or all)
+#   just new <name> [member]          # scaffold a bundle (default member: core)
+#   just clean                        # remove caches
+
+set shell := ["bash", "-c"]
+default := "list"
+
+# Resolve the member directory holding a bundle's .ts (e.g. core/ , web/ ).
+memberof name:
+  @echo "$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)")"
+
+# List every bundle stem + its member.
+list:
+  @echo "TypeScript bundles in the workspace:"
+  @for f in $$(find . -type f -name '*.ts' -not -path '*/node_modules/*' -not -path './scripts/*'); do \
+    name=$$(basename "$$f" .ts); dir=$$(dirname "$$f"); \
+    echo "  $$name  [$$dir]"; \
+  done
+
+# Run a bundle by stem (workspace-wide; member resolved by file lookup).
+run name:
+  @d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    pnpm exec tsx "$$d/{{name}}.ts"
+
+# (Re)capture a bundle's stdout to <member>/<name>_output.txt (deterministic: §4.2 rules).
+out name:
+  @d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    pnpm exec tsx "$$d/{{name}}.ts" > "$$d/{{name}}_output.txt" 2>/dev/null \
+    && { test -s "$$d/{{name}}_output.txt" && echo "captured $$d/{{name}}_output.txt ($$(wc -l < "$$d/{{name}}_output.txt" | tr -d ' ') lines)" || echo "EMPTY output — run failed?"; } \
+    || echo "RUN FAILED"
+
+# Verify ONE bundle: run it, count [check] lines, typecheck its member, _output.txt presence.
+check name:
+  @echo "===== {{name}} ====="
+  @d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    if pnpm exec tsx "$$d/{{name}}.ts" > /tmp/ts_{{name}}.out 2>/tmp/ts_{{name}}.err; then echo "  tsx run: OK"; else echo "  tsx run: FAILED"; cat /tmp/ts_{{name}}.err; exit 1; fi
+  @n=$$(grep -c "\[check\]" /tmp/ts_{{name}}.out); echo "  checks printed: $$n"
+  @d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    if pnpm exec tsc --noEmit -p "$$d/tsconfig.json" >/dev/null 2>&1; then echo "  typecheck: OK"; else echo "  typecheck: FAIL"; fi
+  @d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    if test -s "$$d/{{name}}_output.txt"; then echo "  output.txt: present"; else echo "  output.txt: MISSING"; fi
+
+# Typecheck one bundle's member (or the whole workspace with no arg).
+typecheck name='':
+  @if [ -z "{{name}}" ]; then \
+    echo "typecheck: whole workspace (every member)"; pnpm -r exec tsc --noEmit; \
+  else \
+    d=$$(dirname "$$(find . -type f -name '{{name}}.ts' -not -path '*/node_modules/*' | head -1)"); \
+    pnpm exec tsc --noEmit -p "$$d/tsconfig.json"; \
+  fi
+
+# Batch verification sweep across ALL bundles (run after a subagent swarm returns).
+sweep:
+  @echo "===== sweep: all bundles ====="
+  @fail=0; \
+  for f in $$(find . -type f -name '*.ts' -not -path '*/node_modules/*' -not -path './scripts/*' | sort); do \
+    name=$$(basename "$$f" .ts); dir=$$(dirname "$$f"); \
+    printf "\n--- %s [%s] ---\n" "$$name" "$$dir"; \
+    if pnpm exec tsx "$$f" > /tmp/ts_$$name.out 2>/tmp/ts_$$name.err; then \
+      printf "  tsx run: OK\n"; \
+    else \
+      printf "  tsx run: FAILED\n"; cat /tmp/ts_$$name.err; fail=1; \
+    fi; \
+    n=$$(grep -c "\[check\]" /tmp/ts_$$name.out 2>/dev/null); n=$${n:-0}; \
+    printf "  checks printed: %s\n" "$$n"; \
+    if test -s "$$dir/$${name}_output.txt"; then printf "  output.txt: present\n"; else printf "  output.txt: MISSING\n"; fi; \
+  done; \
+  echo; \
+  if [ $$fail -eq 0 ]; then echo "SWEEP: all green"; else echo "SWEEP: failures detected (see above)"; fi
+
+# Scaffold a new bundle from scripts/skeleton.ts into <member>/ (default: core).
+new name member='core':
+  @test ! -f "{{member}}/{{name}}.ts" || { echo "{{member}}/{{name}}.ts already exists"; exit 1; }
+  @test -f scripts/skeleton.ts || { echo "scripts/skeleton.ts missing"; exit 1; }
+  @mkdir -p {{member}}
+  @upper=$$(echo "{{name}}" | tr '[:lower:]' '[:upper:]'); \
+    sed -e "s/__STEM__/{{name}}/g" -e "s/__STEM_UPPER__/$$upper/g" scripts/skeleton.ts > {{member}}/{{name}}.ts
+  @echo "created {{member}}/{{name}}.ts — next: just run {{name}}   (edit sections, then capture: just out {{name}})"
+
+# Remove caches (never source or _output.txt).
+clean:
+  @rm -rf .cache .eslintcache
+  @echo "cleaned caches (node_modules stays — pnpm-managed)"
+
+# phony aliases
+alias r := run
+alias o := out
+alias c := check
+alias s := sweep
+alias l := list
+alias n := new

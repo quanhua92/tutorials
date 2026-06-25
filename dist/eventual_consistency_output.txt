@@ -1,0 +1,180 @@
+eventual_consistency.py - reference impl. All numbers below feed
+EVENTUAL_CONSISTENCY.md. Pure Python stdlib (custom LCG PRNG so the
+.html reproduces gossip peer-picks byte-for-byte).
+Scenario: 3 replicas of key X; one write X=1@v1 to A.
+
+========================================================================
+  SECTION A: convergence - a write spreads until every replica agrees
+========================================================================
+Three replicas of key X, all start X=0 @ v0. We WRITE X=1 @ v1 onto
+replica A, then let ANTI-ENTROPY (push gossip) run round by round.
+
+after WRITE X=1@v1 -> A:   A=X=1@v1, B=X=0@v0, C=X=0@v0
+                          infected (carry v1) = {A}
+
+round 1: A->C(updated)
+          states:   A=X=1@v1, B=X=0@v0, C=X=1@v1
+          infected: {A, C}
+
+round 2: A->B(updated) ; C->A
+          states:   A=X=1@v1, B=X=1@v1, C=X=1@v1
+          infected: {A, B, C}
+
+CONVERGED in 2 rounds: every replica = X=1@v1.
+No new writes arrived during those rounds, so the system reached a
+state where all replicas AGREE. THAT is the eventual-consistency
+promise: eventually, if updates stop, everyone converges.
+
+[check] all replicas share one final state {(1, 1)}: OK
+GOLD (pinned for .html): 3-replica push gossip converges in 2 rounds -> {(1, 1)}
+
+========================================================================
+  SECTION B: stale reads - the window before a replica sees the write
+========================================================================
+Same write as Section A (X=1@v1 at A). A client keeps reading X from
+replica B. While gossip hasn't delivered the update to B yet, the read
+returns X=0 - that is a STALE READ.
+
+client reads B: X=0  <- STALE (expected 1)
+round 1: client reads B: X=0  <- STALE
+round 2: client reads B: X=1  <- fresh
+
+The STALE READ WINDOW for B = rounds 0..1 (2 reads).
+Eventual consistency ALLOWS stale reads DURING convergence - it only
+promises they eventually END. Stronger models forbid them entirely:
+  linearizability   : every read returns the latest WRITTEN value.
+  read-your-writes  : a client always sees its own prior writes.
+  monotonic reads   : once a client sees a value, it never sees an
+                      older one (no going backwards).
+Dynamo offers these only as OPTIONAL, client-tunable session guarantees.
+
+[check] B's stale window closes by round 2:  OK
+
+========================================================================
+  SECTION C: reordered updates - a value can go 0 -> 2 -> 1 (backwards)
+========================================================================
+Two writes to the SAME key from DIFFERENT coordinators:
+  t=1: WRITE X=1 @ v1 -> replica A
+  t=2: WRITE X=2 @ v2 -> replica B    (the LATER, newer write)
+
+Replica C is reached by gossip. There is NO ordering guarantee on
+delivery, so C may receive B's NEWER write BEFORE A's older one.
+
+Scripted delivery to C (a possible, deterministic arrival order):
+  round 1: B -> C  delivers (X=2, v2)
+  round 2: A -> C  delivers (X=1, v1)
+
+--- NAIVE merge (last delivery wins, NO version check) ---
+  start             : C = X=0@v0
+  round1 B->C (v2)  : C = X=2@v2
+  round2 A->C (v1)  : C = X=1@v1    <- went BACKWARDS
+  => C ended at X=1. But the newest write was X=2!
+     The observed sequence 0 -> 2 -> 1 is REVERSED. With no ordering
+     guarantee and no version check, replicas can DIVERGE forever.
+
+--- LWW merge (highest version wins) ---
+  start             : C = X=0@v0
+  round1 B->C (v2)  : C = X=2@v2
+  round2 A->C (v1)  : C = X=2@v2    (v1 < v2 -> rejected)
+  => C ended at X=2. Correct: v2 was the newest write.
+
+THE LESSON: 'eventual consistency' converges ONLY if the merge rule is
+ORDER-INDEPENDENT - it must yield the same final value for ANY delivery
+order. LWW (by version) and CRDTs have this property; naive overwrite
+does NOT. Which order gossip delivers the updates is nondeterministic;
+a good merge rule makes the OUTCOME independent of that order. Whatever
+the order, LWW settles C on X=2.
+
+[check] LWW final=2 (==2, newest) ; naive final=1 (reversed):  OK
+
+========================================================================
+  SECTION D: convergence mechanisms - push gossip, pull, read repair
+========================================================================
+Three ways anti-entropy actually fixes divergent replicas. Same write
+(X=1@v1 at A, 3 replicas) for each; we report ROUNDS TO CONVERGE.
+
+(1) PUSH gossip : each INFECTED node pushes its state to a random peer.
+    Only nodes that already have the update do work. Good early, when
+    few are infected (each push is likely to reach a fresh node).
+    converged in 2 rounds.
+    infected: r0:1 -> r1:2 -> r2:3
+
+(2) PULL gossip : EVERY node asks a random peer for its state.
+    All nodes work every round, so it converges fast in the TAIL
+    (when almost everyone is already updated, pulls still sweep up).
+    converged in 3 rounds.
+    infected: r0:1 -> r1:2 -> r2:2 -> r3:3
+
+(3) READ REPAIR : a client reads from (a quorum of) replicas, spots
+    the newest version, and writes it back to the laggards IN THE SAME
+    round. Convergence in 1 round - but only for keys that are READ.
+    before: A=X=1@v1, B=X=0@v0, C=X=0@v0
+    read newest X=1@v1; wrote back to {B, C}.
+    after : A=X=1@v1, B=X=1@v1, C=X=1@v1
+
+Trade-off: read repair is instant but only fixes keys that are READ;
+gossip fixes EVERYTHING in the background but takes ~log N rounds.
+Dynamo (DeCandia 2007) runs ALL THREE: gossip for liveness, read repair
+for hot keys, and periodic Merkle-tree anti-entropy as a backstop.
+
+[check] push=2r, pull=3r, read-repair=1r (repaired {B,C}):  OK
+
+========================================================================
+  SECTION E: convergence time - gossip is O(log N)  (epidemic spreading)
+========================================================================
+Push-PULL gossip spreads a write like an EPIDEMIC: each round every
+node swaps state with a random peer. An infected-updated node paired
+with a fresh one infects it (via either direction). The infected count
+grows GEOMETRICALLY each round, so reaching all N nodes takes ~log2(N)
+rounds. This is why gossip scales to huge clusters.
+
+| N     | rounds to converge | log2(N) |
+|-------|--------------------|---------|
+| 10    | 3                  | 3.32    |
+| 100   | 7                  | 6.64    |
+| 1000  | 9                  | 9.97    |
+
+Rounds grow with log2(N), not with N: 10x more nodes costs only ~3
+extra rounds. (Random collisions - two infected nodes contacting each
+other - add a small constant factor over the bare log2(N).)
+
+Infection curve for N=1000 (each '#' ~ 2% of the cluster):
+  round  0 |    1 (  0.1%) | 
+  round  1 |    2 (  0.2%) | 
+  round  2 |    7 (  0.7%) | 
+  round  3 |   17 (  1.7%) | 
+  round  4 |   46 (  4.6%) | ##
+  round  5 |  123 ( 12.3%) | ######
+  round  6 |  332 ( 33.2%) | ################
+  round  7 |  682 ( 68.2%) | ##################################
+  round  8 |  950 ( 95.0%) | ###############################################
+  round  9 | 1000 (100.0%) | ##################################################
+
+The logistic SHAPE - slow start, explosive middle, slow tail - is the
+signature of epidemic spreading. It is literally how a rumor or a virus
+moves through a population (Demers et al. 1987).
+
+[check] rounds <= 2*log2(N)+4 for N in 10/100/1000 AND N=1000 hits 1000:  OK
+GOLD (pinned for .html): N=1000 push-pull converges in 9 rounds (log2(1000)=9.97).
+
+========================================================================
+  GOLD CHECK: no new writes => all replicas converge to one final state
+========================================================================
+The defining property of eventual consistency: if no new updates are
+issued, then after enough anti-entropy rounds EVERY replica holds the
+identical (value, version) for every key. Verified at two scales.
+
+3-replica push gossip (LWW, seed=1115):
+  converged in 2 rounds -> final states = {(1, 1)}
+
+1000-node push-pull gossip (LWW, seed=42):
+  converged in 9 rounds -> distinct final states = 1 = (1, 1)
+
+[check] GOLD: 3 replicas -> {(1, 1)}, 1000 nodes -> 1 state (1, 1):  OK
+GOLD scalars (pinned for .html):
+  small convergence rounds = 2 ; final state = (1, 1)
+  large convergence rounds = 9 ; final state = (1, 1)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

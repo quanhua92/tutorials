@@ -1,0 +1,204 @@
+linearizability.py - reference impl. All numbers below feed LINEARIZABILITY.md.
+Pure Python stdlib. Single register X, initial value 0.
+
+========================================================================
+  SECTION A: a linearizable history - read sees the completed write
+========================================================================
+Register X starts at 0. Two clients, two operations:
+
+  C1: .w==]....   W1(write,1,ret=ok)[1-4]
+  C2: .....r=].   R1(read,,ret=1)[5-7]
+
+  C1 writes X=1 (W1), completing at t=4. C2 reads X (R1),
+  invoking at t=5 - AFTER W1's response. Real time says W1 happened
+  first, so R1 MUST see X=1.
+
+Real-time partial order (resp(A) <= inv(B) => A before B):
+  W1 -> R1   (resp(W1)=4 <= inv(R1)=5)
+  (no other edges: only 1 op-pair is time-ordered.)
+
+Checker: 1 topological sort(s) of the real-time order; 1 legal register sequence(s):
+
+  W1 R1   :  [0] W1(->1) R1(=1 ok)   [LEGAL  -> linearizable]
+
+Verdict: HIST_A is LINEARIZABLE.
+The read returned 1, which is exactly the value the completed write
+stored. The linearization (W1, R1) is the one true sequential story.
+
+[check] HIST_A linearizable?  OK
+
+========================================================================
+  SECTION B: a NON-linearizable history - stale read (ret=0)
+========================================================================
+Same setup as Section A, but now R1 returns 0 (stale) even though it
+started AFTER W1 completed:
+
+  C1: .w==]....   W1(write,1,ret=ok)[1-4]
+  C2: .....r=].   R1(read,,ret=0)[5-7]
+
+  C1 writes X=1, completing at t=4. C2 reads at t=5 and gets 0.
+  Real time forces W1 before R1, so R1 should see 1. It saw 0.
+
+Checker: 1 topological sort(s); 0 legal:
+
+  W1 R1   :  [0] W1(->1) R1(=0 MISMATCH ret=0)   [ILLEGAL -> stale]
+
+Verdict: HIST_B is NOT linearizable.
+The ONLY real-time-consistent order is (W1, R1); replaying it makes
+R1 expect 1, but it returned 0. No linearization exists.
+
+--- contrast with SEQUENTIAL CONSISTENCY (Lamport 1979) ---
+Sequential consistency drops the real-time clause, keeping only
+program order (each client's own ops stay ordered). Now R1 is free
+to be placed BEFORE W1, since they are on different clients:
+
+  W1 R1   :  [0] W1(->1) R1(=0 MISMATCH ret=0)   [illegal]
+  R1 W1   :  [0] R1(=0 ok) W1(->1)   [LEGAL -> seq. consistent]
+
+Sequential verdict: HIST_B is sequentially consistent.
+The order (R1, W1) is legal: R1 reads the initial 0, THEN W1 writes 1.
+The client SAW W1 finish, but sequential consistency lets the system
+pretend R1 'hadn't noticed' it yet. LINEARIZABILITY forbids exactly this.
+
+[check] HIST_B not linearizable?  OK
+[check] HIST_B IS sequentially consistent?  OK
+
+========================================================================
+  SECTION C: the linearization point - one instant per operation
+========================================================================
+Each operation has a [inv, resp] interval. The linearization point is
+the SINGLE instant inside that interval where the operation 'appears
+to execute' atomically. Line up the points in time and you get the
+linearization. Real time only constrains NON-overlapping ops; ops that
+overlap may have their points in either relative order.
+
+History C (two CONCURRENT writes + a read):
+
+  C1: .w====]....   W1(write,1,ret=ok)[1-6]
+  C2: ..w==].....   W2(write,2,ret=ok)[2-5]
+  C3: .......r=].   R1(read,,ret=2)[7-9]
+
+  W1 [1--6] and W2 [2--5] OVERLAP: neither finishes before the other
+  starts, so there is NO real-time edge between them. R1 [7--9] starts
+  after both finish, so both must precede it.
+
+Real-time sorts: 2 (W1/W2 may swap; R1 always last). Legal: 1.
+
+  W1 W2 R1   :  [0] W1(->1) W2(->2) R1(=2 ok)   [LEGAL]
+  W2 W1 R1   :  [0] W2(->2) W1(->1) R1(=2 MISMATCH ret=2)   [illegal (read would see wrong value)]
+
+Verdict: HIST_C is LINEARIZABLE.
+
+One valid linearization:  W1 W2 R1
+Matching each op to a linearization point inside [inv, resp]:
+
+| op  | kind  | inv | resp |  interval  | lin pt |
+|-----|-------|-----|------|------------|--------|
+| W1  | write(1) | 1   | 6    | [1,6]     | 3      |
+| W2  | write(2) | 2   | 5    | [2,5]     | 4      |
+| R1  | read(ret=2) | 7   | 9    | [7,9]     | 8      |
+
+The points line up in time as: W1@3 < W2@4 < R1@8
+Each point lies inside its op's interval, points respect real-time
+order, and replaying them gives a legal register story. THAT is the
+linearization-point definition of linearizability (Herlihy & Wing 1990).
+
+[check] HIST_C linearizable with valid lin points?  OK
+[check] linearization points are strictly increasing in time:  OK
+
+========================================================================
+  SECTION D: the checker - enumerate real-time orderings, test each
+========================================================================
+Wing & Gong (1993): a history is linearizable iff SOME topological
+sort of the real-time partial order is a legal sequential register
+history. The algorithm is a backtracking enumeration:
+
+  1. Build the real-time partial order (resp(A) <= inv(B) => A->B).
+  2. Enumerate every total order (topological sort) of that order.
+  3. Replay each as a register; if ANY is legal, -> linearizable.
+
+Run it on all four histories:
+
+| history | #ops | #real-time sorts | #legal | linearizable? |
+|---------|------|------------------|--------|---------------|
+| HIST_A  | 2    | 1                | 1      | YES           |
+| HIST_B  | 2    | 1                | 0      | NO            |
+| HIST_C  | 3    | 2                | 1      | YES           |
+| HIST_D  | 2    | 2                | 1      | YES           |
+
+Detail for HIST_D (overlapping write+read, read returns initial 0):
+  C1: .w===].   W1(write,1,ret=ok)[1-5]
+  C2: ..r=]..   R1(read,,ret=0)[2-4]
+
+  W1 [1--5] and R1 [2--4] OVERLAP -> no real-time edge -> 2 sorts:
+
+    W1 R1   :  [0] W1(->1) R1(=0 MISMATCH ret=0)   [illegal]
+    R1 W1   :  [0] R1(=0 ok) W1(->1)   [LEGAL -> linearizable]
+
+  (R1, W1) wins: R1 reads the initial 0, THEN W1 writes 1. The read
+  happened to complete before the write 'took effect'. This is the key
+  freedom linearizability gives for CONCURRENT operations.
+
+GOLD verdicts (pinned for linearizability.html):
+  is_linearizable(HIST_A) = True  (1 legal / 1 sorts)
+  is_linearizable(HIST_B) = False  (0 legal / 1 sorts)
+  is_linearizable(HIST_C) = True  (1 legal / 2 sorts)
+  is_linearizable(HIST_D) = True  (1 legal / 2 sorts)
+
+[check] all four verdicts match expected {'HIST_A': True, 'HIST_B': False, 'HIST_C': True, 'HIST_D': True}:  OK
+GOLD scalar: is_linearizable(HIST_B) = False  (must be False)
+GOLD scalar: #legal sorts HIST_D = 1  (must be 1)
+
+========================================================================
+  SECTION E: implementation cost - linearizability needs coordination
+========================================================================
+Why isn't everything linearizable? Because guaranteeing that every
+read sees the latest write forces replicas to COORDINATE before they
+respond. The store must pick a single 'latest' value, and that needs
+agreement - CONSENSUS (Raft, Paxos, ZAB) or an equivalent quorum.
+
+CAP consequence (Gilbert & Lynch 2002): linearizability + availability
+are INCOMPATIBLE under a network partition. A linearizable store must
+REFUSE requests it cannot keep consistent -> it is 'CP', not 'AP'.
+
+| system            | mechanism            | linearizable? | cost / notes                |
+|-------------------|----------------------|---------------|-----------------------------|
+| etcd              | Raft consensus (quorum) | YES           | leader + majority round-trip per write |
+| ZooKeeper         | ZAB (Paxos variant)  | YES (sync read) | default reads are sequential; sync() for linearizable |
+| Spanner           | Paxos + TrueTime     | YES (externally consistent) | GPS/atomic clocks; 2PC across shards |
+| Cassandra (ONE)   | tunable / sloppy quorum | NO            | eventual; a read may hit a stale replica |
+| Dynamo            | vector clocks, eventual | NO            | AP store; conflicts resolved after the fact |
+
+Read the rows as a COST LADDER:
+  - etcd / ZooKeeper / Spanner: pay Raft/Paxos round-trips + need a
+    live QUORUM; during a partition the minority side STOPS (CP).
+  - Cassandra / Dynamo: skip coordination, serve any replica fast;
+    reads can be stale, but the store stays AVAILABLE under partition (AP).
+
+Linearizability is the strongest SINGLE-OBJECT model (Herlihy & Wing
+1990). Stronger models (sequential consistency is weaker; serializability
+is about TRANSACTIONS across multiple objects) are out of scope here.
+
+RULE OF THUMB:
+  linearizable  =>  consensus / quorum  =>  extra latency + CP on partition
+  eventual      =>  no coordination      =>  fast + AP on partition
+
+[check] every 'YES' row lists a consensus/quorum mechanism:  OK
+
+========================================================================
+  GOLD CHECK: linearizable passes, non-linearizable fails
+========================================================================
+  HIST_A (read sees completed write)               -> LINEARIZABLE     (1 legal / 1 sorts)  [OK]
+  HIST_B (stale read after completed write)        -> NOT linearizable (0 legal / 1 sorts)  [OK]
+  HIST_C (concurrent writes, read sees later)      -> LINEARIZABLE     (1 legal / 2 sorts)  [OK]
+  HIST_D (overlapping R/W, read sees initial)      -> LINEARIZABLE     (1 legal / 2 sorts)  [OK]
+
+[check] GOLD: all 4 verdicts correct:  OK
+
+[check] HIST_B: linearizable=False, sequentially_consistent=True  (seq is weaker)  ->  OK
+  This is the exact gap: sequential consistency ignores real time,
+  linearizability enforces it. That clause is the whole definition.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

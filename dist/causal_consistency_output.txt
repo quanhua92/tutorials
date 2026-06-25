@@ -1,0 +1,230 @@
+causal_consistency.py - reference impl. All numbers below feed
+CAUSAL_CONSISTENCY.md. python3, stdlib only.
+clients = ('alice', 'bob', 'carol', 'dave') ; replicas = 3 (R0, R1, R2)
+
+==========================================================================
+  SECTION A: causal order - Alice posts, Bob replies
+==========================================================================
+Two operations with a causal link:
+
+  A(alice:1='Hello', deps={})
+  B(bob:1='Re:Hello', deps={alice:1})
+
+Bob's reply B carries dep {alice:1} - he had SEEN Alice's post A
+when he wrote it. So A -> B (A happens-before B).
+
+Under CAUSAL consistency, every replica must reveal A before B.
+
+Version vectors (op.vv = deps merged with own increment):
+  A.vv = {alice:1, bob:0, carol:0, dave:0}    (alice:1; no deps)
+  B.vv = {alice:1, bob:1, carol:0, dave:0}    (alice:1 from dep, bob:1 own)
+
+Replica R0 delivers [A, B] WITH dependency checking:
+
+| step | op | dep check (client: have>=need ?)          | result  | seen after                       |
+|------|----|-------------------------------------------|---------|----------------------------------|
+| A    | A  | (no deps)                                 | APPLY   | {alice:1, bob:0, carol:0, dave:0} |
+| B    | B  | alice: 1>=1=OK                            | APPLY   | {alice:1, bob:1, carol:0, dave:0} |
+
+Both ops apply. R0's users see the feed in the natural order:
+  view(R0) = ['Hello', 'Re:Hello']   <- post first, reply second.
+The causal dependency A -> B is RESPECTED. That is causal order.
+
+[check] A -> B and pos(A) < pos(B) on R0: OK
+
+==========================================================================
+  SECTION B: causal violation - reply shown before the post
+==========================================================================
+Same ops A (alice 'Hello') and B (bob 'Re:Hello'), A -> B.
+
+Now suppose R2 is reachable via a slow link for A but a fast link
+for B. Under EVENTUAL consistency (no dep checking), R2 simply
+applies whatever arrives, in arrival order. B arrives first:
+
+R2 arrival order = [B, A]. Applied BLINDLY (eventual style):
+
+  step 1: apply B ('Re:Hello')    view = ['Re:Hello']
+  step 2: apply A ('Hello')       view = ['Re:Hello', 'Hello']
+
+R2's users see:  ['Re:Hello', 'Hello']
+  -> a REPLY to a post that is not yet visible. Broken UX.
+
+Schedule-validity check (the SPEC): for every A->B delivered,
+pos(A) < pos(B)?  Violations: [('A', 'B')]
+  -> A -> B but B delivered first.
+
+This is exactly what causal consistency FORBIDS. Eventual says
+"they converge eventually" - and they do (final state is the same
+set of writes) - but the MID-FLIGHT view violates causality.
+
+Had R2 run the dependency check (Section D), B would have been
+DEFERRED until A arrived:
+  B arrives: dep_check(seen={alice:0, bob:0, carol:0, dave:0}, B.deps={alice:1})
+             -> ok=False, missing=[('alice', 1, 0)]  -> DEFER B
+  A arrives: dep_check -> ok=True (no deps) -> APPLY A
+             flush pending: B's dep alice:1 now satisfied -> APPLY B
+             view = ['Hello', 'Re:Hello']  (correct!)
+
+[check] blind delivery violates A->B; dep check catches and defers: OK
+
+==========================================================================
+  SECTION C: concurrent operations - any order is valid
+==========================================================================
+Causal consistency constrains ONLY causally-related ops. For
+concurrent ops (a || b) it is SILENT: either order is acceptable.
+
+Our scenario has two independent chains:
+  chain 1: 'Hello'(A) -> 'Re:Hello'(B)    [A -> B]
+  chain 2: 'Hi'(C) -> 'Re:Hi'(D)    [C -> D]
+
+Concurrent pairs (neither -> the other):
+  A || C   (no dep edge either way; A.deps={}, C.deps={})
+  A || D   (no dep edge either way; A.deps={}, D.deps={carol:1})
+  B || C   (no dep edge either way; B.deps={alice:1}, C.deps={})
+  B || D   (no dep edge either way; B.deps={alice:1}, D.deps={carol:1})
+
+Both of these replica schedules are CAUSALLY VALID:
+
+  R0 = ['A', 'B', 'C', 'D']   view = ['Hello', 'Re:Hello', 'Hi', 'Re:Hi']   violations = []
+  R1 = ['C', 'D', 'A', 'B']   view = ['Hi', 'Re:Hi', 'Hello', 'Re:Hello']   violations = []
+
+R0 reveals chain 1 first, R1 reveals chain 2 first. Users on R0 and
+R1 momentarily see the chains in different orders - but NEITHER ever
+shows a reply before its post. Causality is intact; the reordering
+is only between concurrent (independent) writes, which is allowed.
+
+Contrast with Section B: reordering A and B is FORBIDDEN (A->B),
+but reordering A and C is FINE (A||C). The dep graph decides which.
+
+  R2' = ['A', 'C', 'B', 'D']  view = ['Hello', 'Hi', 'Re:Hello', 'Re:Hi']  violations = []
+  (A before B within chain1, C before D within chain2; the chains
+   interleave - still valid, because no causal edge is reversed.)
+
+[check] R0, R1, R2' all causally valid despite different orders: OK
+
+==========================================================================
+  SECTION D: implementation - dependency tracking + wait queue
+==========================================================================
+How is causal consistency IMPLEMENTED? Each op carries its dep
+version vector; each replica keeps a `seen` vector (max seq applied
+per client). Before applying an op, run the DEP CHECK:
+
+    def dep_check(seen, op):
+        for c in op.deps:
+            if seen[c] < op.deps[c]: return DEFER
+        return APPLY
+
+If DEFER, park the op in a PENDING queue. Whenever a new op is
+applied, re-scan the queue - a deferred op may now be unblocked.
+
+============================================================
+DEMO: arrival [B, A] (B first, as in Section B) WITH dep check
+============================================================
+
+This is the SAME pathological arrival order that broke R2 in
+Section B. Watch the dep check turn a would-be violation into a
+correct causal delivery:
+
+| arrival step | op | status              | detail / view after           |
+|--------------|----|---------------------|-------------------------------|
+| B            | B  | DEFERRED            | missing deps: alice: need 1, have 0 |
+| A            | A  | APPLIED             | view = ['Hello']              |
+| B            | B  | APPLIED-AFTER-WAIT  | view = ['Hello', 'Re:Hello']  |
+
+Final view = ['Hello', 'Re:Hello']   <- SAME as R0 in Section A.
+B arrived FIRST but was revealed SECOND, because the dep check
+refused to apply it until A (its causal ancestor) was present.
+
+The dep check is O(#deps) per op. COPS keeps deps 1-hop (the direct
+causal ancestors) rather than the full transitive closure, so each
+op carries a SMALL dep set - cheap to check, cheap to store.
+
+INVARIANT: the pending queue + dep check together guarantee that the
+APPLIED order is causally valid. Proof sketch: an op is applied only
+when all its deps are already applied; hence every A->B edge has
+pos(A) < pos(B) in the applied order. QED.
+
+[check] applied order has zero causal violations: OK
+
+==========================================================================
+  SECTION E: the consistency ladder - eventual < causal < linearizable
+==========================================================================
+Three levels of guarantee, increasing in strength AND in cost.
+
+Using the Alice/Bob scenario (A='Hello' -> B='Re:Hello'):
+
+| guarantee / property                      | eventual | causal   | linearizable  |
+|-------------------------------------------|----------|----------|---------------|
+| replicas converge eventually              | yes      | yes      | yes           |
+| respects causality  (A->B => A before B)  | NO       | yes      | yes           |
+| respects real-time  (ack(X) bef start(Y)) | NO       | NO       | yes           |
+| single total order visible to all clients | NO       | NO       | yes           |
+| concurrent (a||b) may reorder per replica | yes      | yes      | NO            |
+| coordination needed                       | none     | dep tracking (local) | quorum / consensus |
+| stalls on missing deps?                   | no       | yes (defers) | no (serialized) |
+| canonical systems                         | DNS, Dynamo, Riak | COPS, Bayou, CRDTs | Spanner, etcd, 1-server |
+
+Same arrival [B, A] on a replica - what each model does:
+
+  EVENTUAL:      applies B then A. view = ['Re:Hello','Hello'].
+                 Causality violated, but it converges. (Section B)
+
+  CAUSAL:        defers B, applies A, then B. view = ['Hello','Re:Hello'].
+                 Causality respected. Costs a dep check + wait queue.
+                 (Section D)
+
+  LINEARIZABLE:  a single server (or Paxos group) serializes A and B.
+                 Every client sees the SAME total order. Real-time is
+                 respected: if Alice's ack reached Bob before Bob
+                 started, then A precedes B for EVERYONE. Costs a
+                 quorum round-trip per write (Spanner's TrueTime, etcd's Raft).
+
+Pick the weakest model that meets your needs:
+  - cache lookups, DNS             -> eventual
+  - feeds, collaborative docs, IM  -> causal (this tutorial)
+  - money, inventory, locks        -> linearizable
+
+[check] ladder ordering eventual < causal < linearizable verified: OK
+
+==========================================================================
+  GOLD CHECK: causal dependencies respected on every replica
+==========================================================================
+(a) op version vectors (deps + own increment):
+     A.vv = {alice:1, bob:0, carol:0, dave:0}   match gold: True
+     B.vv = {alice:1, bob:1, carol:0, dave:0}   match gold: True
+     C.vv = {alice:0, bob:0, carol:1, dave:0}   match gold: True
+     D.vv = {alice:0, bob:0, carol:1, dave:1}   match gold: True
+
+(b) happens-before reachability (transitive closure of deps):
+     A -> ['B']   match gold: True
+     B -> {}   match gold: True
+     C -> ['D']   match gold: True
+     D -> {}   match gold: True
+
+(c) replica schedules - causal validity + final view:
+     replica        schedule               valid   violations     view
+     -------------- ---------------------- ------- -------------- ------------------------------
+     R0             ['A', 'B', 'C', 'D']   True    []             ['Hello', 'Re:Hello', 'Hi', 'Re:Hi']
+     R1             ['C', 'D', 'A', 'B']   True    []             ['Hi', 'Re:Hi', 'Hello', 'Re:Hello']
+     R2_VIOLATING   ['C', 'D', 'B', 'A']   False   [('A', 'B')]   ['Hi', 'Re:Hi', 'Re:Hello', 'Hello']
+
+(d) dep-check delivery on arrival [B, A] always produces causal order:
+     view = ['Hello', 'Re:Hello']   causal (A before B)? True
+
+(e) spec vs implementation agreement:
+     R0            : blind violations=[] ; dep-check applied order violations=[] ; always causal? True
+     R1            : blind violations=[] ; dep-check applied order violations=[] ; always causal? True
+     R2_VIOLATING  : blind violations=[('A', 'B')] ; dep-check applied order violations=[] ; always causal? True
+
+Summary:
+  (a) version vectors match gold      : OK
+  (b) happens-before graph matches    : OK
+  (c) schedule validity classifies OK : OK
+  (d) dep check yields causal order   : OK
+  (e) dep check never violates causality: OK
+
+=> [check] GOLD: all causal dependencies respected; dep check always produces causal order: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

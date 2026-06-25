@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quorum Replication (Dynamo/Cassandra) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:170px;accent-color:var(--green);vertical-align:middle}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap;line-height:1.5}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--orange)}
+  .readout .gold{color:var(--gold)}
+  table.tbl{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.5rem}
+  table.tbl td,table.tbl th{border:1px solid #30363d;padding:4px 9px;text-align:center}
+  table.tbl th{color:var(--muted);font-weight:600}
+  table.tbl tr.hl td{background:#3a2f12;color:#ffd966;font-weight:700}
+  table.tbl tr.bad td{background:#3a1414;color:#ff9a8a}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button:disabled{opacity:.4;cursor:default}
+  /* CSS-driven display size decouples clientWidth from the backing-store width
+     attribute, breaking the DPR feedback loop that froze the page on mobile. */
+  canvas{display:block;width:100%;max-width:720px;height:340px;background:#0a0e14;border-radius:8px}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .merkle{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.74rem;color:var(--ink)}
+  .merkle .same{color:var(--muted)}
+  .merkle .diff{color:var(--red);font-weight:700}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Quorum Replication (Dynamo / Cassandra) — interactive
+    <a class="badge" href="./QUORUM_RW.md">QUORUM_RW.md</a>
+    <a class="badge" href="./quorum_rw.py">quorum_rw.py</a></h1>
+  <div class="sub"><b style="color:var(--blue)">W</b> replicas ack a write, <b style="color:var(--green)">R</b> replicas answer a read.
+    If their circles <b style="color:var(--gold)">overlap</b>, the reader sees the fresh value. Drag <b>R</b> and <b>W</b> and watch the
+    intersection — and the consistency verdict — change. All numbers recompute live from the <i>identical</i>
+    <code>R + W &gt; N</code> rule as <code>quorum_rw.py</code>.</div>
+
+  <!-- ===== PANEL 1: THE RING + SLIDERS + INTERSECTION ===== -->
+  <h2>① The ring — drag R and W; watch the circles overlap (or not)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> the writer circles the first <b>W</b> replicas clockwise from coordinator <b>R0</b>;
+      the reader circles the first <b>R</b>. Their intersection is <b style="color:var(--gold)">gold</b>. The pigeonhole floor
+      <code>R+W&minus;N</code> is the <i>guaranteed</i> minimum overlap; the actual overlap is usually larger.</div>
+    <div class="controls">
+      <label>N (replicas) <input type="range" id="n" min="3" max="9" value="5">
+        <span class="val" id="nVal">5</span></label>
+      <label>W (write quorum) <input type="range" id="w" min="1" max="5" value="3">
+        <span class="val" id="wVal">3</span></label>
+      <label>R (read quorum) <input type="range" id="r" min="1" max="5" value="3">
+        <span class="val" id="rVal">3</span></label>
+    </div>
+    <div class="row" style="margin-top:.6rem">
+      <canvas id="ring" width="720" height="340"></canvas>
+      <div>
+        <div class="readout" id="ringReadout"></div>
+        <div class="legend" style="margin-top:.6rem">
+          <span><i class="sw" style="background:var(--blue)"></i>write set W</span>
+          <span><i class="sw" style="background:var(--green)"></i>read set R</span>
+          <span><i class="sw" style="background:var(--gold)"></i>intersection W∩R</span>
+          <span><i class="sw" style="background:#3a3a3a;border:1px solid #555"></i>not contacted</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 2: PRESETS ===== -->
+  <h2>② The R/W dial — four classic configs (Cassandra CL=ONE/QUORUM/ALL)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> click a preset to set (W, R) and watch panel ① recompute.
+      The first three have <code>R+W&gt;N</code> (strong); the last has <code>R+W&le;N</code> (eventual — disjoint quorums exist).</div>
+    <div class="controls">
+      <button data-w="1" data-r="5">fast writes (W=1,R=N)</button>
+      <button data-w="5" data-r="1">fast reads (W=N,R=1)</button>
+      <button data-w="3" data-r="3" class="active">balanced (W=R=N/2+1)</button>
+      <button data-w="2" data-r="2">eventual (W=R=2)</button>
+      <span class="micro">N = 5</span>
+    </div>
+    <div style="overflow-x:auto"><table class="tbl" id="presetTable"></table></div>
+    <div class="readout" id="presetReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: SLOPPY QUORUM + HINTED HANDOFF ===== -->
+  <h2>③ Sloppy quorum + hinted handoff — a replica is DOWN</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> with N=5, W=3, toggle <b>R1 down</b>. The write must still hit 3 living replicas,
+      so it walks past R1 to <b>R3</b>. R3 keeps a <b style="color:var(--orange)">hint</b> ("this really belongs to R1") and forwards it when R1 recovers.</div>
+    <div class="controls">
+      <button id="bR1up" class="active">R1 is UP</button>
+      <button id="bR1down">R1 is DOWN</button>
+      <button id="bRecover" disabled>↻ forward hint to recovered R1</button>
+      <span class="micro">coordinator R0, preference list R0→R1→R2→R3→R4</span>
+    </div>
+    <canvas id="sloppy" width="720" height="300"></canvas>
+    <div class="readout" id="sloppyReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 4: READ REPAIR ANIMATION ===== -->
+  <h2>④ Read repair — stale replica fixed on the fly</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> press <b>play</b>. A read of R=3 contacts {R0, R1, R2}; R2 missed the last write
+      (version 1 <b style="color:var(--red)">stale</b>). The reader writes the fresh value back to R2 before returning.</div>
+    <div class="controls">
+      <button id="bPlay">▶ play</button>
+      <button id="bStep">step →</button>
+      <button id="bReset">reset</button>
+      <span class="micro" id="stepLabel">step 0 / 3</span>
+    </div>
+    <canvas id="repair" width="720" height="300"></canvas>
+    <div class="readout" id="repairReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 5: MERKLE TREE ANTI-ENTROPY ===== -->
+  <h2>⑤ Anti-entropy — Merkle tree comparison (pinned from quorum_rw.py §5)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> replicas A and B compare Merkle-tree roots. They differ, so they descend into the
+      mismatched subtree and sync only <b>k2</b>. Leaf hashes below are <code>sha1('key|value')[:8]</code>, pinned verbatim from
+      <code>quorum_rw.py</code> Section E (the .py is the source of truth for the hashes; the .html demonstrates the comparison algorithm).</div>
+    <div class="merkle" id="merkleBox"></div>
+    <div class="readout" id="merkleReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches quorum_rw.py GOLD: min_intersection(3,3,5) = 1 and every (W,R) pair with R+W&gt;N intersects.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formulas, copied from quorum_rw.py ===== */
+/* preference_list(c) = [(c+i)%N for i in 0..N-1]
+   write_set / read_set = first W / R of preference list
+   min_intersection(W,R,N) = max(0, W+R-N)            (pigeonhole)
+   strong_consistency(W,R,N) = (W+R > N) */
+
+const N_DEF=5;
+function prefList(coord,n){ return Array.from({length:n},(_,i)=>(coord+i)%n); }
+function firstK(coord,k,n){ return prefList(coord,n).slice(0,k); }
+function intersect(a,b){ const s=new Set(b); return a.filter(x=>s.has(x)); }
+function minIntersection(w,r,n){ return Math.max(0,w+r-n); }
+function strong(w,r,n){ return w+r>n; }
+
+/* ===== canvas DPR-safe setup (mirrors gqa.html) ===== */
+function setup(cv){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||720, h=cv.clientHeight||340;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+function ringPos(i,n,cx,cy,R){
+  const ang=-Math.PI/2 + i*2*Math.PI/n;     // start at top, clockwise
+  return [cx+R*Math.cos(ang), cy+R*Math.sin(ang)];
+}
+function drawNode(ctx,x,y,r,fill,stroke,label,sub){
+  ctx.beginPath(); ctx.arc(x,y,r,0,2*Math.PI);
+  ctx.fillStyle=fill; ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle=stroke; ctx.stroke();
+  ctx.fillStyle='#e6edf3'; ctx.font='bold 13px ui-monospace,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label,x,y-1);
+  if(sub){ ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace';
+    ctx.fillText(sub,x,y+12); }
+}
+
+/* ===== PANEL 1: ring + sliders ===== */
+const rc=document.getElementById('ring');
+function renderRing(){
+  const ctx=setup(rc); const w=rc.clientWidth,h=rc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const n=+document.getElementById('n').value;
+  const W=+document.getElementById('w').value;
+  const R=+document.getElementById('r').value;
+  const cx=w*0.42, cy=h/2, Rr=Math.min(w,h)*0.36;
+  // slider maxes track N
+  document.getElementById('w').max=n; document.getElementById('r').max=n;
+  document.getElementById('wVal').textContent=Math.min(W,n);
+  document.getElementById('rVal').textContent=Math.min(R,n);
+  document.getElementById('nVal').textContent=n;
+  const Wc=Math.min(W,n), Rc=Math.min(R,n);
+  const ws=firstK(0,Wc,n), rs=firstK(0,Rc,n);
+  const both=new Set(intersect(ws,rs));
+  const wset=new Set(ws), rset=new Set(rs);
+  // ring
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(cx,cy,Rr,0,2*Math.PI); ctx.stroke();
+  // nodes
+  for(let i=0;i<n;i++){
+    const [x,y]=ringPos(i,n,cx,cy,Rr);
+    let fill='#262d36', stroke='#555';
+    if(both.has(i)){ fill='#f1c40f'; stroke='#f1c40f'; }
+    else if(wset.has(i)&&rset.has(i)){ fill='#f1c40f'; stroke='#f1c40f'; }
+    else if(wset.has(i)){ fill='#2980b9'; stroke='#2980b9'; }
+    else if(rset.has(i)){ fill='#27ae60'; stroke='#27ae60'; }
+    const coord=i===0?' (coord)':'';
+    drawNode(ctx,x,y,20,fill,stroke,'R'+i,coord);
+  }
+  // readout
+  const inter=intersect(ws,rs);
+  const mn=minIntersection(Wc,Rc,n);
+  const isStrong=strong(Wc,Rc,n);
+  const fmt=a=>'{'+a.map(x=>'R'+x).join(', ')+'}';
+  const ro=document.getElementById('ringReadout');
+  ro.innerHTML=
+    `  N=${n}  W=${Wc}  R=${Rc}\n`+
+    `  write set   W = ${fmt(ws)}\n`+
+    `  read  set   R = ${fmt(rs)}\n`+
+    `  W INTERSECT R = ${fmt(inter)}   |intersection| = ${inter.length}\n`+
+    `  R + W = ${Rc+Wc}  ${isStrong?'>':'<='}  N = ${n}   =>   `+
+    `<b class="${isStrong?'gold':'bad'}">${isStrong?'STRONG CONSISTENCY':'EVENTUAL (no guarantee)'}</b>\n`+
+    `  pigeonhole floor R+W-N = ${mn}   ${mn>=1?'(>= 1 => overlap guaranteed)':'(= 0 => disjoint quorums exist)'}`;
+  // preset button highlight
+  document.querySelectorAll('[data-w]').forEach(b=>{
+    b.classList.toggle('active', +b.dataset.w===Wc && +b.dataset.r===Rc && n===5);
+  });
+}
+
+/* ===== PANEL 2: presets table ===== */
+function renderPresets(){
+  const t=document.getElementById('presetTable');
+  let H='<tr><th>config</th><th>W</th><th>R</th><th>R+W</th><th>strong?</th>'+
+        '<th>write set</th><th>read set</th><th>|W∩R|</th><th>min</th></tr>';
+  const n=5, coord=0;
+  const cfgs=[['fast writes',1,5],['fast reads',5,1],['balanced',3,3],['eventual',2,2]];
+  const Wc=+document.getElementById('w').value, Rc=+document.getElementById('r').value;
+  cfgs.forEach(([name,W,R])=>{
+    const ws=firstK(coord,W,n), rs=firstK(coord,R,n);
+    const inter=intersect(ws,rs);
+    const mn=minIntersection(W,R,n);
+    const s=strong(W,R,n);
+    const fmt=a=>'{'+a.map(x=>'R'+x).join(',')+'}';
+    const active = (W===Wc && R===Rc);
+    H+=`<tr class="${s?'':(active?'bad':'bad')}${active&&s?' hl':''}">`+
+       `<td>${name}</td><td>${W}</td><td>${R}</td><td>${W+R}</td>`+
+       `<td>${s?'yes':'NO'}</td><td>${fmt(ws)}</td><td>${fmt(rs)}</td>`+
+       `<td>${inter.length}</td><td>${mn}</td></tr>`;
+  });
+  t.innerHTML=H;
+  // eventual counter-example explanation
+  const ro=document.getElementById('presetReadout');
+  const Wc2=+document.getElementById('w').value, Rc2=+document.getElementById('r').value;
+  if(Wc2+Rc2<=5){
+    ro.innerHTML=`<span class="warn">R+W=${Wc2+Rc2} ≤ N=5 → EVENTUAL.</span> A different coordinator can miss the write entirely: `+
+      `e.g. write {R0,R1}, read starting at R2 → {R2,R3}, intersection <b class="bad">{}</b>.`;
+  } else {
+    ro.innerHTML=`R+W=${Wc2+Rc2} > N=5 → <b class="gold">STRONG</b>. Every read quorum overlaps every write quorum (min |W∩R| = ${minIntersection(Wc2,Rc2,5)} ≥ 1).`;
+  }
+}
+
+/* ===== PANEL 3: sloppy quorum + hinted handoff ===== */
+let r1down=false, recovered=false;
+const sc=document.getElementById('sloppy');
+function renderSloppy(){
+  const ctx=setup(sc); const w=sc.clientWidth,h=sc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const n=5, W=3, coord=0;
+  const cx=w*0.42, cy=h/2, Rr=Math.min(w,h)*0.34;
+  const pref=prefList(coord,n);
+  const topW=new Set(pref.slice(0,W));
+  // choose first W alive
+  const chosen=[]; const hints={}; const missing=[];
+  for(const r of pref){
+    if(chosen.length>=W) break;
+    if(r1down && r===1) continue;
+    chosen.push(r);
+    if(!topW.has(r)){ missing.push(1); hints[r]=1; } // R1 is the only down one
+  }
+  // ring
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(cx,cy,Rr,0,2*Math.PI); ctx.stroke();
+  // nodes
+  const chosens=new Set(chosen);
+  for(let i=0;i<n;i++){
+    const [x,y]=ringPos(i,n,cx,cy,Rr);
+    let fill='#262d36', stroke='#555', sub=i===0?'(coord)':'';
+    if(r1down && i===1){
+      if(recovered){ fill='#27ae60'; stroke='#27ae60'; sub='recovered'; }
+      else { fill='#3a1414'; stroke='#c0392b'; sub='DOWN'; }
+    } else if(chosens.has(i)){
+      fill = topW.has(i) ? '#2980b9' : '#e67e22';
+      stroke = fill; sub = topW.has(i) ? (i===0?'(coord)':'') : 'substitute';
+    }
+    drawNode(ctx,x,y,20,fill,stroke,'R'+i,sub);
+  }
+  // hint arrow: from substitute (R3) to R1, dashed orange
+  if(r1down && !recovered && hints[3]){
+    const [x1,y1]=ringPos(3,n,cx,cy,Rr);
+    const [x2,y2]=ringPos(1,n,cx,cy,Rr);
+    ctx.strokeStyle='#e67e22'; ctx.lineWidth=2.5;
+    ctx.setLineDash([6,5]);
+    ctx.beginPath(); ctx.moveTo(x1,y1);
+    const mx=(x1+x2)/2 + (x2-x1)*0.0, my=(y1+y2)/2 - 30;
+    ctx.quadraticCurveTo(mx,my,x2,y2); ctx.stroke();
+    ctx.setLineDash([]);
+    // arrowhead
+    const ang=Math.atan2(y2-my,x2-mx);
+    ctx.beginPath(); ctx.moveTo(x2,y2);
+    ctx.lineTo(x2-10*Math.cos(ang-0.4), y2-10*Math.sin(ang-0.4));
+    ctx.lineTo(x2-10*Math.cos(ang+0.4), y2-10*Math.sin(ang+0.4));
+    ctx.closePath(); ctx.fillStyle='#e67e22'; ctx.fill();
+    ctx.fillStyle='#e67e22'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('hint: "for R1"', mx, my-6);
+  }
+  if(r1down && recovered){
+    // forwarded arrow solid green
+    const [x1,y1]=ringPos(3,n,cx,cy,Rr);
+    const [x2,y2]=ringPos(1,n,cx,cy,Rr);
+    ctx.strokeStyle='#27ae60'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(x1,y1);
+    const mx=(x1+x2)/2, my=(y1+y2)/2 - 30;
+    ctx.quadraticCurveTo(mx,my,x2,y2); ctx.stroke();
+    ctx.fillStyle='#27ae60'; ctx.font='11px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('forwarded ✓', mx, my-6);
+  }
+  // readout
+  const fmt=a=>'{'+a.map(x=>'R'+x).join(', ')+'}';
+  const ro=document.getElementById('sloppyReadout');
+  if(!r1down){
+    ro.innerHTML=`  R1 is UP. Normal write: chosen = ${fmt(chosen)} = top-W preference. No hint needed.`;
+  } else if(!recovered){
+    ro.innerHTML=`  R1 DOWN. Sloppy write walks past R1:\n`+
+      `    chosen (first ${W} ALIVE) = ${fmt(chosen)}\n`+
+      `    R3 is OUTSIDE top-W {R0,R1,R2} → <span class="warn">substitute, holds hint for R1</span>\n`+
+      `    write returns after ${W} acks — availability preserved.`;
+  } else {
+    ro.innerHTML=`  R1 recovered. R3 forwards the hinted write → R1 now has v1, hint discarded.\n`+
+      `    final state: ${fmt(chosen)} ∪ {R1} all hold v1.`;
+  }
+  document.getElementById('bRecover').disabled = !(r1down && !recovered);
+}
+
+/* ===== PANEL 4: read repair animation ===== */
+let step=0;
+const pc=document.getElementById('repair');
+// state per replica: {ver, val, stale}
+function initState(){ return [
+  {v:2,val:'v2'},          // R0
+  {v:2,val:'v2'},          // R1
+  {v:1,val:'v1-stale'},    // R2 (missed write)
+  {v:2,val:'v2'},          // R3
+  null                     // R4 not in play
+]; }
+let repairState=initState();
+const READ_SET=[0,1,2];
+function renderRepair(){
+  const ctx=setup(pc); const w=pc.clientWidth,h=pc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const cx=w*0.42, cy=h/2, Rr=Math.min(w,h)*0.34;
+  const n=5;
+  ctx.strokeStyle='#21262d'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.arc(cx,cy,Rr,0,2*Math.PI); ctx.stroke();
+  // highlight read set with a green arc
+  ctx.strokeStyle='#27ae60'; ctx.lineWidth=4; ctx.globalAlpha=0.5;
+  READ_SET.forEach(i=>{
+    const a0=-Math.PI/2 + i*2*Math.PI/n - 0.25;
+    const a1=-Math.PI/2 + i*2*Math.PI/n + 0.25;
+    ctx.beginPath(); ctx.arc(cx,cy,Rr+6,a0,a1); ctx.stroke();
+  });
+  ctx.globalAlpha=1;
+  for(let i=0;i<n;i++){
+    const [x,y]=ringPos(i,n,cx,cy,Rr);
+    const st=repairState[i];
+    if(!st){ drawNode(ctx,x,y,20,'#262d36','#555','R'+i,''); continue; }
+    let fill='#2980b9', stroke='#2980b9';
+    if(step>=1 && READ_SET.includes(i) && st.v<2){ fill='#c0392b'; stroke='#c0392b'; }
+    if(step>=2 && i===2){ fill='#27ae60'; stroke='#27ae60'; }
+    drawNode(ctx,x,y,20,fill,stroke,'R'+i, st.v+':'+st.val);
+  }
+  // readout
+  const ro=document.getElementById('repairReadout');
+  document.getElementById('stepLabel').textContent=`step ${step} / 3`;
+  if(step===0) ro.innerHTML=`  Read R=3 → {R0,R1,R2}. Versions on contact:\n`+
+    `    R0=(v2,'v2')  R1=(v2,'v2')  <span class="bad">R2=(v1,'v1-stale')</span>`;
+  else if(step===1) ro.innerHTML=`  Responses collected. highest version = 2, fresh = 'v2'.\n`+
+    `    R2 has version 1 < 2 → <span class="bad">STALE</span>. Reader picks 'v2' (correct answer).`;
+  else if(step===2) ro.innerHTML=`  Read repair: reader WRITES 'v2' back to R2.\n`+
+    `    R2 now (v2,'v2'). `+`<b>One round trip returned the right answer AND fixed the divergence.</b>`;
+  else ro.innerHTML=`  Follow-up read of {R0,R1,R2}: all version 2. <b class="gold">ZERO stale replicas.</b>`;
+}
+
+function doStep(){
+  if(step>=3) return;
+  step++;
+  if(step===2){ repairState[2]={v:2,val:'v2'}; }
+  renderRepair();
+}
+function resetRepair(){ step=0; repairState=initState(); renderRepair(); }
+let playTimer=null;
+function playRepair(){
+  if(playTimer){ clearInterval(playTimer); playTimer=null;
+    document.getElementById('bPlay').textContent='▶ play'; return; }
+  resetRepair();
+  document.getElementById('bPlay').textContent='⏸ pause';
+  let n=0;
+  playTimer=setInterval(()=>{
+    if(n>=4){ clearInterval(playTimer); playTimer=null;
+      document.getElementById('bPlay').textContent='▶ play'; return; }
+    doStep(); n++;
+  },900);
+}
+
+/* ===== PANEL 5: Merkle tree comparison (hashes pinned from quorum_rw.py §5) ===== */
+/* leaf = sha1('key|value')[:8]  ; internal = sha1(left|right)[:8]  -- pinned verbatim. */
+const LEAVES_A=['4de30b25','f05b87f9','59bd9a7a','1d8ca44a'];
+const LEAVES_B=['4de30b25','3ed23ae4','59bd9a7a','1d8ca44a'];  // k2 stale
+const KEYS=['k1','k2','k3','k4'];
+const INT_A=['92726ad9','dacd881f'];
+const INT_B=['abe6311b','dacd881f'];
+const ROOT_A='743046af', ROOT_B='df25c573';
+function renderMerkle(){
+  const box=document.getElementById('merkleBox');
+  let H='<pre style="line-height:1.55;margin:0">';
+  H+='  level 2 (root)   level 1 (internal)        level 0 (leaves)\n';
+  H+='  --------------------------------   -----------------------\n';
+  H+=`  A:  root=<span class="diff">${ROOT_A}</span>   [${INT_A.map((h,i)=>h!==INT_B[i]?`<span class="diff">${h}</span>`:`<span class="same">${h}</span>`).join(', ')}]   [${LEAVES_A.map((h,i)=>h!==LEAVES_B[i]?`<span class="diff">${h}</span>`:`<span class="same">${h}</span>`).join(', ')}]\n`;
+  H+=`  B:  root=<span class="diff">${ROOT_B}</span>   [${INT_B.map((h,i)=>h!==INT_A[i]?`<span class="diff">${h}</span>`:`<span class="same">${h}</span>`).join(', ')}]   [${LEAVES_B.map((h,i)=>h!==LEAVES_A[i]?`<span class="diff">${h}</span>`:`<span class="same">${h}</span>`).join(', ')}]\n`;
+  H+='\n  Step 1  roots differ → descend.\n';
+  H+='  Step 2  subtree {k1,k2}: A='+INT_A[0]+' ≠ B='+INT_B[0]+' → descend.   subtree {k3,k4}: SAME.\n';
+  H+='  Step 3  leaf diff: <span class="diff">k2</span>  → sync k2 only.\n';
+  H+='\n  after sync: root_B = '+ROOT_A+'  (= root_A ✓)';
+  H+='</pre>';
+  box.innerHTML=H;
+  const diffs=[];
+  for(let i=0;i<KEYS.length;i++) if(LEAVES_A[i]!==LEAVES_B[i]) diffs.push(KEYS[i]);
+  const okRoots = ROOT_A!==ROOT_B;                  // differ before
+  const okDiff  = diffs.length===1 && diffs[0]==='k2';
+  document.getElementById('merkleReadout').innerHTML=
+    `  [check] roots differ before sync AND only k2 differs AND post-sync root_B(${ROOT_A})==root_A(${ROOT_A}):  `+
+    `<b class="${(okRoots&&okDiff)?'gold':'bad'}">${(okRoots&&okDiff)?'OK':'FAIL'}</b>\n`+
+    `  (matches quorum_rw.py Section E GOLD)`;
+}
+
+/* ===== GOLD CHECK vs quorum_rw.py ===== */
+/* enumerate every (W-set, R-set) for N=5,W=3,R=3 and assert all intersect.
+   Mirrors GOLD CHECK in quorum_rw.py: min_intersection(3,3,5)=1, 0 disjoint / 100. */
+function goldCheck(){
+  const n=5,W=3,R=3;
+  let bad=0, total=0, minSeen=n;
+  const ws=allCombos(n,W), rs=allCombos(n,R);
+  for(const a of ws) for(const b of rs){
+    total++;
+    const ov=a.filter(x=>b.includes(x)).length;
+    minSeen=Math.min(minSeen,ov);
+    if(ov===0) bad++;
+  }
+  const floor=minIntersection(W,R,n);
+  const ok = (bad===0) && (minSeen===floor) && (floor===1);
+  const chk=document.getElementById('check');
+  chk.textContent = ok
+    ? `check: OK — JS matches quorum_rw.py (100 pairs, min|W∩R|=${minSeen}, 0 disjoint)`
+    : `check: FAIL — mismatch!`;
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+function allCombos(n,k){
+  if(k===0) return [[]];
+  const out=[];
+  const rec=(start,acc)=>{
+    if(acc.length===k){ out.push(acc.slice()); return; }
+    for(let i=start;i<n;i++){ acc.push(i); rec(i+1,acc); acc.pop(); }
+  };
+  rec(0,[]); return out;
+}
+
+/* ===== events ===== */
+function renderAll(){ renderRing(); renderPresets(); }
+['n','w','r'].forEach(id=>{
+  document.getElementById(id).addEventListener('input',renderAll);
+});
+document.querySelectorAll('[data-w]').forEach(b=>{
+  b.addEventListener('click',()=>{
+    document.getElementById('n').value=5;
+    document.getElementById('w').value=b.dataset.w;
+    document.getElementById('r').value=b.dataset.r;
+    renderAll();
+  });
+});
+document.getElementById('bR1up').addEventListener('click',function(){
+  r1down=false; recovered=false; this.classList.add('active');
+  document.getElementById('bR1down').classList.remove('active'); renderSloppy();
+});
+document.getElementById('bR1down').addEventListener('click',function(){
+  r1down=true; recovered=false; this.classList.add('active');
+  document.getElementById('bR1up').classList.remove('active'); renderSloppy();
+});
+document.getElementById('bRecover').addEventListener('click',()=>{
+  recovered=true; renderSloppy();
+});
+document.getElementById('bPlay').addEventListener('click',playRepair);
+document.getElementById('bStep').addEventListener('click',doStep);
+document.getElementById('bReset').addEventListener('click',resetRepair);
+window.addEventListener('resize',()=>{ renderRing(); renderSloppy(); renderRepair(); });
+
+renderAll();
+renderSloppy();
+resetRepair();
+renderMerkle();
+goldCheck();
+</script>
+</body>
+</html>

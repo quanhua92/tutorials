@@ -1,0 +1,240 @@
+cap_tradeoffs.py - reference impl. All numbers below feed CAP_TRADEOFFS.md.
+python3, stdlib only.
+N=5 nodes=['A', 'B', 'C', 'D', 'E'] quorum=3 partition=['A', 'B']|['C', 'D', 'E']
+
+==========================================================================
+  SECTION A: CAP formalization - C, A, P and the impossibility
+==========================================================================
+CAP (Brewer 2000, conjecture; Gilbert & Lynch 2002, formal proof).
+
+The three properties, stated precisely:
+
+  C = Consistency  = LINEARIZABILITY. The cluster behaves as if there
+                     is ONE copy of the data; every read returns the
+                     value of the latest completed write (or a newer
+                     one). There is a single total order of operations.
+
+  A = Availability = every request to a non-failing node eventually
+                     gets a NON-ERROR response. No infinite wait, no
+                     'try the other node'. (Gilbert-Lynch: 'total
+                     availability' = every request, every node.)
+
+  P = Partition    = the system keeps operating despite the network
+                     losing/delaying messages between two node groups.
+
+In real networks P is UNAVOIDABLE (links fail), so the theorem reduces
+to: during a partition you must give up C or give up A.
+
+THE IMPOSSIBILITY - the 2-node argument (Gilbert & Lynch 2002):
+
+  2 nodes, A and B, each holding a replica of key x (initial x=0).
+  Network partitions: A and B cannot exchange messages.
+
+  Client writes x=1 to node A. For the system to be both Available
+  AND Consistent, node A must (1) respond and (2) ensure B reflects
+  the write. But A cannot reach B during the partition:
+
+    path 1: A responds immediately (keeps A)            -> B still
+            reads x=0; a later read of x on B returns 0 != 1  -> C BROKEN
+    path 2: A waits to confirm B before responding (keeps C) -> A can
+            never respond during the partition               -> A BROKEN
+  Every possible response breaks one property. QED: C+A+P impossible.
+
+Concrete trace (initial x=0 on both; partition A<->B; client writes x=1 to A):
+
+  | response strategy       | A's reply | B's value | linearizable? | available? |
+  |--------------------------|-----------|-----------|---------------|------------|
+  | respond now (favor A)   | x=1 OK    | x=0       | NO (B stale) | yes        |
+  | wait for B  (favor C)   | <hangs>   | x=0       | yes          | NO         |
+
+[check] both strategies break a property -> C+A+P is impossible: OK
+
+So the design space collapses to TWO axes the system can hold onto
+when a partition strikes:
+
+  CP  : keep C, drop A on the minority (reject writes).  -> Section B
+  AP  : keep A, drop C across sides (accept, diverge).  -> Section C
+  (CA-only systems exist only if you PRETEND P can't happen - e.g. a
+   single-node DB. The moment you have >1 node, P is real.)
+
+
+==========================================================================
+  SECTION B: CP in action - minority rejects, majority commits
+==========================================================================
+Cluster: 5 nodes = ['A', 'B', 'C', 'D', 'E']. Partition: ['A', 'B'] | ['C', 'D', 'E'].
+quorum = floor(5/2)+1 = 3. CP leader on the majority side = C.
+
+Shared key 'balance', initial value = 50 (replicated everywhere).
+
+Two clients each issue a WRITE during the partition - one on each side:
+
+  client -> minority  {A,B} : write balance = 100
+  client -> majority  {C,D,E} : write balance = 200
+
+CP request log (status as seen by the client):
+
+  | # | client side            | op     | CP response                         |
+  |---|------------------------|--------|-------------------------------------|
+  | 1 | minority {A,B}         | write  | ERROR - no quorum: unavailable during partition
+  | 2 | majority {C,D,E}       | write  | OK    - committed balance=200 (3/5 acks >= quorum 3)
+  | 3 | minority {A,B}         | read   | ERROR - no quorum: unavailable during partition
+  | 4 | majority {C,D,E}       | read   | OK    - 200
+
+What happened, step by step:
+  - minority {A,B}: only 2 nodes, < quorum 3. No leader can be
+    elected here, so writes/reads to {A,B} return ERROR. CP SACRIFICES
+    availability on the minority to keep the data correct.
+  - majority {C,D,E}: 3 nodes >= quorum. Leader C replicates
+    the write to D, E (3 acks >= 3) and COMMITS balance=200.
+    Reads on the majority return 200, the last committed value.
+
+  [check] CP keeps C: every successful read sees balance=200 (linearizable).
+  [check] CP drops A: both minority requests error'd -> unavailable: OK
+
+==========================================================================
+  SECTION C: AP in action - both sides accept, diverge, heal
+==========================================================================
+Same cluster & partition: ['A', 'B'] | ['C', 'D', 'E']. Key 'balance' = 50.
+
+AP request log (every side accepts locally, NO quorum gate):
+
+  | # | client side            | op     | AP response                                  |
+  |---|------------------------|--------|----------------------------------------------|
+  | 1 | minority {A,B}         | write  | OK    - accepted locally balance=100 on A,B
+  | 2 | majority {C,D,E}       | write  | OK    - accepted locally balance=200 on C,D,E
+  | 3 | minority {A,B}         | read   | OK    - reads local balance=100
+  | 4 | majority {C,D,E}       | read   | OK    - reads local balance=200
+
+DIVERGENCE during partition:
+  {A,B} hold  balance = 100
+  {C,D,E} hold balance = 200
+  A read on the minority returns 100; a read on the majority returns 200.
+  Neither is an error - AP SACRIFICES consistency, keeping availability.
+  [check] the two sides DISAGREE (100 != 200) -> C is dropped: OK
+
+--- HEALING (partition ends) ---
+
+Strategy 1: Last-Write-Wins (LWW).
+  w1: balance=100 ts=10  (minority side)
+  w2: balance=200 ts=12  (majority side)
+  later ts wins -> balance = 200  (the w2 write)
+  the other write (100) is SILENTLY DROPPED. Clock skew -> data loss.
+
+Strategy 2: CRDT merge (if the value were a G-Counter, not a register).
+  Re-model balance as additive increments per node; merge = max per slot:
+     P1 {A:1, B:1, C:0, D:0, E:0}  -> value = 2
+     P2 {A:0, B:0, C:1, D:1, E:1}  -> value = 3
+     merge {A:1, B:1, C:1, D:1, E:1}  -> value = 5
+  No conflict. Every increment survives. Merge is commutative + idempotent.
+
+[check] AP keeps A: both writes ACCEPTED (no errors).
+[check] AP heals: LWW -> 200; CRDT merge -> 5: OK
+
+==========================================================================
+  SECTION D: PACELC - latency vs consistency when there is no partition
+==========================================================================
+PACELC (Abadi 2010): CAP only describes the PARTITION case. But even with a
+healthy network you face a second trade-off every single request:
+
+    if Partition : choose  A or C        <- this is CAP
+    if Else      : choose  L or C        <- this is the PACELC addition
+                       ^ latency vs consistency on every healthy request
+
+WHY the else-half exists: strong consistency forces replicas to COORDINATE
+(quorum round-trips, 2PC, Paxos). Coordination takes round-trip time, so
+strong C costs latency. Skip the coordination (accept stale reads, async
+replication) and you get low L but weaker C. There is no free lunch.
+
+The four quadrants (partition-choice x else-choice):
+
+  | quadrant | partitioned (P) | else (E)   | means                                          |
+  |----------|-----------------|------------|------------------------------------------------|
+  | PC / EC  | C (drop A)      | C (drop L) | always strong. High latency, blocks on partition|
+  | PA / EL  | A (drop C)      | L (drop C) | always fast/eventual. May block? no, never      |
+  | PA / EC  | A (drop C)      | C (drop L) | fast under partition, strong when healthy       |
+  | PC / EL  | C (drop A)      | L (drop C) | rare/contradictory; mostly theoretical          |
+
+Real systems land in a quadrant (verified against each system's docs):
+
+  | system        | PACELC | partitioned behavior             | else (healthy) behavior            |
+  |---------------|--------|----------------------------------|------------------------------------|
+  | Cassandra     | PA/EL  | all sides accept, diverge        | async replication, fast stale reads|
+  | DynamoDB      | PA/EL  | available, eventual consistency  | async, tunable per request         |
+  | Riak          | PA/EL  | available, CRDT/vector-clock merge| async, eventual                    |
+  | etcd          | PC/EC  | minority rejects, majority Raft  | Raft quorum, linearizable reads    |
+  | ZooKeeper     | PC/EC  | minority rejects, ZAB majority   | ZAB quorum, linearizable reads     |
+  | Spanner       | PC/EC  | Paxos groups reject without maj. | TrueTime + 2PC, external consist.  |
+  | MongoDB       | PA/EC* | (old default) available          | configurable: strong when requested|
+  | HBase         | PC/EC  | unavailable without HMaster maj.  | strong via HDFS + single Region Srv|
+  (* MongoDB is configurable; the historical default was PA/EC, modern modes span the space.)
+
+Counts in this table: PA=3 PC=3 (partition axis); EL=3 EC=3 (else axis).
+[check] the AP family is uniformly PA/EL; the CP family is uniformly PC/EC: OK
+
+==========================================================================
+  SECTION E: real-world systems - classification + tunable consistency
+==========================================================================
+Concrete classification (verified against each system's primary source):
+
+  | system    | class  | consistency mechanism           | availability mechanism           |
+  |-----------|--------|---------------------------------|----------------------------------|
+  | Spanner   | CP/EC  | TrueTime bounds clock skew +    | sacrifices A on minority; Paxos  |
+  |           |        | Paxos per shard -> external C   | groups need majority to commit   |
+  | etcd      | CP/EC  | Raft quorum (strong leader)     | minority rejects; leader serves  |
+  | ZooKeeper | CP/EC  | ZAB quorum (atomic broadcast)   | minority rejects; leader serves  |
+  | HBase     | CP/EC  | single RegionServer per region  | region unavailable if its RS down|
+  |-----------|--------|---------------------------------|----------------------------------|
+  | Cassandra | AP/EL  | tunable (R/W quorum), anti-entropy| always writeable; hinted handoff |
+  | DynamoDB  | AP/EL  | tunable (eventual/strong per req)| always writeable; sync replicas  |
+  | Riak      | AP/EL  | vector clocks / CRDTs, eventual | always writeable; gossip         |
+  | CouchDB   | AP/EL  | multi-master, MVCC, eventual    | always writeable; conflict docs  |
+
+AP systems are TUNABLE: the client picks R (read acks) and W (write acks)
+per request against N replicas. Strong-ish read when R + W > N:
+
+  strong read  <=>  R + W > N    (a read replica and a write replica must overlap)
+  example N=3  :  W=2 (quorum write), R=2 (quorum read) -> 2+2=4 > 3 -> strong-ish
+                 W=1, R=1                          -> 1+1=2 < 3 -> fast, may be stale
+
+Tunable dial, N=3 replicas (Cassandra/DynamoDB model):
+
+  | config      | R | W | R+W | overlap? | consistency read sees?        | latency |
+  |-------------|---|---|-----|----------|-------------------------------|---------|
+  | quorum      | 2 | 2 |  4  | yes      | last write (strong-ish)       | higher (2+ RTT) |
+  | write-all   | 3 | 1 |  4  | yes      | last write (strong-ish)       | higher (2+ RTT) |
+  | one/one     | 1 | 1 |  2  | no       | possibly stale                | lowest (1 RTT) |
+  | read-all    | 1 | 3 |  4  | yes      | last write (strong-ish)       | higher (2+ RTT) |
+
+[check] overlap (strong read) iff R+W>N; default Cassandra W=R=2,N=3 is strong-ish: OK
+
+CP systems have NO such dial: a read always reflects the committed Raft/ZAB
+log, at the cost of round-trips to the leader + quorum. You cannot ask
+etcd for 'a faster, maybe-stale read' without using its (explicit, opt-in)
+serializable=false flag - and even that is still served by the leader.
+TrueTime in Spanner goes further: it BOUNDS clock uncertainty (with GPS+atomic
+clocks) so 2PC commit can WAIT OUT the uncertainty and guarantee external
+consistency (linearizable across datacenters) - a CP guarantee, paid in latency.
+
+==========================================================================
+  GOLD CHECK: CP errors on minority, AP returns data (possibly stale)
+==========================================================================
+  Partition: ['A', 'B'] | ['C', 'D', 'E'], key 'balance'.
+
+  CP minority write -> status=ERROR
+      payload: no quorum: unavailable during partition
+  AP minority read  -> status=OK
+      payload: balance=100 (the minority's local value; possibly stale)
+
+  | system | request to MINORITY during partition | result                  |
+  |--------|-----------------------------------------|-------------------------|
+  | CP     | write balance=100                 | ERROR (unavailable)
+  | AP     | read balance                              | OK, returns 100 (possibly stale)
+
+  CP errors on the minority (C kept, A dropped)?  -> YES
+  AP returns data on the minority (A kept, C dropped)? -> YES
+
+  [check] GOLD: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eventual Consistency — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --fresh:#7f8c8d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:170px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap;line-height:1.5}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--orange)}
+  .readout .gold{color:var(--gold)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button:disabled{opacity:.4;cursor:default}
+  #topo{display:block;width:100%;max-width:980px;height:360px}
+  #curve{display:block;width:100%;max-width:980px;height:300px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Eventual Consistency — interactive
+    <a class="badge" href="./EVENTUAL_CONSISTENCY.md">EVENTUAL_CONSISTENCY.md</a>
+    <a class="badge" href="./eventual_consistency.py">eventual_consistency.py</a></h1>
+  <div class="sub">A write is a <b style="color:var(--green)">rumor</b>; replicas spread it by <b style="color:var(--gold)">gossip</b>. Watch it propagate round by round until every replica agrees — and watch the <b style="color:var(--red)">stale reads</b> and <b style="color:var(--red)">reorders</b> that happen <i>during</i> convergence.
+    The gossip engine here is the <i>byte-identical</i> twin of <code>eventual_consistency.py</code> (same LCG, same merge), so the green <span class="badge" style="padding:1px 6px">check: OK</span> below confirms a match.</div>
+
+  <!-- ===== PANEL 1: GOSSIP PROPAGATION + STALE READS ===== -->
+  <h2>① Gossip propagation — step the rounds, watch the rumor spread</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> pick <b>N</b> replicas and an <b>anti-entropy mechanism</b>, write <code>X=1@v1</code> to node 0, then step the rounds.
+      Each round the infected (updated) replicas gossip. Pick a node to <b>read from</b> — while gossip hasn't reached it, the read glows <span style="color:var(--red)">red (STALE)</span>.</div>
+    <div class="controls">
+      <label>N replicas <input type="range" id="nRep" min="5" max="20" value="8"><span class="val" id="nRepV">8</span></label>
+      <label>mechanism
+        <select id="mech">
+          <option value="push">push gossip</option>
+          <option value="pull">pull gossip</option>
+          <option value="pushpull" selected>push-pull (epidemic)</option>
+        </select></label>
+      <label>merge rule
+        <select id="mrg">
+          <option value="lww" selected>LWW (by version)</option>
+          <option value="naive">naive (last wins — diverges)</option>
+        </select></label>
+      <label>client reads from
+        <select id="readNode"></select></label>
+    </div>
+    <div class="controls" style="margin-top:.6rem">
+      <button id="bReset">&#x27F2; reset</button>
+      <button id="bBack">&#x25C0; prev round</button>
+      <button id="bStep" class="active">&#x25B6; next round</button>
+      <button id="bAuto">&#x25B6;&#x25B6; auto</button>
+      <span class="micro">round <b id="curRound" style="color:var(--ink)">0</b> / <b id="totRound" style="color:var(--ink)">0</b>  &middot;  infected <b id="infCount" style="color:var(--green)">1</b> / <b id="nInf">8</b></span>
+    </div>
+    <canvas id="topo" width="980" height="360"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--fresh)"></i>fresh (X=0@v0)</span>
+      <span><i class="sw" style="background:var(--green)"></i>infected (has X=1@v1)</span>
+      <span><i class="sw" style="background:var(--red)"></i>stale read target</span>
+      <span><i class="sw" style="background:var(--gold)"></i>gossip exchange (delivered)</span>
+      <span><i class="sw" style="background:#3a3f46"></i>exchange (redundant)</span>
+    </div>
+    <div class="readout" id="propReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: EPIDEMIC CURVE ===== -->
+  <h2>② Convergence time — the epidemic curve (rounds vs infected)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> push-pull gossip spreads a write like an epidemic — the infected count grows geometrically, so reaching all <b>N</b> nodes takes ~<b>log&#8322;(N)</b> rounds.
+      Drag <b>N</b> (up to 2000): 10&times; more nodes costs only ~3 extra rounds. The dashed line is the bare <code>log&#8322;(N)</code> reference.</div>
+    <div class="controls">
+      <label>N nodes <input type="range" id="nBig" min="10" max="2000" step="10" value="1000"><span class="val" id="nBigV">1000</span></label>
+      <span class="micro">converged in <b id="bigRounds" style="color:var(--gold)">9</b> rounds  &middot;  log&#8322;(N)=<b id="bigLog2">9.97</b></span>
+    </div>
+    <canvas id="curve" width="980" height="300"></canvas>
+    <div class="micro" style="margin-top:.4rem">The logistic SHAPE — slow start, explosive middle, slow tail — is the signature of epidemic spreading (Demers 1987). Same curve as a rumor or a virus moving through a population.</div>
+  </div>
+
+  <!-- ===== PANEL 3: REORDER ===== -->
+  <h2>③ Reordered updates — a value can go 0 &rarr; 2 &rarr; 1 (backwards)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> two writes, <code>X=1@v1</code> to A then <code>X=2@v2</code> to B (the newer one). Gossip hands replica C the newer write <i>first</i>.
+      Toggle the merge rule: <b>naive</b> lets the value reverse (0&rarr;2&rarr;1); <b>LWW</b> rejects the older write so C holds at 2.</div>
+    <div class="controls">
+      <button id="bLww" class="active">LWW merge (highest version wins)</button>
+      <button id="bNaive">naive merge (last delivery wins)</button>
+      <button id="bStepC">&#x25B6; deliver next update</button>
+      <button id="bResetC">&#x27F2; reset</button>
+    </div>
+    <div class="readout" id="reorderReadout"></div>
+    <div class="micro" style="margin-top:.4rem">Without an order-independent merge, the FINAL value depends on chance message ordering &rarr; <b>no convergence</b>. LWW (by version) and CRDTs make the outcome independent of delivery order.</div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: &hellip;</span>
+    JS gossip recompute matches eventual_consistency.py: 3-replica push (seed 1115) &rarr; 2 rounds; 1000-node push-pull (seed 42) &rarr; 9 rounds; both converge to (1,1).
+  </div>
+
+<script>
+"use strict";
+/* =========================================================================
+   GROUND-TRUTH ENGINE — byte-identical twin of eventual_consistency.py.
+   Same 32-bit LCG (Numerical Recipes constants), same snapshot+commit-buffer
+   rounds, same iteration order. So peer-picks and convergence timelines match
+   the .py exactly. (See _lcg / push_round / pull_round / pushpull_round there.)
+   Each round function returns [nextInfectedSet, exchanges].
+   ========================================================================= */
+
+/* LCG twin of Python _lcg(seed): state=(1664525*state+1013904223)&0xffffffff; /2^32 */
+function lcg(seed){
+  let s = seed >>> 0;
+  return function(){
+    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+function randrange(rnd, n){ return Math.floor(rnd() * n); }   // matches int(rnd()*n)
+
+function makeReps(n){ const r=[]; for(let i=0;i<n;i++) r.push({val:0,ver:0}); return r; }
+function snapOf(reps){ return reps.map(r=>[r.val,r.ver]); }
+
+/* merge rules — twins of lww_merge / naive_merge */
+function lww(dv,dver,sv,sver){
+  if(sver>dver) return [sv,sver];
+  if(sver===dver && sv>dv) return [sv,sver];
+  return [dv,dver];
+}
+function naive(dv,dver,sv,sver){ return [sv,sver]; }
+
+/* PUSH round: each INFECTED node (sorted) pushes start-of-round state to a
+   random peer; destinations accumulate into a commit buffer; commit at end. */
+function pushRound(reps, infected, rnd, merge){
+  merge = merge || lww;
+  const n = reps.length;
+  const snap = snapOf(reps);
+  const buf = snap.map(x=>[x[0],x[1]]);
+  const sinf = [...infected].sort((a,b)=>a-b);
+  const pushes = sinf.map(i=>[i, randrange(rnd,n)]);
+  const next = new Set(infected);
+  const exchanges = [];
+  for(const [i,peer] of pushes){
+    const [sv,sver] = snap[i];
+    const [dv,dver] = buf[peer];
+    const [nv,nver] = merge(dv,dver,sv,sver);
+    const delivered = sver>0 && nver>dver;
+    buf[peer] = [nv,nver];
+    if(sver>0) next.add(peer);
+    exchanges.push([i,peer,delivered]);
+  }
+  for(let i=0;i<n;i++){ reps[i].val=buf[i][0]; reps[i].ver=buf[i][1]; }
+  return [next, exchanges];
+}
+
+/* PULL round: every node i (0..n-1) pulls start-of-round state from a random peer. */
+function pullRound(reps, infected, rnd, merge){
+  merge = merge || lww;
+  const n = reps.length;
+  const snap = snapOf(reps);
+  const buf = snap.map(x=>[x[0],x[1]]);
+  const pulls = [];
+  for(let i=0;i<n;i++) pulls.push([randrange(rnd,n), i]);   // [peer, i]
+  const next = new Set(infected);
+  const exchanges = [];
+  for(const [peer,i] of pulls){
+    const [sv,sver] = snap[peer];
+    const [dv,dver] = buf[i];
+    const [nv,nver] = merge(dv,dver,sv,sver);
+    const delivered = sver>0 && nver>dver;
+    buf[i] = [nv,nver];
+    if(sver>0) next.add(i);
+    exchanges.push([peer,i,delivered]);
+  }
+  for(let i=0;i<n;i++){ reps[i].val=buf[i][0]; reps[i].ver=buf[i][1]; }
+  return [next, exchanges];
+}
+
+/* PUSH-PULL round: each node i offers start-of-round state to a random peer;
+   both accumulate received offers into their commit buffer. Returns [next,exchanges]. */
+function pushpullRound(reps, infected, rnd, merge){
+  merge = merge || lww;
+  const n = reps.length;
+  const snap = snapOf(reps);
+  const buf = snap.map(x=>[x[0],x[1]]);
+  const contacts = [];
+  for(let i=0;i<n;i++) contacts.push([randrange(rnd,n), i]);   // [peer, i]
+  const next = new Set(infected);
+  const exchanges = [];
+  for(const [peer,i] of contacts){
+    const ioff = snap[i], poff = snap[peer];
+    const beforeI = buf[i][1], beforeP = buf[peer][1];
+    buf[i]    = merge(buf[i][0],buf[i][1],poff[0],poff[1]);
+    buf[peer] = merge(buf[peer][0],buf[peer][1],ioff[0],ioff[1]);
+    if(snap[i][1]>0 || snap[peer][1]>0){ next.add(i); next.add(peer); }
+    exchanges.push([i,peer, buf[i][1]>beforeI || buf[peer][1]>beforeP]);
+  }
+  for(let i=0;i<n;i++){ reps[i].val=buf[i][0]; reps[i].ver=buf[i][1]; }
+  return [next, exchanges];
+}
+
+function stepFn(kind){ return kind==="pushpull"?pushpullRound : kind==="push"?pushRound : pullRound; }
+
+/* run a full deterministic sim, recording per-round snapshots (for stepping) */
+function runSim(n, seed, kind, merge){
+  merge = merge || lww;
+  const reps = makeReps(n);
+  reps[0].val = 1; reps[0].ver = 1;
+  let infected = new Set([0]);
+  const rnd = lcg(seed);
+  const fn = stepFn(kind);
+  const rounds = [{round:0, states:snapOf(reps), infected:[0], exchanges:[]}];
+  let r = 0;
+  while(infected.size < n && r < 80){
+    r++;
+    const [next, exchanges] = fn(reps, infected, rnd, merge);
+    infected = next;
+    rounds.push({round:r, states:snapOf(reps), infected:[...infected].sort((a,b)=>a-b), exchanges});
+  }
+  return rounds;
+}
+
+/* lean convergence-rounds counter (for the curve + gold check) */
+function convergeRounds(n, seed, kind){
+  const reps = makeReps(n);
+  reps[0].val = 1; reps[0].ver = 1;
+  let infected = new Set([0]);
+  const rnd = lcg(seed);
+  const fn = stepFn(kind);
+  let r = 0;
+  while(infected.size < n && r < 500){
+    r++;
+    infected = fn(reps, infected, rnd)[0];
+  }
+  const distinct = new Set(reps.map(rp=>rp.val+","+rp.ver));
+  return {rounds:r, curve:curveOf(n,seed,kind), distinct};
+}
+function curveOf(n, seed, kind){
+  const reps = makeReps(n);
+  reps[0].val = 1; reps[0].ver = 1;
+  let infected = new Set([0]);
+  const rnd = lcg(seed);
+  const fn = stepFn(kind);
+  const c = [1];
+  let r = 0;
+  while(infected.size < n && r < 500){
+    r++;
+    infected = fn(reps, infected, rnd)[0];
+    c.push(infected.size);
+  }
+  return c;
+}
+
+/* ===== canvas DPR helper ===== */
+function setup(cv){
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 980, h = cv.clientHeight || 300;
+  const bw = Math.round(w*dpr), bh = Math.round(h*dpr);
+  if(cv.width!==bw || cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  return ctx;
+}
+
+/* =========================================================================
+   PANEL 1 — topology + stale-read highlighting
+   ========================================================================= */
+const SEED = 1115;              // same seed as eventual_consistency.py Section A
+const topo = document.getElementById('topo');
+let sim = [], cur = 0, autoTimer = null;
+
+function rebuildReadNode(n){
+  const sel = document.getElementById('readNode');
+  const prev = +sel.value || 1;
+  sel.innerHTML = Array.from({length:n},(_,i)=>`<option value="${i}">node ${i}</option>`).join('');
+  sel.value = String(Math.min(prev, n-1));
+}
+
+function panel1State(){
+  const n = +document.getElementById('nRep').value;
+  const kind = document.getElementById('mech').value;
+  const mrg = document.getElementById('mrg').value;
+  return {n, kind, merge: mrg==="naive"?naive:lww};
+}
+
+function rebuild(){
+  const {n,kind,merge} = panel1State();
+  rebuildReadNode(n);
+  sim = runSim(n, SEED, kind, merge);
+  cur = 0;
+  drawTopo(); renderProp();
+}
+
+function nodePos(i, n, w, h){
+  const cx = w/2, cy = h/2 + 8;
+  const R = Math.min(w, h)/2 - 54;
+  const ang = -Math.PI/2 + i * 2*Math.PI/n;
+  return [cx + R*Math.cos(ang), cy + R*Math.sin(ang)];
+}
+
+function drawTopo(){
+  const ctx = setup(topo);
+  const w = topo.clientWidth, h = topo.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const n = sim.length ? sim[0].states.length : 8;
+  const rd = sim[cur] || sim[0];
+  const states = rd.states;
+  const readI = +document.getElementById('readNode').value;
+  const pos = i => nodePos(i, n, w, h);
+
+  // exchange arrows for this round
+  for(const [a,b,delivered] of rd.exchanges){
+    if(a===b) continue;
+    const [x1,y1] = pos(a), [x2,y2] = pos(b);
+    const dx=x2-x1, dy=y2-y1, len=Math.hypot(dx,dy);
+    const ux=dx/len, uy=dy/len, R=20;
+    const sx=x1+ux*R, sy=y1+uy*R, ex=x2-ux*R, ey=y2-uy*R;
+    ctx.strokeStyle = delivered ? "#f1c40f" : "#3a3f46";
+    ctx.lineWidth = delivered ? 2.4 : 1.4;
+    ctx.globalAlpha = delivered ? 0.9 : 0.5;
+    ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+    // arrowhead
+    const ahl=8, aw=4;
+    ctx.beginPath();
+    ctx.moveTo(ex,ey);
+    ctx.lineTo(ex-ahl*ux+aw*uy, ey-ahl*uy-aw*ux);
+    ctx.lineTo(ex-ahl*ux-aw*uy, ey-ahl*uy+aw*ux);
+    ctx.closePath(); ctx.fillStyle=ctx.strokeStyle; ctx.fill();
+    ctx.globalAlpha=1;
+  }
+
+  // nodes
+  for(let i=0;i<n;i++){
+    const [x,y] = pos(i);
+    const [val,ver] = states[i];
+    const infected = ver>=1;
+    const isRead = i===readI;
+    const stale = isRead && !infected;
+    // outer ring for read target
+    if(isRead){
+      ctx.strokeStyle = stale ? "#c0392b" : "#27ae60";
+      ctx.lineWidth = 3;
+      ctx.setLineDash(stale ? [4,3] : []);
+      ctx.beginPath(); ctx.arc(x,y,25,0,2*Math.PI); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.fillStyle = infected ? "#27ae60" : "#7f8c8d";
+    ctx.beginPath(); ctx.arc(x,y,20,0,2*Math.PI); ctx.fill();
+    // label
+    ctx.fillStyle = "#0d1117";
+    ctx.font = '700 12px ui-monospace,monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText("n"+i, x, y-3);
+    ctx.font = '600 10px ui-monospace,monospace';
+    ctx.fillText("X="+val+"@v"+ver, x, y+9);
+    ctx.textBaseline='alphabetic';
+  }
+
+  // read-target callout
+  const [val,ver] = states[readI];
+  const stale = ver<1;
+  ctx.fillStyle = stale ? "#c0392b" : "#27ae60";
+  ctx.font = '700 13px system-ui'; ctx.textAlign='left';
+  ctx.fillText("client reads n"+readI+": X="+val+(stale?"  (STALE)":"  (fresh)"), 14, 24);
+}
+
+function renderProp(){
+  document.getElementById('curRound').textContent = cur;
+  document.getElementById('totRound').textContent = Math.max(0, sim.length-1);
+  const rd = sim[cur] || sim[0];
+  document.getElementById('infCount').textContent = rd.infected.length;
+  document.getElementById('nInf').textContent = sim.length ? sim[0].states.length : 8;
+  const readI = +document.getElementById('readNode').value;
+  const [rv,rver] = (sim[cur]||sim[0]).states[readI];
+  const stale = rver<1;
+  const ex = rd.exchanges.filter(([a,b,d])=>a!==b);
+  const exStr = ex.length ? ex.map(([a,b,d])=>"n"+a+"->n"+b+(d?"*":"")).join("  ") : "(none)";
+  const conv = cur>=sim.length-1;
+  const el = document.getElementById('propReadout');
+  let h = "round "+rd.round+" exchanges: "+exStr+"\n";
+  h += "infected: {"+rd.infected.map(i=>"n"+i).join(", ")+"}\n";
+  h += "client reads n"+readI+": X="+rv+(stale?"  <span class='bad'>STALE</span>":"  <b>fresh</b>");
+  if(conv) h += "\n<span class='gold'>CONVERGED</span> in "+rd.round+" rounds — every replica = X=1@v1.";
+  el.innerHTML = h;
+}
+
+/* =========================================================================
+   PANEL 2 — epidemic curve
+   ========================================================================= */
+const curve = document.getElementById('curve');
+function drawBigCurve(){
+  const n = +document.getElementById('nBig').value;
+  const c = curveOf(n, 42, "pushpull");
+  document.getElementById('nBigV').textContent = n;
+  document.getElementById('bigRounds').textContent = c.length-1;
+  document.getElementById('bigLog2').textContent = (Math.log2(n)).toFixed(2);
+  const ctx = setup(curve);
+  const w = curve.clientWidth, h = curve.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const padL=46, padR=18, padT=18, padB=34;
+  const pw = w-padL-padR, ph = h-padT-padB;
+  const R = c.length-1;                 // rounds
+  const xFor = r => padL + (R<=0?0:(r/R)*pw);
+  const yFor = v => padT + ph - (v/n)*ph;
+  // grid + axes
+  ctx.strokeStyle="#21262d"; ctx.fillStyle="#8b949e";
+  ctx.font='11px ui-monospace,monospace';
+  for(let f=0;f<=1.0001;f+=0.25){
+    const y=padT+ph-f*ph;
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    ctx.textAlign='right'; ctx.fillText(Math.round(f*n), padL-6, y+3);
+  }
+  ctx.textAlign='center';
+  for(let r=0;r<=R;r++){
+    const x=xFor(r);
+    ctx.beginPath(); ctx.moveTo(x,padT+ph); ctx.lineTo(x,padT+ph+4); ctx.stroke();
+    if(r===0||r===R||(R<=20)||r%Math.ceil(R/8)===0) ctx.fillText(r, x, padT+ph+18);
+  }
+  ctx.fillText("round", padL+pw/2, h-6);
+  ctx.save(); ctx.translate(14,padT+ph/2); ctx.rotate(-Math.PI/2); ctx.fillText("infected nodes",0,0); ctx.restore();
+  // log2(N) reference (dashed)
+  const log2n = Math.log2(n);
+  ctx.strokeStyle="#e67e22"; ctx.setLineDash([6,5]); ctx.lineWidth=1.6;
+  ctx.beginPath(); ctx.moveTo(xFor(log2n),padT); ctx.lineTo(xFor(log2n),padT+ph); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle="#e67e22"; ctx.textAlign='left'; ctx.fillText("log\u2082(N)="+log2n.toFixed(1), xFor(log2n)+5, padT+12);
+  // filled area + line
+  ctx.beginPath(); ctx.moveTo(xFor(0), yFor(c[0]));
+  for(let r=1;r<c.length;r++) ctx.lineTo(xFor(r), yFor(c[r]));
+  ctx.lineTo(xFor(R), padT+ph); ctx.lineTo(xFor(0), padT+ph); ctx.closePath();
+  ctx.fillStyle="rgba(39,174,96,0.16)"; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(xFor(0), yFor(c[0]));
+  for(let r=1;r<c.length;r++) ctx.lineTo(xFor(r), yFor(c[r]));
+  ctx.strokeStyle="#27ae60"; ctx.lineWidth=2.4; ctx.stroke();
+  // points
+  ctx.fillStyle="#f1c40f";
+  for(let r=0;r<c.length;r++){
+    ctx.beginPath(); ctx.arc(xFor(r),yFor(c[r]),3,0,2*Math.PI); ctx.fill();
+  }
+}
+
+/* =========================================================================
+   PANEL 3 — reorder demo (scripted, matches .py Section C)
+   ========================================================================= */
+let cMerge="lww", cStep=0;
+const cDeliveries=[null,{from:"B",val:2,ver:2},{from:"A",val:1,ver:1}];
+function renderReorder(){
+  const m = cMerge==="lww"?lww:naive;
+  let cv=0,cver=0; const seq=["X=0@v0"]; const lines=[];
+  lines.push("  start              : C = X=0@v0");
+  for(let k=1;k<=cStep;k++){
+    const d=cDeliveries[k];
+    const before=cv;
+    [cv,cver]=m(cv,cver,d.val,d.ver);
+    const note = (cMerge==="lww"&&d.ver<cver&&cv===before)?"  (v"+d.ver+" < current -> rejected)":"";
+    const back = (cMerge==="naive"&&k===2)?"    <- went BACKWARDS":"";
+    lines.push("  round"+k+" "+d.from+"->C (v"+d.ver+") : C = X="+cv+"@v"+cver+note+back);
+    seq.push("X="+cv+"@v"+cver);
+  }
+  const newest = 2;
+  const el = document.getElementById('reorderReadout');
+  let h = "issued:  t=1 WRITE X=1@v1 -> A   |   t=2 WRITE X=2@v2 -> B (newer)\n";
+  h += "delivery to C:  round1 B->C (v2)   then   round2 A->C (v1)\n";
+  h += "--- "+(cMerge==="lww"?"LWW":"NAIVE")+" merge ---\n";
+  h += lines.join("\n")+"\n";
+  if(cStep===2){
+    if(cMerge==="naive"){
+      h += "=> C ended at X="+cv+".  observed: "+seq.join(" -> ")+"  <span class='bad'>REVERSED</span>\n";
+      h += "<span class='bad'>The newest write was X=2, but C shows X="+cv+" — divergence.</span>";
+    } else {
+      h += "=> C ended at X="+cv+".  observed: "+seq.join(" -> ")+"  <b>(holds at newest)</b>\n";
+      h += "<b>v2 was newest; the older v1 was rejected. Outcome independent of order.</b>";
+    }
+  } else if(cStep===0){
+    h += "<span class='warn'>press 'deliver next update' twice.</span>";
+  }
+  el.innerHTML = h;
+}
+
+/* =========================================================================
+   GOLD CHECK vs eventual_consistency.py
+   ========================================================================= */
+function runChecks(){
+  const g3 = convergeRounds(3, 1115, "push");
+  const g1000 = convergeRounds(1000, 42, "pushpull");
+  const ok = g3.rounds===2 && g3.distinct.size===1 && g3.distinct.has("1,1")
+          && g1000.rounds===9 && g1000.distinct.size===1 && g1000.distinct.has("1,1");
+  const chk = document.getElementById('check');
+  chk.innerHTML = ok
+    ? "check: OK &mdash; JS matches eventual_consistency.py (3-replica push: 2 rounds; 1000-node push-pull: 9 rounds; both -> (1,1))"
+    : "check: FAIL &mdash; mismatch! (3rep="+g3.rounds+"r/"+g3.distinct.size+"st, 1000="+g1000.rounds+"r/"+g1000.distinct.size+"st)";
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* =========================================================================
+   EVENTS
+   ========================================================================= */
+function stopAuto(){
+  if(autoTimer){ clearInterval(autoTimer); autoTimer=null; }
+  document.getElementById('bAuto').classList.remove('active');
+  document.getElementById('bAuto').innerHTML = "&#x25B6;&#x25B6; auto";
+}
+function stepFwd(){
+  if(cur < sim.length-1){ cur++; drawTopo(); renderProp(); return true; }
+  return false;
+}
+
+document.getElementById('nRep').addEventListener('input', ()=>{
+  document.getElementById('nRepV').textContent = document.getElementById('nRep').value;
+  stopAuto(); rebuild();
+});
+document.getElementById('mech').addEventListener('change', ()=>{ stopAuto(); rebuild(); });
+document.getElementById('mrg').addEventListener('change', ()=>{ stopAuto(); rebuild(); });
+document.getElementById('readNode').addEventListener('change', ()=>{ drawTopo(); renderProp(); });
+document.getElementById('bReset').addEventListener('click', ()=>{ stopAuto(); cur=0; drawTopo(); renderProp(); });
+document.getElementById('bBack').addEventListener('click', ()=>{ stopAuto(); if(cur>0){ cur--; drawTopo(); renderProp(); } });
+document.getElementById('bStep').addEventListener('click', ()=>{ stopAuto(); stepFwd(); });
+document.getElementById('bAuto').addEventListener('click', function(){
+  if(autoTimer){ stopAuto(); return; }
+  if(cur>=sim.length-1) cur=0;
+  this.classList.add('active'); this.innerHTML="&#x23F8; pause";
+  drawTopo(); renderProp();
+  autoTimer = setInterval(()=>{
+    if(!stepFwd()){ stopAuto(); }
+  }, 700);
+});
+document.getElementById('nBig').addEventListener('input', drawBigCurve);
+
+document.getElementById('bLww').addEventListener('click', function(){
+  cMerge="lww"; this.classList.add('active');
+  document.getElementById('bNaive').classList.remove('active'); renderReorder();
+});
+document.getElementById('bNaive').addEventListener('click', function(){
+  cMerge="naive"; this.classList.add('active');
+  document.getElementById('bLww').classList.remove('active'); renderReorder();
+});
+document.getElementById('bStepC').addEventListener('click', ()=>{ if(cStep<2){ cStep++; renderReorder(); } });
+document.getElementById('bResetC').addEventListener('click', ()=>{ cStep=0; renderReorder(); });
+
+window.addEventListener('resize', ()=>{ drawTopo(); drawBigCurve(); });
+
+/* ===== init ===== */
+rebuild();
+drawBigCurve();
+renderReorder();
+runChecks();
+</script>
+</body>
+</html>

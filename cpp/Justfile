@@ -1,0 +1,114 @@
+# cpp/Justfile — bundle runner & verification harness.
+#
+# Each bundle is a standalone .cpp compiled to a TEMP dir (no artifact lands in
+# the source dir — like `go run`). Flat layout (like go/ / python/), stdlib-only
+# for Phases 1-7; Phase 8 teaches CMake for real multi-target builds. C++23.
+#
+# JUST SYNTAX CHEAT-SHEET (the two traps that bit earlier drafts):
+#   - Just variables are interpolated with {{VAR}}  — NOT $(VAR) (that's shell).
+#   - Just passes `$` to the shell VERBATIM — write single `$` (not `$$`, that's GNU Make).
+#
+# Common:
+#   just run values_types        # run a bundle (compiles to /tmp, runs, no artifact left)
+#   just out  values_types        # (re)capture its _output.txt
+#   just check values_types       # verify ONE (run + [check] count + -Wall -Wextra clean + output)
+#   just sanitize values_types    # re-run under ASan + UBSan (the C++ safety net)
+#   just sweep                    # verify ALL bundles
+#   just list                     # list every bundle stem
+#   just new my_bundle            # scaffold a new bundle from scripts/skeleton.cpp
+#   just clean                    # remove /tmp build artifacts
+
+set shell := ["bash", "-c"]
+default := "list"
+
+# Compiler + flags. c++ = Apple clang 17 on this box (C++23 stdlib supported).
+# -Wall -Wextra -Wpedantic is the "vet" gate: a clean bundle has NO warnings.
+CXX := "c++"
+STD := "-std=c++23"
+WARN := "-Wall -Wextra -Wpedantic"
+OPT := "-O2"
+CXXFLAGS := STD + " " + OPT + " " + WARN
+
+# List every bundle stem (.cpp files in this dir).
+list:
+    @echo "C++ bundles in $(pwd):"
+    @for f in *.cpp; do echo "  ${f%.cpp}"; done
+
+# Run a bundle by stem. Compiles to /tmp (no artifact in source); runs it.
+run name:
+    @{{CXX}} {{CXXFLAGS}} {{name}}.cpp -o /tmp/cpp_{{name}} && /tmp/cpp_{{name}}
+
+# (Re)capture a bundle's stdout to <name>_output.txt (deterministic: §4.2 rules).
+out name:
+    @{{CXX}} {{CXXFLAGS}} {{name}}.cpp -o /tmp/cpp_{{name}} 2>/tmp/cpp_{{name}}.warn
+    @if [ -s /tmp/cpp_{{name}}.warn ]; then echo "  WARNINGS (output may be unreliable):"; cat /tmp/cpp_{{name}}.warn; fi
+    @/tmp/cpp_{{name}} > {{name}}_output.txt 2>/dev/null \
+      && { test -s {{name}}_output.txt && echo "captured {{name}}_output.txt ($(wc -l < {{name}}_output.txt | tr -d ' ') lines)" || echo "EMPTY output — run failed?"; } \
+      || echo "RUN FAILED"
+
+# Verify ONE bundle: compile (-Wall -Wextra clean), run, count [check], _output.txt presence.
+check name:
+    @echo "===== {{name}} ====="
+    @if {{CXX}} {{CXXFLAGS}} {{name}}.cpp -o /tmp/cpp_{{name}} 2>/tmp/cpp_{{name}}.warn; then \
+       if [ -s /tmp/cpp_{{name}}.warn ]; then echo "  compile: OK (warnings below)"; cat /tmp/cpp_{{name}}.warn; else echo "  compile: OK (no warnings)"; fi; \
+     else echo "  compile: FAILED"; cat /tmp/cpp_{{name}}.warn; exit 1; fi
+    @/tmp/cpp_{{name}} > /tmp/cpp_{{name}}.out 2>/tmp/cpp_{{name}}.err && echo "  run: OK" || { echo "  run: FAILED"; cat /tmp/cpp_{{name}}.err; exit 1; }
+    @n=$(grep -c "\[check\]" /tmp/cpp_{{name}}.out); echo "  checks printed: $n"
+    @test -s {{name}}_output.txt && echo "  output.txt: present" || echo "  output.txt: MISSING"
+
+# Re-run a bundle under AddressSanitizer + UndefinedBehaviorSanitizer (ASan/UBSan).
+# Bundles MUST be UB-free for reproducible output (§4.2 rule 5); this is the proof.
+# NOTE: leak detection (detect_leaks) is Linux-only — ASan on macOS doesn't support
+# it, so we don't force the option (it would abort). On Linux it auto-enables.
+sanitize name:
+    @echo "===== {{name}} (ASan + UBSan) ====="
+    @{{CXX}} {{STD}} -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer \
+        {{name}}.cpp -o /tmp/cpp_{{name}}_san 2>/tmp/cpp_{{name}}.sanwarn \
+      && { if [ -s /tmp/cpp_{{name}}.sanwarn ]; then echo "  sanitizer compile: warnings"; cat /tmp/cpp_{{name}}.sanwarn; else echo "  sanitizer compile: OK"; fi; } \
+      || { echo "  sanitizer compile: FAILED"; cat /tmp/cpp_{{name}}.sanwarn; exit 1; }
+    @/tmp/cpp_{{name}}_san > /tmp/cpp_{{name}}.sanout 2>/tmp/cpp_{{name}}.sanerr \
+      && { echo "  ASan/UBSan: clean (no errors)"; } \
+      || { echo "  ASan/UBSan: REPORTED ISSUES below"; cat /tmp/cpp_{{name}}.sanerr; }
+
+# Batch verification sweep across ALL bundles (run after a subagent swarm returns).
+sweep:
+    @echo "===== sweep: all bundles ====="
+    @fail=0; \
+    for f in *.cpp; do \
+      name=${f%.cpp}; \
+      printf "\n--- %s ---\n" "$name"; \
+      if {{CXX}} {{CXXFLAGS}} "$f" -o /tmp/cpp_$name 2>/tmp/cpp_$name.warn; then \
+        if [ -s /tmp/cpp_$name.warn ]; then printf "  compile: OK (warnings)\n"; else printf "  compile: OK (clean)\n"; fi; \
+      else printf "  compile: FAILED\n"; cat /tmp/cpp_$name.warn; fail=1; fi; \
+      if /tmp/cpp_$name > /tmp/cpp_$name.out 2>/tmp/cpp_$name.err; then \
+        printf "  run: OK\n"; \
+      else printf "  run: FAILED\n"; cat /tmp/cpp_$name.err; fail=1; fi; \
+      n=$(grep -c "\[check\]" /tmp/cpp_$name.out 2>/dev/null); n=${n:-0}; \
+      printf "  checks printed: %s\n" "$n"; \
+      if test -s "${name}_output.txt"; then printf "  output.txt: present\n"; else printf "  output.txt: MISSING\n"; fi; \
+    done; \
+    echo; \
+    if [ $fail -eq 0 ]; then echo "SWEEP: all green"; else echo "SWEEP: failures detected (see above)"; fi
+
+# Scaffold a new bundle from scripts/skeleton.cpp.
+new name:
+    @test ! -f {{name}}.cpp || { echo "{{name}}.cpp already exists"; exit 1; }
+    @test -f scripts/skeleton.cpp || { echo "scripts/skeleton.cpp missing"; exit 1; }
+    @upper=$(echo "{{name}}" | tr '[:lower:]' '[:upper:]'); \
+      sed -e "s/__STEM__/{{name}}/g" -e "s/__STEM_UPPER__/$upper/g" scripts/skeleton.cpp > {{name}}.cpp
+    @echo "created {{name}}.cpp — next: just run {{name}}   (edit sections, then capture: just out {{name}})"
+
+# Remove /tmp build artifacts (never source or _output.txt). -rf because macOS
+# ASan builds emit a .dSYM directory beside the binary (rm -f can't remove dirs).
+clean:
+    @rm -rf /tmp/cpp_*
+    @echo "cleaned /tmp/cpp_* (source dir untouched — bundles compile to /tmp)"
+
+# phony aliases
+alias r := run
+alias o := out
+alias c := check
+alias s := sweep
+alias l := list
+alias n := new
+alias san := sanitize

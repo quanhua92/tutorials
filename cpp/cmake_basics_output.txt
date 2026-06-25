@@ -1,0 +1,239 @@
+cmake_basics.cpp — Phase 8 bundle (Build, Tooling & Production).
+Asserts the STRUCTURE of CMakeLists.txt strings + the OBSERVED cmake version.
+No subprocess in the verified path — byte-identical on re-run.
+Compiled -std=c++23 -O2 -Wall -Wextra -Wpedantic; UB-free (just sanitize clean).
+
+======================================================================
+SECTION A — The CMakeLists.txt skeleton + observed cmake version
+======================================================================
+(1) OBSERVED `cmake --version` (first line, baked in as a static fact):
+    "cmake version 4.3.3"
+    parsed: major=4 minor=3 patch=3 (sscanf matched 3/3)
+[check] cmake version string parses to major.minor.patch (3 components): OK
+[check] cmake major version >= 3 (so cmake_minimum_required(VERSION 3.x) is satisfiable): OK
+[check] cmake version is at least 3.20 (a common modern floor): OK
+
+(2) The minimal CMakeLists.txt skeleton:
+
+cmake_minimum_required(VERSION 3.20)
+project(myapp LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(myapp src/main.cpp)
+[check] skeleton contains cmake_minimum_required(VERSION: OK
+[check] skeleton contains project(... LANGUAGES CXX): OK
+[check] skeleton sets CMAKE_CXX_STANDARD: OK
+[check] skeleton declares an executable target (add_executable): OK
+[check] skeleton sets CMAKE_CXX_STANDARD to 23 (the curriculum standard): OK
+
+(3) How the stdlib bundles build today (the Justfile one-liner):
+    c++ -std=c++23 -O2 -Wall -Wextra -Wpedantic NAME.cpp -o /tmp/cpp_NAME
+    ^ compiles ONE translation unit to /tmp. Sufficient for Phase 1-7
+      stdlib bundles; insufficient for a real multi-target project.
+[check] Justfile command targets C++23 (-std=c++23): OK
+[check] Justfile command compiles to /tmp (no artifact in source): OK
+[check] Justfile command is single-TU (one .cpp, no multi-target linking): OK
+
+======================================================================
+SECTION B — Targets: add_library + per-target properties
+======================================================================
+The modern target-based CMakeLists.txt (library + executable):
+
+cmake_minimum_required(VERSION 3.20)
+project(myapp LANGUAGES CXX)
+
+add_library(math STATIC src/math.cpp)
+target_include_directories(math PUBLIC include)
+target_compile_features(math PUBLIC cxx_std_23)
+
+add_executable(app src/main.cpp)
+target_link_libraries(app PRIVATE math)
+[check] declares a STATIC library target: OK
+[check] declares an executable target: OK
+[check] STATIC library type present (archive .a): OK
+[check] the library compiles a source file (src/math.cpp): OK
+[check] target_include_directories (modern, per-target include path): OK
+[check] target_compile_features (modern, per-target compile feature): OK
+[check] modern CMakeLists uses cxx_std_23 (req C++23 for the math target): OK
+[check] executable links the library (target_link_libraries): OK
+
+The three add_library kinds (STATIC/SHARED/INTERFACE):
+  type        artifact                             object files?  header-only?
+  ----------  -----------------------------------  -------------  ------------
+  STATIC      .a archive (compile-time link)       yes            no
+  SHARED      .so/.dylib/.dll (runtime link)       yes            no
+  INTERFACE   no artifact (header-only)            no             yes
+[check] STATIC produces a .a archive with object files: OK
+[check] SHARED produces a runtime-loaded lib with object files: OK
+[check] INTERFACE produces NO artifact (header-only library): OK
+[check] INTERFACE is the header-only-library kind: OK
+
+Modern (target_*, per-target) vs old (global) property commands:
+  modern target_*        | old global equivalent (avoid)
+  ----------------------  | --------------------------------
+  target_include_directo  | include_directories
+  target_link_libraries   | link_libraries
+  target_compile_features | (none; add_definitions / CMAKE_CXX_FLAGS)
+  target_compile_definiti | add_definitions
+[check] modern per-target include cmd = target_include_directories: OK
+[check] modern per-target feature cmd = target_compile_features: OK
+
+======================================================================
+SECTION C — target_link_libraries: PUBLIC / PRIVATE / INTERFACE
+======================================================================
+target_link_libraries(<tgt> <SCOPE> <dep>) — the propagation model:
+
+  SCOPE       used in OWN build?  propagates to CONSUMERS?  use case
+  ----------  ------------------  ------------------------  ----------------------------------
+  PUBLIC      yes                 yes                       a real dependency used in headers + impl
+  PRIVATE     yes                 no                        an implementation detail hidden in .cpp
+  INTERFACE   no                  yes                       header-only: needed by consumers, not by us
+[check] PUBLIC: used in own build AND propagates to consumers: OK
+[check] PRIVATE: used in own build, does NOT propagate to consumers: OK
+[check] INTERFACE: NOT used in own build, DOES propagate to consumers: OK
+[check] PUBLIC == (PRIVATE own-build) UNION (INTERFACE consumer-propagation): OK
+[check] exactly one scope (INTERFACE) is header-only (no own-build use): OK
+[check] modern CMakeLists contains the PRIVATE scope: OK
+[check] math target exposes include dir + feature PUBLIC (propagates to app): OK
+[check] app links math PRIVATE (math is an impl detail; app's consumers do NOT see math): OK
+
+Worked read of the dependency graph in Section B's CMakeLists:
+  math  --PUBLIC include/ + cxx_std_23-->  [propagates to whoever links math]
+  app   --PRIVATE math-------------------->  [math compiles into app; app's
+                                             consumers do NOT inherit math]
+[check] math's PUBLIC include dir reaches app's build (propagation): OK
+[check] app's (hypothetical) consumers would NOT see math (PRIVATE): OK
+
+======================================================================
+SECTION D — generate -> build two-step, generators, out-of-source
+======================================================================
+CMake is a META build system: it generates build files, it does NOT compile.
+The two-step model (run once, then many times):
+  STEP 1 (GENERATE / configure):  cmake -B build -S .
+      -> reads CMakeLists.txt, detects the toolchain, writes build files
+         (Makefiles / Ninja / VS .sln / Xcode .xcodeproj) into build/
+  STEP 2 (BUILD / compile+link):  cmake --build build
+      -> invokes the generated backend to compile .cpp -> .o and link -> binary
+[check] generate step writes into the build/ dir (cmake -B build): OK
+[check] generate step reads the source dir (cmake -S .): OK
+[check] build step targets the build/ dir (cmake --build build): OK
+[check] the two steps are distinct commands (generate != build): OK
+
+Generators (the backends `cmake -G <name>` selects):
+  generator        kind      command-line backend?
+  ---------------  --------  ---------------------
+  Unix Makefiles   Make      yes
+  Ninja            Ninja     yes
+  Visual Studio    VS IDE    no (IDE project)
+  Xcode            IDE       no (IDE project)
+[check] Ninja is a command-line generator: OK
+[check] Unix Makefiles is a command-line generator: OK
+[check] Visual Studio is an IDE-project generator (not command-line): OK
+[check] Xcode is an IDE-project generator (not command-line): OK
+
+Out-of-source build discipline (build/ is generated, never committed):
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+[check] .gitignore ignores build/: OK
+[check] .gitignore ignores cmake-build-*/ (IDE variant dirs): OK
+[check] .gitignore ignores CMakeCache.txt (per-build cache): OK
+[check] .gitignore ignores CMakeFiles/ (generated intermediate dir): OK
+[check] source tree stays clean: only CMakeLists.txt is committed (not its output): OK
+
+======================================================================
+SECTION E — find_package (modern) vs the variable anti-pattern
+======================================================================
+MODERN: find_package imports a TARGET carrying its own properties:
+
+cmake_minimum_required(VERSION 3.20)
+project(myapp LANGUAGES CXX)
+
+find_package(Threads REQUIRED)
+
+add_executable(app src/main.cpp)
+target_link_libraries(app PRIVATE Threads::Threads)
+[check] modern uses find_package: OK
+[check] modern marks the dep REQUIRED (fail fast if missing): OK
+[check] modern links an IMPORTED TARGET (Threads::Threads): OK
+[check] imported target uses the double-colon namespace (::): OK
+[check] modern find_package avoids manual include/link dirs: OK
+
+ANTI-PATTERN: global variables + raw paths (non-propagating, fragile):
+
+# ANTI-PATTERN (old, variable-based, non-propagating) — do not write this:
+include_directories(/usr/local/include)
+link_directories(/usr/local/lib)
+add_definitions(-DDEBUG)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall")
+add_executable(app src/main.cpp)
+target_link_libraries(app pthread)
+[check] anti-pattern uses global include_directories: OK
+[check] anti-pattern uses global link_directories: OK
+[check] anti-pattern uses global add_definitions: OK
+[check] anti-pattern mutates the global CMAKE_CXX_FLAGS: OK
+[check] anti-pattern links a raw lib name (pthread) instead of an imported target: OK
+[check] anti-pattern does NOT use the :: imported-target namespace: OK
+
+Why the modern way wins (the propagation payoff):
+  find_package(Threads) + Threads::Threads  ->  ONE target carries
+    include dirs + link flags + compile defs as PROPERTIES; link it and
+    everything propagates. The old way forces every consumer to repeat
+    include_directories/link_directories/flags manually -> drift + bugs.
+[check] imported targets are self-describing (carry their own properties): OK
+
+======================================================================
+SECTION F — Cross-language: CMake vs cargo / go build
+======================================================================
+The build-system analog across the 5-language curriculum:
+  language     manifest         tool             integrated with compiler?
+  -----------  ---------------  ---------------  -------------------------
+  C++    (this)  CMakeLists.txt   cmake (+ compiler)  no (separate tool)
+  Rust     Cargo.toml       cargo            yes
+  Go      go.mod           go build         yes
+  TS      package.json     tsc + bundler    no (separate tool)
+[check] C++ build manifest is CMakeLists.txt: OK
+[check] CMake is a SEPARATE tool (not integrated with the compiler): OK
+[check] Rust build manifest is Cargo.toml: OK
+[check] cargo IS integrated with the Rust compiler: OK
+[check] Go build manifest is go.mod: OK
+[check] `go build` IS integrated with the Go compiler: OK
+[check] CMake ≈ cargo / go build: a manifest + a build tool over a compiler: OK
+[check] CMake is LESS integrated than cargo (separate tool, own DSL, historical cruft): OK
+
+CMake is C++'s cargo-equivalent — but where `cargo` is THE Rust toolchain
+(one tool, one manifest, curated), CMake is a SEPARATE meta-build-system: it
+GENERATES build files for Make/Ninja/IDEs, which then invoke the OS compiler.
+More moving parts, more historical cruft (the variable-based anti-pattern of
+Section E), no dependency/package layer as integrated as crates.io or the Go
+module proxy (that role falls to vcpkg/Conan — separate tools again).
+[check] cargo/go build skip the generate step (direct compile); CMake does NOT: OK
+[check] C++ lacks an integrated package manager (vcpkg/Conan are separate, unlike crates.io): OK
+
+======================================================================
+SECTION G — Determinism note + the #ifdef RUN_CMAKE gate
+======================================================================
+This bundle asserts STATIC facts only (version string, CMakeLists structure,
+the documented two-step command model). It NEVER spawns cmake in the verified
+path because `cmake -B build` output is nondeterministic (generator-dependent
+paths, compiler-detection lines, timestamps) -> would break the byte-identical
+re-run guarantee (HOW_TO_RESEARCH §4.2 rule: assert static facts).
+
+The real two-step invocation (DOCUMENTED here, gated behind -DRUN_CMAKE):
+    cmake -B build -S .        # generate
+    cmake --build build        # compile + link
+
+(RUN_CMAKE not defined: the nondeterministic cmake invocation is correctly
+ omitted from this build — the verified path stays byte-identical on re-run.)
+[check] verified path does not spawn cmake (RUN_CMAKE not defined in just run/out/check): OK
+[check] all asserted facts are STATIC (string structure + observed version): OK
+[check] no rand/now/system_clock in the verified path (determinism): OK
+[check] bundle is UB-free (passes just sanitize): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

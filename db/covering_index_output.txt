@@ -1,0 +1,258 @@
+covering_index.py - reference impl. All numbers feed COVERING_INDEX.md.
+page_size = 8192 bytes ; pure Python stdlib.
+
+========================================================================
+  SECTION A: regular index scan - key -> TID -> heap (2 trips)
+========================================================================
+Query:  SELECT name FROM users WHERE email = 'cara@x.com'
+
+Index on (email) - PLAIN leaf entries: (email, tid)
+
+  leaf (sorted by email):
+    (alice@x.com  , tid=(0, 0))
+    (bob@x.com    , tid=(0, 1))
+    (cara@x.com   , tid=(1, 0))
+    (dave@x.com   , tid=(1, 1))
+    (eve@x.com    , tid=(2, 0))
+
+ACCESS PATH (regular Index Scan):
+  STEP 1 [index traversal]  : walk the B-tree to the leaf,
+                             find entry (cara@x.com, tid=(1, 0))
+                             -> this is `height` index page reads
+  STEP 2 [heap fetch]       : follow tid={tid} -> read HEAP page 1
+                             heap page 1 holds (3, 'cara@x.com', 'Cara', 41, 'Da Nang')
+  STEP 3 [project]          : extract name = 'Cara' from the tuple
+
+I/O model (point lookup):
+  regular_index_scan  =  height(index pages)  +  1 heap fetch
+  The heap fetch is a RANDOM page read of a (big, cold) page.
+  For 1 matching row this is the dominant cost - see Section E.
+
+[check] name returned == 'Cara': OK
+
+========================================================================
+  SECTION B: covering index - INCLUDE(name) -> skip the heap
+========================================================================
+DDL:    CREATE INDEX users_email_idx ON users (email) INCLUDE (name);
+
+Covering leaf entries: (email, {name}, tid)  - name rides along
+
+  leaf (sorted by email):
+    (alice@x.com  , name=Alice , tid=(0, 0))
+    (bob@x.com    , name=Bob   , tid=(0, 1))
+    (cara@x.com   , name=Cara  , tid=(1, 0))
+    (dave@x.com   , name=Dave  , tid=(1, 1))
+    (eve@x.com    , name=Eve   , tid=(2, 0))
+
+ACCESS PATH (Index-Only Scan, visibility map = all-visible):
+  STEP 1 [index traversal]  : walk the B-tree to the leaf,
+                             find entry (cara@x.com, name=Cara, tid=(1, 0))
+                             -> `height` index page reads
+  STEP 2 [skip heap]        : name IS ALREADY on the card -
+                             NO heap fetch. (visibility map OK)
+  STEP 3 [project]          : return name = 'Cara' directly
+
+I/O model (point lookup, all-visible):
+  covering_index_scan  =  height(index pages)  +  0 heap fetches
+  The random heap read from Section A is GONE. That is the win.
+
+[check] name returned == 'Cara': OK
+
+========================================================================
+  SECTION C: visibility map - index-only is conditional on it
+========================================================================
+An index entry has a TID but does NOT know whether the tuple it
+points at is VISIBLE to the current transaction (MVCC). PostgreSQL
+answers this with the VISIBILITY MAP: a 1-bit-per-heap-page bitmap.
+
+  bit = 1 (all-visible) : every tuple on the page is visible to ALL
+                          transactions -> index-only scan may SKIP
+                          the heap fetch for entries on this page.
+  bit = 0 (not all-visible): at least one tuple may be invisible ->
+                          index-only scan MUST fetch the heap page to
+                          check visibility -> the optimization is
+                          LOST for that row (it degrades to a fetch).
+
+Who sets / clears the bit:
+  SET   by VACUUM (and when a page becomes all-visible after the
+        transaction that dirtied it commits + a VACUUM/autovacuum
+        pass confirms it). This is WHY VACUUM matters for index-only
+        scan performance: no VACUUM -> bits stay 0 -> index-only
+        silently falls back to heap fetches.
+  CLEAR by any UPDATE or DELETE that touches the page (the page is
+        no longer guaranteed all-visible).
+
+EFFECTIVE heap reads for an index-only scan over R matching rows:
+  heap_reads  =  R * (1 - f)     where f = fraction of pages all-visible
+
+R = 1000 matching rows. f = fraction of heap pages all-visible:
+
+| vacuum state        | f (visible) | fallback heap fetches = R*(1-f) |
+|---------------------|-------------|----------------------------------|
+| just VACUUMed (fresh) |        1.00 |                                0 |
+| light write churn   |        0.90 |                              100 |
+| heavy UPDATE workload |        0.50 |                              500 |
+| never VACUUMed      |        0.00 |                             1000 |
+
+TAKEAWAY: a covering index only delivers 0 heap reads when the
+visibility map is healthy. On a write-heavy table that is never
+VACUUMed, index-only scan degenerates toward the regular cost.
+
+[check] f=1.0 -> 0 heap fetches (true index-only): OK
+
+========================================================================
+  SECTION D: INCLUDE vs key columns - leaf entry layout
+========================================================================
+Two ways to put `name` into an index on email:
+
+  (a) compound KEY :  CREATE INDEX ... ON users (email, name)
+      name IS part of the sort order. The B-tree compares on
+      (email, name) pairs. Useful if you ALSO range-scan/filter on
+      name. Cost: every comparison carries name; narrower fanout.
+
+  (b) INCLUDE col  :  CREATE INDEX ... ON users (email) INCLUDE(name)
+      name is STORED in the leaf but NOT compared. Sort order is
+      still just email. No comparison overhead, same fanout on the
+      key. Cost: the leaf entry is bigger -> fewer entries per leaf
+      -> more leaves -> (marginally) taller tree, more index space.
+
+LEAF ENTRY LAYOUT (bytes), email key + name include, 8 KB page:
+
+  +-----------------------------------------+----------+
+  | field                                   | bytes    |
+  +-----------------------------------------+----------+
+  | key: email (the sort column)            |       50 |
+  | [INCLUDE] name (stored, not compared)   |       30 |   <- only in covering/compound
+  | TID (page, offset)                      |        6 |
+  | index tuple header                      |       16 |
+  +-----------------------------------------+----------+
+  | plain leaf entry    (email, TID)        |       72 |
+  | covering leaf entry (email, name, TID)  |      102 |
+  | compound KEY entry  ((email,name), TID) |      102 |   same bytes, different ROLE
+  +-----------------------------------------+----------+
+
+plain leaf cap    = 8192 // 72  = 113 entries/page
+covering leaf cap = 8192 // 102  = 80 entries/page
+compound leaf cap = 8192 // 102  = 80 entries/page  (same bytes -> same cap, but comparisons cost more)
+
+RULE OF THUMB:
+  * Need to FILTER / RANGE-SCAN on the column? -> make it a KEY.
+  * Only need to READ it back in the SELECT?   -> INCLUDE it.
+    INCLUDE gives the covering benefit without slowing comparisons
+    or narrowing the key's sort fanout.
+
+[check] covering entry == plain entry + name bytes: 102 == 72+30 OK
+
+========================================================================
+  SECTION E: when covering helps - I/O comparison (N = 1,000,000)
+========================================================================
+Physical model: page = 8192 B, N = 1,000,000 rows, 40 tuples/heap page -> 25,000 heap pages
+
+Index layouts:
+  PLAIN    (email)              : entry=72 B, leaf_cap=113, leaves=8,850, height=3
+  COVERING (email INCLUDE name) : entry=102 B, leaf_cap=80, leaves=12,500, height=3
+  index size: plain = 8,910 pages, covering = 12,584 pages (+3,674, 41.2%)
+
+(1) POINT LOOKUP  SELECT name FROM users WHERE email = X  (1 matching row):
+
+| plan              | index reads | heap reads | TOTAL I/O |
+|-------------------|-------------|------------|-----------|
+| regular Index Scan|           3 |          1 |         4 |
+| Index-Only Scan   |           3 |          0 |         3 |
+
+  -> covering saves 1 page read(s) per lookup (the heap fetch). For a hot point-lookup path this is huge.
+
+(2) RANGE SCAN  SELECT name FROM users WHERE email BETWEEN ...  (1000 matching rows, heap NOT clustered by email):
+
+| plan              | index reads     | heap reads | TOTAL I/O |
+|-------------------|-----------------|------------|-----------|
+| regular Index Scan|              11 |       1000 |      1011 |
+| Index-Only Scan   |              15 |          0 |        15 |
+
+  -> covering saves 996 page reads on a 1000-row range (all 1000 heap fetches vanish). Range scans are where
+     covering indexes pay back the most.
+
+(3) AGGREGATION
+
+  (3a) SELECT COUNT(*) FROM users  (NO predicate, needs NO column):
+       any index supports index-only COUNT (no data column needed).
+       full heap scan = 25,000 reads ; index-only scan (plain idx) = 8,910 reads ; saves 16,090 reads
+       NOTE: pure COUNT(*) needs no column, so even the PLAIN index
+       is already 'covering' for it. The INCLUDE earns its keep the
+       moment a stored column appears in the SELECT list:
+
+  (3b) SELECT MIN(name), MAX(name) FROM users WHERE email BETWEEN ... (1000 rows):
+       MIN/MAX over name needs name in the index -> only COVERING:
+         regular: must fetch 1000 heap pages for the names = 1011 reads
+         covering: scan 13 index leaves, take min/max = 15 reads  (index-only, sorted -> first/last leaf)
+       -> covering saves 996 reads on a min/max aggregation.
+
+GOLD (pinned for covering_index.html), N = 1,000,000:
+  height (plain)      = 3
+  height (covering)   = 3
+  point lookup regular  total = 4
+  point lookup index-only  total = 3
+  range scan regular  total = 1011
+  range scan index-only  total = 15
+
+[check] GOLD I/O counts reproduce from the formula: OK
+
+========================================================================
+  SECTION F: when it hurts - write amp, HOT loss, cache pressure
+========================================================================
+A covering index is not free. Three costs:
+
+(1) WRITE AMPLIFICATION + loss of HOT (Heap-Only Tuple) updates.
+
+  PostgreSQL HOT update: when you UPDATE a row and NO INDEXED column
+  changes, the new tuple is placed in the SAME heap page and NO index
+  is touched (no index VACUUM bloat, fast). The moment an INDEXED
+  column changes, HOT is disabled and every index pointing at the row
+  must be updated.
+
+  Scenario: UPDATE users SET name = 'Carol' WHERE id = 3
+            (name changes; email does NOT):
+
+  | index on (email)               | name in index? | extra index I/O | HOT? |
+  |--------------------------------|----------------|-----------------|------|
+  | PLAIN   (email)                | no             |               0 |  YES |
+  | COVERING(email INCLUDE name)   | YES            |            ~2* |   NO |
+  (* delete old entry + insert new; can be 1-2 page writes)
+
+  -> adding name to the index turns a FREE HOT update into ~2 index
+     page writes (and the page loses its all-visible bit -> Section C)
+
+(2) INDEX SIZE / CACHE PRESSURE.
+
+  | index            | leaf entry | pages      | vs plain     |
+  |------------------|------------|------------|--------------|
+  | plain (email)    |         72 |      8,910 | baseline     |
+  | covering         |        102 |     12,584 | +3,674 (41.2%) |
+
+  A 41% bigger index means that many
+  more pages competing for the buffer cache. If the heap is now
+  evicted more often, your OTHER queries (that DO need the heap) get
+  slower. The read win on the covered query can be offset by cache
+  misses elsewhere.
+
+(3) BREAK-EVEN (reads saved vs writes added).
+
+  Each covered point-lookup saves ~1 heap read.
+  Each name-UPDATE costs ~2 extra index writes.
+  Covering wins on I/O when  reads / updates  >  2.0
+
+  | workload                         | covering worth it?            |
+  |----------------------------------|-------------------------------|
+  | read-heavy (logins, profile view)| YES - saves a fetch every read|
+  | write-heavy (name updated often) | NO  - 2 writes per update     |
+  | range-scan heavy on name         | YES - saves N fetches         |
+  | never VACUUMed dirty table       | MAYBE - visibility map hurts  |
+
+RULE OF THUMB: add INCLUDE columns for columns that are READ in hot
+query paths but RARELY updated. Never INCLUDE a churn-heavy column.
+
+[check] break-even reads/updates ratio == 2.0: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,169 @@
+bloom_filter.py - reference impl. All numbers below feed BLOOM_FILTER.md.
+M_WORKED=32  K_WORKED=3  WORKED_KEYS=['apple', 'banana', 'cherry', 'date', 'elderberry']  hash=FNV-1a(32-bit)
+
+========================================================================
+  SECTION A: build a Bloom filter  (m = 32 bits, k = 3 hash functions)
+========================================================================
+Empty bit array, m = 32 bits, k = 3 hashes per key.
+Hash family: k INDEPENDENT hashes, each = mix32(fnv1a(key || byte(i))) mod m
+
+  fnv1a      : 32-bit FNV-1a on (key + suffix byte i)  -- distinct input
+               stream per slot, but weak low-bit diffusion on its own
+  mix32      : 32-bit avalanche finalizer (lowbias32) -- a 1-bit input
+               change flips ~50% of output bits, so positions are
+               independent (the assumption the FPR formula needs)
+
+  positions(key) = [ mix32(fnv1a(key||0)) % m,
+                      mix32(fnv1a(key||1)) % m,
+                      mix32(fnv1a(key||2)) % m ]   (k values total)
+
+Insert 5 keys; show the array after each insert (flipped bits in [brackets]):
+
+  start        :  0  0  0  0  0  0  0  0   0  0  0  0  0  0  0  0   0  0  0  0  0  0  0  0   0  0  0  0  0  0  0  0 
+  insert 'apple      ': positions [12, 19, 11] -> flips [11, 12, 19]
+                0  0  0  0  0  0  0  0   0  0  0 [1][1] 0  0  0   0  0  0 [1] 0  0  0  0   0  0  0  0  0  0  0  0 
+  insert 'banana     ': positions [10, 23, 25] -> flips [10, 23, 25]
+                0  0  0  0  0  0  0  0   0  0 [1] 1  1  0  0  0   0  0  0  1  0  0  0 [1]  0 [1] 0  0  0  0  0  0 
+  insert 'cherry     ': positions [21, 29, 3] -> flips [3, 21, 29]
+                0  0  0 [1] 0  0  0  0   0  0  1  1  1  0  0  0   0  0  0  1  0 [1] 0  1   0  1  0  0  0 [1] 0  0 
+  insert 'date       ': positions [10, 25, 9] -> flips [9, 10, 25]
+                0  0  0  1  0  0  0  0   0 [1][1] 1  1  0  0  0   0  0  0  1  0  1  0  1   0 [1] 0  0  0  1  0  0 
+  insert 'elderberry ': positions [9, 4, 13] -> flips [4, 9, 13]
+                0  0  0  1 [1] 0  0  0   0 [1] 1  1  1 [1] 0  0   0  0  0  1  0  1  0  1   0  1  0  0  0  1  0  0 
+
+After 5 inserts: 12/32 bits are 1 (fill ratio = 0.375).
+
+Notice the two collisions already (m is tiny): some keys share a bit.
+That sharing is exactly what later produces false positives.
+
+
+========================================================================
+  SECTION B: query -- is X in the set?  (check all k bits)
+========================================================================
+Query a TRUE MEMBER: 'cherry'
+  positions = [21, 29, 3]
+    bit[21] = 1
+    bit[29] = 1
+    bit[ 3] = 1
+  all k bits set? True  ->  verdict: maybe in set (true member)
+
+Query a NON-MEMBER:  'mango'
+  positions = [4, 29, 31]
+    bit[ 4] = 1
+    bit[29] = 1
+    bit[31] = 0
+  all k bits set? False  ->  verdict: definitely NOT in set
+
+THE INVARIANT:
+  - true member  -> at least one bit MUST be set on insert; query never
+                    misses it. NO FALSE NEGATIVES, ever.
+  - non-member   -> if even ONE of its k bits is 0, it is PROVABLY absent.
+                    if all k happen to be 1 (set by others) -> false positive.
+
+[check] all 5 inserted keys report 'maybe':  OK
+[check] true member 'cherry' reports 'maybe' (no false negatives):  OK
+
+========================================================================
+  SECTION C: false-positive rate -- measured vs the formula
+========================================================================
+Fresh filter sized for the job:  m = 1024 bits, k = 7, insert n = 100 keys, probe 2000 NON-members.
+
+  measured FPR = 17/2000 = 0.85%
+  theory    FPR = (1 - e^(-kn/m))^k = (1 - e^(-7*100/1024))^7
+                = 0.73%
+
+  Why they are close but not equal: the formula is the ASYMPTOTIC mean;
+  the measurement is a finite-sample draw from Binomial(tests, theory).
+  The TRUE guarantee is one-sided: measured FP >= 0 is fine, measured
+  FALSE NEGATIVE would be a bug (impossible -- see Section B).
+
+  cross-check via FILL RATIO (deterministic, uses ALL bits):
+    actual fill   = 0.4941
+    expected fill = 1 - (1-1/m)^(kn) = 1 - e^(-kn/m) = 0.4954
+    |diff|        = 0.0012  (small -> formula is sound)
+
+[check] fill ratio matches (1-1/m)^(kn) within 0.05:  OK
+[check] measured FPR within 3x of theory:  OK
+
+========================================================================
+  SECTION D: optimal parameters for a target false-positive rate p
+========================================================================
+Two closed forms (Bloom 1970; standard derivation):
+  optimal m (bits)        m* = -n * ln(p) / (ln 2)^2
+  bits per element        m*/n = -ln(p) / (ln 2)^2  ~= 1.44 * log2(1/p)
+  optimal k (hash funcs)  k* = (m/n) * ln 2         (minimizes the FPR)
+
+NOTE the beautiful decoupling: bits-per-element depends ONLY on p, not n.
+
+| target p | bits/elem (m*/n) |  n=1,000 m* |  k* (rounded) | FPR at rounded k |
+|----------|------------------|-------------|---------------|------------------|
+| 10.00%   | 4.793            | 4793        | 3   (k*=3.32)  | 10.07%           |
+| 5.00%    | 6.235            | 6235        | 4   (k*=4.32)  | 5.03%            |
+| 1.00%    | 9.585            | 9585        | 7   (k*=6.64)  | 1.00%            |
+| 0.10%    | 14.378           | 14378       | 10  (k*=9.97)  | 0.10%            |
+| 0.01%    | 19.170           | 19170       | 13  (k*=13.29)  | 0.01%            |
+
+Worked example: n = 1000, target p = 1.00%.
+  m* = -1000 * ln(0.01) / (ln 2)^2 = 9585.1 bits (1198.1 bytes)
+  k* = (m*/n) * ln 2 = 6.644  ->  round to k = 7
+  At m=9585, k=7, n=1000: FPR = 1.00%  (meets the 1% target after rounding)
+
+[check] FPR at rounded k stays within 1.5x of target p:  OK
+
+========================================================================
+  SECTION E: space savings -- Bloom filter vs an exact set
+========================================================================
+Membership for n = 1,000,000 keys at target FPR p = 1.00%.
+
+  Bloom filter : m* = -n*ln(p)/(ln2)^2 = 9,585,058 bits = 1.14 MiB
+  Exact hashset: 8 B per key (one pointer-sized slot) = 7.63 MiB   (ignores the key strings themselves)
+
+  -> Bloom uses 6.7x LESS memory than the set,
+     at the cost of a 1.00% false-positive rate. That is the trade.
+
+  The numbers everyone quotes: '~1.2 MB per million keys at 1% FPR'
+  comes from exactly this: bits/elem = -ln(0.01)/(ln 2)^2 = 9.585;
+  9.585 bits * 1e6 = 9.585 Mbit = 1.198 MB (decimal) = 1.14 MiB.
+
+Where the asymmetry is priceless (Bloom wins big):
+  - shipping a set summary over the network (CDN peer checks, gossip)
+  - per-file filters in an LSM tree (1.2 MiB vs full SST scan) [ RocksDB -- see LSM_TREE.md ]
+  - 'is this row possibly cached?' front-ends (Cassandra row cache)
+
+[check] Bloom (1.14 MiB) < 1/5 of set (7.63 MiB):  OK
+
+========================================================================
+  SECTION F: where Bloom filters live inside real databases
+========================================================================
+| system            | what it indexes                      | what the filter prevents                      |
+|-------------------|--------------------------------------|-----------------------------------------------|
+| PostgreSQL bloom  | multi-column equality tuples         | heap fetches for WHERE a=? AND b=? AND c=? (no single-col index helps) |
+| RocksDB per-SST   | the keys of each SSTable file        | reading a whole SST file on a Get() that misses (the big LSM win) |
+| Cassandra / HBase | row keys per SSTable                 | opening/reading an SST for a row that is not there |
+| Cassandra row cache | rows currently cached                | a hash lookup to ask 'could this row be cached?' before probing |
+| CDN / proxy cache | URLs held by peer caches             | a remote RPC just to learn 'do you have this URL?' (summary cache) |
+| LSM compaction    | the output range of each level       | touching a level that provably cannot contain the key |
+
+The shared shape: a Bloom filter is a CHEAP, LOSSY summary that lets the
+system say 'definitely not here' WITHOUT doing the expensive thing
+(heap fetch / SST read / RPC / cache probe). The ~1% lie rate is worth
+it because the filter is checked BILLIONS of times and is tiny.
+
+🔗 Compare with bitmap_index.py -- a bitmap is a lossless set of TIDs
+(exact membership, O(N) bits). A Bloom filter is a lossy set summary
+(probabilistic membership, O(n*1.44*log2(1/p)) bits -- far smaller).
+🔗 Compare with hash_index.py -- a hash index answers membership exactly
+and supports lookup, but stores the keys. A Bloom filter stores NO keys.
+
+========================================================================
+  GOLD CHECK -- no false negatives + FPR formula reproduces
+========================================================================
+  (1) 500 inserted keys all report 'maybe'  ->  NO FALSE NEGATIVES:  OK
+  (2) fill ratio actual=0.5798 vs formula 0.5745  (rel err 0.92%)
+      -> derived FPR = (1-e^(-kn/m))^k = 2.07%  [matches bloom_filter.html gold]
+
+[check] GOLD: no false negatives AND FPR formula reproduces:  OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

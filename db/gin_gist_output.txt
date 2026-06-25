@@ -1,0 +1,286 @@
+gin_gist.py - reference impl. All numbers below feed GIN_GIST.md.
+GIN_PENDING_THRESHOLD=4  GiST corpus=7 rects  docs=5
+
+========================================================================
+  SECTION A: GIN -- build the inverted index (element -> TIDs)
+========================================================================
+For each document, the op-class extracts its elements (words). Each
+element is filed under its posting list -- the sorted TIDs of every
+row containing it. This IS the GIN structure.
+
+Corpus (5 documents, TIDs 0..4):
+  doc 0: "the database stores data in pages"
+  doc 1: "a btree index sorts keys for range queries"
+  doc 2: "full text search uses an inverted index"
+  doc 3: "the database index speeds up point lookups"
+  doc 4: "gin indexes arrays and jsonb documents"
+
+Inverted index (30 distinct elements):
+  a            -> TIDs [1]
+  an           -> TIDs [2]
+  and          -> TIDs [4]
+  arrays       -> TIDs [4]
+  btree        -> TIDs [1]
+  data         -> TIDs [0]
+  database     -> TIDs [0, 3]
+  documents    -> TIDs [4]
+  for          -> TIDs [1]
+  full         -> TIDs [2]
+  gin          -> TIDs [4]
+  in           -> TIDs [0]
+  index        -> TIDs [1, 2, 3]
+  indexes      -> TIDs [4]
+  inverted     -> TIDs [2]
+  jsonb        -> TIDs [4]
+  keys         -> TIDs [1]
+  lookups      -> TIDs [3]
+  pages        -> TIDs [0]
+  point        -> TIDs [3]
+  queries      -> TIDs [1]
+  range        -> TIDs [1]
+  search       -> TIDs [2]
+  sorts        -> TIDs [1]
+  speeds       -> TIDs [3]
+  stores       -> TIDs [0]
+  text         -> TIDs [2]
+  the          -> TIDs [0, 3]
+  up           -> TIDs [3]
+  uses         -> TIDs [2]
+
+Read it: 'database' -> [0, 3] means docs 0 and 3 contain 'database'.
+'index' -> [1, 2, 3] (docs 1, 2, 3). Note 'indexes' (doc 4) is a
+DIFFERENT token -- PG would reduce both to the lexeme 'index' via its
+dictionary; our literal tokenizer keeps them apart (see pitfall §).
+
+[check] every posting list sorted + de-duplicated:  OK
+
+========================================================================
+  SECTION B: GIN AND query  --  intersect the posting lists
+========================================================================
+Query: find docs containing ALL of ['database', 'index']
+
+Step 1 -- fetch each word's posting list:
+  'database' -> TIDs [0, 3]
+  'index' -> TIDs [1, 2, 3]
+
+Step 2 -- INTERSECT the lists (sorted-list merge, linear in their size):
+  [0, 3]  (intersection)  [1, 2, 3]
+  = [3]
+
+RESULT: docs [3] contain BOTH 'database' AND 'index'.
+For an OR query we would UNION instead; the per-element lookup is the
+same -- only the set combiner changes.
+
+Second query: ['database', 'jsonb']
+  'database' -> [0, 3] ; 'jsonb' -> [4]
+  intersection = []   (no doc has both -> empty)
+
+[check] GIN AND [3] == brute-force scan [3]:  OK
+
+========================================================================
+  SECTION C: GIN fast update  --  pending list + batch flush
+========================================================================
+Inserting into a posting tree is expensive (find the element's tree,
+insert the TID, rebalance). FAST UPDATE buffers inserts in an unsorted
+PENDING LIST (O(1) append each), then flushes the whole batch in one
+sorted pass when it reaches 4 entries. The win:
+one flush costs ONE posting-tree descent per DISTINCT element in the
+batch -- not one per entry.
+
+Insert stream (element, tid) -- note the repetition:
+  (database,0), (index,1), (database,2), (gin,3), (index,4), (database,5)
+
+| step | (element, tid) | action                         | pending after | main posting (after flush)        |
+|------|----------------|--------------------------------|---------------|-----------------------------------|
+| 1    | (database,0) | inserted(pending=1)            | (database,0)  | (empty)                           |
+| 2    | (index   ,1) | inserted(pending=2)            | (database,0), (index,1) | (empty)                           |
+| 3    | (database,2) | inserted(pending=3)            | (database,0), (index,1), (database,2) | (empty)                           |
+| 4    | (gin     ,3) | inserted+flush(batch=4,distinct=3) | (empty)       | database:[0, 2], gin:[3], index:[1] |
+| 5    | (index   ,4) | inserted(pending=1)            | (index,4)     | database:[0, 2], gin:[3], index:[1] |
+| 6    | (database,5) | inserted(pending=2)            | (index,4), (database,5) | database:[0, 2], gin:[3], index:[1] |
+
+Watch step 4: the pending list hits 4 entries -> FLUSH. The batch
+sorted = [(database,0),(database,2),(gin,3),(index,1)] -- 3 distinct
+elements {database, gin, index} -> 3 posting-tree descents. A naive
+(fastupdate=off) insert would have done 1 descent PER entry = 4.
+
+After 6 inserts (1 flush, 2 still pending):
+  fastupdate=OFF : 6 posting-tree descents (1 per insert)
+  fastupdate=ON  : 3 descents (1 per distinct element per flush)
+  ratio          : 0.50x  (the win grows with element repetition + batch size)
+
+The price: a lookup must scan BOTH the main posting list AND the
+pending list, because un-flushed entries live only there:
+  query('database'): main=[0, 2] + pending=[5] -> [0, 2, 5]
+  query('index'): main=[1] + pending=[4] -> [1, 4]
+  query('gin'): main=[3] + pending=[] -> [3]
+
+Force a final flush (mirrors VACUUM emptying the pending list):
+  flushed 2 entries, 2 distinct -> 2 more descents. Total descents now 5.
+
+Scaling: if all 6 inserts had been the SAME element, a flush would
+still cost 1 descent (1 distinct element). fastupdate turns N inserts
+of one element into ~1 descent per flush -- the extreme case where
+fast update shines. PG's gin_pending_list_limit caps the list so
+lookups never pay too much linear pending scan.
+
+[check] fast-update query(posting+pending) == direct index:  OK
+
+========================================================================
+  SECTION D: GiST -- build the tree; union keys (BBs) nest
+========================================================================
+Insert 7 rectangles. The op-class groups them into leaves (fanout 2),
+and every internal node stores the BOUNDING BOX of its children --
+the UNION KEY. A parent's BB always encloses every child's BB. That
+nesting is what lets a query prune whole subtrees.
+
+Rectangles (axis-aligned, inclusive bounds):
+  R0: Rect(1,1)-(3,3)   area=4
+  R1: Rect(2,2)-(5,5)   area=9
+  R2: Rect(8,1)-(11,4)   area=9
+  R3: Rect(9,3)-(12,6)   area=9
+  R4: Rect(2,9)-(4,12)   area=6
+  R5: Rect(5,10)-(7,13)   area=6
+  R6: Rect(10,9)-(13,12)   area=9
+
+Tree (each node's bb == union of its children's keys):
+
+NODE Root  bb=Rect(1,1)-(13,13)  (union of 2 children)
+  -- child key=Rect(1,1)-(7,13) ->
+    NODE Node X  bb=Rect(1,1)-(7,13)  (union of 2 children)
+      -- child key=Rect(1,1)-(5,5) ->
+        LEAF Leaf A  bb=Rect(1,1)-(5,5)  (union of 2 children)
+          entry R0  key=Rect(1,1)-(3,3)
+          entry R1  key=Rect(2,2)-(5,5)
+      -- child key=Rect(2,9)-(7,13) ->
+        LEAF Leaf C  bb=Rect(2,9)-(7,13)  (union of 2 children)
+          entry R4  key=Rect(2,9)-(4,12)
+          entry R5  key=Rect(5,10)-(7,13)
+  -- child key=Rect(8,1)-(13,12) ->
+    NODE Node Y  bb=Rect(8,1)-(13,12)  (union of 2 children)
+      -- child key=Rect(8,1)-(12,6) ->
+        LEAF Leaf B  bb=Rect(8,1)-(12,6)  (union of 2 children)
+          entry R2  key=Rect(8,1)-(11,4)
+          entry R3  key=Rect(9,3)-(12,6)
+      -- child key=Rect(10,9)-(13,12) ->
+        LEAF Leaf D  bb=Rect(10,9)-(13,12)  (union of 1 children)
+          entry R6  key=Rect(10,9)-(13,12)
+
+Nesting check (parent.bb MUST enclose each child.bb):
+  Root: bb=Rect(1,1)-(13,13)
+      child Node X bb=Rect(1,1)-(7,13)  (key=Rect(1,1)-(7,13))  enclosed: True
+  Node X: bb=Rect(1,1)-(7,13)
+      child Leaf A bb=Rect(1,1)-(5,5)  (key=Rect(1,1)-(5,5))  enclosed: True
+  Leaf A: bb=Rect(1,1)-(5,5)
+      entry R0 key=Rect(1,1)-(3,3)  enclosed: True
+      entry R1 key=Rect(2,2)-(5,5)  enclosed: True
+      child Leaf C bb=Rect(2,9)-(7,13)  (key=Rect(2,9)-(7,13))  enclosed: True
+  Leaf C: bb=Rect(2,9)-(7,13)
+      entry R4 key=Rect(2,9)-(4,12)  enclosed: True
+      entry R5 key=Rect(5,10)-(7,13)  enclosed: True
+      child Node Y bb=Rect(8,1)-(13,12)  (key=Rect(8,1)-(13,12))  enclosed: True
+  Node Y: bb=Rect(8,1)-(13,12)
+      child Leaf B bb=Rect(8,1)-(12,6)  (key=Rect(8,1)-(12,6))  enclosed: True
+  Leaf B: bb=Rect(8,1)-(12,6)
+      entry R2 key=Rect(8,1)-(11,4)  enclosed: True
+      entry R3 key=Rect(9,3)-(12,6)  enclosed: True
+      child Leaf D bb=Rect(10,9)-(13,12)  (key=Rect(10,9)-(13,12))  enclosed: True
+  Leaf D: bb=Rect(10,9)-(13,12)
+      entry R6 key=Rect(10,9)-(13,12)  enclosed: True
+
+Observe: Root bb (1,1)-(13,13) covers everything. Node X bb
+(1,1)-(7,13) covers leaves A+C (the left half). Node Y bb
+(8,1)-(13,12) covers leaves B+D (the right half). A query for a
+point in the LEFT half never touches Y's subtree at all.
+
+[check] every parent.bb encloses every child.bb (nesting):  OK
+
+========================================================================
+  SECTION E: GiST point query  --  descend, PRUNE by bounding box
+========================================================================
+Query: 'which rectangles contain point P?'
+
+At each node, test the union key: does this node's BB contain P?
+  YES -> descend into the children.
+  NO  -> PRUNE the whole subtree (skip every entry beneath it).
+
+--- query point (4, 4) ---
+node           kind     key/bb                     contains?  decision  
+--------------------------------------------------------------------------
+Root           node     Rect(1,1)-(13,13)          yes        descend   
+Node X         node     Rect(1,1)-(7,13)           yes        descend   
+Leaf A         leaf     Rect(1,1)-(5,5)            yes        descend   
+  R0           leaf     Rect(1,1)-(3,3)            no         miss      
+  R1           leaf     Rect(2,2)-(5,5)            yes        HIT       
+Leaf C         leaf     Rect(2,9)-(7,13)           no         PRUNE     
+Node Y         node     Rect(8,1)-(13,12)          no         PRUNE     
+
+RESULT: ['R1'].  Visited 3 tree node(s) (of 7); PRUNED 2.
+
+--- query point (11, 11) ---
+node           kind     key/bb                     contains?  decision  
+--------------------------------------------------------------------------
+Root           node     Rect(1,1)-(13,13)          yes        descend   
+Node X         node     Rect(1,1)-(7,13)           no         PRUNE     
+Node Y         node     Rect(8,1)-(13,12)          yes        descend   
+Leaf B         leaf     Rect(8,1)-(12,6)           no         PRUNE     
+Leaf D         leaf     Rect(10,9)-(13,12)         yes        descend   
+  R6           leaf     Rect(10,9)-(13,12)         yes        HIT       
+
+RESULT: ['R6'].  Visited 3 tree node(s) (of 7); PRUNED 2.
+
+Brute-force check (scan all 7 rectangles, no tree):
+  point (4,4): tree=['R1']  brute=['R1']  -> match
+  point (11,11): tree=['R6']  brute=['R6']  -> match
+
+[check] GiST point query == brute-force rectangle scan:  OK
+
+WHY THIS IS FAST: a B-tree cannot index 'contains point' at all (no
+total ordering on 2D). A sequential scan is O(N). GiST visits only
+the nodes whose BB contains the point -- O(log_F N + matches) when
+the data is well-clustered. The pruning is what turns O(N) into
+O(log N).
+
+========================================================================
+  SECTION F: GIN vs GiST  --  pick by query shape
+========================================================================
+| Aspect               | GIN                              | GiST                                       |
+|----------------------|----------------------------------|--------------------------------------------|
+| Core idea            | inverted index: element -> TID list | search tree: node stores union key of children |
+| Best for             | membership: 'row contains element X' | overlap/containment/distance: 'row overlaps X' |
+| Typical types        | tsvector (FTS), array, jsonb     | geometry, range types, pg_trgm             |
+| AND of many terms    | INTERSECT posting lists (cheap)  | n/a (each predicate is a separate descent) |
+| Nearest-neighbour / distance | no                               | yes (KNN via priority queue over union keys) |
+| Lookup cost          | O(log N) per element + TID-list merge | O(log_F N) descent + prune                 |
+| Insert cost          | slow per-key (fastupdate amortizes) | moderate (find leaf, update union keys to root) |
+| Fast-update / buffer | yes (pending list)               | no direct equivalent                       |
+| Index size           | large (one entry per element)    | moderate (one entry per row + union keys)  |
+
+RULE OF THUMB:
+  - GIN : the value is a SET/MULTISET and you ask 'does it contain X?'
+          (words in a doc, items in an array, keys in jsonb). Build the
+          inverted map; intersect posting lists for AND queries.
+  - GiST: the value has GEOMETRY / OVERLAP / DISTANCE and you ask
+          'does it relate to X?' (rect contains point, range overlaps
+          range, trigram similar to string). Build the union-key tree;
+          prune subtrees whose key cannot match.
+
+OVERLAP: trigram similarity (pg_trgm) can be indexed EITHER way --
+gin_trgm_ops (one posting list per trigram) or gist_trgm_ops (union
+of trigrams). GIN is usually faster for exact trigram membership;
+GiST supports the KNN (<->) operator for 'most similar' ordering.
+
+Neither GIN nor GiST does what a B-tree does (sorted range scans,
+ORDER BY). For equality only, a hash index is simpler (see
+HASH_INDEX.md). Each access method is a tool for a query shape.
+
+========================================================================
+  GOLD - GIN AND query must match brute-force document scan
+========================================================================
+GIN AND['database', 'index']            = [3]
+brute_force_and(docs)['database', 'index'] = [3]
+[check] GIN AND == brute-force == [3]:  OK  (this is what gin_gist.html recomputes)
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

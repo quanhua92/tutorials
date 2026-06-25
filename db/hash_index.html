@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hash Index — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 13px;cursor:pointer;font-size:.82rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.6rem;
+           font-variant-numeric:tabular-nums;line-height:1.55}
+  .readout b{color:var(--green)}
+  .readout .gold{color:var(--gold)}
+  .readout .red{color:var(--red)}
+  .readout .muted{color:var(--muted)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.55rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  #buckets{display:block;width:100%;max-width:1000px;height:auto}
+  /* load factor gauge */
+  .gauge{display:flex;align-items:center;gap:.6rem;margin-top:.4rem}
+  .gauge .lab{color:var(--muted);font-size:.78rem;min-width:80px}
+  .gauge .track{flex:1;height:16px;background:#0a0e14;border-radius:8px;overflow:hidden;border:1px solid #30363d;position:relative}
+  .gauge .fill{height:100%;border-radius:8px;transition:width .25s ease, background .25s ease}
+  .gauge .thresh{position:absolute;top:0;bottom:0;width:2px;background:var(--red);opacity:.7}
+  .gauge .num{min-width:74px;text-align:right;font-variant-numeric:tabular-nums;font-size:.8rem}
+  .splitnote{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--gold);
+             background:#2a200a;border:1px solid #5a4416;border-radius:6px;padding:.5rem .7rem;margin-top:.5rem}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>The Hash Index (PostgreSQL linear hashing) — interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/db/HASH_INDEX.md">HASH_INDEX.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/db/hash_index.py">hash_index.py</a></h1>
+  <div class="sub">Each key is hashed (<b style="color:var(--green)">FNV-1a</b> stand-in for PG's <code>hash_any</code>) to a 32-bit value and routed to a
+    <b style="color:var(--gold)">bucket</b>. When a bucket's primary page fills, an <b>overflow chain</b> grows. When the <b>load factor</b> crosses
+    <b>0.75</b>, ONE bucket splits (Litwin 1980 linear hashing) — items rehash, some move to a new bucket. Slide <b># keys</b> to watch splits and chains
+    appear; <b>pick a key</b> to trace its lookup down the chain. Recomputed live in JS from the <i>identical</i> inputs as
+    <code>hash_index.py</code>. &nbsp;|&nbsp; <a href="./heap_vs_clustered.html">B-tree side of the comparison →</a></div>
+
+  <!-- ===== PANEL 1: BUCKET ARRAY + INSERT ===== -->
+  <h2>① The bucket array — slide # keys, watch splits + overflow chains grow</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b># keys</b>. Each insert routes to a bucket via
+      <code>hash &amp; high_mask</code>; full buckets grow an <span style="color:var(--orange)">overflow page</span>; when load factor
+      crosses <span style="color:var(--red)">0.75</span> (the red line) the index fires ONE split — a victim bucket's items rehash and some move to the new bucket.</div>
+    <div class="controls">
+      <label># keys <input type="range" id="nkeys" min="0" max="10" value="10">
+        <span class="val" id="nkeysVal">10</span></label>
+      <button id="reset">↺ reset</button>
+      <button id="stepSplit">force one split</button>
+      <span class="micro">primary_capacity=4 · overflow_capacity=4 · fillfactor=0.75 · keys pinned in <code>hash_index.py</code></span>
+    </div>
+    <div class="gauge">
+      <span class="lab">load factor</span>
+      <span class="track">
+        <span class="thresh" id="thresh" style="left:75%"></span>
+        <span class="fill" id="lfFill"></span>
+      </span>
+      <span class="num" id="lfNum"></span>
+    </div>
+    <div style="overflow-x:auto;margin-top:.5rem"><svg id="buckets" viewBox="0 0 1000 360" preserveAspectRatio="xMidYMid meet"></svg></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--blue)"></i>primary page</span>
+      <span><i class="sw" style="background:var(--orange)"></i>overflow page</span>
+      <span><i class="sw" style="background:var(--gold)"></i>lookup path / split victim</span>
+      <span><i class="sw" style="background:var(--purple)"></i>just-split new bucket</span>
+      <span><i class="sw" style="background:var(--green)"></i>found tuple</span>
+    </div>
+    <div class="readout" id="stateReadout"></div>
+    <div id="splitNoteHost"></div>
+  </div>
+
+  <!-- ===== PANEL 2: LOOKUP TRACE ===== -->
+  <h2>② Lookup a key — hash → bucket → primary → overflow chain</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> the lookup walks the chain linearly — tuples in a bucket are <b>not sorted</b>
+      (unlike a B-tree leaf), so a miss must scan the whole chain. Pick a key that lives on an overflow page (e.g. <code>judy</code> at #keys=10) to see the full walk.</div>
+    <div class="controls">
+      <label>lookup key&nbsp;
+        <select id="lookupSel"></select>
+      </label>
+      <label>or type: <input type="text" id="lookupInput" value="judy" size="14"
+        style="background:#0a0e14;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:3px 8px;font-size:.82rem;font-family:ui-monospace,monospace"></label>
+    </div>
+    <div class="readout" id="lookupReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS recompute matches <code>hash_index.py</code> GOLD (lookup('alice') = 101, hash 0x872213e7, bucket 3, page 1).
+  </div>
+
+<script>
+"use strict";
+/* =========================================================================
+   ground-truth formulas, copied byte-for-byte from hash_index.py
+   ========================================================================= */
+const FNV_OFFSET=2166136261, FNV_PRIME=16777619, MASK32=0xFFFFFFFF;
+const PRIMARY_CAP=4, OVERFLOW_CAP=4, SPLIT_THRESHOLD=0.75;
+
+/* FNV-1a 32-bit, mirrors hash_index.fnv1a_32 / hash_key.
+   NB: must use Math.imul, NOT `(h^c)*FNV_PRIME & MASK32`. JS bitwise ^ returns
+   a SIGNED Int32; multiplying a negative by FNV_PRIME then masking gives the
+   wrong low 32 bits. Math.imul(a,b) returns the exact low 32 bits of a*b
+   regardless of sign, so it matches Python's `(h*b) & 0xFFFFFFFF` exactly. */
+function hashKey(key){
+  let h=FNV_OFFSET;
+  for(let i=0;i<key.length;i++){ h=Math.imul(h ^ key.charCodeAt(i), FNV_PRIME); }
+  return h>>>0;
+}
+
+/* The 10 deterministic keys, byte-identical to TEN_KEYS in the .py. */
+const TEN_KEYS=[
+  ["alice",101],["bob",102],["carol",103],["dave",104],["eve",105],
+  ["frank",106],["grace",107],["heidi",108],["ivan",109],["judy",110]
+];
+
+/* HashIndex class -- faithful JS port of hash_index.py:HashIndex */
+class HashIndex{
+  constructor(){
+    this.primaryCap=PRIMARY_CAP; this.overflowCap=OVERFLOW_CAP;
+    this.splitThreshold=SPLIT_THRESHOLD;
+    this.buckets={0:[[]]};        // buckets[b] = list of pages; page = list of [k,v]
+    this.maxbucket=0; this.low_mask=0; this.high_mask=0; this.split_count=0;
+    this.lastSplit=null;          // {victim,newBucket,moved,stayed,crossed} for highlight
+  }
+  bucketOf(key){
+    const h=hashKey(key);
+    let b=h & this.high_mask;
+    if(b>this.maxbucket) b=b & this.low_mask;
+    return [b,h];
+  }
+  numItems(){ let n=0; for(const b in this.buckets) for(const p of this.buckets[b]) n+=p.length; return n; }
+  numBuckets(){ return this.maxbucket+1; }
+  loadFactor(){ return this.numItems()/(this.numBuckets()*this.primaryCap); }
+  chainLength(b){ return Math.max(0, this.buckets[b].length-1); }
+  insert(key,value){
+    const [b,_]=this.bucketOf(key);
+    const pages=this.buckets[b];
+    for(const page of pages) for(let i=0;i<page.length;i++){
+      if(page[i][0]===key){ page[i]=[key,value]; return "updated"; }
+    }
+    let status="inserted";
+    for(let pi=0; pi<pages.length; pi++){
+      const cap = pi===0 ? this.primaryCap : this.overflowCap;
+      if(pages[pi].length<cap){ pages[pi].push([key,value]); return this._maybeSplit("inserted"); }
+    }
+    pages.push([[key,value]]);
+    return this._maybeSplit("overflow");
+  }
+  _maybeSplit(status){
+    if(this.loadFactor()>this.splitThreshold){ this._split(); return status+"+split"; }
+    return status;
+  }
+  _split(){
+    const newBucket=this.maxbucket+1;
+    const victim=newBucket & this.low_mask;     // OLD low_mask
+    const crossed = newBucket>this.high_mask;
+    if(crossed){ this.low_mask=this.high_mask; this.high_mask=newBucket|this.low_mask; }
+    this.maxbucket=newBucket;
+    this.buckets[newBucket]=[[]];
+    const old=[];
+    for(const page of this.buckets[victim]) for(const it of page) old.push(it);
+    this.buckets[victim]=[[]];
+    let moved=0, stayed=0;
+    for(const [k,v] of old){
+      const [b]=this.bucketOf(k);
+      const pages=this.buckets[b];
+      let placed=false;
+      for(let pi=0;pi<pages.length;pi++){
+        const cap = pi===0 ? this.primaryCap : this.overflowCap;
+        if(pages[pi].length<cap){ pages[pi].push([k,v]); placed=true; break; }
+      }
+      if(!placed) pages.push([[k,v]]);
+      if(b===newBucket) moved++; else stayed++;
+    }
+    this.split_count++;
+    this.lastSplit={victim,newBucket,moved,stayed,crossed,items:old.length};
+  }
+  lookup(key){
+    const [b,h]=this.bucketOf(key);
+    const pages=this.buckets[b]||[[]];
+    let scanned=0;
+    for(let pi=0; pi<pages.length; pi++){
+      scanned++;
+      for(const [k,v] of pages[pi]) if(k===key) return {value:v,hash:h,bucket:b,page:pi+1,pagesScanned:scanned};
+    }
+    return {value:null,hash:h,bucket:b,page:0,pagesScanned:scanned};
+  }
+  delete(key){
+    const [b]=this.bucketOf(key);
+    for(const page of (this.buckets[b]||[])) for(let i=0;i<page.length;i++){
+      if(page[i][0]===key){ page.splice(i,1); return true; }
+    }
+    return false;
+  }
+}
+
+/* =========================================================================
+   app state + render
+   ========================================================================= */
+let state=new HashIndex();
+let highlightNewBucketTimer=null;
+let highlightNewBucket=-1;
+let lookupHighlight={key:null, found:false};   // controls gold highlight on the chain
+
+function rebuild(n){
+  state=new HashIndex();
+  for(let i=0;i<n;i++) state.insert(TEN_KEYS[i][0], TEN_KEYS[i][1]);
+  render();
+  refreshLookupSel();
+  renderLookup();
+}
+
+const svg=document.getElementById('buckets');
+function render(){
+  const nkeys=+document.getElementById('nkeys').value;
+  document.getElementById('nkeysVal').textContent=nkeys;
+
+  // ---- gauge ----
+  const lf=state.loadFactor();
+  const lfFill=document.getElementById('lfFill');
+  lfFill.style.width=(Math.min(1,lf)*100).toFixed(1)+'%';
+  lfFill.style.background = lf>SPLIT_THRESHOLD ? '#e67e22' : (lf>0.6 ? '#f1c40f' : '#27ae60');
+  document.getElementById('lfNum').innerHTML =
+    `<b style="color:${lf>SPLIT_THRESHOLD?'#e67e22':'#27ae60'}">${lf.toFixed(3)}</b> `+
+    `&middot; ${state.numItems()} items / ${state.numBuckets()}×${PRIMARY_CAP}`;
+
+  // ---- bucket visualization ----
+  const W=1000, padL=40, padR=40;
+  const nb=state.numBuckets();
+  const colW=Math.max(70, Math.min(160, (W-padL-padR)/Math.max(nb,1)));
+  const primaryY=70, rowH=46, maxRows=5;
+  let g='';
+
+  // header: state line
+  g+=`<text x="${padL}" y="22" font-size="12" fill="#8b949e" font-family="ui-monospace,monospace">`
+    +`maxbucket=${state.maxbucket}  low_mask=${state.low_mask} (0x${state.low_mask.toString(16)})  `
+    +`high_mask=${state.high_mask} (0x${state.high_mask.toString(16)})  `
+    +`buckets=${nb}  items=${state.numItems()}  splits=${state.split_count}</text>`;
+  g+=`<text x="${padL}" y="40" font-size="11" fill="#8b949e">routing: <tspan fill="#e6edf3">bucket = hash &amp; high_mask; if &gt; maxbucket: &amp;= low_mask</tspan></text>`;
+
+  // buckets
+  const splitInfo=state.lastSplit;
+  const lookupB = lookupHighlight.key!==null ? state.bucketOf(lookupHighlight.key)[0] : -1;
+  const lookupFoundPage = lookupHighlight.found ? state.lookup(lookupHighlight.key).page : -1;
+
+  for(let b=0; b<nb; b++){
+    const x = padL + b*colW + 8;
+    const pages=state.buckets[b];
+    const isVictim = splitInfo && splitInfo.victim===b;
+    const isNewB   = highlightNewBucket===b;
+    const isLookupB= b===lookupB;
+    const headColor = isNewB ? '#8e7cc3' : (isVictim ? '#f1c40f' : (isLookupB ? '#f1c40f' : '#2980b9'));
+    // bucket header
+    g+=`<text x="${x+colW/2-8}" y="${primaryY-12}" text-anchor="middle" font-size="12" `
+      +`font-weight="700" fill="${headColor}" font-family="ui-monospace,monospace">bucket ${b}</text>`;
+    g+=`<text x="${x+colW/2-8}" y="${primaryY-26}" text-anchor="middle" font-size="9" fill="#8b949e">chain=${state.chainLength(b)}</text>`;
+    // pages stacked vertically
+    for(let pi=0; pi<pages.length && pi<maxRows; pi++){
+      const py=primaryY + pi*rowH;
+      const cap = pi===0 ? PRIMARY_CAP : OVERFLOW_CAP;
+      const isOvfl = pi>0;
+      const isLookupPage = isLookupB && (pi+1)===lookupFoundPage;
+      let fill='#161b22', stroke='#30363d', txtCol='#c9d1d9';
+      if(isOvfl){ fill='#2a1c0e'; stroke='#7a4d1a'; }
+      if(isVictim){ fill='#3a2f12'; stroke='#f1c40f'; txtCol='#ffd966'; }
+      if(isNewB){ fill='#2a2438'; stroke='#8e7cc3'; txtCol='#b9a9e0'; }
+      if(isLookupPage){ fill='#0e2a18'; stroke='#27ae60'; txtCol='#27ae60'; }
+      const pw=colW-16, ph=38;
+      g+=`<rect x="${x}" y="${py}" width="${pw}" height="${ph}" rx="6" fill="${fill}" stroke="${stroke}" stroke-width="${(isLookupPage||isVictim||isNewB)?2.5:1.5}"/>`;
+      // capacity bar at bottom of page
+      const frac=pages[pi].length/cap;
+      g+=`<rect x="${x+5}" y="${py+ph-7}" width="${pw-10}" height="4" rx="2" fill="#0a0e14"/>`;
+      g+=`<rect x="${x+5}" y="${py+ph-7}" width="${(pw-10)*frac}" height="4" rx="2" fill="${isOvfl?'#e67e22':'#3a6ea5'}"/>`;
+      // label: role + fill
+      g+=`<text x="${x+6}" y="${py+13}" font-size="9" fill="#8b949e" font-family="ui-monospace,monospace">`
+        +`${pi===0?'primary':'ovfl'+pi} [${pages[pi].length}/${cap}]</text>`;
+      // tuples
+      const tuples = pages[pi].map(kv=>{
+        const isHit = isLookupPage && lookupHighlight.key===kv[0];
+        const c = isHit ? '#27ae60' : txtCol;
+        return `<tspan fill="${c}" font-weight="${isHit?'700':'400'}">${kv[0]}</tspan>`+
+               `<tspan fill="#8b949e">=${kv[1]}</tspan>`;
+      }).join('<tspan dx="4"> </tspan>');
+      g+=`<text x="${x+6}" y="${py+27}" font-size="11" font-family="ui-monospace,monospace">${tuples}</text>`;
+    }
+    if(pages.length>maxRows){
+      const py=primaryY+maxRows*rowH;
+      g+=`<text x="${x}" y="${py+8}" font-size="10" fill="#8b949e">…+${pages.length-maxRows} more</text>`;
+    }
+    // overflow arrow between pages
+    for(let pi=0; pi<pages.length-1 && pi<maxRows; pi++){
+      const y1=primaryY+pi*rowH+38, y2=primaryY+(pi+1)*rowH;
+      g+=`<line x1="${x+pw/2}" y1="${y1}" x2="${x+pw/2}" y2="${y2-2}" stroke="#7a4d1a" stroke-width="2"/>`;
+      g+=`<polygon points="${x+pw/2-4},${y2-6} ${x+pw/2+4},${y2-6} ${x+pw/2},${y2-2}" fill="#7a4d1a"/>`;
+    }
+    // new-bucket badge
+    if(isNewB){
+      g+=`<text x="${x+pw/2}" y="${primaryY-40}" text-anchor="middle" font-size="9" fill="#8e7cc3" font-weight="700">⤴ new</text>`;
+    }
+    if(isVictim){
+      g+=`<text x="${x+pw/2}" y="${primaryY-40}" text-anchor="middle" font-size="9" fill="#f1c40f" font-weight="700">victim</text>`;
+    }
+  }
+  svg.innerHTML=g;
+
+  // ---- state readout ----
+  const el=document.getElementById('stateReadout');
+  const lastAction = splitInfo
+    ? `<span class="gold">last split:</span> split #${state.split_count} created bucket <b>${splitInfo.newBucket}</b>, `
+      + `rehashed bucket <span class="gold">${splitInfo.victim}</span> (${splitInfo.items} tuples: `
+      + `<b>${splitInfo.moved}</b> moved, <b>${splitInfo.stayed}</b> stayed)`
+      + (splitInfo.crossed ? ` &mdash; <span class="red">address space DOUBLED</span> (low_mask ${state.low_mask}, high_mask ${state.high_mask}).` : '.')
+    : `<span class="muted">no split yet.</span>`;
+  el.innerHTML = `state: <b>${nb}</b> buckets, <b>${state.numItems()}</b> items, load_factor=<b>${lf.toFixed(3)}</b> `
+    + `(threshold ${SPLIT_THRESHOLD}) &middot; ${lastAction}`;
+  // split note (animated)
+  const sn=document.getElementById('splitNoteHost');
+  if(splitInfo && highlightNewBucket>=0){
+    sn.innerHTML=`<div class="splitnote">⚡ split fired: victim bucket ${splitInfo.victim} → new bucket ${splitInfo.newBucket}. `
+      +`${splitInfo.moved} of ${splitInfo.items} tuples moved; address space ${splitInfo.crossed?'DOUBLED':'unchanged'}.</div>`;
+  } else { sn.innerHTML=''; }
+}
+
+/* ---- lookup panel ---- */
+function refreshLookupSel(){
+  const sel=document.getElementById('lookupSel');
+  const nkeys=+document.getElementById('nkeys').value;
+  const present=[];
+  for(let i=0;i<nkeys;i++){
+    const r=state.lookup(TEN_KEYS[i][0]);
+    if(r.value!==null) present.push(TEN_KEYS[i][0]);
+  }
+  const cur=sel.value;
+  sel.innerHTML=present.map(k=>`<option value="${k}">${k}</option>`).join('');
+  if(present.includes(cur)) sel.value=cur;
+  // sync typed input if it matches a present key
+  const ti=document.getElementById('lookupInput').value;
+  if(!present.includes(ti) && present.length>0) document.getElementById('lookupInput').value=present[present.length-1];
+}
+function renderLookup(){
+  const key=document.getElementById('lookupInput').value.trim();
+  lookupHighlight={key:null, found:false};
+  const el=document.getElementById('lookupReadout');
+  if(key===''){ el.innerHTML='<span class="muted">type a key to look up</span>'; render(); return; }
+  const r=state.lookup(key);
+  if(r.value===null){
+    el.innerHTML=`lookup('<b>${esc(key)}</b>'): hash=0x${r.hash.toString(16).padStart(8,'0')}, bucket=${r.bucket} `
+      + `&rarr; <span class="red">NOT FOUND</span> (scanned ${r.pagesScanned} page(s) on the chain). `
+      + `<span class="muted">A hash index cannot short-circuit on ordering — tuples are unsorted, so a miss walks the whole chain.</span>`;
+    render(); return;
+  }
+  lookupHighlight={key, found:true};
+  const h=r.hash, highMask=state.high_mask, raw=h&highMask;
+  const remask = raw>state.maxbucket;
+  const finalB = remask ? (raw & state.low_mask) : raw;
+  el.innerHTML = `lookup('<b>${esc(key)}</b>') = <b>${r.value}</b><br>`
+    + `1. hashvalue = hash_any('${esc(key)}') = <span class="gold">0x${h.toString(16).padStart(8,'0')}</span><br>`
+    + `2. bucket = 0x${h.toString(16).padStart(8,'0')} &amp; high_mask (0x${highMask.toString(16).padStart(8,'0')}) = <b>${raw}</b>`
+    + (remask ? ` &gt; maxbucket (${state.maxbucket})? <span class="red">YES</span> &rarr; &amp; low_mask (0x${state.low_mask.toString(16).padStart(8,'0')}) = <b>${finalB}</b>` : ` &le; maxbucket (${state.maxbucket})? <b>NO</b> &rarr; bucket stays <b>${finalB}</b>`)
+    + `<br>3. scan bucket <b>${r.bucket}</b>: primary`
+    + (r.pagesScanned>1 ? ` &rarr; overflow page ${r.pagesScanned-1}` : '')
+    + ` &rarr; <span class="gold">FOUND on page ${r.page}</span> (chain length ${r.pagesScanned-1}, scanned ${r.pagesScanned} page(s)).`;
+  render();
+}
+function esc(s){ return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+/* =========================================================================
+   gold check vs hash_index.py GOLD block
+   ========================================================================= */
+function goldCheck(){
+  const g=new HashIndex();
+  for(const [k,v] of TEN_KEYS) g.insert(k,v);
+  const r=g.lookup('alice');
+  // expected, from `python3 hash_index.py` Section GOLD:
+  //   value=101, hash=0x872213e7, bucket=3, page=1, pages_scanned=1
+  const ok = r.value===101
+    && r.hash===0x872213e7
+    && r.bucket===3
+    && r.page===1
+    && r.pagesScanned===1
+    && g.maxbucket===3 && g.low_mask===1 && g.high_mask===3
+    && g.numItems()===10 && g.split_count===3;
+  const chk=document.getElementById('check');
+  chk.textContent = ok
+    ? "check: OK — lookup('alice')=101, hash=0x872213e7, bucket=3, page=1 (matches hash_index.py GOLD)"
+    : "check: FAIL — mismatch!";
+  chk.style.borderColor = ok?'#27ae60':'#c0392b';
+  chk.style.color = ok?'#27ae60':'#c0392b';
+  chk.style.background = ok?'#1c3a25':'#3a1414';
+}
+
+/* =========================================================================
+   events
+   ========================================================================= */
+document.getElementById('nkeys').addEventListener('input',e=>{
+  rebuild(+e.target.value);
+});
+document.getElementById('reset').addEventListener('click',()=>{
+  document.getElementById('nkeys').value=10;
+  rebuild(10);
+});
+document.getElementById('stepSplit').addEventListener('click',()=>{
+  state._split();
+  highlightNewBucket=state.lastSplit.newBucket;
+  if(highlightNewBucketTimer) clearTimeout(highlightNewBucketTimer);
+  highlightNewBucketTimer=setTimeout(()=>{ highlightNewBucket=-1; render(); }, 1600);
+  render();
+  renderLookup();
+});
+document.getElementById('lookupSel').addEventListener('change',e=>{
+  document.getElementById('lookupInput').value=e.target.value;
+  renderLookup();
+});
+document.getElementById('lookupInput').addEventListener('input',renderLookup);
+
+/* init */
+rebuild(10);
+goldCheck();
+</script>
+</body>
+</html>

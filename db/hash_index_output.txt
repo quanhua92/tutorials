@@ -1,0 +1,267 @@
+hash_index.py - reference impl. All numbers below feed HASH_INDEX.md.
+PRIMARY_CAPACITY=4  OVERFLOW_CAPACITY=4  SPLIT_THRESHOLD=0.75  hash=FNV-1a 32-bit (stand-in for hash_any)
+
+========================================================================
+  SECTION A: hash_any -> 32-bit hashvalue -> bucket number
+========================================================================
+PostgreSQL funnels EVERY key type through hash_any() (Jenkins lookup3,
+hashfunc.c) -> a 32-bit uint32. For this tutorial we use FNV-1a 32-bit,
+which has the same avalanche + uniformity -- only the bucket math below
+is what matters, and that is byte-identical to PG.
+
+| key       | hashvalue (FNV-1a) | hashvalue (hex) |
+|-----------|--------------------|-----------------|
+| alice     |         2267157479 | 0x872213e7        |
+| bob       |         2261164244 | 0x86c6a0d4        |
+| carol     |         1728614162 | 0x67088f12        |
+| dave      |         3496789471 | 0xd06cc5df        |
+| eve       |         1537336773 | 0x5ba1e5c5        |
+| frank     |         4094485955 | 0xf40ce5c3        |
+| grace     |         2621995627 | 0x9c487a6b        |
+| heidi     |         1859349638 | 0x6ed36c86        |
+| ivan      |         2539416321 | 0x975c6b01        |
+| judy      |         2588971191 | 0x9a5090b7        |
+
+Bucket selection (PG _hash_hashkey2bucket, hashutil.c):
+    bucket = hashvalue & high_mask
+    if bucket > maxbucket: bucket &= low_mask
+
+Why two masks? It is the linear-hashing trick. high_mask always covers
+the 'new' (post-doubling) address space 0..2^(N+1)-1; low_mask covers
+the 'old' space 0..2^N-1. If your hash lands in a bucket that does not
+EXIST yet (bucket > maxbucket), you fall back to the old space.
+
+At this state  (maxbucket=5  low_mask=3  high_mask=7  buckets=6  items=0  load_factor=0.000  splits=5):
+    N+1 split levels -> high_mask = 0x00000007 (2^(N+1)-1 = 7),  low_mask = 0x00000003 (2^N-1 = 3)
+
+| key       | hashvalue & high_mask | > maxbucket? | final bucket (after & low_mask) |
+|-----------|-----------------------|--------------|--------------------|
+| alice     |                     7 | yes -> & 0x3 | 3                  |
+| bob       |                     4 | no           | 4                  |
+| carol     |                     2 | no           | 2                  |
+| dave      |                     7 | yes -> & 0x3 | 3                  |
+| eve       |                     5 | no           | 5                  |
+| frank     |                     3 | no           | 3                  |
+| grace     |                     3 | no           | 3                  |
+| heidi     |                     6 | yes -> & 0x3 | 2                  |
+| ivan      |                     1 | no           | 1                  |
+| judy      |                     7 | yes -> & 0x3 | 3                  |
+
+Notice: keys whose high_mask value is 6 or 7 do NOT have a real bucket
+yet (maxbucket=5) -- they fall back to the low_mask, which is themselves
+& 3, i.e. they share a bucket with the keys 0..3 until a future split
+creates their real home.
+
+[check] FNV-1a of ''  == 0x811c9dc5  (the FNV offset basis):  OK
+[check] FNV-1a of 'a' == 0xe40c292c  (one byte after basis):  OK
+
+========================================================================
+  SECTION B: linear hashing grows ONE bucket per split (no global resize)
+========================================================================
+Start with ONE bucket. Each split adds exactly one bucket and rehashes
+only the VICTIM bucket. Whenever maxbucket+1 crosses a power of two, the
+address space doubles (low_mask <- old high_mask; high_mask doubles).
+
+| split # | maxbucket | low_mask | high_mask | # buckets | victim (new_bucket & old low_mask) | address space 2^(N+1) |
+|---------|-----------|----------|-----------|-----------|-------------------------------------|------------------------|
+| 1       | 1         | 0        | 1         | 2         | new=1, victim=0                  | x2 ->    2^1-1 |
+| 2       | 2         | 1        | 3         | 3         | new=2, victim=0                  | x2 ->    2^2-1 |
+| 3       | 3         | 1        | 3         | 4         | new=3, victim=1                  |          2^2-1 |
+| 4       | 4         | 3        | 7         | 5         | new=4, victim=0                  | x2 ->    2^3-1 |
+| 5       | 5         | 3        | 7         | 6         | new=5, victim=1                  |          2^3-1 |
+| 6       | 6         | 3        | 7         | 7         | new=6, victim=2                  |          2^3-1 |
+| 7       | 7         | 3        | 7         | 8         | new=7, victim=3                  |          2^3-1 |
+| 8       | 8         | 7        | 15        | 9         | new=8, victim=0                  | x2 ->    2^4-1 |
+| 9       | 9         | 7        | 15        | 10        | new=9, victim=1                  |          2^4-1 |
+
+Read this as: at split #1 we doubled 0->1 (space 2 -> 4). At split #2
+the space was already 4, no doubling. At split #3 maxbucket crossed
+2 (the new power of two) so we doubled again 2->3. And so on. The
+RESULT is that the address space (high_mask+1) is always within 2x of
+the actual bucket count -- so the load factor stays bounded.
+
+Victim pattern: 0, 0, 1, 2, 0, 3, 4, 1, 2, ...  -- round-robin through
+the existing buckets in the order they will be 'split next.' This is
+Litwin's split pointer `p`, made implicit by the masks.
+
+[check] over 50 splits: low_mask = 2^N-1, high_mask = 2^(N+1)-1, low_mask <= maxbucket <= high_mask:  OK
+
+========================================================================
+  SECTION C: insert 10 keys  --  watch buckets fill, chains form, splits fire
+========================================================================
+Constants: primary_capacity=4, overflow_capacity=4, split_threshold (fillfactor)=0.75
+
+Insertion trace (load_factor > 0.75 triggers a split AFTER the insert):
+
+| step | key     | value | hashvalue  | bucket | action            | post-state                                                   |
+|------|---------|-------|------------|--------|-------------------|--------------------------------------------------------------|
+| 1    | alice   | 101   | 0x872213e7 | 0      | inserted          | maxbucket=0  low_mask=0  high_mask=0  buckets=1  items=1  load_factor=0.250  splits=0 |
+| 2    | bob     | 102   | 0x86c6a0d4 | 0      | inserted          | maxbucket=0  low_mask=0  high_mask=0  buckets=1  items=2  load_factor=0.500  splits=0 |
+| 3    | carol   | 103   | 0x67088f12 | 0      | inserted          | maxbucket=0  low_mask=0  high_mask=0  buckets=1  items=3  load_factor=0.750  splits=0 |
+| 4    | dave    | 104   | 0xd06cc5df | 0      | inserted+split    | maxbucket=1  low_mask=0  high_mask=1  buckets=2  items=4  load_factor=0.500  splits=1 |
+| 5    | eve     | 105   | 0x5ba1e5c5 | 1      | inserted          | maxbucket=1  low_mask=0  high_mask=1  buckets=2  items=5  load_factor=0.625  splits=1 |
+| 6    | frank   | 106   | 0xf40ce5c3 | 1      | inserted          | maxbucket=1  low_mask=0  high_mask=1  buckets=2  items=6  load_factor=0.750  splits=1 |
+| 7    | grace   | 107   | 0x9c487a6b | 1      | overflow+split    | maxbucket=2  low_mask=1  high_mask=3  buckets=3  items=7  load_factor=0.583  splits=2 |
+| 8    | heidi   | 108   | 0x6ed36c86 | 2      | inserted          | maxbucket=2  low_mask=1  high_mask=3  buckets=3  items=8  load_factor=0.667  splits=2 |
+| 9    | ivan    | 109   | 0x975c6b01 | 1      | inserted          | maxbucket=2  low_mask=1  high_mask=3  buckets=3  items=9  load_factor=0.750  splits=2 |
+| 10   | judy    | 110   | 0x9a5090b7 | 1      | inserted+split    | maxbucket=3  low_mask=1  high_mask=3  buckets=4  items=10  load_factor=0.625  splits=3 |
+
+Final state of every bucket after all 10 inserts + the splits they triggered:
+
+bucket 0  (chain=0, pages=1)
+    primary  [1/4]:  bob=102
+bucket 1  (chain=0, pages=1)
+    primary  [2/4]:  eve=105, ivan=109
+bucket 2  (chain=0, pages=1)
+    primary  [2/4]:  carol=103, heidi=108
+bucket 3  (chain=1, pages=2)
+    primary  [4/4]:  alice=101, dave=104, frank=106, grace=107
+    ovfl1    [1/4]:  judy=110
+
+[check] all 10 inserted keys are findable via lookup():  OK
+
+========================================================================
+  SECTION D: lookup  --  hash -> bucket -> primary -> overflow chain
+========================================================================
+Look up 'judy' (expected value 110):
+
+  1. hashvalue        = hash_any('judy') = 0x9a5090b7
+  2. bucket           = 0x9a5090b7 & high_mask (0x00000003) = 3
+     > maxbucket (3)? NO -> bucket stays 3
+  3. scan bucket 3:
+        PRIMARY: alice=101, dave=104, frank=106, grace=107
+        OVERFLOW page 1: judy=110   <-- FOUND here
+
+  RESULT: value=110, found on page 2 of bucket 3.
+  COST:   scanned 2 page(s); chain length = 1.
+          Contrast with a B-tree: O(log N) root-to-leaf descent +
+          a leaf-page read; for a pure equality probe the hash index
+          is asymptotically faster, but only marginally on small N.
+
+Look up a MISSING key 'nonexistent_key_zzz': hashvalue=0x746e687d, bucket=1; scanned 1 page(s), returned None. (Must scan the WHOLE chain --
+a hash index cannot short-circuit on ordering because tuples are unsorted.)
+
+[check] lookup('alice') == 101:  OK
+[check] lookup(missing) is None:  OK
+
+========================================================================
+  SECTION E: split  --  one bucket splits, its tuples rehash (stay or move)
+========================================================================
+The next split will create bucket 4 and rehash the tuples of
+bucket 0 (the victim = new_bucket & low_mask = 4 & 0x00000001 = 0).
+
+BEFORE split:
+maxbucket=3  low_mask=1  high_mask=3  buckets=4  items=10  load_factor=0.625  splits=3
+
+bucket 0  (chain=0, pages=1)
+    primary  [1/4]:  bob=102
+bucket 1  (chain=0, pages=1)
+    primary  [2/4]:  eve=105, ivan=109
+bucket 2  (chain=0, pages=1)
+    primary  [2/4]:  carol=103, heidi=108
+bucket 3  (chain=1, pages=2)
+    primary  [4/4]:  alice=101, dave=104, frank=106, grace=107
+    ovfl1    [1/4]:  judy=110
+
+Victim bucket 0 tuples and where they will land after the split:
+| key   | hashvalue  | new bucket (after masks update) | moves? |
+|-------|------------|----------------------------------|--------|
+| bob    | 0x86c6a0d4 | 4                                | moves to 4           |
+
+AFTER split (split_count=4):
+maxbucket=4  low_mask=3  high_mask=7  buckets=5  items=10  load_factor=0.500  splits=4
+(maxbucket 3->4 crossed the previous high_mask, so the address space DOUBLED: low_mask 3, high_mask 7.)
+
+bucket 0  (chain=0, pages=1)
+    primary  [0/4]:  (empty)
+bucket 1  (chain=0, pages=1)
+    primary  [2/4]:  eve=105, ivan=109
+bucket 2  (chain=0, pages=1)
+    primary  [2/4]:  carol=103, heidi=108
+bucket 3  (chain=1, pages=2)
+    primary  [4/4]:  alice=101, dave=104, frank=106, grace=107
+    ovfl1    [1/4]:  judy=110
+bucket 4  (chain=0, pages=1)
+    primary  [1/4]:  bob=102
+
+Rehash summary: of the 1 tuples in old bucket 0, 1 moved to new bucket 4, 0 stayed.
+
+[check] all 10 keys still findable after the split:  OK
+
+========================================================================
+  SECTION F: delete  --  remove a tuple; NO merge (lazy deletion)
+========================================================================
+Delete 'alice' from bucket 3.
+
+BEFORE delete:
+bucket 0  (chain=0, pages=1)
+    primary  [0/4]:  (empty)
+bucket 1  (chain=0, pages=1)
+    primary  [2/4]:  eve=105, ivan=109
+bucket 2  (chain=0, pages=1)
+    primary  [2/4]:  carol=103, heidi=108
+bucket 3  (chain=1, pages=2)
+    primary  [4/4]:  alice=101, dave=104, frank=106, grace=107
+    ovfl1    [1/4]:  judy=110
+bucket 4  (chain=0, pages=1)
+    primary  [1/4]:  bob=102
+
+delete('alice') -> found=True
+
+AFTER delete:
+bucket 0  (chain=0, pages=1)
+    primary  [0/4]:  (empty)
+bucket 1  (chain=0, pages=1)
+    primary  [2/4]:  eve=105, ivan=109
+bucket 2  (chain=0, pages=1)
+    primary  [2/4]:  carol=103, heidi=108
+bucket 3  (chain=1, pages=2)
+    primary  [3/4]:  dave=104, frank=106, grace=107
+    ovfl1    [1/4]:  judy=110
+bucket 4  (chain=0, pages=1)
+    primary  [1/4]:  bob=102
+
+Note the bucket's overflow pages are STILL THERE, even if now empty.
+PG performs LAZY deletion: a delete only clears the tuple slot; overflow
+pages are reclaimed later by VACUUM, never at delete time. This keeps
+deletes O(1) and avoids concurrent splits fighting over page reuse.
+
+[check] lookup('alice') is None; all 9 other keys still findable:  OK
+
+========================================================================
+  SECTION G: hash vs B-tree  --  pick by query shape, not by hype
+========================================================================
+| Operation / property                  | HASH index          | BTREE index               | Use                       |
+|---------------------------------------|---------------------|--------------------------|---------------------------|
+| Point equality  (col = v)             | O(1) avg            | O(log N)                 | HASH (faster, smaller)    |
+| Range scan  (col BETWEEN a AND b)     | NOT SUPPORTED       | O(log N + k)             | BTREE (hash cannot order) |
+| ORDER BY col                          | NOT SUPPORTED       | O(N log N) sort avoided  | BTREE (index is pre-sorted) |
+| Prefix match  (col LIKE 'abc%')       | NOT SUPPORTED       | O(log N)                 | BTREE                     |
+| UNIQUE / PRIMARY KEY enforcement      | SUPPORTED           | SUPPORTED (default)      | BTREE (PG default for PK) |
+| Index size                            | ~hash + TID only    | key + TID + pointers     | HASH (~half the size)     |
+| Crash safety (WAL)                    | PG 10+ (2017)       | always                   | both safe; pre-10 hash was not |
+| Autovacuum / bloat reclaim            | supported           | supported                | tie                       |
+
+RULE OF THUMB:
+  - HASH : pure equality lookups on a column you never sort or range on.
+           (e.g. session-token UUIDs, hash-partition keys, url-hashes).
+           Smaller index, O(1) lookups.
+  - BTREE: anything else (ranges, ORDER BY, joins on inequality, prefix,
+           default PRIMARY KEY). The default; reach for it unless you can
+           articulate why hash is better.  See HEAP_VS_CLUSTERED.md.
+
+PG history: hash indexes existed since v6.5 (1999) but were UNLOGGED,
+so a crash could corrupt them -- the docs warned 'prefer B-tree.' Since
+PostgreSQL 10 (2017) they are fully WAL-logged and crash-safe; the warning
+was removed. They still account for a tiny fraction of production indexes
+because B-trees are good enough for most workloads.
+
+========================================================================
+  GOLD - lookup(k) must return the same value that was inserted
+========================================================================
+lookup('alice'):  value=101  (expected 101),  hash=0x872213e7, bucket=3, page=1, pages_scanned=1
+[check] lookup('alice') == 101:  OK  (this is what hash_index.html recomputes)
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

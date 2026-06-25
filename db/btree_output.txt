@@ -1,0 +1,221 @@
+btree.py - reference impl. All numbers below feed BTREE.md.
+stdlib only. Run: python3 btree.py
+
+========================================================================
+  SECTION A: build a B+tree of order m=4 from an insertion sequence
+========================================================================
+order m = 4  ->  max 3 keys per node, min 2 keys per non-root leaf.
+insertion sequence (18 keys): [10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 1, 3, 8, 22, 9, 28, 15, 2]
+
+Final tree, level by level (root at top, leaves at bottom):
+
+  L0 INT : [10,20]
+  L1 INT : [3,6,8]   [15]   [25,30]
+  L2 LEAF: [1,2]   [3,5]   [6,7]   [8,9]   [10,12]   [15,17]   [20,22]   [25,28]   [30,31]
+  CHAIN: [1,2] -> [3,5] -> [6,7] -> [8,9] -> [10,12] -> [15,17] -> [20,22] -> [25,28] -> [30,31]
+
+height = 3 levels (2 internal + 1 leaf)
+leaves = 9, total keys stored = 18
+
+Read it as: each internal node's keys are dividers; the leaves hold
+the data and are stitched into one sorted chain by the next-pointers.
+A point lookup descends exactly `height` pages; a range scan lands in
+one leaf then walks the chain. (Sections C and D.)
+
+========================================================================
+  SECTION B: page split, step by step (leaf split -> root grows)
+========================================================================
+Watch splits propagate. A leaf overflows at 4 keys; the median is
+COPIED up. When the parent itself overflows, its median is MOVED up.
+When the ROOT splits, a new root is made and the tree grows TALLER.
+
+insert sequence: [10, 20, 5, 6, 12, 30, 7, 1, 8, 9]
+
+--- insert 10 ---
+  L0 LEAF: [10]
+  CHAIN: [10]
+--- insert 20 ---
+  L0 LEAF: [10,20]
+  CHAIN: [10,20]
+--- insert 5 ---
+  L0 LEAF: [5,10,20]
+  CHAIN: [5,10,20]
+--- insert 6 ---
+    [SPLIT leaf]   overflow [5, 6, 10, 20] -> left=[5, 6] right=[10, 20]; COPY sep 10 up
+    [NEW ROOT] new root keys=[10] -> height grows to 2
+  L0 INT : [10]
+  L1 LEAF: [5,6]   [10,20]
+  CHAIN: [5,6] -> [10,20]
+--- insert 12 ---
+  L0 INT : [10]
+  L1 LEAF: [5,6]   [10,12,20]
+  CHAIN: [5,6] -> [10,12,20]
+--- insert 30 ---
+    [SPLIT leaf]   overflow [10, 12, 20, 30] -> left=[10, 12] right=[20, 30]; COPY sep 20 up
+  L0 INT : [10,20]
+  L1 LEAF: [5,6]   [10,12]   [20,30]
+  CHAIN: [5,6] -> [10,12] -> [20,30]
+--- insert 7 ---
+  L0 INT : [10,20]
+  L1 LEAF: [5,6,7]   [10,12]   [20,30]
+  CHAIN: [5,6,7] -> [10,12] -> [20,30]
+--- insert 1 ---
+    [SPLIT leaf]   overflow [1, 5, 6, 7] -> left=[1, 5] right=[6, 7]; COPY sep 6 up
+  L0 INT : [6,10,20]
+  L1 LEAF: [1,5]   [6,7]   [10,12]   [20,30]
+  CHAIN: [1,5] -> [6,7] -> [10,12] -> [20,30]
+--- insert 8 ---
+  L0 INT : [6,10,20]
+  L1 LEAF: [1,5]   [6,7,8]   [10,12]   [20,30]
+  CHAIN: [1,5] -> [6,7,8] -> [10,12] -> [20,30]
+--- insert 9 ---
+    [SPLIT leaf]   overflow [6, 7, 8, 9] -> left=[6, 7] right=[8, 9]; COPY sep 8 up
+    [SPLIT internal] overflow keys [6, 8, 10, 20] -> MOVE 10 up; left keys=[6, 8] right keys=[20]
+    [NEW ROOT] new root keys=[10] -> height grows to 3
+  L0 INT : [10]
+  L1 INT : [6,8]   [20]
+  L2 LEAF: [1,5]   [6,7]   [8,9]   [10,12]   [20,30]
+  CHAIN: [1,5] -> [6,7] -> [8,9] -> [10,12] -> [20,30]
+
+Key moments above:
+  * insert 6   : leaf [5,6,10,20] overflows -> split, COPY 10 up, NEW ROOT.
+  * insert 30  : right leaf overflows -> split, COPY 20 into the root.
+  * insert 1,9 : splits cascade until the root overflows -> internal split,
+                  MOVE 10 up, NEW ROOT again -> tree is now 3 levels tall.
+
+Note the two different 'push up' rules: leaves COPY the separator up
+(every key stays in a leaf); internals MOVE it (it is only a divider).
+
+========================================================================
+  SECTION C: point lookup -- descend root -> leaf, count comparisons
+========================================================================
+At each internal level we compare the search key against the separators
+until we find the child whose range contains it; in the leaf we scan for
+the key. Each comparison is counted. Path length = height = 3 pages.
+
+search(12):
+  L0 INT  [10, 20]: 12>=10; 12<20 -> child 1
+  L1 INT  [15]: 12<15 -> child 0
+  L2 LEAF [10, 12]: 12>10; 12==12 FOUND@1
+  -> FOUND, value = 12; comparisons = 5
+
+search(1):
+  L0 INT  [10, 20]: 1<10 -> child 0
+  L1 INT  [3, 6, 8]: 1<3 -> child 0
+  L2 LEAF [1, 2]: 1==1 FOUND@0
+  -> FOUND, value = 1; comparisons = 3
+
+search(28):
+  L0 INT  [10, 20]: 28>=10; 28>=20; past all -> child 2
+  L1 INT  [25, 30]: 28>=25; 28<30 -> child 1
+  L2 LEAF [25, 28]: 28>25; 28==28 FOUND@1
+  -> FOUND, value = 28; comparisons = 6
+
+search(99):
+  L0 INT  [10, 20]: 99>=10; 99>=20; past all -> child 2
+  L1 INT  [25, 30]: 99>=25; 99>=30; past all -> child 2
+  L2 LEAF [30, 31]: 99>30; 99>31; end of leaf (absent)
+  -> NOT FOUND; comparisons = 6
+
+Every lookup touched exactly 3 pages (one per level) no matter the key.
+Comparisons scale with keys-per-node; in a real engine each node is read
+once and binary-searched internally, so it is O(log_fanout N) comparisons.
+
+========================================================================
+  SECTION D: range scan -- find leaf, then walk the leaf chain
+========================================================================
+range [6, 22]:
+
+Step 1 - descend to the leaf that would hold the low key (same as a
+point lookup, just using `lo` as the probe):
+
+Step 2 - scan that leaf, then FOLLOW THE NEXT-POINTERS rightward until
+a key exceeds `hi`. No second tree traversal -- the '+' of B+tree:
+
+  leaf 0: keys=[6, 7]  <-- matched [6, 7]
+  leaf 1: keys=[8, 9]  <-- matched [8, 9]
+  leaf 2: keys=[10, 12]  <-- matched [10, 12]
+  leaf 3: keys=[15, 17]  <-- matched [15, 17]
+  leaf 4: keys=[20, 22]  <-- matched [20, 22]
+  leaf 5: keys=[25, 28]
+
+results (10 keys): [6, 7, 8, 9, 10, 12, 15, 17, 20, 22]
+The chain walk is SEQUENTIAL I/O on contiguous leaf pages -- cheap on
+disk/SSD. This is why clustered PK range scans are so fast. 🔗 HEAP_VS_CLUSTERED.md
+
+========================================================================
+  SECTION E: delete -- borrow from a sibling, or merge on underflow
+========================================================================
+min 2 keys per non-root leaf. Delete drops a key; if the leaf now has
+< 2 keys it underflows: BORROW one from a sibling that can spare it,
+else MERGE with a sibling (pulling the separator down). Three demos:
+
+starting tree:
+  L0 INT : [10,20]
+  L1 LEAF: [5,6,7]   [10,12]   [20,30]
+  CHAIN: [5,6,7] -> [10,12] -> [20,30]
+
+--- delete 7 ---
+  (leaf still >= min keys; no rebalancing needed)
+  L0 INT : [10,20]
+  L1 LEAF: [5,6]   [10,12]   [20,30]
+  CHAIN: [5,6] -> [10,12] -> [20,30]
+
+--- delete 6 ---
+  REBALANCE: merge-right-into-child -> now [5, 10, 12]
+  L0 INT : [20]
+  L1 LEAF: [5,10,12]   [20,30]
+  CHAIN: [5,10,12] -> [20,30]
+
+--- delete 30 ---
+  REBALANCE: borrow-left -> now [12, 20]
+  L0 INT : [12]
+  L1 LEAF: [5,10]   [12,20]
+  CHAIN: [5,10] -> [12,20]
+
+What happened:
+  delete 7  : leaf [5,6,7] -> [5,6] (2 keys, still OK) -> no rebalance.
+  delete 6  : leaf [5,6] -> [5] underflows; sibling [10,12] is also at
+               min (2) so cannot lend -> MERGE [5]+[10,12]=[5,10,12],
+               separator 10 pulled down from the root.
+  delete 30 : leaf [20,30] -> [20] underflows; left sibling [5,10,12]
+               has 3 keys (> min) -> BORROW 12 over, leaf -> [12,20],
+               separator updated to 12.
+
+========================================================================
+  SECTION F: fanout math -- why a B+tree of 1M rows is only 3 pages tall
+========================================================================
+page size = 4096 B; key = 8 B, value = 8 B, child ptr = 8 B
+
+internal node: holds M keys + (M+1) child pointers
+  M = (page - ptr) / (key + ptr) = (4096 - 8) / 16 = 255 keys
+  fanout (children per internal node) = M + 1 = 256
+leaf node: 256 (key,value) entries per page
+
+N = 1,000,000 rows -> leaf pages needed = ceil(N/leaf_cap) = ceil(1000000/256) = 3,907
+
+| height (levels) | role of bottom level | max rows addressable |
+|----------------:|----------------------|---------------------:|
+| 1 | leaf (root is the leaf)      |              256 |
+| 2 | leaves (under 1 internal level) |           65,536 |
+| 3 | leaves (under 2 internal levels) |       16,777,216 |  <-- 1M rows live here
+| 4 | leaves (under 3 internal levels) |    4,294,967,296 |
+
+height for N = 1,000,000: 1 + ceil(log_256(3,907)) = 3 levels
+-> a point lookup reads exactly 3 pages. Range scan adds the
+   sequential leaf walk. THAT is the B+tree payoff: O(log_fanout N) I/O,
+   and with a 256-way fanout the log barely grows.
+
+[check] 1M rows fits in 3 levels: fanout^(3-1)*leaf_cap = 256^2*256 = 16,777,216 >= 1,000,000: OK
+[check] 2 levels would cap at 65,536 < 1,000,000 -> need 3: OK
+
+========================================================================
+  GOLD CHECK: btree.search(k) == sorted-list binary search
+========================================================================
+checked 18 present + 11 absent keys.
+for every k:  BPlusTree.find(k)  ==  binary_search(sorted_inserts, k)
+[check] btree.search matches flat sorted-list binary search:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

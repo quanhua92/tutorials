@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSM-tree — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --gray:#6e7681;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:.9rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:150px;accent-color:var(--green);vertical-align:middle}
+  input[type=number]{width:74px;background:#0a0e14;color:var(--ink);border:1px solid #30363d;
+                    border-radius:6px;padding:3px 7px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:2ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .badge.gold{background:#3a3018;color:var(--gold);border-color:var(--gold)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 12px;cursor:pointer;font-size:.8rem;font-weight:600}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  button.qb{padding:4px 9px;font-size:.78rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.76rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+
+  /* level diagram */
+  .lvlrow{display:flex;align-items:flex-start;gap:.5rem;margin:.35rem 0;min-height:62px}
+  .lvltag{width:74px;flex-shrink:0;font-size:.74rem;color:var(--muted);padding-top:.5rem;
+          font-family:ui-monospace,monospace}
+  .lvltag b{color:var(--ink);font-size:.86rem}
+  .sstrow{display:flex;gap:.4rem;flex-wrap:wrap;flex:1}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.32rem .45rem;
+        font-size:.72rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.3;
+        transition:all .18s;min-width:84px}
+  .card .pid{font-weight:700;color:var(--muted)}
+  .card .rng{color:#c9d1d9;font-size:.68rem}
+  .card .ks{color:var(--muted);font-size:.66rem;margin-top:1px}
+  .card.mem{border-color:var(--gold);background:#3a3018}
+  .card.mem .pid{color:var(--gold)}
+  .card.l0{border-left:3px solid var(--orange)}
+  .card.l0 .pid{color:var(--orange)}
+  .card.li{border-left:3px solid var(--green)}
+  .card.li .pid{color:var(--green)}
+  .card.empty{border-style:dashed;color:var(--gray);background:transparent;display:flex;align-items:center;justify-content:center;min-width:120px;color:var(--gray)}
+  /* read-path highlight states */
+  .card.chk{outline:2px solid #58a6ff;outline-offset:1px}
+  .card.skip{opacity:.45}
+  .card.hit{border-color:var(--green);box-shadow:0 0 0 2px rgba(39,174,96,.5),0 0 16px rgba(39,174,96,.4)}
+  .card.tomb{border-color:var(--red);box-shadow:0 0 0 2px rgba(192,57,43,.5)}
+  .card .tmb{color:var(--red);font-weight:700}
+
+  /* read chips */
+  .chips{display:flex;flex-wrap:wrap;gap:.3rem;margin:.5rem 0;min-height:30px}
+  .chip{background:#0a0e14;border:1px solid #30363d;border-radius:5px;padding:3px 8px;
+        font-size:.74rem;font-family:ui-monospace,monospace;transition:all .25s}
+  .chip.chk{background:#1c2733;border-color:#58a6ff;color:#58a6ff}
+  .chip.skip{background:#161b22;border-color:var(--gold);color:var(--gold)}
+  .chip.read{background:#0e2a18;border-color:var(--green);color:var(--green)}
+  .chip.hit{background:#1c3a25;border-color:var(--green);color:#a8f0c0;font-weight:700}
+  .chip.tomb{background:#3a1414;border-color:var(--red);color:#ffb3a8;font-weight:700}
+  .chip.absent{background:#161b22;color:var(--muted)}
+
+  .counters{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-end;margin:.3rem 0 .1rem}
+  .count{display:flex;flex-direction:column;align-items:center;min-width:78px}
+  .count .n{font-size:1.8rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
+  .count .lab{color:var(--muted);font-size:.72rem;margin-top:.2rem;text-align:center}
+  .count .n.c0{color:var(--muted)} .count .n.c1{color:var(--blue)} .count .n.c2{color:var(--green)} .count .n.c3{color:var(--gold)} .count .n.c4{color:var(--red)}
+  .readout{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.5rem .65rem;margin-top:.45rem;
+           font-variant-numeric:tabular-nums;min-height:1.3em}
+  .readout b{color:var(--green)} .readout .bad{color:var(--red)} .readout .go{color:var(--gold)}
+  .log{font-family:ui-monospace,monospace;font-size:.74rem;color:var(--muted);
+       background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.5rem .65rem;
+       max-height:120px;overflow:auto;margin-top:.45rem}
+  .log b{color:var(--ink)}
+  .row2{display:flex;gap:1.1rem;flex-wrap:wrap;margin-top:.55rem}
+  .row2 .blk{flex:1;min-width:220px}
+  table.amp{border-collapse:collapse;font-size:.76rem;font-variant-numeric:tabular-nums;margin-top:.4rem}
+  table.amp td,table.amp th{border:1px solid #30363d;padding:3px 8px;text-align:left}
+  table.amp th{color:var(--muted);font-weight:600}
+  table.amp tr.hl td{background:#3a2f12;color:#ffd966;font-weight:700}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Log-Structured Merge-tree (LSM) — interactive
+    <a class="badge gold" href="https://github.com/quanhua92/tutorials/blob/main/db/LSM_TREE.md">LSM_TREE.md</a>
+    <a class="badge gold" href="https://github.com/quanhua92/tutorials/blob/main/db/lsm_tree.py">lsm_tree.py</a></h1>
+  <div class="sub">Writes <b>append</b> to a <b style="color:var(--gold)">MemTable</b> → flush to immutable <b style="color:var(--orange)">L0 SSTables</b> (overlapping) →
+    background <b style="color:var(--green)">compaction</b> merge-sorts them into disjoint levels (each ~T× bigger). Reads walk MemTable → L0 (every file) → L1+ (one by range),
+    stopping at the first hit — a value <i>or</i> a tombstone. The page rebuilds the exact canonical workload from <code>lsm_tree.py</code> in JS and gold-checks every query.</div>
+
+  <!-- ===== PANEL 1: LEVELS + WRITE/COMPACT CONTROLS ===== -->
+  <h2>① The levels — insert, flush, compact</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>MemTable cap
+        <input type="range" id="capR" min="2" max="8" value="4"><span class="val" id="capV">4</span></label>
+      <label>size ratio T
+        <input type="range" id="tR" min="2" max="10" value="4"><span class="val" id="tV">4</span></label>
+      <label>num levels
+        <input type="range" id="lR" min="2" max="5" value="4"><span class="val" id="lV">4</span></label>
+      <button id="bIns">insert next op ▸</button>
+      <button id="bComp">compact L0 → L1</button>
+      <button id="bReset">reset to canonical</button>
+      <button id="bFlush">flush memtable now</button>
+    </div>
+    <div id="levels"></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--gold)"></i>MemTable (in-memory)</span>
+      <span><i class="sw" style="background:var(--orange)"></i>L0 SST (overlapping)</span>
+      <span><i class="sw" style="background:var(--green)"></i>L1+ SST (disjoint run)</span>
+      <span><i class="sw" style="background:#6e7681"></i>empty level</span>
+    </div>
+    <div class="log" id="oplog"></div>
+  </div>
+
+  <!-- ===== PANEL 2: READ PATH ===== -->
+  <h2>② Read path — point lookup animation (MemTable → L0 scan → L1+ by range)</h2>
+  <div class="panel">
+    <div class="controls">
+      <label>key <input type="number" id="qKey" value="0"></label>
+      <button id="bQ">query ▸</button>
+      <span class="micro">quick:</span>
+      <button class="qb" data-k="7">7 (mem)</button>
+      <button class="qb" data-k="5">5 (update)</button>
+      <button class="qb" data-k="20">20 (tomb)</button>
+      <button class="qb" data-k="0">0 (worst)</button>
+      <button class="qb" data-k="99">99 (absent)</button>
+      <label><input type="checkbox" id="bloomChk" checked> bloom filters on</label>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="counters" id="qCounters"></div>
+    <div class="readout" id="qReadout">Pick a key and hit query ▸.</div>
+    <div class="micro" style="margin-top:.45rem">A tombstone hit (red) STOPS the search — looking deeper would let an old version resurface.
+      A bloom skip (gold) means "definitely not here" → no SST read. With bloom off, every L0 file is read (worst-case read amp).</div>
+  </div>
+
+  <!-- ===== PANEL 3: AMPLIFICATION ===== -->
+  <h2>③ Amplification — the price of write-optimization (live from this state)</h2>
+  <div class="panel">
+    <div class="row2">
+      <div class="blk">
+        <div class="counters" id="ampCounters"></div>
+        <div class="readout" id="ampReadout"></div>
+      </div>
+      <div class="blk">
+        <div class="micro" style="margin:0 0 .3rem"><b>Steady-state reference</b> (O'Neil 1996 / Kleppmann DDIA):</div>
+        <table class="amp">
+          <tr><th>policy</th><th>T</th><th>L</th><th>write amp</th><th>who</th></tr>
+          <tr><td>B-tree</td><td>—</td><td>—</td><td>~4×</td><td>PostgreSQL, InnoDB</td></tr>
+          <tr><td>LSM tiering</td><td>10</td><td>4</td><td>~4×</td><td>Cassandra</td></tr>
+          <tr class="hl"><td>LSM leveling</td><td>10</td><td>4</td><td>~40×</td><td>RocksDB/LevelDB</td></tr>
+        </table>
+        <div class="micro" style="margin-top:.35rem">The toy's measured write amp grows toward <code>T·L</code> as levels fill. Bloom FPR <code>(1−e^(−kn/m))^k</code>, k=(m/n)·ln2.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS rebuilds the canonical LSM from the same <code>INSERT_OPS</code> as <code>lsm_tree.py</code>, runs the 6 gold queries (no bloom), and verifies compaction.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth workload + model, mirroring lsm_tree.py exactly ===== */
+const INSERT_OPS=[
+  ["put",10,"v10"],["put",0,"v0"],["put",20,"v20"],["put",5,"v5"],
+  ["put",15,"v15"],["put",1,"v1"],["put",11,"v11"],["put",21,"v21"],
+  ["put",6,"v6"],["put",16,"v16"],["put",2,"v2"],["put",12,"v12"],
+  ["put",5,"v5b"],["put",10,"v10b"],["del",20,null],
+  ["put",22,"v22"],["put",7,"v7"]
+];
+const TOMBSTONE=null;
+
+/* deterministic 53-bit string hash (cyrb53) — for the JS bloom (illustrative) */
+function cyrb53(str,seed){seed=seed||0;let h1=0xdeadbeef^seed,h2=0x41c6ce57^seed;
+  for(let i=0;i<str.length;i++){const ch=str.charCodeAt(i);h1=Math.imul(h1^ch,2654435761);h2=Math.imul(h2^ch,1597334677);}
+  h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+  h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+  return 4294967296*(2097151&h2)+(h1>>>0);}
+
+class Bloom{
+  constructor(n,bpk){this.n=Math.max(1,n);this.bpk=bpk;this.m=Math.max(1,this.n*bpk);
+    this.k=Math.max(1,Math.round((this.m/this.n)*Math.LN2));this.bits=new Uint8Array(this.m);}
+  _idx(key){const s=""+key,h1=cyrb53(s,0),h2=cyrb53(s,1)||1;const o=[];for(let i=0;i<this.k;i++)o.push((h1+i*h2)%this.m);return o;}
+  add(key){for(const i of this._idx(key))this.bits[i]=1;}
+  has(key){return this._idx(key).every(i=>this.bits[i]);}
+  get fpr(){return Math.pow(1-Math.exp(-this.k*this.n/this.m),this.k);}
+}
+
+class SST{
+  constructor(level,seq,entries,withBloom,bpk){
+    this.level=level;this.sstSeq=seq;
+    this.entries=entries.slice().sort((a,b)=>a[0]-b[0]);
+    this.keys=this.entries.map(e=>e[0]);
+    this.bloom=null;
+    if(withBloom&&this.entries.length){const b=new Bloom(this.entries.length,bpk);for(const e of this.entries)b.add(e[0]);this.bloom=b;}
+  }
+  minKey(){return this.keys[0];}
+  maxKey(){return this.keys[this.keys.length-1];}
+  mayContain(key){return !this.bloom||this.bloom.has(key);}
+  get(key){const ks=this.keys;let lo=0,hi=ks.length;while(lo<hi){const m=(lo+hi)>>1;if(ks[m]<key)lo=m+1;else hi=m;}if(lo<ks.length&&ks[lo]===key)return this.entries[lo];return null;}
+  get len(){return this.entries.length;}
+}
+
+class LSM{
+  constructor(opts){const o=Object.assign({cap:4,T:4,L:4,useBloom:true,bpk:10},opts||{});
+    this.cap=o.cap;this.T=o.T;this.L=o.L;this.useBloom=o.useBloom;this.bpk=o.bpk;
+    this.memtable={};this.wal=[];this.levels=Array.from({length:this.L},()=>[]);
+    this.nextOp=0;this.nextSst=0;this.entriesFlushed=0;this.entriesCompacted=0;this.logicalWrites=0;}
+  put(key,value){const s=this.nextOp++;this.wal.push(["put",key,value,s]);this.memtable[key]=[value,s];this.logicalWrites++;this._maybeFlush();}
+  del(key){const s=this.nextOp++;this.wal.push(["del",key,s]);this.memtable[key]=[TOMBSTONE,s];this.logicalWrites++;this._maybeFlush();}
+  _maybeFlush(){if(Object.keys(this.memtable).length>=this.cap)this._flush();}
+  flushNow(){if(Object.keys(this.memtable).length>0)this._flush();}
+  _flush(){const ks=Object.keys(this.memtable).map(Number).sort((a,b)=>a-b);
+    const ents=ks.map(k=>[k,this.memtable[k][0],this.memtable[k][1]]);
+    const sst=new SST(0,this.nextSst,ents,this.useBloom,this.bpk);this.nextSst++;
+    this.entriesFlushed+=ents.length;this.levels[0].push(sst);this.memtable={};}
+  compact(lvl){const src=this.levels[lvl].concat(this.levels[lvl+1]);let mg=this._kmerge(src);
+    if(lvl+1===this.L-1)mg=mg.filter(e=>e[1]!==TOMBSTONE);
+    const n=new SST(lvl+1,this.nextSst,mg,this.useBloom,this.bpk);this.nextSst++;
+    this.entriesCompacted+=mg.length;this.levels[lvl]=[];this.levels[lvl+1]=[n];return [n,src.length,mg.length];}
+  _kmerge(ssts){const latest={};for(const s of ssts)for(const e of s.entries){const k=e[0];
+    if(!(k in latest)||e[2]>latest[k][2])latest[k]=[e[0],e[1],e[2]];}
+    return Object.values(latest).sort((a,b)=>a[0]-b[0]);}
+  query(key){const checks=[];let sr=0,bs=0;checks.push(["MemTable",null]);
+    if(key in this.memtable){const v=this.memtable[key][0];return this._res(v,v!==TOMBSTONE?"memtable":"tombstone",checks,sr,bs);}
+    for(let i=this.levels[0].length-1;i>=0;i--){const s=this.levels[0][i];checks.push(["L0",s.sstSeq]);
+      if(!s.mayContain(key)){bs++;continue;}sr++;const e=s.get(key);if(e){const v=e[1];return this._res(v,v!==TOMBSTONE?"sst":"tombstone",checks,sr,bs);}}
+    for(let lvl=1;lvl<this.L;lvl++){const fl=this.levels[lvl];if(!fl.length)continue;let c=null;
+      for(const s of fl){if(s.minKey()<=key&&key<=s.maxKey()){c=s;break;}}checks.push(["L"+lvl,c?c.sstSeq:null]);
+      if(!c)continue;if(!c.mayContain(key)){bs++;continue;}sr++;const e=c.get(key);if(e){const v=e[1];return this._res(v,v!==TOMBSTONE?"sst":"tombstone",checks,sr,bs);}}
+    return this._res(null,"absent",checks,sr,bs);}
+  _res(v,r,c,sr,bs){return{value:v,reason:r,checks:c,sstReads:sr,bloomSkips:bs,filesChecked:c.length};}
+  physical(){let n=0;for(const lv of this.levels)for(const s of lv)n+=s.len;return n;}
+}
+function buildLsm(ops,opts){const db=new LSM(opts);for(const op of(ops||INSERT_OPS)){if(op[0]==="put")db.put(op[1],op[2]);else db.del(op[1]);}return db;}
+
+/* ===== app state ===== */
+let db;
+let insIdx=0;
+let opLog=[];
+function log(msg){opLog.unshift(msg);if(opLog.length>14)opLog.pop();renderLog();}
+function renderLog(){document.getElementById("oplog").innerHTML=opLog.map(l=>"<div>"+l+"</div>").join("")||"<div style='color:#6e7681'>(no ops yet — hit “insert next op”)</div>";}
+
+function opts(){return{cap:+document.getElementById("capR").value,T:+document.getElementById("tR").value,L:+document.getElementById("lR").value,useBloom:document.getElementById("bloomChk").checked,bpk:10};}
+
+/* ===== render: levels ===== */
+function fmtVal(v){return v===TOMBSTONE?"<span class='tmb'>TOMB</span>":v;}
+function renderLevels(highlight){
+  highlight=highlight||{};
+  let h="";
+  // MemTable row
+  const mkeys=Object.keys(db.memtable).map(Number).sort((a,b)=>a-b);
+  let memCard;
+  if(mkeys.length){memCard=`<div class="card mem ${highlight.mem?'chk':''}"><span class="pid">MemTable</span><div class="ks">${mkeys.map(k=>k+":"+(db.memtable[k][0]===TOMBSTONE?"TOMB":db.memtable[k][0])).join(" ")}</div></div>`;}
+  else{memCard=`<div class="card empty">MemTable empty</div>`;}
+  h+=`<div class="lvlrow"><div class="lvltag"><b>MemTable</b><br>${mkeys.length}/${db.cap} → flush</div><div class="sstrow">${memCard}</div></div>`;
+  // level rows
+  for(let lvl=0;lvl<db.L;lvl++){
+    const files=db.levels[lvl];
+    const cls=lvl===0?"l0":"li";
+    const sizeNote = lvl===0 ? "~cap·#flush" : ("~"+(db.cap*Math.pow(db.T,lvl)));
+    let cards="";
+    if(!files.length){cards=`<div class="card empty">no SSTables (level empty)</div>`;}
+    else{for(const s of files){
+      const ks=s.entries.map(e=>e[0]+(e[1]===TOMBSTONE?"•":"")).join(" ");
+      const hl = highlight.sst && highlight.sst===s.sstSeq ? highlight.cls : "";
+      const hitCls = highlight.hit===s.sstSeq ? "hit" : (highlight.tomb===s.sstSeq?"tomb":"");
+      const skipCls = highlight.skip && highlight.skip.indexOf(s.sstSeq)>=0 ? "skip" : "";
+      cards+=`<div class="card ${cls} ${hl} ${hitCls} ${skipCls}"><span class="pid">SST${s.sstSeq}@L${lvl}</span> <span class="rng">[${s.minKey()}..${s.maxKey()}]</span><div class="ks">${ks}</div></div>`;
+    }}
+    const tag = lvl===0 ? `<b>L0</b><br>overlapping<br>${files.length} file${files.length===1?"":"s"}` : `<b>L${lvl}</b><br>disjoint<br>size ~${sizeNote}`;
+    h+=`<div class="lvlrow"><div class="lvltag">${tag}</div><div class="sstrow">${cards}</div></div>`;
+  }
+  document.getElementById("levels").innerHTML=h;
+  renderAmp();
+}
+
+/* ===== render: amplification counters ===== */
+function renderAmp(){
+  const phys=db.physical();
+  const unique=new Set();for(const lv of db.levels)for(const s of lv)for(const e of s.entries)unique.add(e[0]);
+  const u=unique.size, stale=Math.max(0,phys-u);
+  const wa = db.logicalWrites>0 ? ((db.entriesFlushed+db.entriesCompacted)/db.logicalWrites) : 0;
+  const sa = u>0 ? (stale/u*100) : 0;
+  const cs=[
+    {n:db.logicalWrites,lab:"logical writes",c:"c0"},
+    {n:db.entriesFlushed+db.entriesCompacted,lab:"physical writes",c:"c1"},
+    {n:wa.toFixed(2)+"×",lab:"write amp",c:"c3"},
+    {n:stale+"/"+u,lab:"stale / unique",c:"c2"},
+    {n:sa.toFixed(0)+"%",lab:"space amp",c:"c4"},
+  ];
+  document.getElementById("ampCounters").innerHTML=cs.map(c=>`<div class="count"><span class="n ${c.c}">${c.n}</span><span class="lab">${c.lab}</span></div>`).join("");
+  document.getElementById("ampReadout").innerHTML=`write amp = (flush ${db.entriesFlushed} + compact ${db.entriesCompacted}) / ${db.logicalWrites} logical = <b>${wa.toFixed(2)}×</b> &nbsp;|&nbsp; space amp = ${stale} stale / ${u} unique = <span class="${sa>0?'bad':'go'}">${sa.toFixed(1)}%</span>. Both grow as L0 fills; compaction drives them back down.`;
+}
+
+/* ===== render: read path (animated) ===== */
+function runQuery(key){
+  const r=db.query(key);
+  // determine which sst was the hit / tomb, and which were bloom-skipped
+  let hitSeq=null,tombSeq=null;const skipSeq=[];
+  for(const c of r.checks){
+    if(c[0]==="MemTable"){if(r.reason==="memtable"||r.reason==="tombstone"){}continue;}
+    const lvl=c[0]==="L0"?0:+c[0].slice(1);
+    const sstSeq=c[1];
+    if(sstSeq==null)continue;
+    // was this a skip or a read?
+  }
+  // simpler: derive from result + bloomSkips by re-walking isn't needed; mark the LAST checked file specially
+  // highlight: hit file = the last 'checks' entry if reason in sst/tombstone; skipped = files where bloom said no
+  const highlight={};
+  if(r.reason==="memtable")highlight.mem="chk";
+  if(r.reason==="tombstone"||r.reason==="sst"){const last=r.checks[r.checks.length-1];if(last[1]!=null){if(r.reason==="tombstone")highlight.tomb=last[1];else highlight.hit=last[1];}}
+  // render chips progressively
+  const chips=document.getElementById("chips");
+  chips.innerHTML="";
+  const list=[];
+  for(let i=0;i<r.checks.length;i++){
+    const [where,seq]=r.checks[i];
+    const label = where==="MemTable"?"MemTable":(where+"·SST"+seq);
+    // classify this check
+    let cls="chk";
+    // is this the terminal check?
+    const terminal=(i===r.checks.length-1);
+    if(where!=="MemTable"&&seq!=null){
+      // did we read it? recompute: this file was skipped iff bloom said no AND it's not the hit
+      const lvl = where==="L0"?0:+where.slice(1);
+      const s = db.levels[lvl].find(x=>x.sstSeq===seq);
+      if(s && !s.mayContain(key)){cls="skip";skipSeq.push(seq);}
+      else if(terminal&&(r.reason==="sst"||r.reason==="tombstone")){cls=r.reason==="tombstone"?"tomb":"hit";}
+      else cls="read";
+    } else if(where==="MemTable"&&terminal&&(r.reason==="memtable"||r.reason==="tombstone")){cls=r.reason==="tombstone"?"tomb":"hit";}
+    list.push({label,cls});
+  }
+  highlight.skip=skipSeq;
+  // animate
+  let i=0;
+  (function step(){
+    if(i>0){const prev=chips.children[i-1];prev.className="chip "+list[i-1].cls;prev.textContent=list[i-1].label+(list[i-1].cls==="skip"?" ✓bloom":(list[i-1].cls==="read"?" (read)":""));}
+    if(i>=list.length){finishQuery(r,highlight);return;}
+    const chip=document.createElement("div");chip.className="chip chk";chip.textContent=list[i].label+" …";chips.appendChild(chip);
+    i++;setTimeout(step,260);
+  })();
+  // counters
+  const cs=[
+    {n:r.filesChecked,lab:"files checked",c:"c1"},
+    {n:r.sstReads,lab:"sst reads (I/O)",c:"c2"},
+    {n:r.bloomSkips,lab:"bloom skips",c:"c3"},
+  ];
+  document.getElementById("qCounters").innerHTML=cs.map(c=>`<div class="count"><span class="n ${c.c}">${c.n}</span><span class="lab">${c.lab}</span></div>`).join("");
+}
+function finishQuery(r,highlight){
+  const v = r.value===TOMBSTONE?null:r.value;
+  const vshow = v===null?"<span class='bad'>None (deleted / absent)</span>":("<b>"+v+"</b>");
+  const reasonColor={memtable:"go",sst:"go",tombstone:"bad",absent:"bad"}[r.reason];
+  document.getElementById("qReadout").innerHTML=`query(<b>${currentKey()}</b>) → value=${vshow} &nbsp; reason=<span class="${reasonColor}">${r.reason}</span> &nbsp;|&nbsp; checked ${r.filesChecked} file(s), ${r.sstReads} SST read(s), ${r.bloomSkips} bloom skip(s).`;
+  renderLevels(highlight);
+}
+function currentKey(){return parseInt(document.getElementById("qKey").value,10);}
+
+/* ===== gold check (vs lsm_tree.py GOLD block; bloom OFF, structural) ===== */
+const GOLD={
+  7:{value:"v7",filesChecked:1,sstReads:0,reason:"memtable"},
+  5:{value:"v5b",filesChecked:2,sstReads:1,reason:"sst"},
+  10:{value:"v10b",filesChecked:2,sstReads:1,reason:"sst"},
+  20:{value:null,filesChecked:2,sstReads:1,reason:"tombstone"},
+  0:{value:"v0",filesChecked:5,sstReads:4,reason:"sst"},
+  99:{value:null,filesChecked:5,sstReads:4,reason:"absent"},
+};
+function goldCheck(){
+  const g=buildLsm(INSERT_OPS,{cap:4,T:4,L:4,useBloom:false,bpk:10});
+  let ok=true;const detail=[];
+  for(const k of [7,5,10,20,0,99]){
+    const r=g.query(k);
+    const exp=GOLD[k];
+    const vok=(r.value===undefined?null:r.value)===exp.value;
+    const match=vok&&r.filesChecked===exp.filesChecked&&r.sstReads===exp.sstReads&&r.reason===exp.reason;
+    if(!match)ok=false;
+    detail.push(`${k}:${match?"ok":"FAIL"}`);
+  }
+  // compaction gold
+  const g2=buildLsm(INSERT_OPS,{cap:4,T:4,L:4,useBloom:false,bpk:10});
+  const [n,src,out]=g2.compact(0);
+  const compOk = g2.levels[0].length===0 && g2.levels[1].length===1 && out===13;
+  if(!compOk)ok=false;
+  detail.push("compact:"+compOk);
+  // ground-truth equivalence
+  const gt={};for(const op of INSERT_OPS){if(op[0]==="put")gt[op[1]]=op[2];else if(op[0]==="del")delete gt[op[1]];}
+  let eq=true;for(const k of Object.keys(gt).map(Number).concat([7,99,100])){const r=g.query(k);const exp=Object.prototype.hasOwnProperty.call(gt,k)?gt[k]:null;if((r.value===undefined?null:r.value)!==exp){eq=false;}}
+  if(!eq)ok=false;detail.push("eq:"+eq);
+  const chk=document.getElementById("check");
+  chk.textContent = ok ? "check: OK — JS LSM matches lsm_tree.py (6 gold queries + compaction + ground-truth)" : ("check: FAIL — "+detail.join(" "));
+  chk.style.borderColor=ok?"#27ae60":"#c0392b";chk.style.color=ok?"#27ae60":"#c0392b";chk.style.background=ok?"#1c3a25":"#3a1414";
+}
+
+/* ===== events ===== */
+function reset(){db=buildLsm(INSERT_OPS.slice(0,0).concat(INSERT_OPS),opts());insIdx=INSERT_OPS.length;opLog=[];log("reset to canonical build (cap="+db.cap+", T="+db.T+", L="+db.L+")");renderLevels();document.getElementById("chips").innerHTML="";document.getElementById("qCounters").innerHTML="";document.getElementById("qReadout").textContent="Pick a key and hit query ▸.";}
+document.getElementById("capR").oninput=function(){document.getElementById("capV").textContent=this.value;reset();};
+document.getElementById("tR").oninput=function(){document.getElementById("tV").textContent=this.value;reset();};
+document.getElementById("lR").oninput=function(){document.getElementById("lV").textContent=this.value;reset();};
+document.getElementById("bloomChk").onchange=function(){db.useBloom=this.checked;for(const lv of db.levels)for(const s of lv){s.bloom=null;if(this.checked&&s.entries.length){const b=new Bloom(s.entries.length,10);for(const e of s.entries)b.add(e[0]);s.bloom=b;}}renderLevels();};
+document.getElementById("bReset").onclick=reset;
+document.getElementById("bFlush").onclick=function(){if(Object.keys(db.memtable).length===0){log("memtable already empty — nothing to flush");return;}const n=Object.keys(db.memtable).length;db.flushNow();log("<b>flush</b> MemTable ("+n+" entries) → SST"+(db.nextSst-1)+"@L0");renderLevels();};
+document.getElementById("bIns").onclick=function(){
+  if(insIdx>=INSERT_OPS.length){log("all "+INSERT_OPS.length+" canonical ops already inserted");return;}
+  const op=INSERT_OPS[insIdx++];
+  const beforeFlush=db.nextSst;
+  if(op[0]==="put")db.put(op[1],op[2]);else db.del(op[1]);
+  const vs = op[0]==="put"?op[2]:"<tombstone>";
+  let msg="<b>"+(op[0]==="put"?"put":"del")+"</b>("+op[1]+", "+vs+")";
+  if(db.nextSst>beforeFlush)msg+=" &nbsp;→ <b style='color:#e67e22'>FLUSH → SST"+(db.nextSst-1)+"@L0</b> (memtable full)";
+  else msg+=" &nbsp;→ MemTable (size "+Object.keys(db.memtable).length+"/"+db.cap+")";
+  log(msg);renderLevels();
+};
+document.getElementById("bComp").onclick=function(){
+  if(db.L<2){log("need ≥2 levels to compact");return;}
+  if(db.levels[0].length===0){log("L0 is empty — nothing to compact");return;}
+  const before=db.levels[0].length, beforePhys=db.physical();
+  const [n,src,out]=db.compact(0);
+  log("<b>compaction</b> L0→L1: merged "+src+" SSTs → <b style='color:#27ae60'>SST"+n.sstSeq+"@L1</b> ("+out+" entries); L0 "+before+"→"+db.levels[0].length+" file(s).");
+  renderLevels();
+};
+document.getElementById("bQ").onclick=function(){runQuery(currentKey());};
+document.getElementById("qKey").addEventListener("keydown",function(e){if(e.key==="Enter")runQuery(currentKey());});
+Array.prototype.forEach.call(document.querySelectorAll("button.qb"),function(b){b.onclick=function(){document.getElementById("qKey").value=b.getAttribute("data-k");runQuery(+b.getAttribute("data-k"));};});
+
+/* ===== init ===== */
+db=buildLsm(INSERT_OPS,opts());
+insIdx=INSERT_OPS.length;
+log("loaded canonical build: 4 L0 SSTables, MemTable holds key 7 (matches lsm_tree.py GOLD).");
+renderLevels();
+goldCheck();
+</script>
+</body>
+</html>

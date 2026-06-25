@@ -1,0 +1,206 @@
+bitmap_index.py - reference impl. All numbers below feed BITMAP_INDEX.md.
+N_ROWS=16  STATUS_VALUES=['active', 'pending', 'closed', 'deleted']  REGION_VALUES=['east', 'west', 'north', 'south']  ROWS_PER_PAGE=4
+
+========================================================================
+  SECTION A: build a bitmap index on 'status'  (4 values x 16 rows)
+========================================================================
+Table: 16 rows. Indexed column 'status' has D = 4 distinct values: ['active', 'pending', 'closed', 'deleted'].
+
+The table data (what an INDEX is built from):
+
+| row | 0  | 1  | 2  | 3  | 4  | 5  | 6  | 7  | 8  | 9  | 10 | 11 | 12 | 13 | 14 | 15 |
+|-----|----|----|----|----|----|----|----|----|----|----|----|----|----|----|----|----|
+|status| acti| pend| clos| acti| dele| acti| pend| clos| acti| acti| clos| pend| acti| dele| clos| acti|
+|region| east| west| east| north| south| east| west| north| east| south| east| west| north| south| east| west|
+
+For each distinct value, build a 16-bit bitmap (bit i = 1 iff row i has that value):
+
+| value   | bitmap (16 bits, grouped 8)          | #1s | rows (TIDs)        |
+|---------|--------------------------------------|-----|--------------------|
+| active  | 10010100 11001001                    | 7   | [0, 3, 5, 8, 9, 12, 15] |
+| pending | 01000010 00010000                    | 3   | [1, 6, 11]         |
+| closed  | 00100001 00100010                    | 4   | [2, 7, 10, 14]     |
+| deleted | 00001000 00000100                    | 2   | [4, 13]            |
+
+Total index size (uncompressed) = D x N = 4 x 16 = 64 bits = 8 bytes.
+
+Sanity: the {value} bitmaps are a PARTITION -- every row is 1 in exactly one of them.
+
+[check] every column position sums to 1 across the 4 bitmaps (partition):  OK
+
+========================================================================
+  SECTION B: WHERE status='active' AND region='east'  ->  bitmap AND
+========================================================================
+Fetch the bitmap for each predicate (no heap IO yet):
+
+  active  : 10010100 11001001   (popcount 7)
+  east    : 10100100 10100010   (popcount 6)
+
+Bit-by-bit AND (one CPU op per word in hardware; shown per bit):
+
+  A      : 10010100 11001001
+  B      : 10100100 10100010
+  A AND B: 10000100 10000000
+
+Result bitmap has popcount 3 -> matching rows (TIDs) [0, 5, 8].
+
+That is the entire query: 16 bitwise ANDs, ZERO heap tuple reads. Only the 3 surviving positions will later be fetched.
+
+  bitmap AND rows  : [0, 5, 8]
+  linear scan rows : [0, 5, 8]
+
+[check] bitmap AND == linear scan  (both -> [0, 5, 8]):  OK
+
+========================================================================
+  SECTION C: RLE compression  (sparse bitmap -> run-length pairs)
+========================================================================
+Bitmap indexes shine on LOW-cardinality columns, and within them the
+RARE values produce SPARSE bitmaps (long runs of 0s). Run-length
+encoding (RLE) replaces a run of identical bits with one (value,
+length) pair, so the cost becomes proportional to the NUMBER of runs,
+not N.
+
+Example 1 -- SPARSE (status='deleted' on a 128-row table, 2 rows):
+
+  uncompressed (128 bits = 16 bytes):
+    00000000 00000001 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 10000000 00000000 00000000 00000000
+
+  RLE runs (5 pairs): [(0, 15), (1, 1), (0, 80), (1, 1), (0, 31)]
+  RLE bytes = 5 run-lengths + 1 packed value-bits = 6 bytes
+  -> 16 B -> 6 B  =  37.5% of original  (2.7x smaller)
+
+Example 2 -- PERIODIC '1 in every 8' (16 ones, evenly spaced):
+
+  uncompressed (128 bits = 16 bytes):
+    10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000 10000000
+
+  RLE runs (32 pairs): (1,1),(0,7) x 16  ->  32 runs = 36 bytes
+  -> 16 B -> 36 B  =  225.0% of original  (2.2x BIGGER)
+
+LESSON: naive RLE wins when runs are LONG (very sparse or clustered
+1s). Regular/periodic patterns (1-in-8) have MANY short runs, so RLE
+makes them BIGGER. Production bitmap indexes use smarter hybrids:
+  - BBC (Byte-aligned Bitmap Code): Oracle's byte-aligned RLE.
+  - Roaring (Chambi 2015): per-65535-row chunk picks ONE of
+    {sorted-array | 1024-bit bitmap | RLE runs}, whichever is smallest.
+That adaptivity is why Roaring is the de-facto standard today.
+
+[check] RLE round-trip exact, sparse 16B->6B (smaller), periodic 16B->36B (larger):  OK
+
+========================================================================
+  SECTION D: Bitmap Index Scan -> Bitmap Heap Scan  (two-phase)
+========================================================================
+Phase 1 (Bitmap Index Scan): the predicate's bitmap IS the TID set.
+  result TID bitmap: 10000100 10000000
+  matching rows     : [0, 5, 8]
+
+Convert row positions to physical TIDs (page, offset), 4 rows/page:
+
+| row | page | offset | TID    |
+|-----|------|--------|--------|
+| 0   | 0    | 0      | (0,0)   |
+| 5   | 1    | 1      | (1,1)   |
+| 8   | 2    | 0      | (2,0)   |
+
+Phase 2a (EXACT bitmap): collect the DISTINCT pages that own a hit:
+
+| page | rows on page   | has hit? | tuples to fetch & recheck |
+|------|----------------|----------|---------------------------|
+| 0    | [0, 1, 2, 3]   | YES      | 1                         |
+| 1    | [4, 5, 6, 7]   | YES      | 1                         |
+| 2    | [8, 9, 10, 11] | YES      | 1                         |
+| 3    | [12, 13, 14, 15] | skip     | 0                         |
+
+  -> visit 3 of 4 pages, recheck 3 tuples. Pages with no hit (here page [3]) are NEVER read.
+
+Phase 2b (LOSSY bitmap): if work_mem is too small for the exact TID
+bitmap, PostgreSQL degrades to a PAGE-level bitmap (1 bit/page).
+
+  page bitmap over 4 pages: [1, 1, 1, 0]  (set where >=1 hit MIGHT live)
+
+  -> still visit 3 pages, but now must RECHECK ALL 12 tuples on them
+     (vs 3 in exact mode) -- trading CPU/IO for bounded memory.
+
+The RECHECK is also what keeps the answer correct under MVCC: a TID
+in the bitmap may belong to a tuple that was since updated/deleted;
+phase 2 re-tests visibility AND the predicate before returning it.
+
+[check] exact TID set [0, 5, 8] == lossy recheck result [0, 5, 8]; recheck count 12 >= hits 3:  OK
+
+========================================================================
+  SECTION E: cardinality analysis  (when bitmap wins, when it loses)
+========================================================================
+Fix N = 1,000,000 rows. Bitmap index size = D x N / 8 bytes. B-tree size
+is ~O(N) regardless of D. Sweep D and watch what happens:
+
+| column example   | D (distinct) | bitmap size = D*N/8 | verdict       |
+|------------------|--------------|---------------------|---------------|
+| gender (D=2)     | 2            | 244.1 KB            | WIN (tiny, low D) |
+| status (D=4)     | 4            | 488.3 KB            | WIN (tiny, low D) |
+| country (D=200)  | 200          | 23.84 MB            | ok (warehouse) |
+| category (D=1k)  | 1000         | 119.21 MB           | borderline    |
+| user_id (D=N)    | 1000000      | 116.42 GB           | LOSE (D~N, huge) |
+
+The breaking point: bitmap size is LINEAR in D. Double the distinct
+values and you double the index. At D ~ N (a unique key) it becomes
+N^2/8 bits -- catastrophic. A B-tree on the same column stays O(N).
+
+RULE OF THUMB:
+  - WIN  : low D (gender, status, boolean, country), AND/OR of SEVERAL
+           low-selectivity predicates, read-mostly / warehouse.
+  - LOSE : high D (~unique keys), OLTP with frequent writes (each
+           update flips bits = rewrites compressed runs), or a single
+           high-selectivity predicate (B-tree reaches the few TIDs
+           directly -- no need to build a bitmap).
+
+NOTE: PostgreSQL has NO persistent bitmap index. It builds a TID
+bitmap ON THE FLY from a B-tree/GIN index and runs the Section D
+pipeline. So you get the bitmap-AND benefit for ad-hoc queries
+without the write penalty. Real on-disk bitmap indexes live in
+Oracle, DB2, and ClickHouse (the latter uses sparse-encoding /
+bitset columns).
+
+[check] gender idx = 250,000 B; user_id (D=N) = 116.4 GB (quadratic blowup):  OK
+
+========================================================================
+  SECTION F: bitmap AND/OR -- combine predicates BEFORE the heap fetch
+========================================================================
+The headline benefit: AND/OR of bitmaps costs O(N/word) CPU and ZERO
+heap IO, so you only fetch the rows that survive ALL predicates.
+
+Compare plans for  WHERE status='active' AND region='east':
+
+| plan                                   | heap tuples fetched | discarded |
+|----------------------------------------|---------------------|-----------|
+| sequential scan, filter in memory      | 16                  | 13        |
+| B-tree(status) then filter region      | 7                   | 4         |
+| B-tree(region) then filter status      | 6                   | 3         |
+| BITMAP AND, then fetch survivors       | 3                   | 0         |
+
+Bitmap AND fetches only 3 tuples (the 3 that survive both predicates), discarding none. A single-predicate index
+fetches every row matching THAT predicate, then throws away the ones
+failing the other. On random IO, fetches are the expensive part.
+
+OR is symmetric. WHERE status='pending' OR status='closed':
+
+  pending : 01000010 00010000   (popcount 3)
+  closed  : 00100001 00100010   (popcount 4)
+  P OR C  : 01100011 00110010   (popcount 7)  -> rows [1, 2, 6, 7, 10, 11, 14]
+
+  One bitmap op yields the union; no merge-sort of two TID lists, no
+  duplicate elimination (bitwise OR is idempotent by construction).
+
+NOT inverts (over the full N-row range). WHERE status != 'active' is NOT(active):
+
+  active    : 10010100 11001001   (popcount 7)
+  NOT active: 01101011 00110110   (popcount 9)  -> rows [1, 2, 4, 6, 7, 10, 11, 13, 14]
+
+  A NOT predicate is cheap on a bitmap (flip every bit) and murderous
+  on a B-tree (it means 'everything except these' -> scan). This is
+  another reason OLAP loves bitmaps.
+
+[check] AND=intersection, OR=union, NOT=complement, popcount(A)+popcount(NOT A)=16:  OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

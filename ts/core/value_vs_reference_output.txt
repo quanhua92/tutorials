@@ -1,0 +1,143 @@
+value_vs_reference.ts — Phase 3 bundle (core/).
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: the only two regimes are COPY (primitives) and SHARE (objects).
+There are no pointer types, no &/*, no address-of — only object identity (===).
+
+======================================================================
+SECTION A — Primitives copy by VALUE (all 7 types)
+======================================================================
+number : aNum=2  bNum=1   (bNum copied 1, aNum rebound to 2)
+[check] number: bNum === 1 after aNum = 2 (copy, not alias): OK
+string : aStr="HI"  bStr="hi"   (bStr copied "hi")
+[check] string: bStr === "hi" after aStr = aStr.toUpperCase(): OK
+boolean: aBool=false  bBool=true
+[check] boolean: bBool === true after aBool = false: OK
+bigint : aBig=99  bBig=10
+[check] bigint: bBig === 10n after aBig = 99n: OK
+symbol : aSym === bSym -> true   (same symbol value copied)
+[check] symbol: bSym === aSym (the same symbol primitive is copied): OK
+null   : aNull=null  bNull=null
+[check] null: aNull === null (primitive, copied by value): OK
+undef  : aUndef=undefined  bUndef=undefined
+[check] undefined: bUndef === undefined (primitive, copied by value): OK
+
+pass-by-value: bump(41) returned 42, caller's before still 41
+[check] primitive arg is copied: before stays 41 after bump(before): OK
+[check] ...but the function returned the bumped value 42: OK
+
+======================================================================
+SECTION B — Objects/arrays/functions share by REFERENCE; === is identity
+======================================================================
+object : b = a; b.x = 2;  ->  a.x = 2   (a sees the mutation — shared object)
+[check] object: a.x === 2 after b.x = 2 (a and b share ONE object): OK
+array  : arrB = arrA; arrB.push(2);  ->  arrA.length = 2, arrA = [1,2]
+[check] array: arrA.length === 2 after arrB.push(2) (arrays are objects): OK
+function: aliased === original -> true; aliased() = 7
+[check] function: aliased === original (same function object, by reference): OK
+
+=== on objects compares IDENTITY (the reference), not structure:
+  {} === {} (two literals)        -> false   (distinct objects)
+  o2 === o1 (same shape)          -> false   (still distinct objects)
+  o3 === o1 (o3 = o1 alias)       -> true   (SAME reference)
+  [] === [] (two array literals)  -> false   (distinct arrays)
+[check] {} === {} is false (=== is identity, not deep equality): OK
+[check] [] === [] is false (distinct array objects): OK
+[check] o2 === o1 is false (same shape, different objects): OK
+[check] o3 === o1 is true (same reference — aliased): OK
+[check] a === a is always true (a value is === to itself): OK
+[check] Object.is(o1, o2) === false (identity, same as === for objects): OK
+[check] Object.is(o1, o3) === true (same reference): OK
+
+======================================================================
+SECTION C — Argument passing: MUTATE shared object vs REBIND local (THE payoff)
+======================================================================
+mutate(callerBox)        -> callerBox.x = 99   (caller SEES the mutation)
+[check] mutate(): callerBox.x === 99 (shared object was mutated through the param): OK
+reassign(callerBox2)      -> callerBox2.x = 1   (caller UNCHANGED — local rebind)
+[check] reassign(): callerBox2.x === 1 (param rebind is local-only, caller untouched): OK
+pushTo(listA)            -> listA = [1,2,999]   (mutation visible)
+replaceArr(listB)        -> listB = [1,2]   (reassign NOT visible)
+[check] pushTo(): listA was mutated through the shared reference: OK
+[check] replaceArr(): listB untouched by the local param rebind: OK
+
+tryMutateNumber(5) -> myNum still 5   (primitive has no shared object to mutate)
+[check] primitive arg cannot be mutated through the param (no shared object): OK
+impossibleSwap(p=1, q=2) -> p=1, q=2   (caller's locals cannot be swapped by a function)
+[check] swap() cannot rebind caller's locals (pass-by-value-of-reference): OK
+
+======================================================================
+SECTION D — Shallow copy (spread/Object.assign) vs deep copy (structuredClone)
+======================================================================
+spread {...o} — top-level copied, nested SHARED:
+  spreadCopy.label = "b"   original.label = "a"   (independent)
+  spreadCopy.n.x   = 2   original.n.x   = 2   (SHARED — the bug)
+[check] spread: top-level label is independent (original.label === 'a'): OK
+[check] spread: nested n.x is SHARED (original.n.x === 2 after copy.n.x = 2): OK
+
+Object.assign(target, src) — shallow, and MUTATES the target:
+  assignResult === assignTarget -> true   (returns the same target)
+  assignTarget.label = "a"   (target's label overwritten by source)
+[check] Object.assign returns the (mutated) target (assignResult === assignTarget): OK
+[check] Object.assign overwrote target.label with source's 'a': OK
+
+[...arr] — new array, element objects SHARED:
+  arrOriginal[0].v = 2   (shared element mutated through the copy)
+[check] [...arr]: element objects are shared (arrOriginal[0].v === 2): OK
+
+structuredClone — FULLY independent (nested copied, not shared):
+  deepClone.n.x    = 99   deepOriginal.n.x    = 1   (independent)
+  deepClone.list   = [1,2,3]   deepOriginal.list   = [1,2]   (independent)
+  deepClone.when instanceof Date -> true   (Date type preserved)
+  deepClone.tags  instanceof Set  -> true   (Set type preserved)
+[check] structuredClone: nested n.x is independent (original stays 1): OK
+[check] structuredClone: list is independent (original keeps [1,2]): OK
+[check] structuredClone: deepClone.when is a real Date (type preserved): OK
+[check] structuredClone: deepClone.tags is a real Set (type preserved): OK
+[check] structuredClone: clone is NOT the same reference as original: OK
+
+structuredClone handles cycles:
+  cyclic.self === cyclic            -> true
+  cyclicClone.self === cyclicClone  -> true   (cycle re-created on the clone)
+  cyclicClone === cyclic            -> false   (still a distinct object)
+[check] structuredClone: cycle re-created on the clone (clone.self === clone): OK
+[check] structuredClone: but the clone is a distinct object (clone !== original): OK
+
+structuredClone THROWS DataCloneError on functions:
+  structuredClone({ fn: () => 1 }) threw -> true   (functions are not cloneable)
+[check] structuredClone: throws DataCloneError on a function value: OK
+
+JSON round-trip LOSSES (vs structuredClone):
+  jsonSource.when instanceof Date -> true
+  jsonRoundTrip.when instanceof Date -> false   (Date became a string: "2024-01-15T00:00:00.000Z")
+  jsonSource.bag instanceof Map  -> true
+  jsonRoundTrip.bag instanceof Map -> false   (Map became {})
+  'gone' in jsonRoundTrip        -> false   (undefined key was DROPPED)
+[check] JSON round-trip: Date is NOT preserved (becomes a string): OK
+[check] JSON round-trip: Map is NOT preserved (becomes {}): OK
+[check] JSON round-trip: undefined value is DROPPED (key absent): OK
+
+======================================================================
+SECTION E — No pointers: what JS has instead (cross-language framing)
+======================================================================
+Boxing a primitive does NOT give a shared identity:
+  primA === primB                 -> true   (primitives copy/equal by value)
+  boxedA === boxedB               -> false   (distinct wrapper objects)
+  boxedA.valueOf() === boxedB.valueOf() -> true   (same primitive inside)
+[check] boxed primitives: primA === primB is true (value equality): OK
+[check] boxed primitives: boxedA === boxedB is FALSE (distinct objects): OK
+[check] boxed primitives: .valueOf() recovers the equal primitive: OK
+  typeof 5        -> number
+  typeof new Number(5) -> object   (boxed -> object, not number)
+[check] typeof new Number(5) === "object" (boxing changes the runtime type): OK
+[check] typeof 5 === "number" (the primitive keeps its type): OK
+
+GC reachability — a reference is the only thing keeping an object alive:
+  weak.deref() while held -> the object   id=42
+[check] WeakRef.deref() returns the object while it is still reachable: OK
+  (after dropping the last reference, the object becomes unreachable — GC may free it; timing is NOT asserted here)
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

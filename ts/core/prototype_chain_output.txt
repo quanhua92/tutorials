@@ -1,0 +1,161 @@
+prototype_chain.ts — Phase 3 bundle.
+Every link and lookup below is computed by this file; the .md guide
+pastes it verbatim. Nothing is hand-computed.
+
+Reminder: TypeScript types are ERASED at runtime. The [[Prototype]]
+chain is a RUNTIME structure — `Object.getPrototypeOf`, `in`, and
+property access see it; your annotations and interfaces do not.
+
+======================================================================
+SECTION A — [[Prototype]], Object.getPrototypeOf, and the walk to null
+======================================================================
+The [[Prototype]] link, read three equivalent ways:
+  Object.getPrototypeOf(child) === base : true
+  Reflect.getPrototypeOf(child) === base: true
+  Object.getPrototypeOf === Reflect.getPrototypeOf (same fn? false)
+[check] Object.getPrototypeOf(child) === base: OK
+[check] Reflect.getPrototypeOf(child) === base (mirror API, same value): OK
+[check] Object.getPrototypeOf({}) === Object.prototype (root): OK
+[check] Reflect.getPrototypeOf({}) === Object.prototype: OK
+
+THE chain end:
+  Object.getPrototypeOf(Object.prototype) === null
+[check] Object.getPrototypeOf(Object.prototype) === null (chain end!): OK
+[check] Reflect.getPrototypeOf(Object.prototype) === null: OK
+
+Property lookup walks the chain (child has no own 'hello'):
+  Object.hasOwn(child, "hello") : false   (not on child)
+  child.hello()                : "hi from base"   (found on base via [[Prototype]])
+[check] Object.hasOwn(child, "hello") === false (it is inherited): OK
+[check] child.hello() === "hi from base" (found by walking the chain): OK
+
+A missing property resolves to undefined (walk reached null):
+  child.nope (walked to null, found nothing): undefined
+[check] child.nope === undefined (chain walked to null, nothing found): OK
+
+The full chain walk (rendered):
+  child -> {plain object} -> Object.prototype -> null
+  (i.e. child -> base -> Object.prototype -> null)
+
+======================================================================
+SECTION B — `in` (whole chain) vs hasOwnProperty/Object.hasOwn (own only)
+======================================================================
+The two ownership questions on a bare {}:
+  "toString" in {}                     : true   (walks the WHOLE chain)
+  ({}).hasOwnProperty("toString")      : false   (own only)
+  Object.hasOwn({}, "toString")        : false   (own only)
+[check] "toString" in {} === true (reachable on Object.prototype): OK
+[check] {}.hasOwnProperty("toString") === false (not OWN): OK
+[check] Object.hasOwn({}, "toString") === false (not OWN): OK
+
+Same key, different receiver — ownership is per-object:
+  Object.hasOwn(Object.prototype, "toString"): true
+[check] Object.hasOwn(Object.prototype, "toString") === true (it is defined HERE): OK
+[check] "toString" in Object.prototype === true: OK
+[check] hasOwnProperty and Object.hasOwn agree (own 'a'): OK
+
+Property shadowing (own hides inherited at the same key):
+  ownShadow.b            : own-b   (own wins; lookup stops here)
+  protoShadow.b          : proto-b   (untouched — not mutated)
+  Object.hasOwn(ownShadow,"b"): true
+[check] ownShadow.b === "own-b" (own property shadows inherited): OK
+[check] protoShadow.b === "proto-b" (shadowing does NOT mutate the prototype): OK
+[check] Object.hasOwn(ownShadow, "b") === true (the shadow is an own property): OK
+
+======================================================================
+SECTION C — Object.create + the function.prototype/new link (__proto__ vs .prototype)
+======================================================================
+Object.create(proto) — set the [[Prototype]] at creation:
+  o.greet()                          : "hi"   (inherited)
+  Object.getPrototypeOf(o) === proto : true
+[check] o.greet() === "hi" (inherited from the Object.create prototype): OK
+[check] Object.getPrototypeOf(o) === greeterProto: OK
+
+Object.create(null) — a prototype-less object (the clean dict):
+  Object.getPrototypeOf(dict) === null : true
+  typeof (dict as object).toString     : undefined   (NOT inherited — none exists)
+[check] Object.getPrototypeOf(dict) === null (truly prototype-less): OK
+[check] dict.toString is undefined at runtime (no Object.prototype reached): OK
+
+The function.prototype + new link (instances chain to Fn.prototype):
+  inst.greet()                                : "hi"
+  Object.getPrototypeOf(inst) === Fn.prototype: true
+  Fn.prototype.constructor === Fn             : true
+[check] inst.greet() === "hi" (inherited from Fn.prototype): OK
+[check] Object.getPrototypeOf(new Fn()) === Fn.prototype (the new link): OK
+[check] Fn.prototype.constructor === Fn (the back-reference): OK
+[check] inst.__proto__ === Fn.prototype (the INSTANCE link === the FUNCTION's .prototype target): OK
+
+__proto__ vs .prototype — two different links on two different things:
+  Object.getPrototypeOf(inst)   === Fn.prototype  (INSTANCE link)
+  Object.getPrototypeOf(Fn)     === Function.prototype  (Fn is itself an object: a function)
+  Fn.prototype                  is the object instances chain to
+[check] Object.getPrototypeOf(Fn) === Function.prototype (functions are objects; they chain to Function.prototype): OK
+[check] Object.create(Fn.prototype) wires the same [[Prototype]] as new Fn(): OK
+[check] Object.create(Fn.prototype).greet() === "hi" (same inherited method): OK
+
+======================================================================
+SECTION D — Built-in chains + Object.setPrototypeOf (rewire, discouraged)
+======================================================================
+Built-in chains (literal -> Constructor.prototype -> Object.prototype -> null):
+  [] -> Array.prototype -> Object.prototype -> null
+  fn -> Function.prototype -> Object.prototype -> null
+[check] Object.getPrototypeOf([]) === Array.prototype: OK
+[check] Object.getPrototypeOf(Array.prototype) === Object.prototype: OK
+[check] Object.getPrototypeOf(Object.prototype) === null (chain end): OK
+[check] Array.prototype.__proto__ === Object.prototype (legacy accessor agrees): OK
+[check] function f(){} chains to Function.prototype: OK
+[check] Function.prototype chains to Object.prototype: OK
+[check] Object.hasOwn([], "map") === false (map is inherited, not own): OK
+[check] "map" in [] === true (reachable on Array.prototype): OK
+[check] Array.prototype.map === [].map (same function, shared by all arrays): OK
+
+Object.setPrototypeOf — rewire an existing object's [[Prototype]] (slow!):
+  obj.rewired before setProto: undefined   (undefined — not on the chain)
+  typeof obj.rewired after     : function
+[check] Object.setPrototypeOf rewires: Object.getPrototypeOf(obj) === newProto: OK
+[check] obj.rewired is now reachable ("function"): OK
+
+__proto__ literal setter (standardized, optimized — set at creation):
+  viaLiteral.inherited: 42   (inherited via __proto__ literal)
+  viaLiteral.own      : 1   (own)
+[check] Object.getPrototypeOf(viaLiteral) === parentLit (via __proto__ literal): OK
+[check] viaLiteral.inherited === 42 (inherited through the literal-set prototype): OK
+
+======================================================================
+SECTION E — class as sugar + the prototype-pollution gotcha
+======================================================================
+class is sugar over [[Prototype]] — same chain, nicer syntax:
+  Object.getPrototypeOf(a) === Animal.prototype : true
+  Object.hasOwn(Animal.prototype, "speak")      : true   (method lives here)
+  Object.hasOwn(a, "speak")                     : false   (NOT own on the instance)
+  Object.hasOwn(a, "kind")                      : true   (field IS own)
+  Object.hasOwn(Animal, "kingdom")              : true   (static is on the class)
+  a.speak()                                     : "..."   (inherited via the chain)
+[check] Object.getPrototypeOf(new Animal()) === Animal.prototype: OK
+[check] Object.hasOwn(Animal.prototype, "speak") === true (method on the prototype): OK
+[check] Object.hasOwn(a, "speak") === false (method NOT own on the instance): OK
+[check] Object.hasOwn(a, "kind") === true (instance FIELD is own): OK
+[check] Object.hasOwn(Animal, "kingdom") === true (static is own on the class function): OK
+[check] a.speak() === "..." (inherited method, dispatched via the chain): OK
+[check] Animal.kingdom() === "Animalia" (static, NOT inherited by instances): OK
+[check] a instanceof Animal (walks the chain, finds Animal.prototype): OK
+[check] a instanceof Object (Object.prototype is further up the SAME chain): OK
+
+Prototype-pollution gotcha (inherited array is SHARED state):
+  shared.list after pollChild.list.push(3): [1,2,3]   <-- PROTOTYPE MUTATED
+[check] prototype pollution: pollChild.list.push(3) mutated shared.list: OK
+[check] both children see the mutation (shared reference): OK
+
+Safe counterpart — assigning a NEW value shadows (no mutation):
+  safeChild.count after =99 : 99   (own)
+  shared2.count (untouched) : 0
+[check] assigning a new value shadows: shared2.count still 0 (not mutated): OK
+[check] assigning a new value shadows: safeChild.count === 99 (own): OK
+[check] Object.hasOwn(safeChild, "count") === true (the shadow is own): OK
+[check] JS chain is DYNAMIC: dispatch changed by Object.setPrototypeOf (no static dispatch): OK
+[check] JS chain is REWIREABLE per-instance (each Object.create sets its own link): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

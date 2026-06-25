@@ -27,7 +27,7 @@
 |---|---|---|---|---|
 | 1 | Language Foundations | core | 8 | ✅ done (8/8, 460 checks) |
 | 2 | Type System & Generics | core | 8 | ✅ done (8/8, 318 checks) |
-| 3 | Memory & Object Semantics | core | 6 | ⬜ pending |
+| 3 | Memory & Object Semantics | core | 6 | ✅ done (6/6, 240 checks) |
 | 4 | Concurrency & the Event Loop | core | 7 | ⬜ pending |
 | 5 | Standard Library Essentials | core | 7 | ⬜ pending |
 | 6 | Serialization, Validation & Metaprogramming | metaprog | 5 | ⬜ pending |

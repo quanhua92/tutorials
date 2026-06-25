@@ -1,0 +1,159 @@
+iterators_generators.ts — Phase 3 bundle.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: iteration rests on TWO duck-typed protocols — an ITERABLE
+has [Symbol.iterator] -> an ITERATOR; an iterator has .next() ->
+{value, done}. Generators (function*/yield) are sugar for writing
+iterators as suspendable, lazy, single-use functions.
+
+======================================================================
+SECTION A — The iterator protocol (.next -> {value,done}) + making an object iterable
+======================================================================
+Hand-rolled iterator (a plain object with a .next() method):
+  it.next() -> { value: 0, done: false }
+  it.next() -> { value: 1, done: false }
+  it.next() -> { value: 2, done: false }
+  it.next() -> { value: undefined, done: true }   (terminal: value is undefined)
+  it.next() -> { value: undefined, done: true }   (stays done — the protocol's contract)
+[check] sequence is 0,1,2 then done (and stays done): OK
+
+Duck-typed shape — a plain Object satisfies the protocol (no class):
+  Object.getPrototypeOf(it) === Object.prototype  -> true
+  typeof it.next                                  -> function
+[check] iterator is a plain Object (protocol is duck-typed, not nominal): OK
+
+Making it iterable: add [Symbol.iterator]() that returns an iterator:
+  const ii = { next() { ... }, [Symbol.iterator]() { return this; } };
+  ii[Symbol.iterator]() === ii  -> true   (iterable iterator)
+[check] [Symbol.iterator]() returns this (the iterable-iterator idiom): OK
+
+======================================================================
+SECTION B — Consumers (for...of/spread/destructure) + built-in iterables (string = code points)
+======================================================================
+for...of consumes any iterable (here, the hand-rolled one):
+  for (const x of ii) ... -> [0,1,2]
+[check] for...of over hand-rolled iterable yields [0,1,2]: OK
+
+Spread consumes an iterable (calls [Symbol.iterator] internally):
+  [...ii2] -> [0,1,2]
+[check] [...handRolledIterable] === [0,1,2]: OK
+
+Array destructuring consumes an iterable:
+  const [a, b, c] = ii3  ->  a=0, b=1, c=2
+[check] destructuring pulls the first three values (0,1,2): OK
+
+Built-in iterables — Array, Map, Set (all have [Symbol.iterator]):
+  for...of [10,20,30]      -> [10,20,30]
+  for...of Map{a:1,b:2}    -> ["a=1","b=2"]
+  for...of Set{x,y,z}      -> ["x","y","z"]
+[check] for...of Map yields entries [a=1,b=2]: OK
+[check] for...of Set yields ["x","y","z"]: OK
+
+String iterates CODE POINTS (the expert fact — .length counts UTF-16 units):
+  const s = "a𝔸";
+  s.length             -> 3        (UTF-16 code UNITS: 'a' + 2 surrogates)
+  [...s]               -> ["a","𝔸"]   (CODE POINTS: 'a' + the astral 𝔸)
+  [...s].length        -> 2
+[check] "a𝔸".length === 3 (UTF-16 units): OK
+[check] [..."a𝔸" yields 2 code points: OK
+[check] first code point is "a": OK
+[check] second code point is "𝔸" (the full astral char, not a lone surrogate): OK
+
+A plain Object is NOT iterable (no [Symbol.iterator]) -> for...of throws:
+  for (const x of {}) -> threw TypeError? true
+[check] for...of over a plain object throws TypeError (not iterable): OK
+
+======================================================================
+SECTION C — Generators (function*/yield): lazy suspendable; infinite streams; yield*
+======================================================================
+Generator: function* + yield — a function that SUSPENDS at each yield:
+  g.next() -> { value: 1, done: false }
+  g.next() -> { value: 2, done: false }
+  g.next() -> { value: 3, done: false }
+  g.next() -> { value: undefined, done: true }   (body returned; generator is done)
+[check] generator sequence is 1,2,3 then done: OK
+
+A generator is an iterable iterator — spread consumes it:
+  [...(function*(){ yield 1; yield 2; yield 3 })()] -> [1,2,3]
+[check] [...range()] deep-equals [1,2,3]: OK
+[check] generator[Symbol.iterator]() === itself: OK
+
+INFINITE generator — naturals() yields 1,2,3,... forever; take() pulls a prefix:
+  take(naturals(), 3) -> [1,2,3]   (lazy; never hangs)
+[check] take(naturals(), 3) === [1,2,3]: OK
+  take(naturals(), 10) -> [1,2,3,4,5,6,7,8,9,10]
+[check] take(naturals(), 10) === [1..10]: OK
+
+yield* DELEGATES to another iterable (compose / flatten):
+  function* combined() { yield 0; yield* [1,2,3]; yield* range(); yield 7; }
+  [...combined()] -> [0,1,2,3,1,2,3,7]   (0, then [1,2,3], then range 1,2,3, then 7)
+[check] yield* flattened to [0,1,2,3,1,2,3,7]: OK
+
+======================================================================
+SECTION D — Lazy pipelines (map/filter/take) + the single-use exhaustion trap + .return()
+======================================================================
+Lazy pipeline: naturals -> map(x*x) -> filter(>10) -> take(3):
+  [...pipe]       -> [16,25,36]
+  source pulled   -> 6 value(s)   (only 6, despite an INFINITE source)
+[check] pipeline result is [16,25,36]: OK
+[check] laziness: source pulled exactly 6 values (not Infinity): OK
+
+Single-use trap — a generator is EXHAUSTED after one full pass:
+  const g = three();
+  [...g] (1st pass) -> [1,2,3]
+  [...g] (2nd pass) -> []   (EMPTY — g was consumed)
+[check] first pass yields [1,2,3]: OK
+[check] second pass yields [] (exhausted): OK
+
+Same trap via for...of — two loops over ONE generator:
+  1st loop sum -> 6
+  2nd loop sum -> 0   (generator already exhausted)
+[check] first for...of sums to 6: OK
+[check] second for...of sums to 0 (exhausted): OK
+
+.return() cleanup — for...of with break calls the generator's .return():
+  for (const x of withCleanup()) { if (x === 2) break; }  // finally ran on .return()
+  cleanup.ran -> true
+[check] .return() ran the finally block on early break: OK
+
+Explicit .return(value) — force the generator to finish:
+  g.next()       -> { value: 1, done: false }
+  g.return(99)   -> { value: 99, done: true }   (value: 99, done: true)
+  g.next()       -> { value: undefined, done: true }   (stays done)
+[check] g.return(99) yields {value:99,done:true}: OK
+[check] generator stays done after .return(): OK
+
+======================================================================
+SECTION E — Two-way .next(value) + .throw() + async iterators (for await) + cross-language
+======================================================================
+Two-way .next(value) — the arg becomes the result of the suspended yield:
+  const g = twoWay();  // function* () { const a = yield 1; yield a + 100; }
+  g.next(999) -> { value: 1, done: false }   (FIRST next()'s arg is IGNORED)
+  g.next(5)   -> { value: 105, done: false }   (a = 5; yields 5 + 100)
+[check] first next()'s argument is ignored (yields 1): OK
+[check] second next(5) makes a=5, yields 105: OK
+
+.throw(error) — inject an error at the suspended yield:
+  gc.next()                       -> {"value":"first","done":false}
+  gc.throw(new Error("injected")) -> {"value":"caught: injected","done":false}   (caught inside the generator)
+  gc.next()                       -> {"done":true}   (body finished; done)
+[check] catcher caught the injected error ("caught: injected"): OK
+[check] after catching, the generator continued and is now done: OK
+
+Async iterators (PREVIEW — full treatment: ASYNC_AWAIT):
+  async function* asyncRange() { yield 1; yield 2; yield 3; }
+  for await (const x of asyncRange()) { ... }   // each .next() is a Promise
+
+> async demo output (for await...of consumed asyncRange):
+  collected -> [1,2,3]
+[check] for await...of collected [1,2,3]: OK
+
+Async-iterator protocol shape (duck-typed via Symbol.asyncIterator):
+  gen[Symbol.asyncIterator] is a function -> true
+  gen.next is a function (returns a Promise) -> true
+[check] async generator has [Symbol.asyncIterator] and next(): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

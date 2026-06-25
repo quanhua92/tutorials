@@ -1,0 +1,158 @@
+closures_capture.ts — Phase 3 bundle.
+Every value below is computed by this file; the .md guide pastes
+it verbatim. Nothing is hand-computed.
+
+Reminder: a closure is a function + the variables it CAPTURED. JS
+captures BY REFERENCE (a live binding) — never by value, never by move.
+That one fact drives every section below (counter, module, loop trap,
+retention leak) and contrasts with Rust's explicit Fn/FnMut/FnOnce.
+
+======================================================================
+SECTION A — Closure = function + captured environment; capture BY REFERENCE
+======================================================================
+makeAdder: two closures, same body, different captured env:
+  add5 = makeAdder(5);  add5(2)  -> 7    (x captured = 5)
+  add10 = makeAdder(10); add10(2) -> 12   (x captured = 10)
+[check] add5(2) === 7  (captured x = 5): OK
+[check] add10(2) === 12 (captured x = 10): OK
+
+Capture BY REFERENCE (the binding is LIVE):
+  let x = 1; const readX = () => x;
+  readX()  -> 1   (value at creation)
+  x = 2;   // mutate AFTER closure creation
+  readX()  -> 2   (closure sees the NEW value — live binding)
+[check] capture is BY REFERENCE: readX() === 2 after x = 2: OK
+
+Counter factory — `n` survives makeCounter's return (closure RETAINS it):
+  c() -> 1
+  c() -> 2
+  c() -> 3
+[check] counter persists: first three calls are 1, 2, 3: OK
+
+Closure scope chain — each level captures the whole enclosing chain:
+  sumChain(1)(2)(3)(4) -> 20   (1+2+3+4+10; e captured from global)
+[check] scope chain: sumChain(1)(2)(3)(4) === 20: OK
+
+======================================================================
+SECTION B — The module pattern: closure-enforced privacy (pre-#private)
+======================================================================
+Module pattern — `balance` is PRIVATE (closure-enforced):
+  bank.deposit(100); bank.withdraw(30);
+  bank.getBalance()  -> 70
+[check] module state: bank.getBalance() === 70: OK
+
+Proof of privacy — balance is NOT an own property of `bank`:
+  Object.keys(bank).sort() -> ["deposit","getBalance","withdraw"]
+  "balance" in bank        -> false
+[check] "balance" is NOT a property of bank (closure-private): OK
+[check] bank own keys are exactly [deposit,getBalance,withdraw] (no balance): OK
+
+IIFE module — three methods share ONE private lexical environment:
+  modCounter.increment(); increment(); decrement();
+  modCounter.value() -> 1
+[check] IIFE module shared env: modCounter.value() === 1: OK
+
+Independence — each factory call = a separate private environment:
+  a1 = createBank(); a2 = createBank(); a1.deposit(50);
+  a1.getBalance() -> 50   a2.getBalance() -> 0
+[check] counters are independent: a2.getBalance() === 0 (not affected by a1): OK
+
+======================================================================
+SECTION C — The loop-var capture trap: var [3,3,3] vs let [0,1,2]; the IIFE fix
+======================================================================
+var: ONE shared loop binding -> every closure sees the FINAL value:
+  for (var i = 0; i < 3; i++) fns.push(() => i);
+  fns.map(fn => fn()) -> [3,3,3]
+[check] var loop-var trap: result is [3,3,3]: OK
+
+let: a FRESH per-iteration binding -> each closure captures its own value:
+  for (let i = 0; i < 3; i++) fns.push(() => i);
+  fns.map(fn => fn()) -> [0,1,2]
+[check] let per-iteration binding: result is [0,1,2]: OK
+
+Pre-`let` IIFE fix — a fresh parameter binding per iteration:
+  for (var i = 0; i < 3; i++) { (function (j) { fns.push(() => j); })(i); }
+  fns.map(fn => fn()) -> [0,1,2]
+[check] IIFE fix yields [0,1,2] (per-call parameter binding): OK
+[check] let-fix and IIFE-fix are behaviorally identical (both [0,1,2]): OK
+
+======================================================================
+SECTION D — Capture & RETENTION: a closure keeps a large object alive (leak)
+======================================================================
+Leak pattern — closure closes over a big object it barely uses:
+  function makeLeakyReader() {
+    const big = makeBig(1000);      // 1000-element array
+    return () => big.length;         // closes over the WHOLE `big`
+  }
+  const leaky = makeLeakyReader();  // outer fn has returned
+  leaky() -> 1000   // `big` is STILL alive (retained by the closure)
+[check] retention: leaky() === 1000 (closure keeps `big` alive after return): OK
+
+Fix — capture only the primitive you need (`big` becomes collectable):
+  function makeLeanReader() {
+    const big = makeBig(1000);
+    const len = big.length;        // destructure the needed value
+    return () => len;               // closes over `len`, NOT `big`
+  }
+  const lean = makeLeanReader();
+  lean() -> 1000   // same answer; `big` is no longer referenced
+[check] lean reader: lean() === 1000 (same answer, no big-object retention): OK
+
+Reachability is the precondition (GC timing is NOT asserted here):
+  leaky holds a captured reference to a 1000-element array -> it is reachable
+  lean  holds only a captured number               -> the array is NOT reachable from it
+[check] both readers agree on length (1000); only the leaky one retains the array: OK
+
+Shared mutability via capture (by-reference consequence):
+  const shared = { count: 0 };
+  const increment = () => { shared.count += 1; };
+  const readCount = () => shared.count;
+  increment(); increment(); readCount() -> 2
+[check] two closures over one object see the same mutations (shared reference): OK
+
+======================================================================
+SECTION E — Idioms built on capture + the cross-language capture model
+======================================================================
+memoize — a result cache held in a closure:
+  squareCached("12") -> 144
+  squareCached("12") -> 144   (cache HIT: fn not re-run)
+  squareCached("5")  -> 25   (cache MISS: fn runs)
+  underlying fn actually ran 2 time(s)
+[check] memoize: 12*12 === 144: OK
+[check] memoize: repeat call returns cached 144: OK
+[check] memoize: fn ran exactly twice (2 unique keys: 12 and 5): OK
+
+once — run exactly once, cache the first result (flag in closure):
+  initialize() -> "initialized"
+  initialize() -> "initialized"   (cached; fn NOT re-run)
+  initialize() -> "initialized"   (cached; fn NOT re-run)
+  underlying fn actually ran 1 time(s)
+[check] once: every call returns the first result "initialized": OK
+[check] once: fn ran exactly once across three calls: OK
+
+curry / partial application — nested closures capture args step by step:
+  add(1)(2)(3)       -> 6
+  const addOne = add(1); addOne(2)(3) -> 6   (partial application)
+  addOneTwo(3)       -> 6
+[check] curry: add(1)(2)(3) === 6: OK
+[check] curry: partial application addOne(2)(3) === 6: OK
+
+`this` recap — arrow captures lexical this (a closure over `this`):
+  const counter = { n: 0, tickArrow() { const inner = () => ++this.n; return inner(); } };
+  counter.tickArrow() -> 1   (arrow closed over method `this` == counter)
+[check] arrow captures lexical this: counter.tickArrow() === 1: OK
+
+Cross-language capture model — JS (one implicit mode) vs Rust (explicit + typed):
+  JS:  capture is ALWAYS by reference (a live binding). No choice, no
+       annotation, no move. The captured variable stays alive as long as
+       the closure is reachable (the Section D retention rule).
+  Rust Fn    : captures by shared reference (&T)        — callable many times
+  Rust FnMut : captures by mutable reference (&mut T)   — callable many times, may mutate
+  Rust FnOnce: captures by MOVE (owns T)               — callable exactly ONCE
+  Rust `move` keyword: forces every capture to be BY VALUE (a move),
+       overriding the compiler's by-ref default. JS has NO equivalent.
+[check] JS capture mode is singular (by-reference); Rust exposes 3 traits + move: OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

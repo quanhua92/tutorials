@@ -1,0 +1,147 @@
+garbage_collection.ts — Phase 3 bundle (Memory & Object Semantics).
+Deterministic facts only: reachability, weak-ref APIs, retention bugs.
+GC TIMING is nondeterministic — reclamation is framed as 'may', not 'will'.
+
+Reminder: every check() asserts a DETERMINISTIC invariant. We never assert
+that an object 'has been collected' — that depends on V8's GC heuristics.
+
+======================================================================
+SECTION A — Reachability, roots & the mark-sweep idea
+======================================================================
+ROOTS (V8): the call stack (locals), the global object, embedder handles.
+An object is reachable if a STRONG-reference path exists from a root.
+Reachable objects MUST be kept; unreachable ones MAY be collected.
+
+held.payload      -> 42
+new WeakRef(held) -> a NON-retaining view of the same object
+ref.deref()      -> {"payload":42}   (obj still strongly held)
+ref.deref() === held -> true   (the WeakRef resolves to the live object)
+[check] WeakRef.deref() === held while held is strongly referenced: OK
+[check] WeakRef.deref() !== undefined for a reachable object: OK
+[check] an aliased reference resolves to the same object (nested === held): OK
+
+Mark-sweep (the foundation): MARK from roots via strong refs,
+SWEEP unmarked (unreachable) memory back to a free list,
+(optionally) COMPACT survivors to defragment.
+Cycles are NOT a leak here: a rootless cycle is never marked.
+
+======================================================================
+SECTION B — WeakRef + global.gc (guarded --expose-gc)
+======================================================================
+--expose-gc installs global.gc as a synchronous 'collect now' function.
+It is ABSENT by default. The bundle guards it so it runs either way.
+
+global.gc exposed?  -> false   (not exposed; gc-dependent demos SKIP gracefully)
+[check] gc exposed: SKIPPED (run with --expose-gc for the gc demos)
+
+WeakRef is NON-retaining: it does not extend the target's lifetime.
+w.deref() === obj  -> true   (obj still strongly held by local)
+[check] new WeakRef(obj).deref() === obj while obj is strongly held: OK
+typeof w.deref()   -> object   (object while reachable; undefined if collected)
+[check] w.deref() returns the object type while it is reachable: OK
+
+After the last strong reference is dropped the object becomes ELIGIBLE
+for collection — but deref() MAY return the object OR undefined:
+V8's GC heuristics decide, so reclamation is framed as 'may', not 'will'.
+
+======================================================================
+SECTION C — WeakMap, WeakSet (weak keys) & FinalizationRegistry
+======================================================================
+WeakMap: KEYS are weakly held; the value is reachable WHILE the key is.
+wm.get(key)  -> "wm-value"   (key strongly held)
+wm.has(key)  -> true
+[check] WeakMap.get(key) === value while key is strongly held: OK
+[check] WeakMap.has(key) === true: OK
+wm.set("primitive", x) -> throws TypeError   (keys must be objects)
+[check] WeakMap rejects a primitive key (TypeError at runtime): OK
+
+WeakSet: members are weakly held; presence does not keep them alive.
+ws.has(member) -> true
+[check] WeakSet.has(member) === true: OK
+[check] WeakSet.has(nonmember) === false (never added): OK
+
+WeakMap/WeakSet are NOT iterable and expose NO .size (by spec design:
+iterating keys would observe GC liveness, which must stay invisible).
+[check] WeakMap has no "size" property: OK
+[check] WeakSet has no "size" property: OK
+[check] FinalizationRegistry.register(target, held, token) does not throw: OK
+[check] FinalizationRegistry.unregister(token) === true (was registered): OK
+
+FinalizationRegistry: a callback that MAY run after a target is collected.
+It is NONDETERMINISTIC — it may run late, or never. Use only for
+non-critical cleanup; never assert that it fires.
+registry.unregister(token) -> true   (deterministic: target was registered)
+
+======================================================================
+SECTION D — Retention bugs: closures, caches, timers, listeners
+======================================================================
+makeRetainer() returns a getter that closes over a 'big' object.
+While the getter is reachable, the big object is reachable too.
+[check] closure-retained object: WeakRef.deref() !== undefined (closure keeps it alive): OK
+[check] closure-retained object: getter() === 4 (captures the live binding): OK
+
+A plain Map<string, V> STRONGLY holds values -> entries never collect.
+cache.size after 3 inserts -> 3   (grows without bound)
+[check] plain Map retains all entries (size === 3): OK
+weakCache.get('live')?.deref()?.data -> [1,2]   (value while live held)
+[check] WeakRef-wrapped cache value resolves while the object is held: OK
+
+Other retention vectors (documented — Node/browser specific):
+  * setInterval callback: keeps its captured closure alive until cleared.
+  * addEventListener: keeps the listener (and its closure) alive until removed.
+  * detached DOM nodes (browser): a node removed from the DOM but held by JS.
+  * global/module-top arrays: live for the process lifetime, never swept.
+Fix: clear timers (clearInterval), remove listeners, null stale references,
+and prefer WeakMap/WeakRef caches so entries CAN be reclaimed.
+
+======================================================================
+SECTION E — V8 generational + Orinoco model + cross-language
+======================================================================
+V8 heap layout (generational):
+  YOUNG generation = nursery + intermediate (semi-space: From/To).
+    Allocations start in the nursery; survivors of one minor GC become
+    'intermediate'; survivors of a second minor GC are promoted to OLD.
+  OLD generation    = collected by the major (mark-compact) GC.
+
+Generational Hypothesis: 'most objects die young' (V8.dev). So minor GCs
+(Scavenger) are frequent and cheap (copy only survivors); major GCs
+(mark-compact) are rare and costly (mark the whole old generation).
+
+Two collectors: Minor GC (Scavenger, young gen, copies survivors) +
+Major GC (Mark-Compact, whole heap). Orinoco adds parallel,
+incremental, and concurrent techniques to keep them off the main thread.
+
+Orinoco techniques (V8.dev 'Trash talk'):
+  PARALLEL    — main + helper threads work together during a stop-the-world
+                pause; total pause divided across threads.
+  INCREMENTAL — main thread does small GC slices interleaved with JS;
+                spreads work over time (does not reduce total main-thread time).
+  CONCURRENT  — helper threads do GC entirely in the background while the
+                main thread runs JS uninterrupted (the hardest, best technique).
+
+process.memoryUsage() — V8 heap fields (keys only; values are run-specific):
+  arrayBuffers
+  external
+  heapTotal
+  heapUsed
+  rss
+[check] process.memoryUsage() reports "heapUsed": OK
+[check] process.memoryUsage() reports "heapTotal": OK
+[check] process.memoryUsage() reports "external": OK
+[check] process.memoryUsage() reports "arrayBuffers": OK
+
+Cross-language memory models:
+  JS   — GC reclaims UNREACHABLE objects; weak refs are an OPT-IN escape hatch.
+  Go   — concurrent tri-color mark-sweep GC (a close sibling); GOGC/GOMEMLIMIT
+         tune trigger + soft limit; no weak-map primitive in the language.
+  Rust — NO GC: deterministic Drop/RAII frees the instant the owner leaves
+         scope. Memory bugs become compile errors (the borrow checker).
+
+Node memory flags (documented):
+  --max-old-space-size=N  raise V8's old-generation heap limit (MB).
+  Exceeding it -> 'JavaScript heap out of memory' (FATAL alloc failure).
+  --expose-gc             install global.gc for synchronous collection.
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

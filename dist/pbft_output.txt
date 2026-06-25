@@ -1,0 +1,245 @@
+pbft.py - reference impl. All numbers below feed PBFT.md.
+python stdlib only.
+
+========================================================================
+  SECTION A: the three phases  (N=4, f=1, honest primary)
+========================================================================
+Setup:  N = 3f+1 = 4 replicas,  f = 1,  quorum Q = 2f+1 = 3
+        view = 0,  primary = view mod N = 0 mod 4 = 0
+        client request : PAY(alice,100)
+  cluster:   [0*] [1 ] [2 ] [3 ]
+        (* = primary)
+
+--- Phase 1: PRE-PREPARE  (primary broadcasts its proposal) ---
+  primary 0 -> PRE-PREPARE(v=0, n=1, 'PAY(alice,100)')
+      -> replica 1
+      -> replica 2
+      -> replica 3
+  messages: 3  (= N-1 = 3)
+
+--- Phase 2: PREPARE  (all-to-all vote, O(N^2)) ---
+  Every replica broadcasts a PREPARE for the proposal to every peer:
+  replica 0 -> {1, 2, 3}: PREPARE(v=0, n=1, 'PAY(alice,100)')
+  replica 1 -> {0, 2, 3}: PREPARE(v=0, n=1, 'PAY(alice,100)')
+  replica 2 -> {0, 1, 3}: PREPARE(v=0, n=1, 'PAY(alice,100)')
+  replica 3 -> {0, 1, 2}: PREPARE(v=0, n=1, 'PAY(alice,100)')
+  messages: 12  (= N*(N-1) = 4*3 = 12)
+  per-replica prepare tally (matching votes received, self incl.):
+    replica 0: 4 votes [0, 1, 2, 3]  >= quorum 3?  PREPARED
+    replica 1: 4 votes [0, 1, 2, 3]  >= quorum 3?  PREPARED
+    replica 2: 4 votes [0, 1, 2, 3]  >= quorum 3?  PREPARED
+    replica 3: 4 votes [0, 1, 2, 3]  >= quorum 3?  PREPARED
+
+--- Phase 3: COMMIT  (all-to-all second vote, prepared replicas) ---
+  4 prepared replica(s) [0, 1, 2, 3] each broadcast a COMMIT:
+  replica 0 -> {1, 2, 3}: COMMIT(v=0, n=1, 'PAY(alice,100)')
+  replica 1 -> {0, 2, 3}: COMMIT(v=0, n=1, 'PAY(alice,100)')
+  replica 2 -> {0, 1, 3}: COMMIT(v=0, n=1, 'PAY(alice,100)')
+  replica 3 -> {0, 1, 2}: COMMIT(v=0, n=1, 'PAY(alice,100)')
+  messages: 12  (= #prepared * (N-1) = 4*3)
+  per-replica commit tally:
+    replica 0: 4 votes  >= quorum 3?  COMMITTED
+    replica 1: 4 votes  >= quorum 3?  COMMITTED
+    replica 2: 4 votes  >= quorum 3?  COMMITTED
+    replica 3: 4 votes  >= quorum 3?  COMMITTED
+
+--- Summary ---
+  pre-prepare messages : 3
+  prepare    messages  : 12
+  commit     messages  : 12
+  TOTAL                : 27   (= (N-1)(2N+1) = 3*9)
+  compare N^2 = 16;  total/N^2 = 1.69  -> grows as O(N^2)
+  all 4 replicas committed 'PAY(alice,100)'?  YES -> CONSENSUS
+
+[check] all replicas committed the same value:  OK
+
+========================================================================
+  SECTION B: Byzantine primary (equivocation) -> detected in PREPARE
+========================================================================
+Setup:  N = 4, f = 1, primary = 0 is BYZANTINE
+  cluster:   [0!] [1 ] [2 ] [3 ]
+        (! = Byzantine)
+
+ATTACK -- the primary EQUIVOCATES: it sends DIFFERENT proposals:
+  primary 0 -> PRE-PREPARE(v=0, n=1, 'X') -> replicas 1,2
+  primary 0 -> PRE-PREPARE(v=0, n=1, 'Y') -> replica  3
+  pre-prepare messages: 3  (= N-1)
+
+--- Phase 2: PREPARE -- each replica votes for the value IT got ---
+  3 honest replica(s) [1, 2, 3] broadcast prepares (byzantine primary sends none):
+  replica 1 -> {0, 2, 3}: PREPARE(v=0, n=1, 'X')
+  replica 2 -> {0, 1, 3}: PREPARE(v=0, n=1, 'X')
+  replica 3 -> {0, 1, 2}: PREPARE(v=0, n=1, 'Y')
+  messages: 9  (= #honest*(N-1) = 3*3)
+
+  per-replica prepare tally -- votes are SPLIT across 'X' and 'Y':
+    replica 1:
+        2 vote(s) for 'X'  from [1, 2]
+        1 vote(s) for 'Y'  from [3]
+        -> max matching = 2, quorum = 3:  CANNOT PREPARE
+    replica 2:
+        2 vote(s) for 'X'  from [1, 2]
+        1 vote(s) for 'Y'  from [3]
+        -> max matching = 2, quorum = 3:  CANNOT PREPARE
+    replica 3:
+        2 vote(s) for 'X'  from [1, 2]
+        1 vote(s) for 'Y'  from [3]
+        -> max matching = 2, quorum = 3:  CANNOT PREPARE
+
+DETECTION:
+  No replica can assemble 3 matching votes, because the byzantine
+  primary split the vote: 'X' has 2 backers, 'Y' has 1.
+  Worse, replicas 1 & 2 SEE replica 3's prepare for 'Y' while they
+  hold 'X' -> two values for the same (view,seq) -> EQUIVOCATION.
+  => primary 0 is suspect. Replicas stop accepting its pre-prepares
+     and trigger a VIEW CHANGE (Section D).
+
+[check] no honest replica reached quorum 3 (attack detected):  OK
+
+========================================================================
+  SECTION C: quorum certificates  (the portable PROOF of agreement)
+========================================================================
+A certificate is a SET of 2f+1 signed matching votes. It is a
+PORTABLE proof: anyone can verify it without re-running the vote.
+
+  prepared  certificate : 3 (= 2f+1) matching PREPARE messages
+  committed certificate: 3 (= 2f+1) matching COMMIT  messages
+
+WHY 2f+1 is the magic number (== CRASH_VS_BYZANTINE.md derivation):
+  two 3-vote quorums on 4 replicas overlap in at least
+     2*Q - N = 2*3 - 4 = 2   node(s).
+  of those 2, at most f = 1 can be Byzantine, so at least
+     2 - 1 = 1  is HONEST.
+  An honest replica cannot sign two conflicting prepares for the
+  same (view, seq) -> two CONFLICTING prepared certs cannot both
+  exist. That overlap of >= 1 honest signer is the safety anchor.
+
+--- Assembling a prepared certificate (collect prepares one by one) ---
+  + prepare from replica 1:  signers = [1]  (1/3)  need 2 more
+  + prepare from replica 2:  signers = [1, 2]  (2/3)  need 1 more
+  + prepare from replica 3:  signers = [1, 2, 3]  (3/3)  QUORUM REACHED -> VALID CERTIFICATE
+
+  prepared certificate = {replica 1, replica 2, replica 3}
+  honest signers >= |cert| - f = 3 - 1 = 2  -> >= 1 honest replica was prepared.
+  This certificate is what the new primary MUST honour during a
+  view change (Section D): a value with a prepared cert cannot be
+  silently dropped, because a client may already have f+1 replies.
+
+--- Certificate & overlap sizes vs f ---
+| f | N=3f+1 | quorum Q=2f+1 | cert signers | honest in cert | quorum overlap |
+|---|--------|---------------|--------------|----------------|----------------|
+| 1 | 4      | 3             | 3            | 2                | 2              |
+| 2 | 7      | 5             | 5            | 3                | 3              |
+| 3 | 10     | 7             | 7            | 4                | 4              |
+| 4 | 13     | 9             | 9            | 5                | 5              |
+| 5 | 16     | 11            | 11           | 6                | 6              |
+
+  Notice 'honest in cert' = Q - f = f+1 stays >= 2, and the quorum
+  overlap = f+1 stays >= 2 -- both >> 1, so safety has slack.
+
+[check] honest_in_overlap(Q=3, N=4) = 1 >= 1:  OK
+
+========================================================================
+  SECTION D: view change  (depose a faulty primary, rotate leadership)
+========================================================================
+Trigger: Section B detected primary 0 equivocating. Replicas stop
+accepting pre-prepares from view 0 and run a view change.
+
+  view 0:    [0!] [1 ] [2 ] [3 ]
+  new view = 1,  new primary = view mod N = 1 mod 4 = 1
+
+--- Step 1: replicas broadcast VIEW-CHANGE(v=1, prepared_certs) ---
+  replica 1 -> VIEW-CHANGE(v=1, last_seq=0, prepared_certs={})   (nothing was prepared)
+  replica 2 -> VIEW-CHANGE(v=1, last_seq=0, prepared_certs={})   (nothing was prepared)
+  replica 3 -> VIEW-CHANGE(v=1, last_seq=0, prepared_certs={})   (nothing was prepared)
+  VIEW-CHANGE messages sent: 3  (from honest replicas)
+
+--- Step 2: new primary collects 2f+1 view-change messages ---
+  new primary 1 needs 3 view-change messages (= 2f+1); its own counts.
+  + VIEW-CHANGE from replica 1:  have [1]  (1/3)  need 2 more
+  + VIEW-CHANGE from replica 2:  have [1, 2]  (2/3)  need 1 more
+  + VIEW-CHANGE from replica 3:  have [1, 2, 3]  (3/3)  QUORUM -> send NEW-VIEW, I am the primary
+
+--- Step 3: new primary inspects prepared certificates ---
+  highest prepared seq across all view-change messages = 0
+  (nothing was prepared in view 0). So it is SAFE to re-propose the
+  client request cleanly in view 1.
+
+--- Step 4: re-run the three phases under honest primary 1 ---
+  primary 1 -> PRE-PREPARE(v=1, n=1, 'X') -> replicas
+  prepare phase: honest replicas [1, 2, 3] each gather 3 matching prepares (>= quorum 3) -> PREPARED
+  commit  phase: honest replicas [1, 2, 3] each gather 3 matching commits  (>= quorum 3) -> COMMITTED
+  view 1:    [0!] [1*] [2 ] [3 ]
+  messages: pre-prepare 3, prepare 9, commit 9, total 21
+
+  honest replicas [1, 2, 3] committed:  ['X', 'X', 'X']
+
+[check] after view change all 3 honest replicas agree on 'X':  OK
+
+========================================================================
+  SECTION E: PBFT vs Raft  (and modern BFT)
+========================================================================
+Two consensus families, one per failure model.
+
+| protocol  | fault model | min N | quorum | msgs / request | leader / view change          |
+|-----------|-------------|-------|--------|----------------|-------------------------------|
+| Raft | crash | 2f+1 | f+1 | O(N) | leader election, O(N log N) msgs |
+| PBFT | byzantine | 3f+1 | 2f+1 | O(N^2) | view change, O(N^2) msgs |
+| Tendermint | byzantine | 3f+1 | 2f+1 | O(N^2) | round-robin proposer, 2 rounds |
+| HotStuff | byzantine | 3f+1 | 2f+1 | O(N) | LINEAR view change (threshold signatures) |
+
+Message cost, concrete (per request, point-to-point unicast):
+| N  | f | Raft ~2(N-1) | PBFT (N-1)(2N+1) | ratio PBFT/Raft |
+|----|---|--------------|------------------|-----------------|
+| 4  | 1 | 6            | 27               | 4.5x             |
+| 7  | 2 | 12           | 90               | 7.5x             |
+| 10 | 3 | 18           | 189              | 10.5x             |
+| 16 | 5 | 30           | 495              | 16.5x             |
+| 31 | 10 | 60           | 1890             | 31.5x             |
+
+WHY PBFT is O(N^2): TWO all-to-all broadcast rounds (prepare +
+commit), each N replicas x (N-1) peers. WHY Raft is O(N): only the
+leader talks -- one AppendEntries stream to N-1 followers + acks.
+
+Modern BFT (HotStuff, Tendermint) keeps 3f+1 safety but cuts the
+communication to O(N) by AGGREGATING signatures: one threshold
+signature replaces N individual ones, so a 'QC' (quorum certificate)
+shrinks to O(1) and view change no longer re-broadcasts O(N^2) votes.
+HotStuff is the modern baseline (DiemBFT / Aptos / Aleo consensus).
+
+[check] PBFT/Raft message ratio grows ~ N: at N=4 it is 4.5x, at N=31 it is 31.5x  -> O(N^2)/O(N):  OK
+
+========================================================================
+  GOLD CHECK  (pinned values for pbft.html)
+========================================================================
+Canonical point: f = 1
+  N = 3f+1               = 4
+  quorum Q = 2f+1        = 3
+  max Byzantine tolerated= (N-1)//3 = (4-1)//3 = 1
+  honest replicas = N-f  = 3
+
+GOLD 1 -- happy path (honest primary 0, value 'X'):
+  messages total = (N-1)(2N+1) = 3*9 = 27
+  all 4 replicas committed 'X'?  True
+
+GOLD 2 -- Byzantine primary (equivocation X,X,Y):
+  no honest replica reached prepare quorum 3?  True   (equivocation detected)
+
+GOLD 3 -- after view change (primary 1, byzantine 0 silent):
+  honest replicas [1, 2, 3] all committed 'X'?  True
+
+GOLD scalars (for a compact .html check):
+  pbft_N(1)             = 4
+  pbft_quorum(1)        = 3
+  pbft_max_byz(4)       = 1
+  messages(4).total     = 27
+  messages(7).total     = 90
+  primary_of_view(1,4)  = 1
+  quorum_overlap(Q=3,N=4) = 2   (= f+1)
+  honest_in_overlap     = 1   (>= 1 -> safety)
+
+[check] all gold identities reproduce from the formulas:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

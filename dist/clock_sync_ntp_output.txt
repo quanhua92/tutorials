@@ -1,0 +1,172 @@
+clock_sync_ntp.py - reference impl. All numbers below feed CLOCK_SYNC_NTP.md.
+Pure Python stdlib. rho = 1e-06
+
+========================================================================
+  SECTION A: Cristian's algorithm  (client/server, RTT/2 offset)
+========================================================================
+Setup: client asks a trusted server 'what time is it?'.
+  T0 : client sends the request   (read on the CLIENT clock)
+  T1 : server stamps the reply    (read on the SERVER clock)
+  T2 : client receives the reply  (read on the CLIENT clock)
+  RTT = T2 - T0  (measured entirely by the client).
+
+Formulas:
+  offset  theta    = T1 - (T0 + T2)/2     (ADD to client to match server)
+  accuracy bound   = (T2 - T0)/2 = RTT/2  (|true - theta| <= this)
+
+Ground truth for the demo: client clock == real time; server is +12.0 s ahead. TRUE offset = 12.0.
+
+Case 1 (SYMMETRIC network, d_out=4.0, d_in=4.0):
+  T0=0.0, T1=16.0, T2=8.0, RTT=8.0
+  theta = T1 - (T0+T2)/2 = 16.0 - 4.0 = 12.0000
+  accuracy bound = RTT/2 = 4.0000
+  error = |true - theta| = 0.000000  (ZERO -> symmetric delay cancels out exactly)
+
+Case 2 (ASYMMETRIC network, d_out=3.0, d_in=5.0):
+  T0=0.0, T1=15.0, T2=8.0, RTT=8.0
+  theta = T1 - (T0+T2)/2 = 15.0 - 4.0 = 11.0000
+  accuracy bound = RTT/2 = 4.0000
+  error = |true - theta| = 1.0000   == (d_in - d_out)/2 = 1.0000  (the asymmetry bias)
+  true offset 12.0 in [theta-RTT/2, theta+RTT/2] = [7.0000, 15.0000]?  True
+
+The punchline: Cristian's error is at most RTT/2. A 200 ms ping
+=> you only ever know the time to +/- 100 ms. Want milliseconds of
+accuracy? You need a sub-2-millisecond round trip, i.e. a LAN.
+
+GOLD (pinned for clock_sync_ntp.html) - Case 2 scenario:
+  T0=0, d_out=3, d_in=5, server_ahead=12 -> T1=15, T2=8
+  theta  = 11.0     (must be exactly 11.0)
+  accuracy = 4.0   (must be exactly 4.0)
+  true_offset = 12.0 , error = 1.0  (== (d_in-d_out)/2)
+[check] Cristian GOLD: theta=11.0, accuracy=4.0, bound holds:  OK
+
+========================================================================
+  SECTION B: Berkeley algorithm  (master averages, tells slaves to adjust)
+========================================================================
+No machine is the 'truth'. A master polls every clock, AVERAGES them,
+and tells each machine how to nudge itself so they all meet in the middle.
+
+  average = mean(all clocks, master included)
+  adj_i   = average - clock_i    (+ => speed up, - => slow down)
+
+| machine  | clock (s vs master) | average | adjustment = avg - clock |
+|----------|---------------------|---------|--------------------------|
+| master   |                +0.0 |    15.0 |                    +15.0 |
+| slave A  |               +10.0 |    15.0 |                     +5.0 |
+| slave B  |               +20.0 |    15.0 |                     -5.0 |
+| slave C  |               +30.0 |    15.0 |                    -15.0 |
+
+average = (0 + 10 + 20 + 30) / 4 = 15.0 s
+After applying the adjustments every clock reads 15.0 s. They AGREE, even though none was right.
+
+Weakness (why we need Marzullo next): one liar drags the average.
+  If slave C jumps to +300 s, average becomes 82.5 s and the
+  master would obediently slow itself by 82.5 s to match garbage.
+  Fix: reject outliers BEFORE averaging (Marzullo, section_c).
+
+[check] clean-case adjustments sum to 0: True  (they must, by construction)
+
+========================================================================
+  SECTION C: NTP strata + Marzullo's intersection algorithm
+========================================================================
+NTP builds a HIERARCHY. Stratum 0 = a reference clock (atomic/GPS);
+stratum 1 is wired directly to stratum 0; stratum 2 syncs from stratum
+1; and so on. Each hop ADDS error. Stratum 16 means 'unsynchronized'.
+
+| stratum | what it is                          | typical error vs UTC |
+|---------|-------------------------------------|----------------------|
+| 0       | reference clock (atomic / GPS / radio) | < 1 us  (the truth)  |
+| 1       | server directly attached to stratum 0 | ~few ms              |
+| 2       | syncs from one or more stratum-1    | ~10s of ms           |
+| 3       | syncs from stratum-2                | ~100 ms              |
+| 4       | syncs from stratum-3                | ~hundreds of ms      |
+| 16      | unsynchronized / unreachable        | no guarantee         |
+
+Error accumulates DOWN the tree: a stratum-3 clock is wrong by
+everything stratum 1 and 2 were wrong by, plus its own RTT/2.
+
+Marzullo's algorithm (1984): given several servers, each returning
+(offset, +/- error), keep only the LARGEST clique of intervals that all
+overlap; discard the rest as outliers. This is NTP's outlier filter.
+
+| server          | offset +/- error | interval [lo, hi] |
+|-----------------|------------------|-------------------|
+| server A        |  10.0 +/- 2.0    | [  8.0,  12.0]      |
+| server B        |  11.0 +/- 2.0    | [  9.0,  13.0]      |
+| server C        |  12.0 +/- 2.0    | [ 10.0,  14.0]      |
+| server D (liar) |  25.0 +/- 2.0    | [ 23.0,  27.0]      |
+
+Largest overlapping clique = {A, B, C} = 3 servers
+  region of agreement = [10.0, 12.0], midpoint estimate = 11.00
+  rejected as outliers = {D}
+
+[check] Marzullo picks the 3 agreeing servers and rejects the liar: trusted=[0, 1, 2], region=(10.0, 12.0):  OK
+
+========================================================================
+  SECTION D: clock drift  (rho ~ 1e-6, worst-case divergence = 2*rho*t)
+========================================================================
+A quartz crystal drifts at rate rho. The textbook value is ~1 ppm,
+so a single clock can be off by rho*t and two clocks can differ by
+up to 2*rho*t. Once you SYNC, the clock IMMEDIATELY starts drifting
+again - synchronization is not a state, it is a recurring payment.
+
+rho = 1e-06  (1 ppm). Sanity: rho * 12 days = 1.0368 s  (~ '1 second per 12 days' per clock)
+
+| elapsed       | rho * t   (1 clock vs truth) | 2*rho*t  (two clocks)   |
+|---------------|------------------------------|-------------------------|
+| 1.000 s       | 1.00 us (1e-06 s)            | 2.00 us (2e-06 s)       |
+| 1.00 min      | 60.00 us (6e-05 s)           | 120.00 us (0.00012 s)   |
+| 1.00 h        | 3.60 ms (0.0036 s)           | 7.20 ms (0.0072 s)      |
+| 1.00 days     | 86.40 ms (0.0864 s)          | 172.80 ms (0.1728 s)    |
+| 12.00 days    | 1.037 s (1.037 s)            | 2.074 s (2.074 s)       |
+| 1.00 years    | 31.558 s (31.56 s)           | 1.05 min (63.12 s)      |
+
+So even if you perfectly sync two machines, after ONE DAY they can
+already differ by 0.1728 s, and after a year by 63.12 s.
+Moral: you must RE-SYNC periodically (NTP polls every ~17 minutes by
+default) just to hold the drift budget.
+
+[check] 2*rho*t for t=1 day == 2 * 1e-6 * 86400 == 0.1728 s:  OK
+
+========================================================================
+  SECTION E: why you can NEVER fully trust a wall clock
+========================================================================
+Even with Cristian + Berkeley + NTP + Marzullo, wall-clock timestamps
+are unsafe to treat as monotonic facts. Four classic ways they bite:
+
+(1) LEAP SECONDS. The IERS occasionally inserts a 61st second into a
+    UTC minute: 23:59:59 -> 23:59:60 -> 00:00:00. A naive clock either
+    repeats 23:59:59 (so two distinct instants share a timestamp) or
+    smears it. POSIX pretends all days are 86400 s, so the leap second
+    is literally undefined behavior at the OS layer.
+
+(2) NTP STEP ADJUSTMENTS. If ntpd computes an offset larger than the
+    'slew' threshold (~128 ms), it STEPS the clock - an instantaneous
+    jump that can be BACKWARD. Code that does `end - start` on wall-
+    clock readings can get a NEGATIVE duration.
+
+    demo: real work took 0.3 s around a -0.5 s NTP step:
+          duration = end - start = 999.8 - 1000.0 = -0.200 s   (NEGATIVE!)
+
+(3) VM MIGRATION. A live-migration pauses the guest for the memory-
+    copy, then resumes. The guest wall clock JUMPS FORWARD by the
+    pause (seconds to minutes) and the TSC may reset. Any timeout or
+    lease based on wall time can fire spuriously.
+
+(4) GOOGLE'S SMEAR (the fix for leap seconds). Instead of a 1 s jump,
+    slow/speed the clock slightly over 24 h so the leap second slides
+    through invisibly:
+      smear rate = 1 s / 86400 s = 1.157407e-05 s/s = 11.57 us/s = 11.57 ppm
+    Over 24 h the clock is at most ~0.5 s off UTC, but it NEVER jumps.
+    The price: during the window your clock disagrees with unsmeared
+    servers by up to half a second.
+
+TAKEAWAY: never use wall-clock time to measure durations or order
+events. Use a MONOTONIC clock (CLOCK_MONOTONIC / performance.now())
+for elapsed time, and logical clocks / HLC for event ordering.
+
+[check] smear rate = 1.157407e-05 s/s ~= 11.57 ppm:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

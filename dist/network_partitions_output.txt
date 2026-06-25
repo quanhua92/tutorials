@@ -1,0 +1,181 @@
+network_partitions.py - reference impl. All numbers below feed
+NETWORK_PARTITIONS.md. python3, stdlib only.
+N=5 nodes=['A', 'B', 'C', 'D', 'E'] quorum=3
+
+==========================================================================
+  SECTION A: the partition - majority vs minority, leader election
+==========================================================================
+Cluster: 5 nodes = ['A', 'B', 'C', 'D', 'E']
+A network partition splits them into two ISOLATED groups that cannot
+exchange messages:
+  P_minority = ['A', 'B']   (size 2)
+  P_majority = ['C', 'D', 'E']   (size 3)
+
+Raft/Paxos quorum (majority) = floor(N/2)+1 = floor(5/2)+1 = 3
+A side can elect a leader ONLY if it has >= 3 live nodes it can
+reach. Because two sides of one split sum to 5 < 2*3, they can
+NEVER both reach quorum -> at most one leader -> split-brain impossible
+(under correct quorum-based consensus).
+
+| partition   | nodes   | size | size >= quorum(3)? | can elect leader? | leader       |
+|-------------|---------|------|--------------------|-------------------|--------------|
+| P_majority  | C,D,E   | 3    | True               | yes               | C            |
+| P_minority  | A,B     | 2    | False              | no                | - (none)     |
+
+=> Majority ['C', 'D', 'E'] elects leader C and keeps serving safely.
+=> Minority ['A', 'B'] has no quorum -> no leader -> it must now
+   CHOOSE: refuse work (CP) or accept work unsafely (AP). -> Section B
+
+[check] exactly one side reaches quorum -> split-brain impossible: OK
+
+==========================================================================
+  SECTION B: CAP under partition - Consistency (CP) vs Availability (AP)
+==========================================================================
+CAP theorem (Brewer 2000; Gilbert & Lynch 2002): when a partition
+happens you CANNOT keep both Consistency and Availability - pick one.
+
+  CP (etcd, ZooKeeper, Consul, Spanner): the quorum side serves writes;
+     the minority has no leader and REJECTS writes -> Consistent, not
+     Available there. Correctness first.
+
+  AP (Cassandra, DynamoDB, Riak, CouchDB): EVERY partition accepts writes
+     (no quorum gate) -> Available, but the sides DIVERGE and must
+     reconcile on heal. Uptime first.
+
+Shared key = 'balance', initial value = 50 (already replicated to all).
+
+During the partition, a client on EACH side writes 'balance':
+  client in P_minority {A,B} writes balance = 100
+  client in P_majority {C,D,E} writes balance = 200
+
+| system | write in minority {A,B} (->100) | write in majority {C,D,E} (->200) | state DURING partition |
+|--------|----------------------------------|-----------------------------------|------------------------|
+| CP     | REJECTED (no leader; unsafe)     | accepted (leader C -> D, E)       | consistent: only 200   |
+| AP     | accepted (no quorum gate)        | accepted                          | DIVERGES: AB=100, CDE=200 |
+
+CP stays correct (everyone who reads sees 200) but the 2 minority nodes
+are UNAVAILABLE for writes. AP serves everyone but the value DISAGREES
+until heal. Neither is 'wrong' - they optimize different guarantees.
+
+[check] CP rejects the minority write; AP accepts both -> divergence detected: OK
+
+==========================================================================
+  SECTION C: split-brain - two leaders, two conflicting writes
+==========================================================================
+Split-brain = the safety property BREAKS: both partitions elect a leader
+and both accept writes. (Causes: no quorum enforcement, or each side
+miscounts and wrongly believes it has majority.) Now the SAME key is
+written concurrently on both sides -> a real conflict to resolve.
+
+Simulated: P1 {A,B} elects leader A; P2 {C,D,E} keeps leader C. Both
+write 'balance'. Initial balance=50 was set by A before the split:
+
+  initial : balance = 50   vc = {A:1}
+  w1      : balance = 100   ts = 10   vc = {A:2}   # by P1 (leader A)
+  w2      : balance = 200   ts = 12   vc = {A:1, C:1}   # by P2 (leader C)
+
+Happens-before check (vector clocks):
+  w1 -> w2 ?  False
+  w2 -> w1 ?  False
+  => concurrent? True
+
+Neither write knows the other happened. They are CONCURRENT writes to the
+same key. On heal the store sees TWO values for 'balance' (100 and 200) ->
+a CONFLICT that must be resolved (Section D).
+
+[check] w1 and w2 are concurrent (a true conflict, not a stale read): OK
+
+==========================================================================
+  SECTION D: resolving the conflict - LWW vs vector clocks vs CRDT
+==========================================================================
+Same conflict from Section C (balance: 100 vs 200, concurrent).
+
+--- Strategy 1: Last-Write-Wins (LWW) - newest timestamp decides ---
+  w1.ts=10, w2.ts=12 -> later wins -> balance = 200
+  The losing write (100) is SILENTLY DROPPED. Forever.
+
+  Clock-skew danger: if A's clock jumped ahead (w1.ts=99) then
+  'later wins' -> balance = 100. The causally-fine write 200
+  is LOST purely because a wall clock said so -> silent DATA LOSS.
+
+--- Strategy 2: Vector clocks - detect concurrency, then surface ---
+  w1.vc and w2.vc are concurrent -> store keeps BOTH as siblings:
+     siblings = [100, 200]
+  Nothing is dropped silently. The application (or a human) decides:
+     e.g. take max -> 200; prompt the user; or union. The conflict is
+     VISIBLE instead of hidden. (This is how Dynamo/Riak expose it.)
+
+--- Strategy 3: CRDT - shape the data so conflicts CANNOT exist ---
+  Re-model the value as a G-Counter CRDT: each node owns a counter slot;
+  merge = element-wise MAX; value = SUM. Concurrent increments always merge.
+
+     P1 state {A:1, B:1, C:0, D:0, E:0}  -> value = 2
+     P2 state {A:0, B:0, C:1, D:1, E:1}  -> value = 3
+     merge   {A:1, B:1, C:1, D:1, E:1}  -> value = 5
+  No conflict. Every partition's increments survive. Merge is commutative +
+  idempotent, so it converges no matter the order of healing.
+
+  Trade-off: CRDTs need a merge-friendly operation (add, union, max). 'SET
+  balance = X' is NOT merge-friendly - for that you'd use a register CRDT
+  (LWW-register or MV-register), which reintroduces LWW or siblings.
+
+| strategy     | decides by   | drops data?    | needs clock sync?        | works for any op?        |
+|--------------|--------------|----------------|--------------------------|--------------------------|
+| LWW          | timestamp    | yes (silent)   | yes (skew = data loss)  | yes (any write)          |
+| vector clock | causality    | no (surfaces)  | no                       | yes (any write)          |
+| CRDT         | merge fn     | no (never)     | no                       | only merge-friendly ops  |
+
+[check] LWW->200 (skew->100), vector->siblings[100,200], CRDT->5: OK
+
+==========================================================================
+  SECTION E: healing - the partition ends, nodes rejoin
+==========================================================================
+The network recovers. Both sides must converge back to ONE consistent
+state. CP and AP do it very differently.
+
+--- CP healing (etcd / ZooKeeper) ---
+  During the partition the minority ['A', 'B'] had NO leader and
+  BLOCKED writes. The majority ['C', 'D', 'E'] committed balance = 200.
+  The minority's local copy is STALE (=50) but it made NO writes.
+
+  Rejoin timeline:
+     t0  network heals; A,B can again reach C,D,E
+     t1  A,B contact leader C; see their Raft term/log is behind
+     t2  A,B DISCARD their stale log tail (nothing to discard - they blocked)
+          and receive committed entries (balance=200) via AppendEntries from C
+     t3  A,B catch up; all 5 nodes agree balance=200
+
+  CP final state: balance = 200 on every node -> {'A': 200, 'B': 200, 'C': 200, 'D': 200, 'E': 200}
+  conflicts = 0 (the minority had no writes to conflict with). Fully
+  consistent across all 5 nodes the moment catch-up completes.
+
+--- AP healing (Cassandra / Dynamo) ---
+  During the partition BOTH sides accepted writes and DIVERGED. Healing
+  must reconcile the divergence:
+
+    - anti-entropy : background gossip syncs missing rows. A Merkle tree
+      (hash of hashes) per node lets replicas compare cheaply and pinpoint
+      ONLY the divergent keys - no full-table scan on big datasets.
+    - read repair  : a read that hits disagreeing replicas fixes them in
+      the background, converging lazily as traffic flows.
+
+  For the view_count G-Counter (Section D), merge is just max-per-slot:
+     P1 {A:1, B:1, C:0, D:0, E:0}  +  P2 {A:0, B:0, C:1, D:1, E:1}  -> merged {A:1, B:1, C:1, D:1, E:1} -> value = 5
+  AP final state: every node converges to view_count = 5.
+  No writes lost - all 5 increments are preserved. Eventually consistent.
+
+
+==========================================================================
+  GOLD CHECK: post-heal correctness
+==========================================================================
+  CP : all 5 nodes agree balance = 200? True | conflicts = 0  -> [check] OK
+  AP : CRDT merge kept every increment (A..E all =1)? True | total = 5  -> [check] OK
+
+  => CP guarantee : NO conflicts ever (minority writes are discarded).
+  => AP guarantee : NO writes lost (every partition's writes are merged).
+  Both converge after healing - they just promise different things.
+  [check] GOLD: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

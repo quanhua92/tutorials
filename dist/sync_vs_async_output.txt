@@ -1,0 +1,204 @@
+sync_vs_async.py - reference impl. All numbers below feed SYNC_VS_ASYNC.md.
+Python stdlib only. Deterministic inputs. (Delta=1.0s, GST=6.0s, mean_RTT=50ms)
+
+========================================================================
+  SECTION A: SYNCHRONOUS MODEL - detection time = 2*Delta  (GOLD)
+========================================================================
+Three nodes n0, n1, n2. One-way message delay bound Delta = 1.0s.
+So a round trip (ping out + reply back) is bounded by 2*Delta = 2.0s.
+
+FAILURE-DETECTION RULE (synchronous):
+  n0 pings n2 at time t. If n2 is alive, its reply arrives at n0
+  by t + 2*Delta = t + 2.0s.
+  If NO reply by t + 2*Delta, n2 MUST be crashed - the sync bound
+  forbids any other explanation (no 'maybe it is slow' excuse).
+
+DEMO: n0 pings n2 every 1.0s. n2 CRASHES at t = 2.5s.
+
+Ping/reply timeline (n0's view). 'reply by' = sent + 2*Delta:
+| ping# | sent at | arrives n2 | reply by | outcome                        |
+|-------|----------|------------|----------|--------------------------------|
+| 0     | 0.0      | 1.0        | 2.0      | n2 alive -> reply arrives OK
+| 1     | 1.0      | 2.0        | 3.0      | n2 alive -> reply arrives OK
+| 2     | 2.0      | 3.0        | 4.0      | ping arrives AFTER crash -> NO reply -> DEAD @ t=4.0
+
+Detection happens on ping #2: sent @ t=2.0s, declared DEAD @ t=4.0s.
+  detection_time = reply_by - sent = 4.0 - 2.0 = 2.0s = 2*Delta.
+  (wall-clock detection since the crash @ 2.5s is 1.5s - faster than 2*Delta here, because the
+   detecting ping was already in flight when n2 died.)
+
+GOLD: synchronous failure-detection latency (the silence window) = 2*Delta = 2.0s.
+[check] detection_time == 2*Delta == 2.0s:  OK
+
+========================================================================
+  SECTION B: ASYNCHRONOUS MODEL - 'slow' vs 'crashed' is UNKNOWABLE
+========================================================================
+Same three nodes, but now the network gives NO delay guarantee.
+
+Two runs. SAME observer (n0). SAME observation. DIFFERENT truth:
+
+n0 sends n2 a probe @ t=0 and waits T = 5.0s.
+At t = 5.0s n0 has received NO reply. Two worlds fit the
+observation equally well:
+
+| world        | truth                        | n0 sees @ t=5.0 |
+|--------------|------------------------------|-----------------|
+| RUN 1: SLOW  | n2 ALIVE, reply delayed 10s  | no reply yet    |
+| RUN 2: CRASH | n2 DEAD since t=0            | no reply yet    |
+
+The observations are byte-identical, so n0 CANNOT tell which world
+it is in. Whatever timeout T the protocol picks, the adversary picks
+a delay just over T and forces a wrong call:
+
+| chosen timeout T | adversary reply delay | n0 verdict @ T | correct?            |
+|------------------|------------------------|----------------|---------------------|
+| 1.0              | 1.001                  | dead @ t=  1.0 | WRONG (n2 alive) |
+| 2.0              | 2.001                  | dead @ t=  2.0 | WRONG (n2 alive) |
+| 5.0              | 5.001                  | dead @ t=  5.0 | WRONG (n2 alive) |
+| 10.0             | 10.001                 | dead @ t= 10.0 | WRONG (n2 alive) |
+| 100.0            | 100.001                | dead @ t=100.0 | WRONG (n2 alive) |
+
+For EVERY finite T the adversary sets delay = T + epsilon, making n0
+falsely declare n2 dead. No finite timeout wins -> there is NO
+correct failure detector in the pure async model. This is the seed
+of FLP (Section C).
+
+[check] for all tried T, adversary delay T+epsilon fools the detector:  OK
+
+========================================================================
+  SECTION C: FLP - bivalent states stay bivalent forever
+========================================================================
+CONSENSUS (binary): each process proposes 0 or 1; all non-faulty
+processes must decide the SAME value (AGREEMENT), eventually
+(TERMINATION), choosing a value that was proposed (VALIDITY).
+
+Configuration valency:
+  0-VALENT : from here, EVERY execution decides 0.
+  1-VALENT : from here, EVERY execution decides 1.
+  BIVALENT : BOTH 0 and 1 are still reachable (undecided).
+
+LEMMA 1 (a bivalent initial configuration exists):
+  Compare two starts: (all propose 0) -> validity forces decision 0;
+  (all propose 1) -> validity forces decision 1. Walk from one start
+  to the other, changing one proposal at a time. The forced decision
+  must FLIP somewhere on this walk, so the crossing configuration is
+  BIVALENT. Hence a bivalent initial state exists.
+
+LEMMA 2 (bivalence can be preserved forever) - toy illustration:
+  Toy protocol: 2 processes p0, p1. p0 proposes 0, p1 proposes 1.
+  Rule: the FIRST process to RECEIVE the other's proposal decides
+  that value and broadcasts DECIDE(v); all then decide v.
+
+  Two messages are in flight:
+    m0 = (p0 -> p1, value 0)   m1 = (p1 -> p0, value 1)
+    - deliver m0 first -> p1 receives 0 -> decides 0 -> all decide 0.
+    - deliver m1 first -> p0 receives 1 -> decides 1 -> all decide 1.
+  BOTH futures are reachable, so the initial state is BIVALENT.
+
+ADVERSARY'S BIVALENT CHAIN (never deliver a 'deciding' message):
+| step | action by adversary              | m0 in flight | m1 in flight | 0 reachable | 1 reachable | valency  |
+|------|----------------------------------|--------------|--------------|-------------|-------------|----------|
+| 0    | initial state (both msgs sent)   | yes          | yes          | yes         | yes         | BIVALENT |
+| 1    | delay BOTH m0 and m1 another epsilon | yes          | yes          | yes         | yes         | BIVALENT |
+| 2    | delay BOTH m0 and m1 another epsilon | yes          | yes          | yes         | yes         | BIVALENT |
+| 3    | delay BOTH m0 and m1 another epsilon | yes          | yes          | yes         | yes         | BIVALENT |
+| 4    | delay BOTH m0 and m1 another epsilon | yes          | yes          | yes         | yes         | BIVALENT |
+| 5    | delay BOTH m0 and m1 another epsilon | yes          | yes          | yes         | yes         | BIVALENT |
+
+At EVERY step the adversary keeps both messages in flight, so both
+the 0-deciding and 1-deciding futures remain reachable. The protocol
+can NEVER decide -> TERMINATION is violated. Repeated indefinitely
+this is an infinite bivalent chain -> no deterministic async
+consensus protocol can guarantee termination with even 1 crash
+(FLP, Fischer-Lynch-Paterson 1985).
+
+NOTE: the full FLP proof handles arbitrarily many in-flight events
+and shows that for any 'critical' event e whose delivery would force
+a decision, a finite prelude of OTHER deliveries leaves the post-e
+configuration STILL bivalent. The toy above is the load-bearing
+intuition; the real proof generalizes it to any protocol.
+
+[check] bivalent steps demonstrable = unbounded (>= 6); FLP holds:  OK
+
+========================================================================
+  SECTION D: PARTIAL SYNCHRONY - 'eventually synchronous' (DLS 1988)
+========================================================================
+Dwork-Lynch-Stockmeyer (1988) define THREE timing models:
+
+  (1) SYNCHRONOUS     : Delta known up front. Consensus solvable with
+                        f < n crash faults.
+  (2) ASYNCHRONOUS    : no Delta. FLP -> unsolvable with even 1 crash.
+  (3) PARTIAL SYNC    : a bound Delta EXISTS, and there is a time GST
+                        after which delays are <= Delta. GST and Delta
+                        are UNKNOWN to the protocol. Consensus IS
+                        solvable with f < n/2 crash faults.
+
+Partial synchrony is the model real systems (Raft, Paxos) assume.
+
+DEMO timeline (GST = 6.0s, Delta_after = 1.0s):
+
+| t    | event              | delay  | phase                | outcome                       |
+|------|--------------------|--------|----------------------|-------------------------------|
+| 1.0  | leader A elected   | 0.6s   | before GST (async-like) | 0.6s < any timeout -> A looks fine |
+| 2.0  | A heartbeat        | 9.0s   | before GST (async-like) | 9s > timeout -> A deposed |
+| 3.5  | leader B elected   | 4.0s   | before GST (async-like) | 4s > timeout -> B deposed too |
+| 6.0  | <<< GST >>>        | -      | after GST (sync-like) | network stabilizes here |
+| 6.5  | leader C elected   | 0.8s   | after GST (sync-like) | 0.8s < Delta -> C survives |
+| 7.5  | C heartbeat        | 0.9s   | after GST (sync-like) | 0.9s < Delta -> stable |
+| 8.5  | C heartbeat        | 1.0s   | after GST (sync-like) | = Delta -> still within bound |
+
+Before GST, leaders keep getting deposed: their heartbeats exceed the
+timeout because delays are unbounded. After GST, delays fall within
+Delta, so leader C's heartbeats always arrive in time -> C stays
+leader -> consensus proceeds. The protocol did NOT need to KNOW GST;
+it just kept re-electing until the network stabilized.
+
+This is EXACTLY how Raft and Paxos work: they assume partial
+synchrony, use timeouts as a best guess for Delta, and make progress
+once GST has passed. (🔗 Raft: randomized 150-300ms election timeout;
+see Section E.)
+
+[check] leaders churned before GST = 2 (>1); stable leader after GST = 1:  OK
+
+========================================================================
+  SECTION E: TIMEOUT TRADE-OFF - false positives vs failover latency
+========================================================================
+Raft randomized election timeout: 150-300ms. Paxos: similar.
+
+Model a heartbeat's network delay as EXPONENTIAL with mean mu = 50ms (standard queueing-delay model).
+  P(delay > T) = exp(-T / mu).
+A follower starts an election if its election timeout T_elapses with
+no heartbeat. So P(false election) = P(heartbeat delay > T). Failover
+latency on a REAL crash ~= T (you wait T, then elect).
+
+Trade-off table (per election-term window):
+
+| T_elect | P(false election) = e^(-T/mu) | failover (real crash) | verdict                      |
+|---------|------------------------------|-----------------------|------------------------------|
+|   50ms  | 36.7879%                     |      50 ms             | too short -> many false elections |
+|  100ms  | 13.5335%                     |     100 ms             | too short -> many false elections |
+|  150ms  | 4.9787%                      |     150 ms             | Raft sweet spot 150-300ms |
+|  300ms  | 0.2479%                      |     300 ms             | Raft sweet spot 150-300ms |
+|  500ms  | 0.0045%                      |     500 ms             | too long -> slow failover |
+| 1000ms  | 0.0000%                      |    1000 ms             | too long -> slow failover |
+
+Reading the table:
+  - T=50ms : 36.79% of terms are FALSE elections - constant
+             leader churn, the cluster never settles.
+  - T=150ms: 4.98% false elections - tolerable; failover
+             ~150ms - snappy. Raft's lower bound.
+  - T=300ms: 0.2479% false elections - very stable; failover
+             ~300ms. Raft's upper bound.
+  - T=1000ms: ~0% false elections, but a real crash takes ~1s to
+             heal - users notice the outage.
+
+Raft randomizes T per node across 150-300ms to avoid split votes
+(two followers timing out simultaneously). The window is the partial-
+synchrony compromise: low enough for quick failover, high enough to
+ride out normal network jitter.
+
+[check] P(false) decreases monotonically with T: True; failover increases monotonically: True:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

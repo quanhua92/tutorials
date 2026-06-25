@@ -1,0 +1,244 @@
+paxos.py - reference impl. All numbers below feed PAXOS.md.
+python stdlib only.
+
+========================================================================
+  SECTION A: basic Paxos  (1 proposer, 3 acceptors, 1 learner)
+========================================================================
+N = 3 acceptors -> majority = floor(3/2)+1 = 2
+1 Proposer wants to choose 'X'. Trace of every message:
+
+-- Proposer, n=1, wants='X'
+  Proposer -> A0: Prepare(n=1)
+  A0 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A1: Prepare(n=1)
+  A1 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A2: Prepare(n=1)
+  A2 -> Proposer: Promise(n=1, accepted=none)
+  Phase 1 OK: 3/3 promises (need 2). value to accept = 'X' (own value)
+  Proposer -> A0: Accept(n=1, v='X')
+  A0 -> Proposer: Accepted(n=1, v='X')
+  Proposer -> A1: Accept(n=1, v='X')
+  A1 -> Proposer: Accepted(n=1, v='X')
+  Proposer -> A2: Accept(n=1, v='X')
+  A2 -> Proposer: Accepted(n=1, v='X')
+  Phase 2 OK: 3/3 accepted (need 2) -> CHOSEN = 'X'
+
+Learner is told: chosen = 'X'
+
+Read the trace top-to-bottom as four vertical sweeps:
+  Prepare down  -> Promise up      (Phase 1: lock the number)
+  Accept  down  -> Accepted up     (Phase 2: commit the value)
+No prior accepted value existed, so the proposer used its own 'X'.
+
+[check] chosen == 'X' and majority 2 reached:  OK
+
+========================================================================
+  SECTION B: competing proposers  (higher proposal number wins)
+========================================================================
+N = 3 acceptors, majority = 2.
+Proposer A (n=1, wants 'A') and Proposer B (n=2, wants 'B') race.
+
+-- Proposer A, Phase 1 only (n=1)
+  Proposer -> A0: Prepare(n=1)
+  A0 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A1: Prepare(n=1)
+  A1 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A2: Prepare(n=1)
+  A2 -> Proposer: Promise(n=1, accepted=none)
+  -> A holds 3 promises (a majority)
+
+-- Proposer B, Phase 1 (n=2)  -- supersedes A
+  Proposer -> A0: Prepare(n=2)
+  A0 -> Proposer: Promise(n=2, accepted=none)
+  Proposer -> A1: Prepare(n=2)
+  A1 -> Proposer: Promise(n=2, accepted=none)
+  Proposer -> A2: Prepare(n=2)
+  A2 -> Proposer: Promise(n=2, accepted=none)
+  -> B holds 3 promises. Acceptors now promised n=2 (A's n=1 is stale).
+
+Now A tries to finish (Phase 2 with n=1) -- but acceptors promised 2:
+  Proposer -> A0: Accept(n=1, v='A')
+  A0 -> Proposer: Rejected  (promised n=2 > 1)
+  Proposer -> A1: Accept(n=1, v='A')
+  A1 -> Proposer: Rejected  (promised n=2 > 1)
+  Proposer -> A2: Accept(n=1, v='A')
+  A2 -> Proposer: Rejected  (promised n=2 > 1)
+  -> A accepted by 0 acceptors (need 2): REJECTED by all. A's proposal dies.
+
+B finishes (Phase 2 with n=2):
+  Proposer -> A0: Accept(n=2, v='B')
+  A0 -> Proposer: Accepted(n=2, v='B')
+  Proposer -> A1: Accept(n=2, v='B')
+  A1 -> Proposer: Accepted(n=2, v='B')
+  Proposer -> A2: Accept(n=2, v='B')
+  A2 -> Proposer: Accepted(n=2, v='B')
+  -> B accepted by 3 acceptors -> CHOSEN = 'B'
+
+WHY higher n wins: an acceptor promises to reject any Accept with
+n < its promised number. B's Prepare(2) raised every acceptor's
+promised number to 2, so A's Accept(1) is rejected everywhere.
+Proposal numbers are Paxos's 'newer wins' ordering -- the lever that
+breaks ties between concurrent proposers without a central leader.
+
+[check] A's accept count (0) < majority and B's (3) >= majority:  OK
+
+========================================================================
+  SECTION C: value selection  (forced reuse guarantees safety)
+========================================================================
+N = 3 acceptors, majority = 2.
+Step 1: Proposer P1 (n=1) wants 'X' and gets it chosen.
+
+-- P1, n=1, wants='X'
+  Proposer -> A0: Prepare(n=1)
+  A0 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A1: Prepare(n=1)
+  A1 -> Proposer: Promise(n=1, accepted=none)
+  Proposer -> A2: Prepare(n=1)
+  A2 -> Proposer: Promise(n=1, accepted=none)
+  Phase 1 OK: 3/3 promises (need 2). value to accept = 'X' (own value)
+  Proposer -> A0: Accept(n=1, v='X')
+  A0 -> Proposer: Accepted(n=1, v='X')
+  Proposer -> A1: Accept(n=1, v='X')
+  A1 -> Proposer: Accepted(n=1, v='X')
+  Proposer -> A2: Accept(n=1, v='X')
+  A2 -> Proposer: Accepted(n=1, v='X')
+  Phase 2 OK: 3/3 accepted (need 2) -> CHOSEN = 'X'
+
+Result: 'X' is CHOSEN. Every acceptor now has accepted=(1, 'X').
+
+Step 2: a LATE Proposer P3 (n=3) arrives and WANTS 'Y'.
+P3 must run Phase 1 first. Watch what the acceptors report back:
+
+-- P3, n=3, wants='Y'
+  Proposer -> A0: Prepare(n=3)
+  A0 -> Proposer: Promise(n=3, accepted=(1, 'X'))
+  Proposer -> A1: Prepare(n=3)
+  A1 -> Proposer: Promise(n=3, accepted=(1, 'X'))
+  Proposer -> A2: Prepare(n=3)
+  A2 -> Proposer: Promise(n=3, accepted=(1, 'X'))
+  Phase 1 OK: 3/3 promises (need 2). value to accept = 'X' (FORCED reuse of accepted value)
+  Proposer -> A0: Accept(n=3, v='X')
+  A0 -> Proposer: Accepted(n=3, v='X')
+  Proposer -> A1: Accept(n=3, v='X')
+  A1 -> Proposer: Accepted(n=3, v='X')
+  Proposer -> A2: Accept(n=3, v='X')
+  A2 -> Proposer: Accepted(n=3, v='X')
+  Phase 2 OK: 3/3 accepted (need 2) -> CHOSEN = 'X'
+
+Result: P3 wanted 'Y' but was FORCED to propose 'X'.
+
+THE RULE (Lamport Phase 2a): when a proposer collects a majority of
+promises, it MUST propose the value of the HIGHEST-numbered proposal
+any acceptor reports as already-accepted. Since the acceptors reported
+(1, 'X'), P3's own desire 'Y' is overridden -> P3 proposes 'X'.
+
+This is the whole safety argument in one move: a new proposer cannot
+win a majority without passing through Phase 1, and Phase 1 hands it
+any value a prior majority already chose. So it re-chooses the SAME
+value. Two proposers, two majorities, ONE value. (Proven in GOLD.)
+
+[check] P1 chose 'X' and P3 (wanted Y) chose 'X':  OK -- same value
+
+========================================================================
+  SECTION D: Multi-Paxos  (stable leader -> Phase 1 once, then Phase 2 only)
+========================================================================
+N = 3 acceptors, majority = 2. Choose 3 values V1..V3.
+
+BASIC Paxos: every value is its own log instance; each pays BOTH
+phases (2 round-trips / value):
+  chosen = ['V1', 'V2', 'V3']
+  BASIC totals: messages = 36, round-trips = 6
+
+MULTI-Paxos: a stable leader runs Phase 1 ONCE (a 'lease'), then
+issues ONLY Phase 2 (Accept/Accepted) for each subsequent value:
+  Phase 1 (lease, n=1):
+    Proposer -> A0: Prepare(n=1)
+    A0 -> Proposer: Promise(n=1, accepted=none)
+    Proposer -> A1: Prepare(n=1)
+    A1 -> Proposer: Promise(n=1, accepted=none)
+    Proposer -> A2: Prepare(n=1)
+    A2 -> Proposer: Promise(n=1, accepted=none)
+  leader now holds the lease; promised n=1 on all acceptors.
+
+  chosen = ['V1', 'V2', 'V3']
+  MULTI totals: messages = 24, round-trips = 4
+
+Throughput improvement (round-trips), K=3 values:
+  BASIC 6 RT  vs  MULTI 4 RT  ->  MULTI uses 0.67x the round-trips (1.50x fewer).
+
+Scaling the round-trip count as K grows (N fixed):
+| values K | basic RT = 2K | multi RT = K+1 | multi/basic |
+|----------|---------------|----------------|-------------|
+| 1        | 2             | 2              | 1.00x       |
+| 2        | 4             | 3              | 0.75x       |
+| 3        | 6             | 4              | 0.67x       |
+| 5        | 10            | 6              | 0.60x       |
+| 10       | 20            | 11             | 0.55x       |
+| 50       | 100           | 51             | 0.51x       |
+
+As K -> infinity, multi/basic -> 1/2: a stable leader DOUBLES the
+decision throughput by amortizing Phase 1 over many values. This is
+why every deployed Paxos (Chubby, Spanner, ZooKeeper's Zab) runs the
+Multi-Paxos / stable-leader shape, not bare per-value Paxos.
+
+[check] both modes chose the same 3 values (['V1', 'V2', 'V3'] == ['V1', 'V2', 'V3']):  OK
+
+========================================================================
+  SECTION E: Paxos vs Raft  (two roads to the same consensus)
+========================================================================
+Paxos and Raft both solve consensus for CRASH faults with a 2f+1
+majority. They differ in structure, not in what they guarantee.
+
+| aspect              | Paxos                          | Raft                          |
+|---------------------|--------------------------------|-------------------------------|
+| leader model        | decentralized: any node can propose; no strong leader required | strong leader: ALL writes flow through one elected leader |
+| roles               | Proposer / Acceptor / Learner (explicit, may be co-located) | Leader / Follower / Candidate (one node's state machine) |
+| core mechanism      | Prepare/Promise + Accept/Accepted (proposal numbers) | RequestVote + AppendEntries (term numbers) |
+| ordering term       | proposal number (round, id)    | term (monotonic integer)      |
+| understandability   | notoriously subtle             | designed to be teachable      |
+| fault model         | crash, 2f+1                    | crash, 2f+1                   |
+| log replication     | Multi-Paxos: per-instance consensus | built-in: leader appends + matches |
+| canonical paper     | Lamport 1998/2001              | Ongaro & Ousterhout 2014      |
+| used by             | Chubby, Spanner (Paxos), ZooKeeper (Zab) | etcd, Consul, TiKV, CockroachDB |
+
+Practically equivalent: both deliver the SAME safety & liveness for
+crash faults with the SAME 2f+1 node count and majority quorum. Raft
+IS Multi-Paxos with a built-in strong leader and a simpler story --
+Ongaro & Ousterhout's contribution is UNDERSTANDABILITY, not power.
+Choice in practice is about ops & tooling, not capability.
+
+========================================================================
+  GOLD CHECK  (safety: any two proposers that get a majority agree)
+========================================================================
+Canonical cluster: N = 3 acceptors, majority = 2
+
+Two proposers, each reaching a majority:
+  P1 (n=1, wanted 'X') -> chose 'X'
+  P2 (n=2, wanted 'Y') -> chose 'X'  (forced to reuse X)
+  chosen set = ['X']
+  [check] at most one distinct value chosen?  OK
+
+Stress (25 sequential proposers, random desired values):
+  values chosen over time = ['X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X', 'X']
+  distinct chosen values  = ['X']
+  [check] exactly one value ever chosen?  OK
+
+Competing proposers (A n=1 vs B n=2) accept counts:
+  A accepted by 0 acceptor(s)  (needs 2)
+  B accepted by 3 acceptor(s)  (needs 2) -> chosen 'B'
+  [check] higher-n proposer wins all accepts?  OK
+
+GOLD scalars (pinned for paxos.html):
+  majority_of(N=3)                      = 2
+  P1 chosen value (basic, n=1, want X)  = 'X'
+  P2 chosen value (n=2, want Y, forced) = 'X'
+  forced-reuse value == first chosen    = True
+  stress distinct-chosen count          = 1
+  basic_round_trips(K=3)  = 2*K         = 6
+  multi_round_trips(K=3)  = K+1         = 4
+
+[check] all gold identities reproduce from the protocol:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

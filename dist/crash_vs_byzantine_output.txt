@@ -1,0 +1,207 @@
+crash_vs_byzantine.py - reference impl. All numbers below feed CRASH_VS_BYZANTINE.md.
+python stdlib only.
+
+========================================================================
+  SECTION A: crash fault model  (N=5, f=2)  -> 2f+1 is enough
+========================================================================
+The faulty nodes simply go SILENT. They send no messages and never
+lie. So the only question is: are there enough live nodes to form a
+quorum?
+
+  cluster:   [0X] [1X] [2 ] [3 ] [4 ]
+
+N = 5,  f = 2 (crashed),  alive = 3  [2, 3, 4]
+quorum (majority) = floor(N/2)+1 = floor(5/2)+1 = 3
+
+alive (3) >= quorum (3)?  YES -> progress is possible
+
+The general crash bound:
+  To tolerate f crashes we need  N >= 2f+1.
+  Here 2f+1 = 2*2+1 = 5  = N.  Bare minimum, exactly met.
+  faults this N tolerates = (N-1)//2 = (5-1)//2 = 2
+
+WHY a majority is enough (the overlap argument):
+  Two majorities of a 5-node cluster each have >= 3 members.
+  Worst-case overlap = 2*quorum - N = 2*3 - 5 = 1 node.
+  That 1 overlapping member was in BOTH decisions, so it carries the
+  latest committed value forward. Crashed members never contradict it
+  (they are silent), so 1 honest witness is sufficient. -> CFT safe.
+
+[check] N (5) == 2f+1 (5) and quorum (3) == f+1 (3):  OK
+
+========================================================================
+  SECTION B: Byzantine fault model  (N=5, f=2)  -> 2f+1 is NOT enough
+========================================================================
+Now the faulty nodes stay in the room and LIE. Each honest node must
+collect enough responses to be SURE no traitor can fool two honest
+nodes into disagreeing.
+
+  cluster:   [0!] [1!] [2 ] [3 ] [4 ]
+
+N = 5,  f = 2 (Byzantine),  honest = 3  [2, 3, 4]
+
+Liveness bound: an honest node can wait for at most N-f responses
+  (up to f traitors may stay silent). N-f = 5-2 = 3.
+  So each honest node commits after hearing from a set of >= 3 nodes.
+
+ATTACK: the 2 traitors [0, 1] tell different stories.
+  traitor 0 tells honest A:   'I vote YES'
+  traitor 1 tells honest A:   'I vote YES'
+  traitor 0 tells honest C:   'I vote NO '
+  traitor 1 tells honest C:   'I vote NO '
+
+  honest A hears 3 responses: {A:YES, 0:YES, 1:YES}  -> commits YES
+  honest C hears 3 responses: {C:NO , 0:NO , 1:NO }  -> commits NO
+  => two honest nodes DISAGREE. Safety violated with N=5, f=2.
+
+ROOT CAUSE: the two response sets (size N-f=3) overlap in only
+  2*(N-f) - N = 2*3 - 5 = 1 node, and that node can be a traitor.
+  With N=5 the overlap is 1, and f=2 traitors can occupy it -> unsafe.
+
+To make the overlap safe it must hold MORE than f honest nodes,
+which is impossible at N=5. We need a bigger cluster -> Section C.
+
+[check] max Byzantine tolerated by N=5: (N-1)//3 = 1  (< 2)  -> N too small:  FAILS as shown
+
+========================================================================
+  SECTION C: why 3f+1 -- the safety derivation, step by step
+========================================================================
+Goal: find the smallest N that lets honest nodes agree despite f
+Byzantine traitors. We reason about ONE round of message exchange.
+
+Step 1. Of N nodes, up to f are Byzantine. So the HONEST count is
+        at least  N - f.
+
+Step 2. LIVENESS: an honest node cannot wait forever. Up to f nodes
+        may stay silent (Byzantine can omit messages), so it proceeds
+        once it has heard from  N - f  nodes. Call each honest node's
+        heard-set S, with |S| = N - f.
+
+Step 3. Of those N - f heard nodes, at most f are Byzantine, so at
+        least  (N - f) - f = N - 2f  of them are HONEST.
+
+Step 4. SAFETY: take two honest nodes with heard-sets S1, S2, each of
+        size N - f. By inclusion-exclusion their overlap is at least
+        |S1 ∩ S2| >= |S1| + |S2| - N = 2(N - f) - N = N - 2f.
+
+Step 5. The overlap must contain at least ONE honest node -- otherwise
+        f traitors could fill the entire overlap and split the two
+        honest nodes (exactly the Section B attack). So we need
+            (overlap honest count) >= 1
+        The overlap has N - 2f nodes, of which at most f are traitors,
+        so honest in overlap >= (N - 2f) - f = N - 3f. Requiring >= 1:
+            N - 3f >= 1   <=>   N >= 3f + 1.
+
+Step 6. EQUIVALENTLY (the textbook one-liner): require the overlap
+        itself to be strictly larger than f, so it cannot be all-traitor:
+            N - 2f > f   <=>   N > 3f   <=>   N >= 3f + 1.
+
+Worked numbers for f = 2:
+   3f+1 = 7   <- minimum safe N
+   at N = 7: honest >= N-f = 5,  heard-set size N-f = 5,
+   overlap >= N-2f = 3,  honest in overlap >= N-3f = 1 >= 1.  SAFE.
+
+Crucially, the SAME derivation for CRASH faults stops at Step 4:
+crashed nodes never lie, so an overlap of just 1 (any node, honest
+by definition since crashes don't forge) is enough -> N >= 2f+1.
+
+[check] N-3f = 7-6 = 1 >= 1  and  N (7) >= 3f+1 (7):  OK
+
+========================================================================
+  SECTION D: quorum intersection  (f+1 vs 2f+1 quorums)
+========================================================================
+A quorum is the smallest set that may legally make a decision. The
+two models pick different sizes so that ANY two quorums overlap by
+enough to anchor safety.
+
+Crash model   : quorum = floor(N/2)+1   (a strict majority)
+Byzantine model: quorum = ceil((2N+1)/3) (a strict >2/3 supermajority)
+
+Using the minimal N for each model:
+
+| model | f | min N | quorum Q | overlap = 2Q-N | honest in overlap | safe? |
+|---|---|---|---|---|---|---|
+| crash | 0 | 1     | 1        | 1              | 1                 | OK    |
+| byz   | 0 | 1     | 1        | 1              | 1                 | OK    |
+| crash | 1 | 3     | 2        | 1              | 1                 | OK    |
+| byz   | 1 | 4     | 3        | 2              | 1                 | OK    |
+| crash | 2 | 5     | 3        | 1              | 1                 | OK    |
+| byz   | 2 | 7     | 5        | 3              | 1                 | OK    |
+| crash | 3 | 7     | 4        | 1              | 1                 | OK    |
+| byz   | 3 | 10    | 7        | 4              | 1                 | OK    |
+
+Read the table by column:
+  - quorum Q grows as f+1 (crash) or 2f+1 (Byzantine).
+  - overlap = 2Q - N is the inclusion-exclusion floor.
+  - 'honest in overlap' subtracts the f traitors that could hide there.
+  - safety holds iff honest-in-overlap >= 1.
+
+Concrete quorum-intersection picture, Byzantine f=2 (N=7, Q=5):
+  universe {0..6},  quorum size Q=5
+  S1 = [0, 1, 2, 3, 4]
+  S2 = [2, 3, 4, 5, 6]   (shifted to minimize overlap)
+  S1 ∩ S2 = [2, 3, 4]   |overlap| = 3
+  traitors that could hide in overlap <= f = 2, so honest in overlap >= 1  -> SAFE
+
+Same picture, crash f=2 (N=5, Q=3):
+  universe {0..4},  quorum size Q=3
+  S1 = [0, 1, 2]
+  S2 = [2, 3, 4]   (shifted to minimize overlap)
+  S1 ∩ S2 = [2]   |overlap| = 1
+  crashes never forge, so all 1 overlapping node(s) are honest -> SAFE
+
+========================================================================
+  SECTION E: comparison table  (CFT vs BFT, real systems)
+========================================================================
+Two families of consensus protocol, one per failure model.
+
+| family | model | min N | faults tolerated f = | quorum size       | canonical protocols            |
+|--------|-------|-------|----------------------|-------------------|--------------------------------|
+| CFT | crash | 2f+1 | (N-1)//2 | f+1  (majority) | Paxos, Raft, Zab, ZooKeeper |
+| BFT | byz | 3f+1 | (N-1)//3 | 2f+1 (>2/3 supermaj.) | PBFT, Tendermint, HotStuff, DiemBFT |
+
+Real deployments (typical node counts):
+| system       | protocol  | N  | model | f tolerated | quorum needed |
+|--------------|-----------|----|-------|-------------|--------------|
+| etcd/K8s     | Raft      | 3  | crash | 1           | 2            |
+| etcd/K8s     | Raft      | 5  | crash | 2           | 3            |
+| ZooKeeper    | Zab       | 5  | crash | 2           | 3            |
+| PBFT (1999)  | PBFT      | 4  | byz   | 1           | 3            |
+| Tendermint   | Tendermint | 7  | byz   | 2           | 5            |
+| HotStuff     | HotStuff  | 7  | byz   | 2           | 5            |
+
+Read it as: a 5-node Raft cluster survives 2 crashed members and
+needs 3 votes; a 7-node Tendermint validator set survives 2 traitors
+and needs 5 (=2f+1) agreeing votes. The 'cost of lies' is the extra
+f nodes: 3f+1 - (2f+1) = f more replicas for the same f.
+
+========================================================================
+  GOLD CHECK  (pinned values for crash_vs_byzantine.html)
+========================================================================
+Canonical point: f = 2
+  crash    min N  = 2f+1       = 5
+  byzantine min N = 3f+1       = 7
+  crash    quorum = floor(N/2)+1   (N=5) = 3   = f+1
+  byzantine quorum = ceil((2N+1)/3) (N=7) = 5   = 2f+1
+  crash    quorum overlap (2Q-N)        = 1
+  byzantine quorum overlap (2Q-N)       = 3  (= f+1)
+  byzantine honest in overlap (overlap-f)= 1  (>=1 -> safe)
+
+Slider default point: N = 7
+  crash_quorum(7)    = floor(7/2)+1     = 4
+  byz_quorum(7)      = ceil((2*7+1)/3) = 5
+  max_crash_tolerated(7)  = (7-1)//2  = 3
+  max_byz_tolerated(7)    = (7-1)//3  = 2
+
+GOLD scalars (for a compact .html check):
+  byz_quorum(N=7)              = 5
+  crash_quorum(N=7)            = 4
+  byz_min_n(f=2)               = 7
+  crash_min_n(f=2)             = 5
+  cost_of_lies(f=2) = 3f+1-2f-1 = 2
+
+[check] all gold identities reproduce from the formulas:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

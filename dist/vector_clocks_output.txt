@@ -1,0 +1,220 @@
+vector_clocks.py - reference impl. All numbers below feed
+VECTOR_CLOCKS.md. python3, stdlib only.
+N=3 processes P0,P1,P2
+
+==========================================================================
+  SECTION A: vector clock rules - local / send / receive
+==========================================================================
+3 processes P0, P1, P2, each starting at VC = [0, 0, 0].
+Rules:
+  local  : VC[my_id] += 1
+  send   : VC[my_id] += 1 ; attach a COPY of the whole VC
+  receive: VC[k] = max(VC[k], msg[k]) for all k ; then VC[my_id] += 1
+
+Trace (events in execution order; VC shown AFTER each event):
+
+| step | event | proc | type   | rule applied                         | vector clock |
+|------|-----|-----|-----|-----|-----|
+| 1    | a1    | P0   | local  | VC[my_id] += 1                       | [1, 0, 0]    |
+| 2    | a2    | P0   | send   | VC[my_id] += 1 ; ship copy           | [2, 0, 0]    |
+| 3    | c1    | P2   | local  | VC[my_id] += 1                       | [0, 0, 1]    |
+| 4    | b1    | P1   | recv   | max(msg,local) ; VC[my_id] += 1      | [2, 1, 0]    |
+| 5    | b2    | P1   | local  | VC[my_id] += 1                       | [2, 2, 0]    |
+| 6    | b3    | P1   | send   | VC[my_id] += 1 ; ship copy           | [2, 3, 0]    |
+| 7    | c2    | P2   | local  | VC[my_id] += 1                       | [0, 0, 2]    |
+| 8    | c3    | P2   | recv   | max(msg,local) ; VC[my_id] += 1      | [2, 3, 3]    |
+
+Messages shipped (the piggybacked vectors):
+  a2 (P0 -> P1): ships VC = [2, 0, 0]
+  b3 (P1 -> P2): ships VC = [2, 3, 0]
+
+Key observations:
+  - a send bumps the sender's own slot, and the receiver LATER takes
+    the component-wise MAX with the shipped vector (see b1, c3).
+  - b1 = max([0,0,0], [2,0,0]) then inc P1 = [2,1,0]. P1 now 'knows'
+    about both of P0's events.
+  - c1 and c2 on P2 grew WITHOUT hearing from P0/P1 -> their slots 0,1
+    stay 0. That missing knowledge is exactly what makes them CONCURRENT
+
+==========================================================================
+  SECTION B: comparison - VC(a) < VC(b) iff all <= and some <
+==========================================================================
+The comparison is DEFINED component by component (not as a number):
+
+  VC(a) < VC(b)   <=>   (a[k] <= b[k] for ALL k)  AND  (a[k] < b[k] for SOME k)
+
+Read it as: 'b has heard about everything a heard about, and strictly
+more in at least one slot' -> a is a causal ANCESTOR of b (a -> b).
+
+  Compare a1 = [1, 0, 0]  vs  a2 = [2, 0, 0]:
+     slot 0: 1<2 (strict)
+     slot 1: 0=0
+     slot 2: 0=0
+     all<=? True ; some<? True  =>  VC(a1) < VC(a2)? True  ->  a1 -> a2
+
+  Compare a2 = [2, 0, 0]  vs  b1 = [2, 1, 0]:
+     slot 0: 2=2
+     slot 1: 0<1 (strict)
+     slot 2: 0=0
+     all<=? True ; some<? True  =>  VC(a2) < VC(b1)? True  ->  a2 -> b1
+
+  Compare c1 = [0, 0, 1]  vs  c2 = [0, 0, 2]:
+     slot 0: 0=0
+     slot 1: 0=0
+     slot 2: 1<2 (strict)
+     all<=? True ; some<? True  =>  VC(c1) < VC(c2)? True  ->  c1 -> c2
+
+The rule is strict: a SINGLE slot with a[k] > b[k] sinks the whole
+comparison. That is why a process that 'hasn't heard' of another can
+never be considered an ancestor of it.
+
+[check] a1->a2, a2->b1, c1->c2 all classified CAUSAL by VC < : OK
+
+==========================================================================
+  SECTION C: concurrent detection - neither VC < the other
+==========================================================================
+Two events are CONCURRENT (a || b) iff NEITHER VC(a)<VC(b) NOR VC(b)<VC(a).
+
+This is the thing Lamport clocks CANNOT do: tell causal order apart from
+coincidental order. Vector clocks can, because each slot encodes what the
+process has heard about.
+
+  a2 = [2, 0, 0]   vs   c1 = [0, 0, 1]
+     VC(a2) < VC(c1)? False
+     VC(c1) < VC(a2)? False
+     slot 0: a2[0]=2 > c1[0]=0 -> blocks a2->c1
+     slot 2: c1[2]=1 > a2[2]=0 -> blocks c1->a2
+     => a2 || c1 (concurrent)? True
+
+  b3 = [2, 3, 0]   vs   c2 = [0, 0, 2]
+     VC(b3) < VC(c2)? False
+     VC(c2) < VC(b3)? False
+     slot 0: b3[0]=2 > c2[0]=0 -> blocks b3->c2
+     slot 2: c2[2]=2 > b3[2]=0 -> blocks c2->b3
+     => b3 || c2 (concurrent)? True
+
+  a2 = [2, 0, 0]   vs   c2 = [0, 0, 2]
+     VC(a2) < VC(c2)? False
+     VC(c2) < VC(a2)? False
+     slot 0: a2[0]=2 > c2[0]=0 -> blocks a2->c2
+     slot 2: c2[2]=2 > a2[2]=0 -> blocks c2->a2
+     => a2 || c2 (concurrent)? True
+
+Physical meaning: a2 happened on P0, c1 on P2, with NO message between
+them. Neither process knows the other's event occurred. They are truly
+independent -> concurrent. (Section D shows DynamoDB turns this into a
+conflict that must be surfaced.)
+
+[check] a2||c1, b3||c2, a2||c2 all classified CONCURRENT: OK
+
+==========================================================================
+  SECTION D: version vectors (DynamoDB) - detect conflicting writes
+==========================================================================
+A VERSION VECTOR is the data-store variant of a vector clock. Differences:
+  - increment OWN node's counter only on a WRITE (not on every event);
+  - on a READ/replication, MERGE by element-wise max (NO increment);
+  - the vector is attached to each stored OBJECT VERSION.
+
+Two versions of the same key are SIBLINGS (a conflict) iff their version
+vectors are CONCURRENT. Dynamo/Riak surface siblings to the app instead of
+silently dropping one. (DeCandia et al. 2007, Dynamo SOSP.)
+
+Scenario: key 'cart', 3 replicas N1,N2,N3. A partition isolates N3.
+
+  t0  client writes 'cart' to coordinator N1
+      version v0 : val = '[]'   vv = {N1:1, N2:0, N3:0}
+      N1 replicates v0 to N2 and N3 (all converge).
+
+  t1  PARTITION: N3 isolated. {N1, N2} can talk, N3 cannot.
+      client updates 'cart' via N1 -> val = '[A]'
+      N1 increments its OWN slot on the write:
+      version w1 : val = '[A]'   vv = {N1:1, N2:1, N3:0}
+      N1 replicates w1 to N2 (reachable). N3 still holds v0.
+
+  t2  a DIFFERENT client updates 'cart' via N3 (it only knows v0):
+      N3 increments its OWN slot:
+      version w2 : val = '[B]'   vv = {N1:1, N2:0, N3:1}
+      N3 cannot replicate w2 out (partitioned).
+
+  t3  HEAL. Replica N2 holds w1, N3 holds w2. The coordinator compares
+      their version vectors to decide the relationship:
+
+      w1.vv = {N1:1, N2:1, N3:0}   (val [A])
+      w2.vv = {N1:1, N2:0, N3:1}   (val [B])
+      w1 < w2 ? False
+      w2 < w1 ? False
+      => concurrent (conflict)? True
+
+      Neither version descends from the other -> Dynamo keeps BOTH as
+      SIBLINGS and returns them to the application:
+         siblings(cart) = ['[A]', '[B]']
+      The app resolves it (e.g. union -> [A,B], prompt the user, ...).
+      NOTHING is silently dropped -- unlike last-write-wins.
+
+      After the app reconciles, a new write advances from the merge:
+         merged vv = {N1:1, N2:1, N3:1}  -> store resolved version.
+
+[check] w1||w2 concurrent -> surfaced as siblings; merge = {N1:1, N2:1, N3:1}: OK
+
+==========================================================================
+  SECTION E: Lamport vs vector clocks - the trade-off
+==========================================================================
+Both assign timestamps to events, but they buy different things.
+
+Concrete failure mode of Lamport (using the SAME scenario):
+
+  a2 on P0 and c1 on P2 are CONCURRENT (Section C proved it). But:
+     L(a2) = 2   L(c1) = 1
+     VC(a2) = [2, 0, 0]   VC(c1) = [0, 0, 1]
+
+  A naive reader sees L(c1)=1 < L(a2)=2 and wrongly infers c1 -> a2.
+  Lamport only guarantees a->b => L(a)<L(b); the CONVERSE is FALSE, so you
+  CANNOT classify a pair from Lamport timestamps alone.
+
+  Vector clocks give the exact characterization a->b <=> VC(a)<VC(b), so
+  the same pair is correctly shown as c1 || a2.
+
+| property                       | Lamport clock     | Vector clock          |
+|--------------------------------|-------------------|-----------------------|
+| state per process              | 1 scalar (O(1))   | 3 counters (O(N))     |
+| message overhead               | 1 integer         | 3 integers            |
+| a -> b  =>  ts(a) < ts(b) ?    | yes               | yes                   |
+| ts(a) < ts(b)  =>  a -> b ?    | NO (converse false) | YES (exact)           |
+| detects concurrency (a || b) ? | NO                | YES                   |
+| needs to know N (group size) ? | no                | yes                   |
+| scales to huge N ?             | trivially         | cost grows with N     |
+| typical use                    | event ordering, txn IDs | causality, conflict detection |
+
+Rule of thumb: if you only need a TOTAL ORDER consistent with causality,
+Lamport is cheap and enough. If you need to DETECT that two events are
+independent (conflict detection, causal consistency, debugging), you need
+a vector clock (or its sparse cousins: dotted version vectors, HLCs).
+
+[check] Lamport L(c1)<L(a2) mis-orders concurrent pair; vector fixes it: OK
+
+==========================================================================
+  GOLD CHECK: VC comparison matches happens-before, ALL pairs
+==========================================================================
+Events: 8 -> 56 ordered pairs checked.
+  causal pairs (a->b)  classified correctly: 18
+  concurrent/incomparable classified correctly: 38
+  mismatches: 0
+
+This is the CHARACTERIZATION theorem in action:
+  a -> b  <=>  VC(a) < VC(b)   for EVERY pair. Vector clocks represent
+  happens-before EXACTLY, so every causal link AND every concurrent pair
+is classified correctly. That is the property Lamport clocks lack.
+
+Spot check (named pairs):
+  a1 -> a2? graph=True   VC(a1)<VC(a2)? True   match=True
+  a2 -> b1? graph=True   VC(a2)<VC(b1)? True   match=True
+  b3 -> c3? graph=True   VC(b3)<VC(c3)? True   match=True
+  c1 -> c3? graph=True   VC(c1)<VC(c3)? True   match=True
+  a2 -> c1? graph=False   VC(a2)<VC(c1)? False   match=True
+  b3 -> c2? graph=False   VC(b3)<VC(c2)? False   match=True
+
+=> [check] GOLD: all 56 pairs match happens-before: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

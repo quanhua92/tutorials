@@ -1,0 +1,254 @@
+sha256.py - reference impl. All numbers below feed SHA256.md.
+pure Python stdlib, deterministic (no randomness).
+
+
+========================================================================
+  SECTION A: the constants  (derived from primes, not random)
+========================================================================
+Every constant in SHA-256 is derived from PRIME NUMBERS, so the
+designers could not have hidden a weakness in them. The recipe:
+
+  K[t] = floor( 2^32 * frac( prime[t]^(1/3) ) )   t = 0..63
+  H[i] = floor( 2^32 * frac( prime[i]^(1/2) ) )   i = 0..7
+
+First 8 primes: 2, 3, 5, 7, 11, 13, 17, 19
+
+| i | prime | root |  constant (hex) | recomputed (hex) | match |
+|---|-------|------|-----------------|------------------|-------|
+| 0 | 2     | ∛    | 0x428a2f98    | 0x428a2f98    | OK   |
+| 1 | 3     | ∛    | 0x71374491    | 0x71374491    | OK   |
+| 2 | 5     | ∛    | 0xb5c0fbcf    | 0xb5c0fbcf    | OK   |
+| 3 | 7     | ∛    | 0xe9b5dba5    | 0xe9b5dba5    | OK   |
+| 4 | 11    | ∛    | 0x3956c25b    | 0x3956c25b    | OK   |
+| 5 | 13    | ∛    | 0x59f111f1    | 0x59f111f1    | OK   |
+| 6 | 17    | ∛    | 0x923f82a4    | 0x923f82a4    | OK   |
+| 7 | 19    | ∛    | 0xab1c5ed5    | 0xab1c5ed5    | OK   |
+|   |       |      |                 |                  |       |
+| 0 | 2     | √    | 0x6a09e667    | 0x6a09e667    | OK   |
+| 1 | 3     | √    | 0xbb67ae85    | 0xbb67ae85    | OK   |
+| 2 | 5     | √    | 0x3c6ef372    | 0x3c6ef372    | OK   |
+| 3 | 7     | √    | 0xa54ff53a    | 0xa54ff53a    | OK   |
+| 4 | 11    | √    | 0x510e527f    | 0x510e527f    | OK   |
+| 5 | 13    | √    | 0x9b05688c    | 0x9b05688c    | OK   |
+| 6 | 17    | √    | 0x1f83d9ab    | 0x1f83d9ab    | OK   |
+| 7 | 19    | √    | 0x5be0cd19    | 0x5be0cd19    | OK   |
+
+[check] all 64 K constants match ∛(prime) fractional parts?  True
+[check] all 8  H constants match √(prime) fractional parts?   True
+
+========================================================================
+  SECTION B: padding  (Merkle-Damgård preprocessing)
+========================================================================
+input = b'abc'   (3 bytes = 24 bits)
+
+A 512-bit block holds 16 words. 'abc' is only 24 bits, so we must
+PAD it to 512 bits. The padding has three parts:
+
+  1. the message bits:   0x61 0x62 0x63            ('a','b','c')
+  2. a single '1' bit:   0x80  (1 bit, then seven 0 bits)
+  3. '0' bits until 448 mod 512, then the 64-bit length
+
+After padding: 16 words = 512 bits = 1 block(s)
+
+| word | hex      | meaning                                  |
+|------|----------|------------------------------------------|
+| 0    | 0x61626380 | 0x61626380  = 'a','b','c' then the 0x80 stop bit |
+| 1    | 0x00000000 | 0x00000000  = zero padding               |
+| 2    | 0x00000000 | 0x00000000  = zero padding               |
+| 3    | 0x00000000 | 0x00000000  = zero padding               |
+| 4    | 0x00000000 | 0x00000000  = zero padding               |
+| 5    | 0x00000000 | 0x00000000  = zero padding               |
+| 6    | 0x00000000 | 0x00000000  = zero padding               |
+| 7    | 0x00000000 | 0x00000000  = zero padding               |
+| 8    | 0x00000000 | 0x00000000  = zero padding               |
+| 9    | 0x00000000 | 0x00000000  = zero padding               |
+| 10   | 0x00000000 | 0x00000000  = zero padding               |
+| 11   | 0x00000000 | 0x00000000  = zero padding               |
+| 12   | 0x00000000 | 0x00000000  = zero padding               |
+| 13   | 0x00000000 | 0x00000000  = zero padding               |
+| 14   | 0x00000000 | 0x00000000  = high 32 bits of length (0) |
+| 15   | 0x00000018 | 0x00000018  = low 32 bits of length (24 bits = 0x18) |
+
+message length in bits = 3 bytes * 8 = 24 = 0x18
+[check] last word == bit-length?  24 == 24  OK
+[check] padded length % 512 == 0?  512 % 512 = 0  OK
+
+========================================================================
+  SECTION C: the message schedule  (16 block words -> 64 schedule words)
+========================================================================
+The first 16 schedule words ARE the padded block (copied). Words
+16..63 are DERIVED by mixing earlier words:
+
+  W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]   (mod 2^32)
+
+σ0 and σ1 are rotates+shifts that spread bits around. This
+expansion is why flipping ONE input bit changes almost every W[t].
+
+| t  | W[t] (hex)    | source                          |
+|----|---------------|---------------------------------|
+| 0  | 0x61626380    | block word (copy)               |
+| 1  | 0x00000000    | block word (copy)               |
+| 2  | 0x00000000    | block word (copy)               |
+| 3  | 0x00000000    | block word (copy)               |
+| 4  | 0x00000000    | block word (copy)               |
+| 5  | 0x00000000    | block word (copy)               |
+| 6  | 0x00000000    | block word (copy)               |
+| 7  | 0x00000000    | block word (copy)               |
+| 8  | 0x00000000    | block word (copy)               |
+| 9  | 0x00000000    | block word (copy)               |
+| 10 | 0x00000000    | block word (copy)               |
+| 11 | 0x00000000    | block word (copy)               |
+| 12 | 0x00000000    | block word (copy)               |
+| 13 | 0x00000000    | block word (copy)               |
+| 14 | 0x00000000    | block word (copy)               |
+| 15 | 0x00000018    | block word (copy)               |
+| 16 | 0x61626380    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 17 | 0x000f0000    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 18 | 0x7da86405    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 19 | 0x600003c6    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 20 | 0x3e9d7b78    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 21 | 0x0183fc00    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 22 | 0x12dcbfdb    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 23 | 0xe2e2c38e    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 24 | 0xc8215c1a    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 25 | 0xb73679a2    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 26 | 0xe5bc3909    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 27 | 0x32663c5b    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 28 | 0x9d209d67    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 29 | 0xec8726cb    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 30 | 0x702138a4    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 31 | 0xd3b7973b    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 32 | 0x93f5997f    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 33 | 0x3b68ba73    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 34 | 0xaff4ffc1    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 35 | 0xf10a5c62    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 36 | 0x0a8b3996    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 37 | 0x72af830a    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 38 | 0x9409e33e    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 39 | 0x24641522    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 40 | 0x9f47bf94    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 41 | 0xf0a64f5a    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 42 | 0x3e246a79    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 43 | 0x27333ba3    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 44 | 0x0c4763f2    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 45 | 0x840abf27    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 46 | 0x7a290d5d    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 47 | 0x065c43da    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 48 | 0xfb3e89cb    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 49 | 0xcc7617db    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 50 | 0xb9e66c34    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 51 | 0xa9993667    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 52 | 0x84badedd    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 53 | 0xc21462bc    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 54 | 0x1487472c    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 55 | 0xb20f7a99    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 56 | 0xef57b9cd    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 57 | 0xebe6b238    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 58 | 0x9fe3095e    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 59 | 0x78bc8d4b    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 60 | 0xa43fcf15    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 61 | 0x668b2ff8    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 62 | 0xeeaba2cc    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+| 63 | 0x12b1edeb    | σ1(W[t-2])+W[t-7]+σ0(W[t-15])+W[t-16] |
+
+The derived words (t>=16) look random even though the input was
+almost all zeros — that is the bit-mixing doing its job.
+
+Avalanche check: flip 'abc'->'abd' (1 bit) -> 46/64 schedule words differ.
+
+========================================================================
+  SECTION D: the compression function  (64 rounds, round by round)
+========================================================================
+Start the state at the IV (the 8 H constants). Each round computes:
+  T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]
+  T2 = Σ0(a) + Maj(a,b,c)
+  then shift the register: a<-T1+T2, e<-d+T1, and h<-g<-f<-e<-d<-c<-b
+
+initial state (the IV):
+  a=0x6a09e667  e=0x510e527f
+
+| t  | a after round  | e after round  | T1             | T2             |
+|----|----------------|----------------|----------------|----------------|
+| 0  | 0x00005d6aebcd | 0x0000fa2a4622 | 0x000054da50e8 | 0x000008909ae5 |
+| 1  | 0x00005a6ad9ad | 0x000078ce7989 | 0x00003c5f8617 | 0x00001e0b5396 |
+| 2  | 0x0000c8c347a7 | 0x0000f92939eb | 0x00003dc18b66 | 0x00008b01bc41 |
+| 3  | 0x0000d550f666 | 0x000024e00850 | 0x0000bad621e9 | 0x00001a7ad47d |
+| 4  | 0x000004409a6a | 0x000043ada245 | 0x0000e642b678 | 0x00001dfde3f2 |
+| 5  | 0x00002b4209f5 | 0x0000714260ad | 0x000016d78700 | 0x0000146a82f5 |
+| 6  | 0x0000e5030380 | 0x00009b27a401 | 0x0000d2645c5a | 0x0000129ea726 |
+| 7  | 0x000085a07b5f | 0x00000c657a79 | 0x000037148413 | 0x00004e8bf74c |
+| 63 | 0x0000506e3058 | 0x00005ef50f24 | 0x0000a8467f25 | 0x0000a827b133 |
+| .. | (rounds 8-62 omitted; every round runs identically)              |
+
+After 64 rounds, add the new state into the IV to get the hash words:
+  H[0] = 0x6a09e667 + 0x506e3058 = 0xba7816bf
+  H[1] = 0xbb67ae85 + 0xd39a2165 = 0x8f01cfea
+  ... (8 words)
+
+final digest = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+[check] matches hashlib.sha256(b'abc')?  True
+
+========================================================================
+  SECTION E: full hash + known test vectors  (verification)
+========================================================================
+The real test of a from-scratch SHA-256: does it match the official
+NIST test vectors and Python's hashlib?
+
+| input | our sha256 | hashlib | NIST | match |
+|-------|------------|---------|------|-------|
+| (empty) | e3b0c44298fc1c14... | e3b0c44298fc1c14... | e3b0c44298fc1c14... | OK   |
+| abc   | ba7816bf8f01cfea... | ba7816bf8f01cfea... | ba7816bf8f01cfea... | OK   |
+| abcdbcdecdefdefgef... | 248d6a61d20638b8... | 248d6a61d20638b8... | 248d6a61d20638b8... | OK   |
+| hello world | b94d27b9934d3e08... | b94d27b9934d3e08... | b94d27b9934d3e08... | OK   |
+
+[check] all 4 test vectors match hashlib + NIST?  True
+
+Avalanche: sha256('hello') vs sha256('hellp') (1-bit input change)
+  131 / 256 output bits differ (51.2%)  <- near the ideal 50%
+  2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  fdd7585e08c4e2afd71dcabdb4636c89d557a3f42db9e2040c8bbd1708aa4ce7
+
+========================================================================
+  SECTION F: GOLD values for sha256.html
+========================================================================
+gold input = b'abc'
+
+gold padded block (16 words):
+  W[0] = 0x61626380
+  W[1] = 0x00000000
+  W[2] = 0x00000000
+  W[3] = 0x00000000
+  W[4] = 0x00000000
+  W[5] = 0x00000000
+  W[6] = 0x00000000
+  W[7] = 0x00000000
+  W[8] = 0x00000000
+  W[9] = 0x00000000
+  W[10] = 0x00000000
+  W[11] = 0x00000000
+  W[12] = 0x00000000
+  W[13] = 0x00000000
+  W[14] = 0x00000000
+  W[15] = 0x00000018
+
+gold schedule (sampled):
+  W[0] = 0x61626380
+  W[15] = 0x00000018
+  W[16] = 0x61626380
+  W[17] = 0x000f0000
+  W[63] = 0x12b1edeb
+
+gold round values (a, e, T1, T2):
+  round 0 : a=0x5d6aebcd  e=0xfa2a4622  T1=0x54da50e8  T2=0x08909ae5
+  round 1 : a=0x5a6ad9ad  e=0x78ce7989  T1=0x3c5f8617  T2=0x1e0b5396
+  round 63: a=0x506e3058  e=0x5ef50f24  T1=0xa8467f25  T2=0xa827b133
+
+gold digest = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+[check] gold digest matches hashlib?  True
+
+The .html re-runs the SHA-256 compression in JS from the same IV and
+block, checking the schedule, round values, and final digest above.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

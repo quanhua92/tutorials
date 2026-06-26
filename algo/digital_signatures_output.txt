@@ -1,0 +1,179 @@
+digital_signatures.py - reference impl. All numbers below feed DIGITAL_SIGNATURES.md.
+pure Python stdlib (hashlib only), deterministic (fixed keys).
+
+
+========================================================================
+  SECTION A: RSA signatures - the algorithm walkthrough
+========================================================================
+Textbook primes: p=61, q=53, public exponent e=17
+
+KEY GENERATION:
+  n   = p*q        = 61*53 = 3233        (public modulus)
+  phi = (p-1)(q-1) = 60*52 = 3120   (Euler totient)
+  d   = e^-1 mod phi = 17^-1 mod 3120 = 2753    (private key)
+  check: e*d mod phi = 17*2753 mod 3120 = 1
+
+PUBLIC KEY  = (n, e) = (3233, 17)   -> publish this
+PRIVATE KEY = (n, d) = (3233, 2753)  -> KEEP SECRET
+
+THE TRAPDOOR: computing d needs phi, which needs the factors p,q.
+Factoring n=3233 is trivial; factoring a 2048-bit n is infeasible.
+That gap is ALL of RSA's security.
+
+SIGN / VERIFY formulas:
+  sign   : sig = H(m)^d mod n        (sealed with private d)
+  verify : sig^e mod n == H(m)?      (opened with public e)
+
+[check] e*d == 1 mod phi?  True
+
+========================================================================
+  SECTION B: the sign-then-verify flow  (RSA round trip)
+========================================================================
+message m = b'hello'
+
+Step 1 - hash: H(m) = SHA-256 leftmost 12-bits mod 3233 = 719
+
+Step 2 - SIGN (Alice, with private d):
+  sig = H(m)^d mod n = 719^2753 mod 3233 = 136
+
+Step 3 - VERIFY (Bob, with public e):
+  sig^e mod n = 136^17 mod 3233 = 719
+  H(m)        = 719
+  match? 719 == 719 -> True
+
+[check] rsa_verify(m, sig, e, n)?  True
+
+Bob never sees d. He only needed the PUBLIC (n, e) and the signature
+to confirm Alice authored 'hello' and it was not altered in transit.
+
+========================================================================
+  SECTION C: tampering detection  (modified message -> signature FAILS)
+========================================================================
+Alice signs m="hello" -> sig = 136
+
+Now an attacker flips ONE character of the message in transit:
+
+  original m="hello"  -> H(m) = 719
+  tampered m="hellp"  -> H(m) = 828
+  (one bit of m flips ~half the hash bits -> totally different H(m))
+
+Bob verifies the tampered message with the SAME signature:
+  sig^e mod n = 719
+  H(tampered) = 828
+  match? 719 == 828 -> False
+
+[check] verify original  ?  True
+[check] verify tampered  ?  False
+
+The signature is BOUND to the exact bytes signed. Change one bit and
+verification fails - that is the INTEGRITY guarantee. A wax seal that
+shatters if anyone so much as breathes on the document.
+
+========================================================================
+  SECTION D: ECDSA - elliptic-curve signatures
+========================================================================
+Tiny curve: y^2 = x^3 + 2x + 2  (mod 17)
+Generator G = (5, 1), on curve? True
+
+The curve has 19 points (+the point at infinity O):
+  (0,6), (0,11), (3,1), (3,16), (5,1), (5,16), (6,3), (6,14), (7,6), (7,11), (9,1), (9,16), (10,6), (10,11), (13,7), (13,10), (16,4), (16,13), O
+
+Order of G (smallest n with n*G = O): n = 19
+[check] 19*G = O (infinity)? True
+
+private key d = 7  ->  public key Q = d*G = 7*(5, 1) = (0,6)
+Q on curve? True
+
+Sign m="curve":
+  H(m) truncated to 5 bits mod 19 = 16
+  k = 11, k*G = (13,10)
+  r = (k*G).x mod n = 13
+  s = k^-1 * (H(m) + r*d) mod n = 7 * (16+13*7) mod 19 = 8
+  -> signature (r, s) = (13, 8)
+
+Verify m="curve" with public Q=(0,6):
+  w = s^-1 mod n = 12
+  u1 = H(m)*w = 2, u2 = r*w = 4
+  X = u1*G + u2*Q = 2*G + 4*Q = (13,10)
+  r == X.x mod n ?  13 == 13  -> True
+
+[check] ecdsa_verify(m, sig, Q)?  True
+[check] ecdsa_verify(tampered 'curvE', sig, Q)?  False
+
+Same guarantee as RSA: one byte changed -> verification fails.
+WHY ECDSA WINS in practice: a 256-bit ECDSA key matches a 3072-bit
+RSA key for security, with signatures ~64 bytes vs ~256. That is why
+Bitcoin, TLS, and Apple's Secure Enclave all use ECDSA/Ed25519.
+
+========================================================================
+  SECTION E: HMAC - symmetric message authentication
+========================================================================
+HMAC is NOT asymmetric: BOTH parties share the SAME key. There is no
+public key, so HMAC gives authentication + integrity but NOT
+non-repudiation (either party could have made the tag).
+
+key  = b'secret-key'  (shared, secret)
+msg  = b'transfer $100'
+
+CONSTRUCTION (RFC 2104):
+  block size = 64 bytes ; ipad = 0x36, opad = 0x5c
+  tag = H( (k ^ opad) || H( (k ^ ipad) || m ) )
+
+inner = H( (k^ipad) || m ) = a274defd52494161122f6b9e6007a9404a134f844404ecfaea3262ab9d8e8cf1
+tag   = H( (k^opad) || inner ) = 7aae85d71f38bedd29816b44c6872dd0fb6fb82f3ec1049328b3f7cc6db36206
+
+[check] recompute tag matches?  True
+[check] tag of tampered 'transfer $900' matches?  False  (must be False)
+[check] tag with wrong key matches?  False  (must be False)
+
+Use HMAC when two parties ALREADY share a secret and want fast
+message authentication: API tokens (JWT), TLS record layer, cookie
+sealing, code-deploy signatures. Use RSA/ECDSA when only one party
+should be ABLE to sign (e.g. a server proving its identity).
+
+========================================================================
+  SECTION F: applications  (RSA vs ECDSA vs HMAC)
+========================================================================
+| scheme  | type        | used in                         | notes                              |
+|---------|-------------|---------------------------------|------------------------------------|
+| RSA     | asymmetric  | TLS certs, code signing, PGP    | sign = H(m)^d mod n ; slow, big keys (2048+ bits) |
+| ECDSA   | asymmetric  | Bitcoin, TLS, SSH, Apple enclave | point math; 256-bit key ~= 3072-bit RSA; ~64-byte sig |
+| Ed25519 | asymmetric  | SSH, Signal, apt, age           | fast + deterministic ECDSA variant on Curve25519 |
+| HMAC    | symmetric   | JWT, API auth, TLS record, cookies | shared key; fast; NO non-repudiation |
+
+THE THREE GUARANTEES a signature gives:
+  1. AUTHENTICITY    : only the private-key holder could sign it.
+  2. INTEGRITY       : any change to m breaks verification.
+  3. NON-REPUDIATION : the signer can't later deny it (only d could
+                       have produced the signature). HMAC lacks #3.
+
+WHY SIGN THE HASH, not the message?
+  - SIZE: a signature operates on a fixed-size digest, not a
+    gigabyte document. SHA-256 -> always 32 bytes.
+  - SECURITY: SHA-256 is collision-resistant, so signing H(m) is as
+    safe as signing m, for any practical message length.
+
+========================================================================
+  SECTION G: GOLD values for digital_signatures.html  (rebuild in JS)
+========================================================================
+RSA GOLD:
+  p=61, q=53, e=17 -> n=3233, d=2753
+  m="hello"  ->  H(m) mod 3233 = 719
+  sig = H(m)^d mod n = 136
+  sig^e mod n = 719  (== H(m)? True)
+  [check] rsa_verify?  True
+  [check] tampered verify?  False  (must be False)
+
+ECDSA GOLD:
+  curve y^2=x^3+2x+2 mod 17, G=(5, 1), n=19
+  d=7 -> Q=d*G=(0,6)
+  m="curve", k=11 -> (r,s)=(13,8)
+  [check] ecdsa_verify?  True
+  [check] tampered verify?  False  (must be False)
+
+The .html re-runs RSA sign/verify + ECDSA sign/verify + HMAC in JS
+with these exact parameters and checks the verdicts match.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

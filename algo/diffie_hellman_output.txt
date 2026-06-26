@@ -1,0 +1,166 @@
+diffie_hellman.py - reference impl. All numbers below feed DIFFIE_HELLMAN.md.
+pure Python stdlib, deterministic (fixed exponents a=6, b=15).
+
+
+========================================================================
+  SECTION A: the algorithm walkthrough  (the math, step by step)
+========================================================================
+Public params: prime p = 23, generator g = 5
+
+[check] is g=5 a primitive root mod 23?  True  (its powers cover all of 1..22)
+
+The 'public clock' is Z_23* = {1, 2, ..., 22}, which has order p-1 = 22.
+g is a generator, so multiplying g by itself steps through EVERY
+element before returning to 1:
+
+  e   :   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20  21  22
+  g^e :   5   2  10   4  20   8  17  16  11   9  22  18  21  13  19   3  15   6   7  12  14   1
+
+After 22 steps the cycle repeats (Fermat: g^22 mod 23 = 1).
+
+THE PROTOCOL IN ONE LINE EACH:
+  (1) agree  : Alice & Bob publish p, g                          (public)
+      -> p=23, g=5
+  (2) secrets: Alice picks a in 1..p-1 ; Bob picks b in 1..p-1   (private)
+      -> a=6 (Alice), b=15 (Bob)
+  (3) public : Alice sends A = g^a mod p ; Bob sends B = g^b mod p
+      -> A = 5^6 mod 23 = 8
+      -> B = 5^15 mod 23 = 19
+  (4) shared : Alice = B^a ; Bob = A^b  (both = g^(ab) mod p)
+      -> these are 6*15 = 90 powers of g, mod 23
+
+========================================================================
+  SECTION B: the key exchange flow  (both sides land on the SAME secret)
+========================================================================
+WHO KNOWS WHAT:
+  Alice : private a=6, receives B=19 from Bob
+  Bob   : private b=15, receives A=8 from Alice
+  Eve   : sees p=23, g=5, A=8, B=19  (but NOT a, b, or the secret)
+
+ALICE computes the shared secret:
+  s = B^a mod p = 19^6 mod 23 = 2
+
+BOB computes the shared secret:
+  s = A^b mod p = 8^15 mod 23 = 2
+
+DIRECT (sanity): g^(a*b) mod p = 5^(6*15) mod 23 = 2
+
+[check] B^a == A^b == g^(ab)?  True   (Alice=2, Bob=2, direct=2)
+
+WHY they match - the algebra (nothing up the sleeve):
+  B^a = (g^b)^a = g^(b*a) = g^(a*b)        (exponents multiply)
+  A^b = (g^a)^b = g^(a*b)                  (same product, commutative)
+So both sides compute the SAME g^(a*b) mod p without ever sending a or b.
+
+The shared secret is 2. That number can now feed a cipher
+(e.g. as the AES key) to encrypt the conversation that follows.
+
+========================================================================
+  SECTION C: security analysis  (discrete log - why Eve is stuck)
+========================================================================
+Eve's goal: recover Alice's secret a from A = g^a mod p = 8.
+
+The ONLY known way (for a generic group) is brute force: try every
+exponent x and check whether g^x mod p equals the public value A.
+
+Brute-force trace (Eve squares-and-multiplies, checking each step):
+  try x= 1: g^ 1 mod 23 =  5
+  try x= 2: g^ 2 mod 23 =  2
+  try x= 3: g^ 3 mod 23 = 10
+  try x= 4: g^ 4 mod 23 =  4
+  try x= 5: g^ 5 mod 23 = 20
+  try x= 6: g^ 6 mod 23 =  8  <- MATCH, a recovered!
+
+Eve finds a = 6 after 6 tries.
+
+[check] discrete_log_bruteforce agrees: a=6, tries=6
+[check] with a in hand, Eve computes the secret = B^a = 19^6 mod 23 = 2
+
+THE WHOLE SECURITY RESTS ON p BEING BIG. Cost scales with p:
+  | bits of p | group size | generic brute-force | best-known attack | feasible?  |
+  |-----------|------------|---------------------|--------------------|------------|
+  |         5 | ~2^5       | ~2^5                | ~2^3               | yes (toy)  |
+  |        64 | ~2^64      | ~2^64               | ~2^22              | seconds    |
+  |       256 | ~2^256     | ~2^256              | ~2^64              | no (huge)  |
+  |      2048 | ~2^2048    | ~2^2048             | ~2^112             | no*         |
+  *for a 2048-bit prime, generic brute force is ~2^2048, but the best
+   KNOWN attack (number-field sieve) is ~2^112 - still infeasible today.
+
+Read it as: doubling p's bit-length makes Eve's job EXPONENTIALLY
+harder. With p=23 Eve wins instantly; with a 2048-bit p she loses.
+
+========================================================================
+  SECTION D: the man-in-the-middle attack  (DH has NO authentication)
+========================================================================
+THE WEAKNESS: DH guarantees SECRECY against a passive eavesdropper,
+but NOT against an ACTIVE attacker who intercepts and replaces the
+public values. Alice and Bob each run DH - but with the ATTACKER.
+
+Public values on the wire: Alice sends A=8, Bob sends B=19.
+
+Mallory INTERCEPTS both, discards them, and sends her OWN values:
+  -> Alice receives M1 = g^13 mod 23 = 21  (thinks it's Bob's)
+  -> Bob   receives M2 = g^3 mod 23 = 10  (thinks it's Alice's)
+
+RESULTING shared secrets (there are now TWO, not one):
+  Alice   <-> Mallory : Alice = M1^a = 21^6 = 18
+                       Mallory = A^ma = 8^13 = 18
+  Bob     <-> Mallory : Bob   = M2^b = 10^15 = 5
+                       Mallory = B^mb = 19^3 = 5
+
+[check] Mallory matches both sides, and the two secrets differ?  True
+  Alice's secret 18 == Mallory's view of Alice: 18
+  Bob's   secret 5   == Mallory's view of Bob:   5
+  Alice and Bob hold DIFFERENT secrets (18 vs 5) -> they are
+  NOT actually talking to each other. Mallory decrypts every message
+  from Alice, re-encrypts under Bob's secret, and vice versa.
+
+THE FIX: authenticate the channel FIRST. In TLS this is done with
+DIGITAL SIGNATURES (RSA/ECDSA on the server's DH public value) - see
+DIGITAL_SIGNATURES.md. 🔗 Without a signature, DH is blind to who you
+are keying with.
+
+========================================================================
+  SECTION E: applications  (where Diffie-Hellman lives in the wild)
+========================================================================
+| protocol        | domain             | role of Diffie-Hellman              |
+|-----------------|--------------------|-------------------------------------|
+| TLS / HTTPS     | web encryption     | Key exchange (DHE/ECDHE) negotiates the session key; the server's |
+|                 |                    | DH public value is SIGNED (RSA/ECDSA) to stop MITM. 'Forward secrecy'. |
+| SSH             | secure shell       | diffie-hellman-group14/16 + Ed25519 host signature. |
+| Signal (X3DH)   | end-to-end messaging | Extended triple-DH: 3 DH rounds build the root key; long-term |
+|                 |                    | identity keys authenticate, ephemeral keys give forward secrecy. |
+| IPsec (IKE)     | VPN tunnels        | IKE phases use DH to derive keys for the encrypted tunnel. |
+| Bitcoin (BIP-?) | wallet / ECDH      | ECDH on secp256k1 for address derivation / payment codes. |
+
+FORWARD SECRECY (the headline property): if you use a FRESH a,b per
+session (ephemeral DH = DHE), then a later leak of the long-term key
+CANNOT decrypt old sessions - the per-session a,b are gone. This is
+why modern TLS mandates ECDHE even when RSA keys are present.
+
+VARIANTS:
+  - DH    : integer modular arithmetic (this file).
+  - ECDH  : same idea on an elliptic curve; 256-bit keys ~= 3072-bit
+            RSA security. The dominant choice today.
+  - X25519: a specific fast ECDH curve (Curve25519, Bernstein 2006).
+
+========================================================================
+  SECTION F: GOLD values for diffie_hellman.html  (rebuild in JS)
+========================================================================
+gold public params : p=23, g=5
+gold secrets       : a=6 (Alice), b=15 (Bob)
+gold public A      = g^a mod p = 5^6 mod 23 = 8
+gold public B      = g^b mod p = 5^15 mod 23 = 19
+gold shared secret = B^a mod p = 19^6 mod 23 = 2
+gold shared secret = A^b mod p = 8^15 mod 23 = 2
+gold shared secret = g^(ab)    = 5^90 mod 23 = 2
+
+[check] gold B^a == A^b == g^(ab) == 2?  True
+[check] gold discrete log of A needs 6 tries (toy p=23)
+
+The .html re-runs this exact exchange in JS (same p, g, a, b) and
+verifies the shared secret equals 2.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

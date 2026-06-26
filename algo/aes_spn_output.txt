@@ -1,0 +1,272 @@
+aes_spn.py - reference impl. All numbers below feed AES_SPN.md.
+pure Python stdlib; S-box generated from scratch; deterministic.
+
+
+========================================================================
+  SECTION A: GF(2^8) arithmetic  (add = XOR; mul mod x^8+x^4+x^3+x+1)
+========================================================================
+AES does all its math in GF(2^8): 256 elements, ADDITION is XOR, and
+MULTIPLICATION is polynomial multiply mod the AES polynomial
+0x11b (= x^8 + x^4 + x^3 + x + 1). xtime(a) = a*2, reduced:
+
+  xtime(0x01) = 0x02
+  xtime(0x02) = 0x04
+  xtime(0x57) = 0xae
+  xtime(0x80) = 0x1b
+  xtime(0xff) = 0xe5
+
+products (used by MixColumns and S-box construction):
+  0x57 * 0x83 = 0xc1
+  0x02 * 0x57 = 0xae
+  0x03 * 0x57 = 0xf9
+  0x80 * 0x80 = 0x9a
+  0x53 * 0xca = 0x01
+
+[check] 0x57 * 0x83 == 0xc1 (FIPS-197 Appendix) ?  True
+
+INVERSES (the heart of the S-box): inverse(a) * a == 1, with inverse(0)=0:
+  inverse(0x01) = 0x01   -> 0x01 * 0x01 = 0x01  (=1 ✓)
+  inverse(0x02) = 0x8d   -> 0x02 * 0x8d = 0x01  (=1 ✓)
+  inverse(0x53) = 0xca   -> 0x53 * 0xca = 0x01  (=1 ✓)
+  inverse(0x57) = 0xbf   -> 0x57 * 0xbf = 0x01  (=1 ✓)
+  inverse(0xff) = 0x1c   -> 0xff * 0x1c = 0x01  (=1 ✓)
+
+========================================================================
+  SECTION B: the S-box, generated from scratch  (inverse + affine = CONFUSION)
+========================================================================
+The S-box is the ONLY nonlinear part of AES. FIPS-197 defines it as:
+
+  sbox[b] = affine( inverse_gf28(b) )
+
+Two steps, shown for a few bytes (b -> inverse -> affine -> sbox[b]):
+  b    | inverse | affine | sbox[b]
+  0x00 |   0x00   |  0x63  |   0x63
+  0x01 |   0x01   |  0x7c  |   0x7c
+  0x10 |   0x74   |  0xca  |   0xca
+  0x53 |   0xca   |  0xed  |   0xed
+  0x57 |   0xbf   |  0x5b  |   0x5b
+  0xff |   0x1c   |  0x16  |   0x16
+
+spot-checks against the FIPS-197 table:
+  sbox[0x00] = 0x63 (expected 0x63)  ✓
+  sbox[0x01] = 0x7c (expected 0x7c)  ✓
+  sbox[0x10] = 0xca (expected 0xca)  ✓
+  sbox[0x53] = 0xed (expected 0xed)  ✓
+  sbox[0xff] = 0x16 (expected 0x16)  ✓
+
+[check] generated S-box matches FIPS-197 at all spot-checks ?  True
+[check] S-box is a bijection (permutation of 0..255) ?  True
+
+The inverse+affine construction has no simple algebraic shortcut,
+which is exactly what CONFUSION needs: the ciphertext's dependence on
+the key becomes opaque.
+
+========================================================================
+  SECTION C: ShiftRows + MixColumns  (DIFFUSION / avalanche)
+========================================================================
+starting state (each row reads left = columns 0..3):
+
+    00 10 20 30
+    40 50 60 70
+    80 90 a0 b0
+    c0 d0 e0 f0
+
+ShiftRows: row r left-rotates by r (spreads each column's bytes across all columns):
+
+    00 10 20 30
+    50 60 70 40
+    a0 b0 80 90
+    f0 c0 d0 e0
+
+[check] row0..3 start 0x00,0x50,0xa0,0xf0 (expect 00,50,a0,f0) ?  True
+
+MixColumns: each column * the fixed matrix [2 3 1 1;1 2 3 1;1 1 2 3;3 1 1 2] over GF(2^8).
+Working column 0 of the ShiftRows state = [0x00, 0x50, 0xa0, 0xf0]:
+  out[0] = 2*0x00 ^ 3*0x50 ^ 1*0xa0 ^ 1*0xf0 = 0x00 ^ 0xf0 ^ 0xa0 ^ 0xf0 = 0xa0
+  out[1] = 1*0x00 ^ 2*0x50 ^ 3*0xa0 ^ 1*0xf0 = 0x00 ^ 0xa0 ^ 0xfb ^ 0xf0 = 0xab
+  out[2] = 1*0x00 ^ 1*0x50 ^ 2*0xa0 ^ 3*0xf0 = 0x00 ^ 0x50 ^ 0x5b ^ 0x0b = 0x00
+  out[3] = 3*0x00 ^ 1*0x50 ^ 1*0xa0 ^ 2*0xf0 = 0x00 ^ 0x50 ^ 0xa0 ^ 0xfb = 0x0b
+
+full MixColumns result:
+
+    a0 f0 80 d0
+    ab db 8b fb
+    00 50 20 70
+    0b 7b 2b 5b
+
+[check] inv_mix_columns(mix_columns(state)) == state ?  True   (forward transform verified)
+
+========================================================================
+  SECTION D: the Rijndael key schedule  (16-byte key -> 11 round keys)
+========================================================================
+master key = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+
+Round constants Rcon (powers of x in GF(2^8)) break key symmetry:
+  0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
+
+expansion trace (word w[i] for i % 4 == 0 uses RotWord+SubWord+Rcon):
+  i  | operation              | word
+  0  | (from key)             | 2b 7e 15 16
+  1  | (from key)             | 28 ae d2 a6
+  2  | (from key)             | ab f7 15 88
+  3  | (from key)             | 09 cf 4f 3c
+  4  | w[i-4] ^ SubWord(RotWord(w[i-1])) ^ Rcon | a0 fa fe 17
+  5  | w[i-4] ^ w[i-1]        | 88 54 2c b1
+  6  | w[i-4] ^ w[i-1]        | 23 a3 39 39
+  7  | w[i-4] ^ w[i-1]        | 2a 6c 76 05
+  8  | w[i-4] ^ SubWord(RotWord(w[i-1])) ^ Rcon | f2 c2 95 f2
+  9  | w[i-4] ^ w[i-1]        | 7a 96 b9 43
+  10 | w[i-4] ^ w[i-1]        | 59 35 80 7a
+  11 | w[i-4] ^ w[i-1]        | 73 59 f6 7f
+  ...(continues to word 43 for 11 round keys)
+
+the 11 round keys (K0 = master key, K1..K10 each mix in one Rcon):
+  K0  = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+  K1  = a0 fa fe 17 88 54 2c b1 23 a3 39 39 2a 6c 76 05
+  K2  = f2 c2 95 f2 7a 96 b9 43 59 35 80 7a 73 59 f6 7f
+  K3  = 3d 80 47 7d 47 16 fe 3e 1e 23 7e 44 6d 7a 88 3b
+  K4  = ef 44 a5 41 a8 52 5b 7f b6 71 25 3b db 0b ad 00
+  K5  = d4 d1 c6 f8 7c 83 9d 87 ca f2 b8 bc 11 f9 15 bc
+  K6  = 6d 88 a3 7a 11 0b 3e fd db f9 86 41 ca 00 93 fd
+  K7  = 4e 54 f7 0e 5f 5f c9 f3 84 a6 4f b2 4e a6 dc 4f
+  K8  = ea d2 73 21 b5 8d ba d2 31 2b f5 60 7f 8d 29 2f
+  K9  = ac 77 66 f3 19 fa dc 21 28 d1 29 41 57 5c 00 6e
+  K10 = d0 14 f9 a8 c9 ee 25 89 e1 3f 0c c8 b6 63 0c a6
+
+[check] K0 == master key AND K1 == a0fafe17 88542cb1 23a33939 2a6c7605 (FIPS-197 Appendix B) ?  True
+
+========================================================================
+  SECTION E: one full AES round, step by step  (FIPS-197 test vector)
+========================================================================
+key        = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+plaintext  = 32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
+
+input state:
+
+    32 88 31 e0
+    43 5a 31 37
+    f6 30 98 07
+    a8 8d a2 34
+
+after AddRoundKey(K0)  (plaintext ^ K0):
+
+    19 a0 9a e9
+    3d f4 c6 f8
+    e3 e2 8d 48
+    be 2b 2a 08
+
+  = 19 3d e3 be a0 f4 e2 2b 9a c6 8d 2a e9 f8 48 08
+
+==================================================
+ROUND 1: SubBytes -> ShiftRows -> MixColumns -> AddRoundKey(K1)
+==================================================
+
+Step 1 - SubBytes (each byte through the S-box = confusion):
+
+    d4 e0 b8 1e
+    27 bf b4 41
+    11 98 5d 52
+    ae f1 e5 30
+
+Step 2 - ShiftRows (row r left-rotates r = diffusion):
+
+    d4 e0 b8 1e
+    bf b4 41 27
+    5d 52 11 98
+    30 ae f1 e5
+
+Step 3 - MixColumns (column matrix mul in GF(2^8) = diffusion):
+
+    04 e0 48 28
+    66 cb f8 06
+    81 19 d3 26
+    e5 9a 7a 4c
+
+Step 4 - AddRoundKey(K1) (XOR in round key 1):
+
+    a4 68 6b 02
+    9c 9f 5b 6a
+    7f 35 ea 50
+    f2 2b 43 49
+
+  state after round 1 = a4 9c 7f f2 68 9f 35 2b 6b 5b ea 43 02 6a 50 49
+
+[check] round-1 state == a49c7ff2 689f352b 6b5bea43 026a5049 (FIPS-197 Appendix B) ?  True
+
+========================================================================
+  SECTION F: full AES-128 encrypt  (verified vs FIPS-197 test vector)
+========================================================================
+key        = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+plaintext  = 32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
+ciphertext = 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+expected   = 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32   (FIPS-197 Appendix B)
+
+[check] AES-128(PT, KEY) == FIPS-197 Appendix B ciphertext ?  True
+
+10 rounds (1 AddRoundKey + 9 full rounds + 1 final round without
+MixColumns) turn the plaintext into unrecognizable ciphertext. Every
+output bit depends on every key bit and every input bit.
+
+========================================================================
+  SECTION G: why AES is secure  (avalanche: 1 bit in -> ~64 bits change)
+========================================================================
+plaintext A = 32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
+plaintext B = 33 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34   (bit 0 flipped)
+
+ciphertext A = 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+ciphertext B = 8c 55 eb 94 df ea d5 c4 fa 78 df 03 44 bf 0c d2
+
+bits that differ in the ciphertext = 68 / 128
+[check] avalanche >= 50 bits (confusion + diffusion working) ?  True
+
+A 1-bit plaintext change flips ~half the 128 ciphertext bits. After
+a few rounds the diffusion is total: each output bit depends on every
+input bit (diffusion) and the key's influence is smeared by the S-box
+(confusion). Differential & linear cryptanalysis need > 2^100 chosen
+texts to attack 4+ rounds — far beyond brute force of the 2^128 key.
+
+========================================================================
+  SECTION H: when to use AES  (and the modes that chain blocks)
+========================================================================
+AES is a 128-bit BLOCK cipher: it maps one 16-byte block to one
+16-byte block. Real messages are bigger, so you wrap it in a MODE.
+
+| mode     | how it works            | security              | when to use                         |
+|----------|-------------------------|-----------------------|-------------------------------------|
+| AES-GCM  | counter + auth tag      | confidential + integrity | TLS 1.3, HTTPS, SSH (the default AEAD) |
+| AES-CTR  | encrypt a counter       | confidential (no integrity) | turns AES into a keystream -> XOR (see xor_cipher.py) |
+| AES-CBC  | chain blocks via XOR    | confidential (needs MAC) | legacy TLS, older disk encryption   |
+| AES-XTS  | tweak per sector        | confidential          | full-disk encryption (BitLocker, FileVault) |
+| raw AES  | 1 block                 | NOT for messages      | the building block; never use alone |
+
+RULE OF THUMB: use AES-GCM (AEAD) for confidentiality + integrity.
+Never use raw AES on data (ECB leaks patterns), and never roll your
+own mode. AES-CTR is literally 'XOR with an AES-derived keystream' —
+the bridge between this guide and xor_cipher.py.
+
+========================================================================
+  SECTION I: GOLD values for aes_spn.html  (rebuild in JS, compare)
+========================================================================
+gold key        = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+gold plaintext  = 32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
+gold round key K1 = a0 fa fe 17 88 54 2c b1 23 a3 39 39 2a 6c 76 05
+gold round key K10 = d0 14 f9 a8 c9 ee 25 89 e1 3f 0c c8 b6 63 0c a6
+
+gold state-after-round-1 = a4 9c 7f f2 68 9f 35 2b 6b 5b ea 43 02 6a 50 49
+[check] round-1 matches FIPS-197 ?  True
+
+gold ciphertext  = 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+[check] ciphertext matches FIPS-197 Appendix B ?  True
+
+gold S-box entries (for the .html S-box recompute):
+  sbox[0x00] = 0x63
+  sbox[0x01] = 0x7c
+  sbox[0x53] = 0xed
+  sbox[0xff] = 0x16
+
+The .html rebuilds the S-box (inverse+affine), the key schedule,
+one full round, and the full AES-128 encrypt in JS on this exact (key, plaintext) and verifies the round-1 state and ciphertext match.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

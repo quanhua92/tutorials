@@ -1,0 +1,171 @@
+rsa.py - reference impl. All numbers below feed RSA.md.
+pure Python stdlib, deterministic (no randomness).
+
+keys: p=61, q=53, e=17   (toy primes for printable numbers)
+
+
+========================================================================
+  SECTION A: key generation  (p=61, q=53, e=17)
+========================================================================
+Pick two secret primes:  p = 61,  q = 53
+
+modulus    n = p*q            = 61*53        = 3233
+totient    φ = (p-1)(q-1)     = 60*52        = 3120
+
+The modulus n is PUBLIC (part of both keys). The totient φ is
+SECRET: knowing φ is exactly as valuable as knowing p and q,
+because d is computed from φ. An attacker who knows φ computes
+d = e^-1 mod φ instantly — so φ must never leak.
+
+public exponent e = 17   (a Fermat prime; must satisfy gcd(e,φ)=1)
+[check] gcd(e=17, φ=3120) = 1  ->  e is a valid exponent
+
+private exponent d = e^-1 mod φ = 17^-1 mod 3120 = 2753
+[check] e*d mod φ = 17*2753 mod 3120 = 1   (must be 1)
+
+PUBLIC  key = (n=3233, e=17)   <- publish this; anyone may encrypt
+PRIVATE key = (n=3233, d=2753)   <- keep secret; only you can decrypt
+
+Note n and e are SHARED between the two keys. The ONLY secret in
+the whole system is d (and, equivalently, p, q, and φ). Factoring
+n=3233 back into 61*53 is trivial for these tiny primes — but for
+a 2048-bit n it is believed infeasible (see §E).
+
+========================================================================
+  SECTION B: encrypt + decrypt  (the worked example)
+========================================================================
+plaintext m = 65   (ASCII 'A'; note m < n=3233)
+
+ENCRYPT  with public key (n=3233, e=17):
+  c = m^e mod n = 65^17 mod 3233 = 2790
+
+DECRYPT  with private key (n=3233, d=2753):
+  m = c^d mod n = 2790^2753 mod 3233 = 65
+
+[check] decrypt(encrypt(65)) == 65 ?  True
+
+--- a 3-character message 'CAT' ---
+  'C' m= 67 -> c= 641 -> decrypt= 67 ✓
+  'A' m= 65 -> c=2790 -> decrypt= 65 ✓
+  'T' m= 84 -> c=2159 -> decrypt= 84 ✓
+
+========================================================================
+  SECTION C: sign + verify  (digital signatures)
+========================================================================
+Signatures flip the roles of e and d:
+  SIGN   with PRIVATE key (n=3233, d=2753):  s = m^d mod n
+  VERIFY with PUBLIC  key (n=3233, e=17):        recover m = s^e mod n
+
+plaintext m = 42
+signature  s = m^d mod n = 42^2753 mod 3233 = 3065
+
+verify: s^e mod n = 3065^17 mod 3233 = 42
+[check] verify(sign(42)) == 42 ?  True
+
+Forgery attempt: an attacker sends s' = 999 (not a real signature):
+  verify(999) = 999^17 mod 3233 = 2464   != 42  -> REJECTED
+[check] a forged signature fails verification:  OK
+
+========================================================================
+  SECTION D: why it works — Euler's theorem  (the correctness proof)
+========================================================================
+We built d so that e*d ≡ 1 (mod φ). WHY does that make decryption
+undo encryption? The answer is Euler's theorem:
+
+  Euler's theorem:  if gcd(m, n) = 1,  then  m^φ(n) ≡ 1 (mod n).
+
+Since e*d ≡ 1 (mod φ), write e*d = 1 + k*φ for some integer k:
+  m^(e*d) = m^(1 + k*φ) = m * (m^φ)^k ≡ m * 1^k = m (mod n).
+So (m^e)^d = m^(e*d) ≡ m (mod n). Encrypt then decrypt gives m back.
+
+For our keys: e*d = 17*2753 = 46801 = 1 + 15*φ  (check: 1+15*3120 = 46801)
+
+Euler's theorem in action — m^φ ≡ 1 (mod n) for coprime m:
+
+| m  | gcd(m,n) | m^φ mod n |
+|----|----------|-----------|
+| 2  | 1        | 1        |  <- coprime -> 1
+| 7  | 1        | 1        |  <- coprime -> 1
+| 65 | 1        | 1        |  <- coprime -> 1
+| 100 | 1        | 1        |  <- coprime -> 1
+
+For m coprime to n, m^φ mod n is always 1. The chain
+m^(e*d) = m * (m^φ)^k = m * 1 = m holds, so decryption recovers m.
+
+HOW d IS COMPUTED — the extended Euclidean algorithm finds x with
+e*x + φ*y = 1, and x mod φ is d. Trace for e=17, φ=3120:
+
+| step |   a    |   b    |  q=a//b  |  r=a%b  |
+|------|--------|--------|----------|---------|
+| 0    | 17     | 3120   | 0        | 17      |
+| 1    | 3120   | 17     | 183      | 9       |
+| 2    | 17     | 9      | 1        | 8       |
+| 3    | 9      | 8      | 1        | 1       |
+| 4    | 8      | 1      | 8        | 0       |
+| 5    | 1      | 0      |  (gcd)   |         |  <- gcd=1
+
+Result: gcd=1, x=-367, y=2
+  check: e*x + φ*y = 17*-367 + 3120*2 = 1 (== gcd=1)
+  d = x mod φ = 2753
+
+========================================================================
+  SECTION E: security properties  (factoring hardness + key sizes)
+========================================================================
+RSA's security rests ENTIRELY on one assumption:
+
+  FACTORING n = p*q is hard for an attacker who knows only n.
+
+Why? Because every other secret (φ, d) follows from p and q:
+  know p,q  ->  φ=(p-1)(q-1)  ->  d=e^-1 mod φ  ->  private key.
+
+For our toy n this is trivial:
+  factor(3233) = 61 * 53   (a modern CPU does this in microseconds)
+
+But the difficulty EXPLODES with bit-length:
+
+| RSA modulus | bit-length | factoring effort            | status      |
+|-------------|------------|-----------------------------|-------------|
+| p=61,q=53 (toy) | 12         | instant                     | BROKEN (trivial) |
+| 512-bit     | 512        | ~weeks on a cluster         | BROKEN (2009) |
+| 768-bit     | 768        | ~1500 CPU-years (record)    | BROKEN (2009, Kleinjung) |
+| 1024-bit    | 1024       | estimated feasible for nation-states | deprecated  |
+| 2048-bit    | 2048       | infeasible today            | current minimum |
+| 3072-bit    | 3072       | infeasible for decades      | recommended |
+| 4096-bit    | 4096       | very hard; diminishing returns | conservative |
+
+The gap between 'easy to multiply' and 'hard to factor' is RSA's
+whole leverage: multiplying two 1024-bit primes to get n is fast,
+but recovering them from n alone is (we believe) infeasible.
+
+TEXTBOOK RSA (what this file implements) is NOT secure as-is. Real
+deployments add PADDING (OAEP for encryption, PSS for signatures)
+to defeat chosen-ciphertext and malleability attacks. Without
+padding, RSA is multiplicatively homomorphic:
+  enc(7)*enc(11) mod n = 2369*3061 mod 3233 = 3123
+  enc(7*11) = enc(77)            = 3123
+  equal? True   <- an attacker can combine ciphertexts
+
+That is why real RSA wraps every m in randomized padding before
+exponentiating. 🔗 The padding is hashed — see SHA256.md for how a
+cryptographic hash is built. (hashlib imported only to make the
+point that core RSA uses NO hashing internally.)
+
+========================================================================
+  SECTION F: GOLD values for rsa.html
+========================================================================
+Keys: p=61, q=53, n=3233, e=17, d=2753
+
+GOLD encrypt:  m=65 ('A')  ->  c = m^e mod n = 2790
+GOLD decrypt:  c=2790  ->  m = c^d mod n = 65
+GOLD sign:     m=42  ->  s = m^d mod n = 3065
+GOLD verify:   s=3065  ->  m = s^e mod n = 42
+
+GOLD scalar (compact .html check): encrypt(65) = 2790
+GOLD scalar (compact .html check): verify(sign(42)) = 42
+
+The .html re-derives (n,e,d) from p=61,q=53 and recomputes these
+values in JS, checking against the numbers above.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

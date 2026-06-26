@@ -1,0 +1,159 @@
+hyperloglog.py - reference impl. All numbers feed HYPERLOGLOG.md.
+stdlib only; deterministic (fixed integer-mix hash, reproducible in JS).
+Implements Flajolet et al. 2007 (AOFA '07).
+
+==========================================================================
+  SECTION A: the algorithm - bucket by p bits, keep max rho, harmonic mean
+==========================================================================
+p = 4  ->  m = 16 buckets, w = 28 rho bits. alpha_m = 0.6730
+
+For a few items, show hash -> [bucket bits | tail bits] -> rho, and
+how M[bucket] becomes the MAX rho seen there:
+
+   id  hash (32 bits, bucket|tail)               bucket  rho  M[bucket]
+  ----------------------------------------------------------------------
+    1  1001 0110101000001111100101101011       9    2          2 <-- new max
+    2  1011 0100010000100001101110111011      11    2          2 <-- new max
+    1  1001 0110101000001111100101101011       9    2          2 (dup)
+    3  1110 1101100000011101111011010011      14    1          1 <-- new max
+    4  0101 1000100111111101011101001000       5    1          1 <-- new max
+    2  1011 0100010000100001101110111011      11    2          2 (dup)
+    5  0101 1000001001010011000111000001       5    1          1 <-- new max
+    1  1001 0110101000001111100101101011       9    2          2 (dup)
+    6  0111 1010101011100001101011001110       7    1          1 <-- new max
+    7  0010 0011000101101010001100101001       2    3          3 <-- new max
+    8  1110 0100001110110110100110000001      14    2          2 <-- new max
+    3  1110 1101100000011101111011010011      14    1          2 (dup)
+  ...(18 more adds, incl duplicates)
+
+FINAL registers M[0..15] (max rho per bucket):
+  M[ 0.. 7]:  0  0  3  3  0  1  0  2
+  M[ 8..15]:  1  3  2  2  0  0  2  1
+
+empty buckets (M[j]==0): 6/16
+
+estimate = alpha_m * m^2 / sum(2^-M[j])
+  sum(2^-M[j]) = 8.8750
+  raw E = 0.6730 * 16^2 / 8.8750 = 19.41
+  small-range (E<=2.5m, 6 empty): E = m*ln(m/zeros) = 16*ln(16/6) = 15.69
+  -> cardinality estimate = 15.69
+  -> true distinct        = 20
+  -> relative error       = -21.53%
+
+KEY POINT: the stream had 30 adds but only 20 DISTINCT ids. Re-adding
+an id can only set M[bucket] to the SAME rho it already had (same hash)
+-> duplicates NEVER increase any register -> HLL is invariant to them.
+[check] duplicates do not change the estimate: OK
+
+==========================================================================
+  SECTION B: the error - standard error = 1.04/sqrt(m), verified
+==========================================================================
+HLL's relative error is set ONLY by m (the memory budget), not by the
+cardinality n. Theory (Flajolet 2007): standard error ≈ 1.04/sqrt(m).
+
+    p     m=2^p  theory SE = 1.04/sqrt(m)   memory (bytes)
+  ----------------------------------------------------------
+    4        16                 26.000%             16
+    6        64                 13.000%             64
+    8       256                  6.500%            256
+   10     1,024                  3.250%          1,024
+   12     4,096                  1.625%          4,096
+   14    16,384                  0.812%         16,384
+
+  Redis default p=14 (m=16384) -> 0.81% error for ~12 KiB. m=1024 ->
+  3.25% for 1 KiB. Pay memory, cut error: SE halves for every 4x m.
+
+  Empirical (seeded streams of n distinct ids, n in {1k,10k,100k}):
+
+        m         n    estimate  rel error  |err|/theory_SE
+  --------------------------------------------------------
+      256     1,000         948    -5.18%            0.80
+      256    10,000        9430    -5.70%            0.88
+      256   100,000       94853    -5.15%            0.79
+    4,096     1,000         988    -1.18%            0.73
+    4,096    10,000        9739    -2.61%            1.61
+    4,096   100,000      100172    +0.17%            0.11
+   16,384     1,000         998    -0.22%            0.27
+   16,384    10,000        9885    -1.15%            1.42
+   16,384   100,000      100203    +0.20%            0.25
+
+  |rel error| is usually within ~1-2 theory-SE for large n; the
+  estimator is a little biased LOW for very small n (the small-range
+  linear-counting correction fixes the n << m regime). The headline
+  number to remember: 1.04/sqrt(m) - memory for error, nothing else.
+
+==========================================================================
+  SECTION C: memory - HLL O(m) vs exact O(n), regardless of cardinality
+==========================================================================
+Exact count-distinct must store every distinct id seen (a set). HLL
+stores m = 2^p registers (one byte each for a 32-bit hash) regardless
+of how many distinct items appear.
+
+  bytes_HLL = m * register_width        (1 byte/register, 32-bit hash)
+  bytes_exact = n * id_width            (8 bytes per 64-bit id)
+
+  example: p=14 (Redis default) -> m=16,384 registers = 16,384 bytes (~16 KiB), standard error 0.81%
+
+  scenario (true distinct n)             exact bytes   HLL bytes     HLL win
+  --------------------------------------------------------------------------
+  10K distinct                                80,000      16,384          5x
+  1M distinct                              8,000,000      16,384        488x
+  1B distinct (ad users)               8,000,000,000      16,384     488281x
+  100B distinct (web scale)          800,000,000,000      16,384   48828125x
+
+  Read it: exact is linear in n. HLL is a CONSTANT ~16 KiB no matter
+  whether n is 10K or 100B. For 100B distinct ids, exact needs ~742 GB;
+  HLL needs 16 KiB and loses only ~0.8% accuracy. That is why every
+  modern analytics engine (BigQuery COUNT(DISTINCT), Presto, Druid,
+  Redis PFCOUNT) ships HyperLogLog for count-distinct.
+
+==========================================================================
+  SECTION D: applications - count-distinct, uniques, distributed merge
+==========================================================================
+Daily uniques estimate: 1,000,000 visits from ~250,000 distinct user ids.
+HLL p=14 (m=16,384, 16,384 bytes). estimate = 249,369 (true 250,000, rel error -0.25%).
+
+  HLL gives you 'how many unique users' in O(m) memory, streaming, with
+  no set of ids ever stored. That is the building block for:
+    * DAU/MAU (daily/monthly active users)
+    * unique-visitor counts in analytics dashboards
+    * distinct-query-count in databases (COUNT(DISTINCT))
+
+  Distributed merge: split the 250k ids across two shards, each keeps a
+  p=14 HLL, combine by register-wise MAX. Merged estimate = 249,369; max register diff vs single-pass = 0.
+[check] merge(shard_a, shard_b) == single-pass HLL? OK
+
+  This is why HLL is the standard for distributed count-distinct: each
+  shard summarises locally (~16 KiB), the coordinator takes the
+  register-wise max, and the union cardinality falls out - no shuffle
+  of raw ids across the network.
+
+==========================================================================
+  SECTION E: GOLD values - pinned for hyperloglog.html
+==========================================================================
+p = 4, m = 16, w = 28, alpha_m = 0.673000
+stream = [1, 2, 1, 3, 4, 2, 5, 1, 6, 7, 8, 3, 9, 10, 2, 11, 12, 13, 14, 5, 15, 16, 17, 1, 18, 19, 20, 4, 6, 3]  (30 adds, 20 distinct)
+
+GOLD per-item hash split (id 1..8):
+  id  1: hash=10010110101000001111100101101011  bucket= 9  rho=2
+  id  2: hash=10110100010000100001101110111011  bucket=11  rho=2
+  id  3: hash=11101101100000011101111011010011  bucket=14  rho=1
+  id  4: hash=01011000100111111101011101001000  bucket= 5  rho=1
+  id  5: hash=01011000001001010011000111000001  bucket= 5  rho=1
+  id  6: hash=01111010101011100001101011001110  bucket= 7  rho=1
+  id  7: hash=00100011000101101010001100101001  bucket= 2  rho=3
+  id  8: hash=11100100001110110110100110000001  bucket=14  rho=2
+
+GOLD registers M[0..15] = [0, 0, 3, 3, 0, 1, 0, 2, 1, 3, 2, 2, 0, 0, 2, 1]
+GOLD sum(2^-M[j]) = 8.875000
+GOLD raw E        = 19.412732
+GOLD empty buckets= 6
+GOLD final E      = 15.693268  (true 20, rel err -21.53%)
+
+GOLD compact scalar (for hyperloglog.html):
+  cardinality(TINY_STREAM) = 15.6933
+[check] registers reproduce on re-run: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

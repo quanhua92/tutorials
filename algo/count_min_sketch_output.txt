@@ -1,0 +1,155 @@
+count_min_sketch.py - reference impl. All numbers feed COUNT_MIN_SKETCH.md.
+stdlib only; deterministic (pinned hash params for the tiny example).
+Implements Cormode & Mirodnik 2004.
+
+==========================================================================
+  SECTION A: the algorithm - add() bumps d cells, estimate() takes the min
+==========================================================================
+d = 3 rows, w = 4 cols  -> 12 counters total. P = 1,000,003
+
+Hash family (multiply-mod-prime):  h_j(x) = ((a_j*x + b_j) mod P) mod w
+  row 0: a=140,892  b=841,235
+  row 1: a=596,854  b=800,875
+  row 2: a=888,599  b= 66,172
+
+stream = [1, 2, 1, 3, 1, 2, 1, 4, 1]
+(exact frequencies: {1: 5, 2: 2, 3: 1, 4: 1})
+
+Step through the first few adds - each add bumps exactly d cells:
+
+  add(1): positions = [3, 2, 3]   ->   row0[col3] +=1, row1[col2] +=1, row2[col3] +=1
+  add(2): positions = [0, 0, 3]   ->   row0[col0] +=1, row1[col0] +=1, row2[col3] +=1
+  add(1): positions = [3, 2, 3]   ->   row0[col3] +=1, row1[col2] +=1, row2[col3] +=1
+  add(3): positions = [0, 3, 3]   ->   row0[col0] +=1, row1[col3] +=1, row2[col3] +=1
+  add(1): positions = [3, 2, 3]   ->   row0[col3] +=1, row1[col2] +=1, row2[col3] +=1
+  ...(4 more adds)
+
+FINAL counter matrix (3 x 4), N = 9:
+  row 0: 4 0 0 5
+  row 1: 2 0 6 1
+  row 2: 0 0 0 9
+
+Per-item estimate = MIN over the d cells it hashed to (vs exact, vs over-count):
+
+  item                 cells touched  estimate  exact  over-count
+  ----------------------------------------------------------------
+     1                       [5,6,9]         5      5           0
+     2                       [4,2,9]         2      2           0
+     3                       [4,1,9]         1      1           0
+     4                       [4,6,9]         4      1           3
+
+  EVERY estimate >= exact (CMS never under-counts). Item 1 (heavy, exact
+  5) is recovered EXACTLY: the min across its cells [5,6,9] picks row 0,
+  where item 1 sits ALONE. Item 4 (rare, exact 1) is over-counted to 4:
+  its cells [4,6,9] ALL also absorbed the heavy item 1, so no row is
+  clean and the min (4) >> exact (1). That is over-counting: strangers
+  in the cell, bounded by eps*N. The min is the best you can do.
+
+[check] estimate(x) >= exact(x) for every item? True
+
+==========================================================================
+  SECTION B: the error bound  Pr[estimate - f(x) > eps*N] <= delta
+==========================================================================
+CMS's guarantee (Cormode & Mirodnik 2004): for ANY item x,
+      estimate(x)  <=  f(x) + eps*N     with probability >= 1-delta
+  where N = total stream weight, and (eps, delta) fix (w, d) via:
+      w = ceil(e/eps)         d = ceil(ln(1/delta))
+
+  | target eps | target delta |  w = ceil(e/eps) | d = ceil(ln(1/d)) | counters = d*w |
+  ------------------------------------------------------------------------------
+  |   0.01    |    0.01     |            272 |                 5 |         1,360 |
+  |   0.001    |    0.01     |          2,719 |                 5 |        13,595 |
+  |   0.001    |    0.0001     |          2,719 |                10 |        27,190 |
+  |   0.0001    |    0.001     |         27,183 |                 7 |       190,281 |
+
+  Note memory does NOT depend on the universe U: tracking a 64-bit-id
+  stream to eps=1e-3, delta=1e-4 costs ~5 * 2719 = 13,595 counters,
+  whether U is 10^3 or 10^18. Exact counting needs O(U).
+
+  empirical stream: N=200,000 items, universe U=5,000 distinct ids (seeded, skewed by chance to a handful of near-tops).
+
+  eps=0.002  delta=0.01   -> w=1,360  d=5:  max error/N = 146/200000 = 0.000730  (<= eps=0.002? YES)   items violating: 0/5000
+  eps=0.001  delta=0.001  -> w=2,719  d=7:  max error/N = 72/200000 = 0.000360  (<= eps=0.001? YES)   items violating: 0/5000
+  eps=0.02   delta=0.4    -> w=136    d=1:  max error/N = 1555/200000 = 0.007775  (<= eps=0.02? YES)   items violating: 0/5000
+
+  With enough d (depth), the worst per-item error stays under eps*N
+  -> the tail bound holds in practice. The sketch is ONE-SIDED: every
+  estimate is an over-estimate, so there is never a false 'too few'; the
+  only risk is 'too many', and that risk is what (eps, delta) bounds.
+
+==========================================================================
+  SECTION C: memory - CMS O(d*w) vs exact O(U), independent of the universe
+==========================================================================
+Exact per-item counting must store one counter for every key that COULD
+appear (the universe U). CMS stores a fixed d*w grid regardless of U.
+
+  bytes = (d*w) * counter_width       (4 bytes per 32-bit counter)
+  vs exact = U * counter_width  (and U can be astronomically large)
+
+  example sketch: eps=0.001, delta=0.001 -> d=7, w=2,719 = 19,033 counters = 74.3 KiB
+
+  scenario                                     exact bytes   CMS bytes     CMS win
+  --------------------------------------------------------------------------------
+  10K users (exact is fine here)                    40,000      76,132        0.5x
+  1M user ids                                    4,000,000      76,132      5e+01x
+  1B user ids (ad impressions)               4,000,000,000      76,132      5e+04x
+  64-bit ids (U = 2^64)                   73,786,976,294,838,206,464      76,132      1e+15x
+
+  Read it: exact is linear in U. CMS is a CONSTANT ~53 KiB no matter
+  whether U is 10K or 2^64. For U = 2^64, exact counting is impossible
+  (18 exabytes); CMS still costs ~53 KiB and loses only eps*N accuracy.
+  That trade - bounded memory, bounded additive error - is the deal CMS
+  offers, and why it lives inside telemetry / counting pipelines.
+
+==========================================================================
+  SECTION D: applications - heavy hitters, range sums, inner products
+==========================================================================
+Heavy-hitter detection on a skewed stream: N=50,000, item 42 planted at ~4,000 hits (~8%).
+CMS: eps=0.005, delta=0.01 -> d=5, w=544 counters.
+threshold for 'heavy' = 1% of N = 500.
+
+    item  exact f(x)  CMS estimate    heavy?   CMS says
+  --------------------------------------------------------
+      42       4,073         4,073     heavy      heavy
+
+  CMS recovers the heavy hitter(s) without ever storing item ids at
+  CMS-time. (To NAME them you pair CMS with a small candidate tracker;
+  CMS answers 'how big?' in O(1) for any id you ask about.)
+
+Other things the SAME sketch answers for free:
+  * inner product <f, g> of two streams   = min_j sum_k C1[j][k]*C2[j][k]
+      -> self-join size, traffic correlation, without joining the data.
+  * range / subrange sums                 = sum of estimates over a key range
+      -> 'how many hits from ids 100..200?'.
+  * distributed merge                     = two CMS with identical hash
+      fns add cell-wise -> the union sketch. Each shard keeps ~53 KiB;
+      the reducer adds d*w small ints, no shuffle of raw items.
+
+[check] merge(shard_a, shard_b) == single-pass sketch? a+b max cell diff = 0; fresh merged max cell diff = 0 -> OK
+
+==========================================================================
+  SECTION E: GOLD values - pinned for count_min_sketch.html
+==========================================================================
+d = 3, w = 4, P = 1000003
+hash params (a_j, b_j): [(140892, 841235), (596854, 800875), (888599, 66172)]
+stream = [1, 2, 1, 3, 1, 2, 1, 4, 1]
+
+GOLD counter matrix (counts[j][k]):
+  counts[0] = [4, 0, 0, 5]
+  counts[1] = [2, 0, 6, 1]
+  counts[2] = [0, 0, 0, 9]
+
+GOLD per-item cells + estimate + exact:
+  item 1: positions=[3, 2, 3] cells=[5, 6, 9] estimate=5 exact=5
+  item 2: positions=[0, 0, 3] cells=[4, 2, 9] estimate=2 exact=2
+  item 3: positions=[0, 3, 3] cells=[4, 1, 9] estimate=1 exact=1
+  item 4: positions=[0, 2, 3] cells=[4, 6, 9] estimate=4 exact=1
+
+GOLD compact scalars (for count_min_sketch.html):
+  estimate(item 1) = 5   (exact 5; heavy, near-exact)
+  estimate(item 4) = 4   (exact 1; light, over-counted)
+[check] gold scalars reproduce from the sketch: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

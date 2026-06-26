@@ -1,0 +1,169 @@
+reservoir_sampling.py - reference impl. All numbers below feed RESERVOIR_SAMPLING.md.
+python 3.14.5
+
+========================================================================
+  SECTION A: the algorithm -- Algorithm R, traced step by step
+========================================================================
+Stream (12 items): [A, B, C, D, E, F, G, H, I, J, K, L]
+Reservoir size k = 4, RNG seed = 0
+
+Algorithm R in one breath:
+  1. FILL     : first k items go straight into the reservoir.
+  2. REPLACE  : for item i (i >= k), draw j = randint(0, i); if j < k,
+                evict R[j] and put item i there; else drop item i.
+
+   i  item    phase   j=randint(0,i)  action                     reservoir
+  --------------------------------------------------------------------------------------
+   0     A     fill             --    R[0] = A  (slot fill)      [A]
+   1     B     fill             --    R[1] = B  (slot fill)      [A, B]
+   2     C     fill             --    R[2] = C  (slot fill)      [A, B, C]
+   3     D     fill             --    R[3] = D  (slot fill)      [A, B, C, D]
+   4     E  replace                3  R[3] = E  (evict D)        [A, B, C, E]
+   5     F  replace                3  R[3] = F  (evict E)        [A, B, C, F]
+   6     G  replace                0  R[0] = G  (evict A)        [G, B, C, F]
+   7     H  replace                4  drop H  (j >= k)           [G, B, C, F]
+   8     I  replace                8  drop I  (j >= k)           [G, B, C, F]
+   9     J  replace                7  drop J  (j >= k)           [G, B, C, F]
+  10     K  replace                6  drop K  (j >= k)           [G, B, C, F]
+  11     L  replace                4  drop L  (j >= k)           [G, B, C, F]
+
+Final reservoir = [G, B, C, F]
+Notice: early items (A,B,...) frequently get evicted by late arrivals;
+late items get in rarely but, once in, are safe (nothing evicts them
+afterwards). The balance is exactly k/N for everyone (Section B).
+
+[check] traced run == plain reservoir_sample():  OK
+
+========================================================================
+  SECTION B: probability proof -- every item has probability k/N
+========================================================================
+Claim: with N=12 and k=4, EVERY stream item lands in the final
+reservoir with probability exactly k/N = 4/12 = 33.3%.
+
+PROOF (telescoping product). Fix an item at 0-based index m.
+
+Case 1: m < k  (an early 'fill' item). It starts IN the reservoir. It
+stays iff no later step i (i = k..N-1) evicts it. At step i we draw
+j = randint(0, i); item m's slot is hit iff j == (m's slot), prob 1/(i+1).
+So:
+  P(stay) = Prod_{i=k}^{N-1} (1 - 1/(i+1)) = Prod_{i=k}^{N-1} i/(i+1)
+          = k/(k+1) * (k+1)/(k+2) * ... * (N-1)/N = k/N.   (telescopes)
+
+Case 2: m >= k (a late item). It must ENTER at step m, then SURVIVE:
+  P(enter at m) = k/(m+1)            (k good slots of i+1 = m+1)
+  P(survive)    = Prod_{i=m+1}^{N-1} i/(i+1) = (m+1)/N
+  P(final)      = (k/(m+1)) * (m+1)/N = k/N.
+
+Both cases give k/N. The boundary (m+1)/N is the telescoping hinge.
+
+Numerical telescoping check (N=12, k=4):
+  m= 0 (fill item): P = 0.333333   (k/N = 0.333333)  OK
+  m= 3 (fill item): P = 0.333333   (k/N = 0.333333)  OK
+  m= 4 (late item): P = 0.333333   (k/N = 0.333333)  OK
+  m=11 (late item): P = 0.333333   (k/N = 0.333333)  OK
+
+Monte Carlo over 200,000 independent runs (one shared RNG stream):
+  item     count   empirical P   target k/N     |err|
+     A     66677        0.3334       0.3333    0.0001
+     B     66523        0.3326       0.3333    0.0007
+     C     66444        0.3322       0.3333    0.0011
+     D     66494        0.3325       0.3333    0.0009
+     E     66662        0.3333       0.3333    0.0000
+     F     66952        0.3348       0.3333    0.0014
+     G     66627        0.3331       0.3333    0.0002
+     H     66832        0.3342       0.3333    0.0008
+     I     66603        0.3330       0.3333    0.0003
+     J     66871        0.3344       0.3333    0.0010
+     K     66532        0.3327       0.3333    0.0007
+     L     66783        0.3339       0.3333    0.0006
+
+  max |empirical - k/N| = 0.0014  (expected MC noise ~ sqrt(k/N*(1-k/N)/trials) = 0.0011)
+  [check] all items within ~5 sigma of k/N:  OK
+
+========================================================================
+  SECTION C: complexity -- O(N) time, O(k) space (the memory win)
+========================================================================
+Per item (i >= k): one rng.randint(0, i) + a compare + maybe one write.
+That is O(1) amortized. Over N items -> O(N) time. Memory is just the
+k reservoir slots -> O(k) space. The stream is consumed and forgotten.
+
+Contrast with the naive sampler (store all N, then rng.sample):
+| method              | passes | time   | space  | needs N up front? |
+|---------------------|--------|--------|--------|-------------------|
+| reservoir (Alg. R)  |   1    | O(N)   | O(k)   | no  (stream ok)   |
+| naive store+sample  |   1    | O(N)   | O(N)   | yes (or 2 passes) |
+| sort then take k    |   1    |O(NlogN)| O(N)   | yes               |
+
+Worked scaling: k=10, growing N. 'memory used' = max list length held.
+
+         N   reservoir mem (slots)   naive mem (slots)    ratio
+      1000                      10                1000     100x
+     10000                      10               10000    1000x
+    100000                      10              100000   10000x
+
+Reservoir memory is CONSTANT in N; naive memory grows LINEARLY. For
+N = 100,000 and k = 10, reservoir uses 10,000x LESS memory. That is the
+entire reason the algorithm exists -- sample from a stream that does not
+fit in RAM (logs, click streams, sensor feeds).
+
+[check] reservoir on N=5000, k=10: size=10, all distinct, in range:  OK
+         (reservoir result != naive result in general -- both are
+          valid uniform samples, just different draws. naive = [395, 475, 593, 771, 1235, 2652, 2995, 3234, 4389, 4774].)
+
+========================================================================
+  SECTION D: applications -- where single-pass uniform sampling matters
+========================================================================
+USE reservoir sampling when:
+  - you sample from a STREAM whose length is unknown or infinite
+    (logs, network packets, real-time metrics, a file too big for RAM).
+  - you want k random rows from a HUGE dataset in ONE pass, O(k) memory.
+  - you need a fixed-size RANDOM WINDOW over an evolving population
+    (e.g. 'keep 100 random active users' as the set churns).
+
+Classic real-world uses:
+  - random log/tap sampling: keep k lines out of millions flowing past.
+  - A/B experiment bucketing from an event stream of unknown volume.
+  - MapReduce 'sample k from each shard' then merge (distributed).
+  - 'Random line from a file' is just reservoir sampling with k=1
+    (the classic interview question; one line held, one pass, no len()).
+  - keeping a random subset of an infinite feed for later inspection.
+
+WHEN NOT to use it:
+  - N is known and small: just rng.sample(range(N), k) -- simpler, same.
+  - you need WEIGHTED sampling (items have unequal weights): use
+    Chao's algorithm or A-Res (Efraimidis-Spirakis 2006), NOT Algorithm R.
+  - k is close to N (k ~ N): just store everything; the memory win is gone.
+  - you need multiple independent samples: run independent reservoirs
+    (or weighted, but R alone won't deduplicate across runs).
+
+========================================================================
+  SECTION G: GOLD values (pinned for reservoir_sampling.html)
+========================================================================
+WORKED_STREAM = [A, B, C, D, E, F, G, H, I, J, K, L]  (N=12)
+WORKED_K = 4, WORKED_SEED = 0
+
+GOLD final reservoir    = [G, B, C, F]
+GOLD step count         = 12
+GOLD replacements (i>=k, j<k) = 3
+GOLD drops          (i>=k, j>=k) = 5
+GOLD j-sequence (j=randint(0,i) for each i) = [None, None, None, None, 3, 3, 0, 4, 8, 7, 6, 4]
+GOLD reservoir snapshots (per step i):
+  i= 0 -> [A]
+  i= 1 -> [A, B]
+  i= 2 -> [A, B, C]
+  i= 3 -> [A, B, C, D]
+  i= 4 -> [A, B, C, E]
+  i= 5 -> [A, B, C, F]
+  i= 6 -> [G, B, C, F]
+  i= 7 -> [G, B, C, F]
+  i= 8 -> [G, B, C, F]
+  i= 9 -> [G, B, C, F]
+  i=10 -> [G, B, C, F]
+  i=11 -> [G, B, C, F]
+
+[check] gold reservoir reproduces from reservoir_sample():  OK
+[check] traced j-sequence reproduces from a fresh seeded rng:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

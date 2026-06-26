@@ -1,0 +1,212 @@
+canary.py - reference simulation.
+All numbers below feed CANARY.md.
+python stdlib only; deterministic; no network, no clock.
+
+
+========================================================================
+  SECTION A: canary stages - the weight schedule (0->1->5->25->50->100)
+========================================================================
+A canary ramps traffic to v2 in stages. v1 always gets the rest,
+so v1% + v2% == 100 at every stage. Each bump is bigger than the last
+- small early (cheap to catch a bad v2), large once v2 is trusted.
+
+v1 baseline: error = 0.5%, p95 latency = 100ms.
+
+  weight  v1 %  v2 %  intent
+  ------  ----  ----  ------
+       0   100     0  baseline: v1 serves 100%
+       1    99     1  1% - smoke in prod; tiny blast radius
+       5    95     5  5% - first statistically meaningful slice
+      25    75    25  25% - quarter; real load signal
+      50    50    50  50% - half; confidence building
+     100     0   100  100% - v2 promoted; v1 drained
+
+[check] v1% + v2% == 100 at every weight?  True
+[check] schedule monotonic non-decreasing?  True
+
+Why these jumps (0->1->5->25->50->100): start near-zero so a broken
+release touches almost nobody; 5% is the first weight with enough
+traffic to trust the metrics (>= MIN_SIG_WEIGHT = 5%);
+then geometric-ish growth. Argo Rollouts encodes this as a `steps` list
+of setWeight + analysis actions (see Section C).
+
+========================================================================
+  SECTION B: automated analysis - PROMOTE vs ABORT at each stage
+========================================================================
+At every stage the analysis step compares v2 against the v1 baseline:
+
+    err_ratio = v2_err / 0.5        ABORT if > 2x
+    lat_ratio = v2_lat / 100       ABORT if > 1.5x
+    AND weight >= 5%   (significance gate: p<0.05 proxy)
+
+------------------------------------------------------------
+SCENARIO 1: HEALTHY canary (v2 behaves) -> promotes to 100%
+------------------------------------------------------------
+  stage  v1 %  v2 %   v2 err   v2 lat   decision  detail
+  -----  ----  ----  -------  -------  ---------  ------
+      0   100     0        -        -   BASELINE  baseline (v1 100%)
+      1    99     1    0.60%    102ms    PROMOTE  err 1.2x, lat 1.02x - within 2x/1.5x limits
+      2    95     5    0.55%    101ms    PROMOTE  err 1.1x, lat 1.01x - within 2x/1.5x limits
+      3    75    25    0.70%    105ms    PROMOTE  err 1.4x, lat 1.05x - within 2x/1.5x limits
+      4    50    50    0.65%    104ms    PROMOTE  err 1.3x, lat 1.04x - within 2x/1.5x limits
+      5     0   100        -        -   COMPLETE  PROMOTED (v2 100%)
+
+[check] invariants (1)-(3) hold?  True
+[check] promoted to 100%?          True
+[check] # analysis stages run      4
+
+------------------------------------------------------------
+SCENARIO 2: UNHEALTHY canary (v2 degrades at 25%) -> halt + rollback
+------------------------------------------------------------
+  stage  v1 %  v2 %   v2 err   v2 lat   decision  detail
+  -----  ----  ----  -------  -------  ---------  ------
+      0   100     0        -        -   BASELINE  baseline (v1 100%)
+      1    99     1    0.60%    102ms    PROMOTE  err 1.2x, lat 1.02x - within 2x/1.5x limits
+      2    95     5    0.80%    110ms    PROMOTE  err 1.6x, lat 1.10x - within 2x/1.5x limits
+      3    75    25    2.10%    180ms      ABORT  err 2.10% > 1.00% (=4.2x baseline); lat 180ms > 150ms (=1.80x baseline); p<0.05 significant @ 25%
+      4   100     0        -        -   ROLLBACK  halt + rollback: weight -> 0, v1 100%
+
+[check] invariants (1)-(3) hold?        True  (traffic:True mono:True abort-followed-by-rollback:True)
+[check] ABORT fired?                    True
+[check] rolled back to weight 0?        True
+
+Abort detail: at 25%, err 2.10% > 1.00% (=4.2x baseline); lat 180ms > 150ms (=1.80x baseline); p<0.05 significant @ 25%
+Blast radius: a broken v2 only reached 25% of users before rollback -
+not 100%. That smaller exposure is canary's whole advantage over blue-green.
+
+========================================================================
+  SECTION C: Argo Rollouts - AnalysisTemplate + weighted steps
+========================================================================
+Argo Rollouts automates this loop. A Rollout replaces a Deployment and
+drives a canary strategy: a `steps` list of setWeight + analysis actions,
+and an AnalysisTemplate holding the Prometheus queries + success/failure
+conditions. The controller advances on success, aborts on failure.
+
+The strategy (mirrors our schedule 0->1->5->25->50->100):
+
+  strategy:
+    canary:
+      steps:
+        - setWeight: 1
+        - analysis: { templates: [{ templateName: canary-check }] }
+        - setWeight: 5
+        - analysis: { templates: [{ templateName: canary-check }] }
+        - setWeight: 25
+        - analysis: { templates: [{ templateName: canary-check }] }
+        - setWeight: 50
+        - analysis: { templates: [{ templateName: canary-check }] }
+        - setWeight: 100     # promoted
+
+The AnalysisTemplate (our analyze() rule as YAML):
+
+  apiVersion: argoproj.io/v1alpha1
+  kind: AnalysisTemplate
+  metadata: { name: canary-check }
+  spec:
+    args:
+      - name: service-name
+    metrics:
+      - name: error-rate
+        successCondition: result[0] <= 1.00   # v2 err <= 2x baseline
+        failureCondition: result[0] > 1.00     # hard fail -> abort
+        provider: { prometheus: { query: "..." } }
+      - name: p95-latency
+        successCondition: result[0] <= 150    # v2 lat <= 1.5x baseline
+        provider: { prometheus: { query: "..." } }
+
+Auto-promote: every step's analysis succeeds -> controller runs setWeight
+100 and the Rollout completes. Auto-abort: any analysis hits
+failureCondition -> controller sets weight back to 0 (rollback) and
+marks the Rollout Degraded. This is exactly our run_canary() loop.
+
+========================================================================
+  SECTION D: canary vs blue-green - gradual exposure vs instant flip
+========================================================================
+Same goal (ship v2 with a safety net), opposite risk profiles:
+
+| aspect          | canary                         | blue-green             |
+|-----------------|--------------------------------|------------------------|
+| exposure        | gradual (1% -> 100%)           | instant (100% at once) |
+| blast radius    | small early; grows per stage   | 100% on cutover        |
+| rollback        | route 100% back to v1 (1 step) | flip router back (1)   |
+| resource cost   | ~1x (small canary slice)       | 2x (both envs built)   |
+| traffic split   | weighted (e.g. 75/25)          | {0,100} only           |
+| needs metrics   | YES (gated by analysis)        | no (manual cutover ok) |
+| good for        | risky change, large blast if bad| instant swap, fixed traffic|
+
+[check] canary allows a PARTIAL split?   (75, 25) (v1/v2 at 25%)  -> yes
+[check] blue-green allows a partial split?  no - it is {0,100} only
+
+Rule of thumb: canary when you can MEASURE v2 and a bad release must
+touch few users; blue-green when you want a guaranteed one-step undo and
+can afford the idle capacity. Many teams canary the risky 1->50% then
+finish with a blue-green-style flip to 100%.
+
+========================================================================
+  SECTION E: Flagger - progressive delivery operator
+========================================================================
+Flagger is a Kubernetes operator that runs the SAME loop (advance weight,
+analyse, promote/halt) driven by a Canary CRD and a metric provider
+(Prometheus, Datadog, Cloud Watch, Graphite). You declare the target and
+the thresholds; Flagger drives the dimmer for you.
+
+A Flagger Canary (mirrors our analyze() thresholds):
+
+  apiVersion: flagger.app/v1beta1
+  kind: Canary
+  spec:
+    service: { port: 80, targetPort: 8080, gateways: [public] }
+    analysis:
+      interval: 1m         step: 5m         maxWeight: 100
+      threshold: { max: 1.00 }   # abort if v2 err > 2x
+      metrics:
+        - name: error-rate
+          threshold: { max: 1.0 }
+          query: "..."        # from Prometheus
+        - name: latency-p95
+          threshold: { max: 150 }
+      weights: { minimum: 1, maximum: 100, stepWeight: 5 }
+
+The Flagger reconcile loop (deterministic, like run_canary):
+  1. INITIALIZE  - clone v1 to a v2 deployment + a weighted route (1/99).
+  2. ADVANCE     - bump v2 weight by stepWeight each interval that passes.
+  3. ANALYSE     - query the metric provider; compare v2 vs the threshold.
+  4. PROMOTE     - all weights pass -> weight 100, v1 scaled to 0.
+  5. HALT/ROLLBACK - a metric fails -> weight 0, alert fired, v1 100%.
+
+[check] Flagger threshold.max error == our ERROR_MULT baseline?  1.00% == 1.00%
+[check] Flagger loop == run_canary() loop?  advance -> analyse -> promote/halt: yes, identical shape
+
+Argo Rollouts vs Flagger: same outcome, different ergonomics. Argo is
+step-list driven (explicit setWeight/analysis actions). Flagger is
+interval/threshold driven (it picks the weights). Both need a service
+mesh or an LB that supports weighted routing (Istio, Linkerd, App Mesh,Contour, NGINX).
+
+========================================================================
+  GOLD CHECK: weight progression matches expected; rollback on error
+========================================================================
+HEALTHY rollout trace:
+  stage : 0  1  2  3  4  5
+  weight:   0    1    5   25   50  100
+  decide: BASE  PROM  PROM  PROM  PROM  COMP
+
+UNHEALTHY rollout trace:
+  stage : 0  1  2  3  4
+  weight:   0    1    5   25    0
+  decide: BASE  PROM  PROM  ABOR  ROLL
+
+[check] healthy weights == [0, 1, 5, 25, 50, 100]?          True
+[check] unhealthy weights == [0, 1, 5, 25, 0]?       True
+[check] healthy invariants (1)-(3) hold?                 True
+[check] unhealthy invariants (1)-(3) hold?               True
+[pin] healthy final decision = COMPLETE @ 100%
+[pin] unhealthy abort stage   = 25%
+[pin] unhealthy final state   = ROLLBACK @ 0%
+[pin] healthy # stages = 6  |  unhealthy # stages = 5
+[check] healthy completes @ 100%?     True
+[check] unhealthy aborts + rolls back? True
+[check] all gold pins reproduced:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

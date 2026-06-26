@@ -1,0 +1,171 @@
+kube_proxy.py - reference simulation of the kube-proxy data plane.
+All numbers below feed KUBE_PROXY.md.
+stdlib only; deterministic. RNG = xorshift32 (portable to JS).
+
+========================================================================
+  SECTION A: iptables mode - the KUBE-SVC/KUBE-SEP chain (equal 1/3)
+========================================================================
+Service 'web': ClusterIP 10.96.0.10:80 -> targetPort 8080
+
+Backends (the desks behind the switchboard):
+  idx  name   ip:port            node
+  0    web-a 10.244.1.5:8080      node-1
+  1    web-b 10.244.2.3:8080      node-2
+  2    web-c 10.244.3.7:8080      node-3
+
+kube-proxy writes a 3-tier iptables chain:
+
+  -A KUBE-SERVICES -d 10.96.0.10/32 -p tcp --dport 80 -j KUBE-SVC-WEB
+  -A KUBE-SVC-WEB -m statistic --mode random --probability 0.33333333 -j KUBE-SEP-WEB0
+  -A KUBE-SVC-WEB -m statistic --mode random --probability 0.50000000 -j KUBE-SEP-WEB1
+  -A KUBE-SVC-WEB -j KUBE-SEP-WEB2
+  -A KUBE-SEP-WEB0 -p tcp -j DNAT --to-destination 10.244.1.5:8080
+  -A KUBE-SEP-WEB1 -p tcp -j DNAT --to-destination 10.244.2.3:8080
+  -A KUBE-SEP-WEB2 -p tcp -j DNAT --to-destination 10.244.3.7:8080
+
+The statistic chain gives each pod an EQUAL 1/3 share:
+  rule 0: 1/3 of all flow            -> web-a (KUBE-SEP-WEB0)
+  rule 1: 1/2 of the remaining 2/3    -> web-b (KUBE-SEP-WEB1)
+  rule 2: all remaining (= 1/3)       -> web-c (KUBE-SEP-WEB2)
+
+Simulating 300 NEW connections to 10.96.0.10:80 (seeded xorshift32, seed=42):
+  pod        hits   share
+  web-a      107     35.7%
+  web-b      98      32.7%
+  web-c      95      31.7%
+  total      300
+
+GOLD hit counts (pinned for kube_proxy.html) = [107, 98, 95]
+[check] each pod within 8% of 100?  OK
+
+========================================================================
+  SECTION B: connection tracking - ESTABLISHED flows stick to a backend
+========================================================================
+Once a connection's first packet picks a backend, conntrack CACHES the
+DNAT. Every later packet of the SAME connection hits the cached entry
+and goes to the SAME backend - the statistic chain is SKIPPED (the
+kernel fast-paths ESTABLISHED flows). So 'random' applies only to NEW
+connections.
+
+Client 10.0.0.50 opens a connection, then sends 4 more packets:
+  pkt#  5-tuple key                                  -> backend  state
+  #0    10.0.0.50:40000 -> 10.96.0.10:80            -> web-a  NEW (conntrack recorded)
+  #1    10.0.0.50:40000 -> 10.96.0.10:80            -> web-a  ESTABLISHED (conntrack reuse)
+  #2    10.0.0.50:40000 -> 10.96.0.10:80            -> web-a  ESTABLISHED (conntrack reuse)
+  #3    10.0.0.50:40000 -> 10.96.0.10:80            -> web-a  ESTABLISHED (conntrack reuse)
+  #4    10.0.0.50:40000 -> 10.96.0.10:80            -> web-a  ESTABLISHED (conntrack reuse)
+
+All 5 packets of the connection land on the SAME backend (the first
+packet's pick). Only packet #0 ran the statistic chain.
+
+sessionAffinity: ClientIP extends stickiness to NEW connections:
+  (a second NEW connection from the SAME client IP stays sticky)
+  conn#1 10.0.0.50:40001 -> web-b  AFFINITY miss -> recorded ClientIP 10.0.0.50 -> backend 1 (sticky 10800s)
+  conn#2 10.0.0.50:40002 -> web-b  AFFINITY hit (ClientIP 10.0.0.50 sticky, TTL 10800s)
+
+[check] 1 conntrack flow reused for all 5 packets; 1 affinity entry for the client IP: OK
+
+========================================================================
+  SECTION C: IPVS mode - kernel L4 LB, schedulers (rr, wrr, lc, wlc)
+========================================================================
+In IPVS mode kube-proxy talks to the kernel's IP Virtual Server - a
+dedicated L4 load balancer. Service lookup is a HASH (O(1)); the
+scheduler picks a real server. Available schedulers:
+  rr   round-robin            lc   least-connection
+  wrr  weighted round-robin   wlc  weighted least-connection
+  sh   source hashing         sed  shortest expected delay
+  dh   destination hashing    nq   never queue
+
+IPVS commands for Service 10.96.0.10:80:
+  ipvsadm -A -t 10.96.0.10:80 -s wrr
+  ipvsadm -a -t 10.96.0.10:80 -r 10.244.1.5:8080 -m -w 1
+  ipvsadm -a -t 10.96.0.10:80 -r 10.244.2.3:8080 -m -w 2
+  ipvsadm -a -t 10.96.0.10:80 -r 10.244.3.7:8080 -m -w 1
+
+rr scheduler, first 6 picks: ['web-a', 'web-b', 'web-c', 'web-a', 'web-b', 'web-c']
+
+weights: web-a=1, web-b=2, web-c=1
+  expected proportions: web-a=1/4=25%, web-b=2/4=50%, web-c=1/4=25%
+wrr scheduler, first cycle (4 picks = sum of weights): ['web-b', 'web-a', 'web-b', 'web-c']
+
+Simulating 400 requests through IPVS wrr (deterministic, no RNG):
+  pod        hits   share    expected
+  web-a      100     25.0%    25.0%
+  web-b      200     50.0%    50.0%
+  web-c      100     25.0%    25.0%
+  total      400
+
+GOLD wrr counts (pinned) = [100, 200, 100]
+[check] wrr proportions EXACTLY match weights over complete cycles?  OK
+
+========================================================================
+  SECTION D: performance - iptables O(n) scan vs IPVS O(1) hash
+========================================================================
+iptables is a LINEAR rule list. A packet is matched against rules in
+order until one fires. With S Services x E endpoints, kube-proxy
+writes ~S*(2E+1) rules. A packet to the LAST Service walks nearly ALL
+of them before matching. IPVS instead hashes the Service (O(1)).
+
+  | cluster size | Services | ep/Svc | iptables rules | avg scan | worst scan | IPVS lookup |
+  |--------------|----------|--------|----------------|----------|------------|-------------|
+  | 100 Svcs     | 100      | 10     | 2,100          | 50       | 100        | O(1) hash   |
+  | 1000 Svcs    | 1000     | 10     | 21,000         | 500      | 1000       | O(1) hash   |
+  | 10000 Svcs   | 10000    | 10     | 210,000        | 5000     | 10000      | O(1) hash   |
+  | 100000 Svcs  | 100000   | 10     | 2,100,000      | 50000    | 100000     | O(1) hash   |
+
+Read it as: at 10K Services x 10 endpoints, iptables ships ~210K rules
+and a typical packet walks ~5K of them. IPVS does ONE hash lookup.
+That is why IPVS is recommended for clusters with thousands of
+Services. (Cilium's eBPF data plane removes both - see cni.py.)
+
+[check] 1000 Svcs x 10 ep = 21000 rules; worst-case scan = 999: OK
+
+========================================================================
+  SECTION E: client-side load balancing - skipping kube-proxy
+========================================================================
+kube-proxy load-balances IN THE KERNEL of the originating node. An
+alternative is to load-balance IN THE CLIENT, skipping kube-proxy
+(and the ClusterIP) entirely. Two common forms:
+
+  | approach               | how it picks a pod                          | when to use             |
+  |------------------------|---------------------------------------------|-------------------------|
+  | Envoy sidecar (Istio)  | proxy container per pod; xDS-discovered cluster; RR / least-request | service mesh; sidecar injected |
+  | gRPC client-side LB    | the gRPC channel balances: pick-first or round_robin over pod IPs | app uses gRPC; no kernel rules |
+
+Trade-off: client-side LB removes kube-proxy's O(n) cost and the ClusterIP indirection, but REQUIRES every client to speak the LB protocol (gRPC) or carry a sidecar (Envoy). Plain HTTP/TCP clients still need kube-proxy.
+
+With a Headless Service (clusterIP: None), DNS returns the pod IPs
+directly - the client-side LB iterates them. No kube-proxy rules are
+written at all. (See service_endpoints.py Section D for headless.)
+
+[check] two client-side LB paths modeled (Envoy sidecar, gRPC): OK
+
+========================================================================
+  GOLD: traffic distribution matches expected weights
+========================================================================
+The bundle's gold-check: traffic distribution matches the EXPECTED
+WEIGHTS for both data planes. The .html recomputes both simulations
+from the IDENTICAL RNG + IPVS functions.
+
+GOLD 1 - iptables mode (equal weights, seed=42, 300 reqs):
+  counts = [107, 98, 95]   (each pod ~100)
+  [check] within 8% of 100?  OK
+
+GOLD 2 - IPVS wrr (weights [1, 2, 1], 400 reqs = 100 cycles):
+  counts        = [100, 200, 100]
+  first cycle   = ['web-b', 'web-a', 'web-b', 'web-c']
+  expected      = [100, 200, 100]  (weight_i * 100)
+  [check] counts == expected?  OK
+
+GOLD summary (feeds kube_proxy.html):
+
+  | # | mode          | weights  | counts            | expected proportions |
+  |---|---------------|----------|-------------------|----------------------|
+  | 1 | iptables rand | [1,1,1]  | [107, 98, 95]     | ~33% / 33% / 33%       |
+  | 2 | IPVS wrr      | [1,2,1]  | [100, 200, 100]   | 25% / 50% / 25%        |
+
+[check] both distributions match expected weights: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

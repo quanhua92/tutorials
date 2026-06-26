@@ -1,0 +1,153 @@
+coredns.py - reference simulation.
+All numbers below feed COREDNS.md.
+stdlib only; deterministic. No RNG -- DNS resolution is pure logic.
+
+========================================================================
+  SECTION A: CoreDNS itself -- a Service named kube-dns
+========================================================================
+CoreDNS runs as a Deployment in kube-system (typically 2 replicas).
+It is exposed by a Service named 'kube-dns' whose ClusterIP is the
+fixed address every pod queries:
+
+  Service: kube-dns   (namespace: kube-system)
+  ClusterIP: 10.96.0.10     <- this is in every pod's resolv.conf
+  port: 53/UDP, 53/TCP          <- standard DNS port
+  selector: k8s-app=kube-dns     -> the CoreDNS pods
+
+CRITICAL: 10.96.0.10 is a ClusterIP, NOT a CoreDNS pod IP. A pod's
+DNS query goes to 10.96.0.10; kube-proxy DNATs it to one of the
+CoreDNS pods -- exactly like any Service (see SERVICE_ENDPOINTS.md).
+
+The cluster objects in this simulation:
+  name        ns        clusterIP        headless   pods
+  web-svc     default   10.96.0.20       False      -
+  cache-svc   prod      10.96.0.30       False      -
+  backend     default   None             True       10.244.1.5, 10.244.2.6, 10.244.3.7
+
+[check] kube-dns ClusterIP is in the service CIDR 10.96.0.0/16?  OK
+
+========================================================================
+  SECTION B: Service DNS -- one name -> ONE ClusterIP
+========================================================================
+A normal Service has a ClusterIP. A DNS A-record query for its FQDN
+returns that ONE virtual IP. This is how pods find services without
+hardcoding IPs.
+
+  query (A): web-svc.default.svc.cluster.local
+    answer : 10.96.0.20   (type=service A, rcode=NOERROR)
+    -> pod dials 10.96.0.20, kube-proxy DNATs to a backing pod
+
+  query (A): cache-svc.prod.svc.cluster.local
+    answer : 10.96.0.30   (type=service A, rcode=NOERROR)
+    -> pod dials 10.96.0.30, kube-proxy DNATs to a backing pod
+
+Pattern: <service>.<namespace>.svc.cluster.local -> ClusterIP.
+Cross-namespace lookup REQUIRES the namespace: cache-svc.prod.svc...
+(a pod in 'default' asking 'cache-svc' alone would miss -- see Section D).
+
+[check] web-svc.default.svc.cluster.local -> exactly one IP 10.96.0.20?  OK
+
+========================================================================
+  SECTION C: headless Service + pod DNS -- N pod IPs  (GOLD)
+========================================================================
+Set a Service's clusterIP to None (headless) and there is NO virtual
+IP and NO kube-proxy load balancing. An A-record query instead returns
+the pod IPs DIRECTLY (round-robin). Used by StatefulSets, gRPC client-
+side LB, and anything that wants to reach EACH pod, not a random one.
+
+  query (A): backend.default.svc.cluster.local
+    answer : 10.244.1.5, 10.244.2.6, 10.244.3.7   (N A records, round-robin)
+    type   : headless A
+
+Compare the two shapes side by side:
+  web-svc.default.svc.cluster.local (normal)   -> [10.96.0.20]            1 VIP
+  backend.default.svc.cluster.local (headless) -> 10.244.1.5, 10.244.2.6, 10.244.3.7  N pod IPs
+
+POD DNS (the reverse encoding): a pod's IP is encoded as a DNS name by
+replacing each dot with a dash, under the pod zone pod.cluster.local:
+  10-244-1-5.default.pod.cluster.local       -> 10.244.1.5   (pod backend-0)
+  10-244-2-6.default.pod.cluster.local       -> 10.244.2.6   (pod backend-1)
+  10-244-3-7.default.pod.cluster.local       -> 10.244.3.7   (pod backend-2)
+
+The dash-encoding exists because DNS labels cannot contain dots, and
+the IP 10.244.1.5 has 3 dots -> 10-244-1-5. Resolving it back yields
+the literal pod IP. Rarely used by apps, but it makes every pod's IP a
+valid, resolvable name (useful for debugging / inverse lookups).
+
+GOLD resolution map (pinned for coredns.html):
+  web-svc.default.svc.cluster.local          -> ['10.96.0.20']
+  backend.default.svc.cluster.local          -> ['10.244.1.5', '10.244.2.6', '10.244.3.7']
+  10-244-1-5.default.pod.cluster.local       -> ['10.244.1.5']
+
+[check] all three query shapes resolve to the gold IPs?  OK
+
+========================================================================
+  SECTION D: search domains + ndots -- how 'web-svc' (short) resolves
+========================================================================
+A pod's /etc/resolv.conf is injected by kubelet. It names the kube-dns
+IP (10.96.0.10) and a SEARCH LIST so short names work:
+
+  nameserver 10.96.0.10
+  search default.svc.cluster.local svc.cluster.local cluster.local
+  options ndots:5
+
+The search list for a pod in namespace 'default':
+    default.svc.cluster.local
+    svc.cluster.local
+    cluster.local
+
+ndots:5 means: if the query name has FEWER than 5 dots, try it as
+RELATIVE first (append each search domain). 'web-svc' has 0 dots, so:
+  try web-svc.default.svc.cluster.local  -> NOERROR -> 10.96.0.20   ✓ (1st search domain)
+
+  resolve_short('web-svc'):
+    expanded -> web-svc.default.svc.cluster.local
+    answer   -> ['10.96.0.20']
+    via      -> search domain default.svc.cluster.local
+
+CROSS-NAMESPACE pitfall: 'cache-svc' alone expands to
+cache-svc.default.svc.cluster.local -> NXDOMAIN (it lives in 'prod').
+  resolve_short('cache-svc') -> rcode NXDOMAIN  (must use cache-svc.prod.svc.cluster.local)
+
+WHY ndots:5 (not the libc default 1): cluster FQDNs like
+web-svc.default.svc.cluster.local have 4 dots. With ndots:5 such a name
+is STILL treated as relative first, causing redundant search lookups --
+a known footgun that NodeLocal DNS (Section E) helps absorb.
+
+[check] short 'web-svc' resolves via search, 'cache-svc' misses?  OK
+
+========================================================================
+  SECTION E: NodeLocal DNS cache -- caching + conntrack relief
+========================================================================
+Under high DNS churn (many pods resolving at once), every query is a
+UDP packet from the pod to 10.96.0.10. That packet crosses conntrack
+(the connection-tracking table). At scale, conntrack entry CREATION for
+ephemeral source ports + CoreDNS load can cause dropped queries and
+5s+ stalls (DNS timeout). NodeLocal DNSCache fixes both:
+
+  * runs as a DaemonSet on EVERY node (a cache, not a new resolver)
+  * listens on a node-local IP that all pods are configured to use
+  * answers from CACHE for repeat queries (most lookups repeat)
+  * cache miss -> forwards to the real CoreDNS (10.96.0.10)
+
+The data path, with and without NodeLocal:
+  WITHOUT: pod -> 10.96.0.10 (cross-node, conntrack entry per query)
+           -> CoreDNS pod (load-balanced by kube-proxy)
+  WITH   : pod -> NodeLocal cache (SAME node, cached or forwarded)
+           cache MISS -> CoreDNS pod  (only on miss)
+
+Effect: repeat queries never leave the node (lower latency), and far
+fewer packets hit conntrack (avoids the conntrack-exhaustion stall).
+
+STUB DOMAINS + UPSTREAM (how non-cluster names are resolved):
+  CoreDNS owns cluster.local. For everything else it FORWARDS:
+    - stub domain: forward acme.local -> 10.50.0.2 (a corporate DNS)
+    - default upstream: the node's /etc/resolv.conf (cloud metadata / 8.8.8.8)
+  So 'web-svc.default.svc.cluster.local' is answered LOCALLY, while
+  'github.com' is forwarded upstream. One server, two zones.
+
+[check] NodeLocal caches locally, forwards misses to CoreDNS?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

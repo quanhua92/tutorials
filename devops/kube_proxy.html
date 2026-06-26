@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kube-proxy — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3; --teal:#1abc9c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:220px;accent-color:var(--green);vertical-align:middle}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .barwrap .lab{width:96px;color:var(--ink);font-size:.82rem;font-family:ui-monospace,monospace}
+  .barwrap .track{position:relative;flex:1;height:22px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px;transition:width .15s}
+  .barwrap .mark{position:absolute;top:0;height:100%;width:2px;background:rgba(255,255,255,.35)}
+  .barwrap .num{width:140px;text-align:right;font-variant-numeric:tabular-nums;font-size:.8rem;color:var(--ink)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  table{border-collapse:collapse;font-size:.8rem;margin-top:.4rem;font-variant-numeric:tabular-nums}
+  table td,table th{border:1px solid #30363d;padding:4px 9px;text-align:left}
+  table th{color:var(--muted);font-weight:600}
+  #arch{display:block;width:100%;max-width:980px;height:260px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>kube-proxy — iptables &amp; IPVS data plane — interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/KUBE_PROXY.md">KUBE_PROXY.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/kube_proxy.py">kube_proxy.py</a></h1>
+  <div class="sub"><b style="color:var(--green)">kube-proxy</b> runs on every node and programs kernel rules so a packet to the ClusterIP
+    (<code>10.96.0.10:80</code>) is DNAT'd in flight to a pod. Two data planes: <b style="color:var(--blue)">iptables</b>
+    (a linear <code>-m statistic</code> chain) or <b style="color:var(--orange)">IPVS</b> (a kernel L4 LB with O(1) lookup).
+    Slide the request count and switch weights — the page re-runs the <i>same</i> seeded xorshift32 + the deterministic IPVS wrr
+    scheduler as <code>kube_proxy.py</code> Section GOLD.</div>
+
+  <!-- ===== PANEL 1: ARCHITECTURE (client -> ClusterIP -> kube-proxy -> pods) ===== -->
+  <h2>① The chain: client dials ClusterIP → kube-proxy DNAT → one pod</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to look at:</b> a client dials the stable <b>10.96.0.10:80</b>. kube-proxy on the
+      <i>originating</i> node rewrites the destination to a pod IP (DNAT) BEFORE the packet leaves. Toggle the data plane to see the
+      different kernel mechanisms — iptables walks a rule chain, IPVS does one hash lookup.</div>
+    <div class="controls">
+      <button id="bIpt" class="active">iptables mode</button>
+      <button id="bIpvs">IPVS mode</button>
+    </div>
+    <canvas id="arch" width="980" height="260"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--gold)"></i>ClusterIP (stable)</span>
+      <span><i class="sw" style="background:var(--blue)">kube-proxy data plane</i></span>
+      <span><i class="sw" style="background:var(--green)"></i>backend pod (DNAT target)</span>
+    </div>
+    <div class="readout" id="archReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: TRAFFIC DISTRIBUTION (GOLD) ===== -->
+  <h2>② Traffic distribution — iptables random vs IPVS wrr (recomputed in JS)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> the hit counts are not made up — the page re-runs the routing on the <b>identical</b>
+      seeded xorshift32 (seed=42) and the deterministic IPVS wrr scheduler as <code>kube_proxy.py</code> Section GOLD. The green
+      <span class="badge" style="padding:1px 6px">check: OK</span> confirms the JS counts match the .py gold exactly.</div>
+    <div class="controls" style="margin:.4rem 0">
+      <button class="active" data-d="iptables">iptables (equal 1/3)</button>
+      <button data-d="ipvs">IPVS wrr (1,2,1)</button>
+      <label style="margin-left:1rem">requests
+        <input type="range" id="nreq" min="3" max="1200" value="300" step="3">
+        <span class="val" id="nreqVal">300</span>
+      </label>
+    </div>
+    <div id="bars"></div>
+    <div class="readout" id="simReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: CONNTRACK STICKINESS ===== -->
+  <h2>③ conntrack — ESTABLISHED flows stick to the first-chosen backend</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> a connection's first packet runs the statistic chain and picks a pod.
+      Every later packet of the <i>same</i> connection is fast-pathed via conntrack to the <b>same</b> pod — the chain is skipped.
+      <code>sessionAffinity: ClientIP</code> extends stickiness to NEW connections from the same IP.</div>
+    <div id="ctBox"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS sims match kube_proxy.py Section GOLD (iptables [107,98,95] @300; IPVS wrr [100,200,100] @400).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth model + RNG, copied from kube_proxy.py ===== */
+const SVC={name:'web', vip:'10.96.0.10', port:80, targetPort:8080};
+const PODS=[
+  {name:'web-a', ip:'10.244.1.5', port:8080, node:'node-1'},
+  {name:'web-b', ip:'10.244.2.3', port:8080, node:'node-2'},
+  {name:'web-c', ip:'10.244.3.7', port:8080, node:'node-3'},
+];
+const WEIGHTS=[1,2,1];
+
+/* xorshift32 — byte-identical to Python class RNG in kube_proxy.py */
+function makeRng(seed){ let s=(seed>>>0)||1; return {
+  next(){ s^=(s<<13); s^=(s>>>17); s^=(s<<5); s>>>=0; return s; },
+  uniform(){ return this.next()/0x100000000; }
+};}
+
+/* chained statistic routing, mirrors iptables_route() in the .py */
+function iptablesRoute(rng,n){
+  const r=rng.uniform(); let cum=0, rem=1.0;
+  for(let i=0;i<n;i++){ const p=rem*(1.0/(n-i)); cum+=p; rem-=p; if(r<cum) return i; }
+  return n-1;
+}
+function simIptables(nReq,seed){
+  const rng=makeRng(seed), counts=new Array(PODS.length).fill(0);
+  for(let i=0;i<nReq;i++) counts[iptablesRoute(rng,PODS.length)]++;
+  return counts;
+}
+
+/* IPVS wrr scheduler — mirrors ipvs_wrr_sequence() (kernel ip_vs_wrr.c). Deterministic. */
+function gcd(a,b){ while(b){ [a,b]=[b,a%b]; } return a; }
+function ipvsWrr(weights, nSteps){
+  const n=weights.length;
+  let g=weights[0]; for(let i=1;i<n;i++) g=gcd(g,weights[i]);
+  const maxw=Math.max.apply(null,weights);
+  const seq=[]; let i=-1, cw=0, count=0;
+  while(count<nSteps){
+    i=(i+1)%n;
+    if(i===0){ cw-=g; if(cw<=0){ cw=maxw; if(cw===0) break; } }
+    if(weights[i]>=cw){ seq.push(i); count++; }
+  }
+  return seq;
+}
+function simIpvsWrr(weights,nReq){
+  const seq=ipvsWrr(weights,nReq), counts=new Array(weights.length).fill(0);
+  for(const idx of seq) counts[idx]++;
+  return counts;
+}
+
+/* ===== PANEL 1: architecture canvas ===== */
+let mode='iptables';
+const ac=document.getElementById('arch');
+function setup(cv){ const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, h=cv.clientHeight||260;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx; }
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function drawArch(){
+  const ctx=setup(ac), w=ac.clientWidth, h=ac.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  // client box (left)
+  const cx=30, cy=h/2-30, cw=140, ch=60;
+  ctx.fillStyle='#3a2f12'; ctx.strokeStyle='#f1c40f'; ctx.lineWidth=2;
+  roundRect(ctx,cx,cy,cw,ch,8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle='#f1c40f'; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='left';
+  ctx.fillText('client', cx+12, cy+22);
+  ctx.fillStyle='#e6edf3'; ctx.font='11px ui-monospace,monospace';
+  ctx.fillText('dial '+SVC.vip+':'+SVC.port, cx+12, cy+42);
+  // kube-proxy box (middle)
+  const mx=cx+cw+60, my=h/2-46, mw=200, mh=92;
+  const pc = mode==='iptables' ? '#2980b9' : '#e67e22';
+  ctx.fillStyle='#0f1f2e'; ctx.strokeStyle=pc; ctx.lineWidth=2.5;
+  roundRect(ctx,mx,my,mw,mh,8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=pc; ctx.font='bold 14px system-ui'; ctx.textAlign='center';
+  ctx.fillText('kube-proxy', mx+mw/2, my+22);
+  ctx.fillStyle='#e6edf3'; ctx.font='11px system-ui';
+  ctx.fillText(mode==='iptables' ? 'iptables: -m statistic chain' : 'IPVS: O(1) hash + wrr', mx+mw/2, my+42);
+  ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace';
+  ctx.fillText(mode==='iptables' ? 'DNAT (linear rule walk)' : 'DNAT (kernel IPVS)', mx+mw/2, my+62);
+  ctx.fillText(mode==='iptables' ? 'O(n) rules per packet' : 'O(1) lookup per packet', mx+mw/2, my+78);
+  // pod boxes (right)
+  const px=w-180;
+  PODS.forEach((p,i)=>{
+    const py=30+i*64;
+    ctx.fillStyle='#0f2418'; ctx.strokeStyle='#27ae60'; ctx.lineWidth=2;
+    roundRect(ctx,px,py,160,48,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#27ae60'; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='left';
+    ctx.fillText(p.name, px+10, py+20);
+    ctx.fillStyle='#e6edf3'; ctx.font='11px ui-monospace,monospace';
+    ctx.fillText(p.ip+':'+p.port, px+10, py+38);
+    // arrow proxy -> pod
+    ctx.strokeStyle=pc; ctx.globalAlpha=0.65; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(mx+mw, my+mh/2); ctx.lineTo(px, py+24); ctx.stroke(); ctx.globalAlpha=1;
+  });
+  // arrow client -> proxy
+  ctx.strokeStyle='#f1c40f'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(cx+cw, cy+ch/2); ctx.lineTo(mx, my+mh/2); ctx.stroke();
+  // DNAT tag
+  ctx.fillStyle='#27ae60'; ctx.font='bold 11px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('DNAT: '+SVC.vip+':'+SVC.port+' -> pod:8080', (mx+mw+px)/2, h-12);
+  const el=document.getElementById('archReadout');
+  if(mode==='iptables'){
+    el.innerHTML='iptables mode: KUBE-SERVICES -> KUBE-SVC-WEB -> KUBE-SEP-* (DNAT)\n'+
+      'rule 0: prob 0.33333333 -> web-a | rule 1: prob 0.50000000 -> web-b | rule 2: rest -> web-c\n'+
+      '<b>each packet walks the rule chain until a statistic rule fires (O(n))</b>';
+  }else{
+    el.innerHTML='IPVS mode: ipvsadm -A -t 10.96.0.10:80 -s wrr ; one kernel hash lookup (O(1))\n'+
+      'real servers: web-a -w 1, web-b -w 2, web-c -w 1  ->  25% / 50% / 25%\n'+
+      '<b>scheduler picks a real server deterministically (wrr honors weights)</b>';
+  }
+}
+
+/* ===== PANEL 2: traffic bars ===== */
+let distMode='iptables';
+function renderSim(){
+  const nReq=+document.getElementById('nreq').value;
+  document.getElementById('nreqVal').textContent=nReq;
+  let counts, weights, goldN, goldCounts, expText, seed;
+  if(distMode==='iptables'){
+    weights=[1,1,1]; seed=42; counts=simIptables(nReq,seed);
+    goldN=300; goldCounts=[107,98,95]; expText='~33% each';
+  }else{
+    weights=WEIGHTS; counts=simIpvsWrr(weights, nReq);
+    goldN=400; goldCounts=[100,200,100]; expText='25% / 50% / 25%';
+  }
+  const cols=['#2980b9','#e67e22','#27ae60'];
+  const maxc=Math.max.apply(null,counts);
+  const tot=counts.reduce((a,b)=>a+b,0);
+  let html='';
+  PODS.forEach((p,i)=>{
+    const pct=counts[i]/tot*100;
+    const wNote = distMode==='ipvs' ? ' (w='+weights[i]+')' : '';
+    // expected mark position (share of max bar)
+    const expPct = distMode==='ipvs' ? (weights[i]/weights.reduce((a,b)=>a+b,0)) : (1/PODS.length);
+    html+='<div class="barwrap"><span class="lab">'+p.name+wNote+'</span>'+
+      '<span class="track"><span class="mark" style="left:'+(expPct*maxc/Math.max(maxc,1)*100).toFixed(1)+'%"></span>'+
+      '<span class="fill" style="width:'+(counts[i]/Math.max(maxc,1)*100).toFixed(1)+'%;background:'+cols[i]+'"></span></span>'+
+      '<span class="num">'+counts[i]+' hits · '+pct.toFixed(1)+'%</span></div>';
+  });
+  html+='<div class="micro" style="margin-top:.4rem">expected: '+expText+' &nbsp;|&nbsp; the white tick marks the expected share.</div>';
+  document.getElementById('bars').innerHTML=html;
+  // gold check
+  const chk=document.getElementById('check');
+  if(nReq===goldN){
+    const ok = counts.length===goldCounts.length && counts.every((c,i)=>c===goldCounts[i]);
+    chk.textContent = ok ? 'check: OK — JS sim matches kube_proxy.py GOLD ('+JSON.stringify(counts)+' @'+nReq+')' : 'check: FAIL — mismatch! '+JSON.stringify(counts);
+    chk.style.borderColor=ok?'#27ae60':'#c0392b'; chk.style.color=ok?'#27ae60':'#c0392b';
+    chk.style.background=ok?'#1c3a25':'#3a1414';
+  } else {
+    chk.textContent='check: drag to '+goldN+' ('+distMode+') to compare against the .py gold '+JSON.stringify(goldCounts);
+    chk.style.borderColor='#30363d'; chk.style.color='#8b949e'; chk.style.background='#161b22';
+  }
+  const src = distMode==='iptables' ? 'xorshift32(seed=42)' : 'IPVS wrr (deterministic)';
+  document.getElementById('simReadout').textContent =
+    distMode+' · '+nReq+' requests · '+src+' -> '+JSON.stringify(counts)+' (sum '+tot+')';
+}
+
+/* ===== PANEL 3: conntrack ===== */
+function renderCt(){
+  const rng=makeRng(42);
+  const first=iptablesRoute(rng,PODS.length);
+  let h='<table><tr><th>pkt#</th><th>key</th><th>backend</th><th>state</th></tr>';
+  for(let i=0;i<5;i++){
+    const st = i===0 ? 'NEW (conntrack recorded)' : 'ESTABLISHED (reuse -> same pod)';
+    h+='<tr><td>#'+i+'</td><td><code>10.0.0.50:40000 -> 10.96.0.10:80</code></td>'+
+      '<td style="color:var(--green)">'+PODS[first].name+'</td><td>'+st+'</td></tr>';
+  }
+  h+='</table>';
+  h+='<div class="micro" style="margin-top:.5rem">All 5 packets of the connection hit <b style="color:var(--green)">'+PODS[first].name+
+     '</b>. Only packet #0 ran the statistic chain; #1-#4 were fast-pathed by conntrack. '+
+     '<code>sessionAffinity: ClientIP</code> would make even NEW connections from 10.0.0.50 sticky (TTL 3h).</div>';
+  document.getElementById('ctBox').innerHTML=h;
+}
+
+/* ===== events ===== */
+document.getElementById('bIpt').addEventListener('click',function(){ mode='iptables'; this.classList.add('active'); document.getElementById('bIpvs').classList.remove('active'); drawArch(); });
+document.getElementById('bIpvs').addEventListener('click',function(){ mode='ipvs'; this.classList.add('active'); document.getElementById('bIpt').classList.remove('active'); drawArch(); });
+document.getElementById('nreq').addEventListener('input',renderSim);
+document.querySelectorAll('[data-d]').forEach(b=>b.addEventListener('click',function(){
+  document.querySelectorAll('[data-d]').forEach(x=>x.classList.remove('active'));
+  this.classList.add('active'); distMode=this.dataset.d;
+  // snap to the gold request count for the chosen mode
+  document.getElementById('nreq').value = distMode==='iptables' ? 300 : 400;
+  renderSim();
+}));
+window.addEventListener('resize',drawArch);
+
+drawArch(); renderSim(); renderCt();
+</script>
+</body>
+</html>

@@ -1,0 +1,156 @@
+hcl_graph.py - reference simulation.
+All output below feeds HCL_GRAPH.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: The resource DAG (refs + depends_on => edges)
+========================================================================
+Each HCL block is a node. A reference 'X.id' inside block B, or a
+'depends_on = [X]', draws an edge X -> B (X must exist before B).
+
+Nodes and their dependencies (the DAG edges):
+  aws_vpc.main               depends on {} (root)
+  aws_subnet.main            depends on ['aws_vpc.main']
+  aws_subnet.zone[0]         depends on ['aws_vpc.main']
+  aws_subnet.zone[1]         depends on ['aws_vpc.main']
+  aws_subnet.zone[2]         depends on ['aws_vpc.main']
+  aws_security_group.app     depends on ['aws_vpc.main']
+  aws_iam_role.app           depends on {} (root)
+  aws_iam_role_policy.app    depends on ['aws_iam_role.app']
+  aws_instance.app           depends on ['aws_iam_role_policy.app', 'aws_security_group.app', 'aws_subnet.main']
+  aws_eip.app                depends on ['aws_instance.app']
+
+total nodes: 10   total edges: 10
+roots (no dependencies, can start immediately): ['aws_iam_role.app', 'aws_vpc.main']
+leaves (nothing depends on them): ['aws_eip.app', 'aws_subnet.zone[0]', 'aws_subnet.zone[1]', 'aws_subnet.zone[2]']
+
+The classic chain in this graph:
+  aws_vpc.main -> aws_subnet.main / aws_security_group.app
+             -> aws_instance.app -> aws_eip.app
+
+========================================================================
+  SECTION B: Topological sort -- a valid creation order  (GOLD)
+========================================================================
+A topological order lists every node AFTER its dependencies. Terraform
+uses it to decide what to create first. Kahn's algorithm (deterministic,
+ready-set kept sorted) produces:
+
+  creation order:
+     1. aws_iam_role.app
+     2. aws_iam_role_policy.app
+     3. aws_vpc.main
+     4. aws_security_group.app
+     5. aws_subnet.main
+     6. aws_instance.app
+     7. aws_eip.app
+     8. aws_subnet.zone[0]
+     9. aws_subnet.zone[1]
+    10. aws_subnet.zone[2]
+
+VALIDATION: for every edge dependency -> dependent, the dependency is
+listed first:
+  no violations found -- every dependency precedes its dependent.
+
+GOLD (pinned for hcl_graph.html):
+  topological order has 10 nodes, all edges respected
+[check] topological order respects ALL dependencies?  OK
+
+========================================================================
+  SECTION C: Parallel execution -- waves of concurrent creation
+========================================================================
+Terraform creates nodes as soon as their dependencies finish. Grouping
+nodes by 'wave' (longest dependency chain length) shows what runs in
+PARALLEL: nodes in the same wave have NO edges between them.
+
+  wave 0: ['aws_iam_role.app', 'aws_vpc.main']   (2 node(s) in parallel)
+  wave 1: ['aws_iam_role_policy.app', 'aws_security_group.app', 'aws_subnet.main', 'aws_subnet.zone[0]', 'aws_subnet.zone[1]', 'aws_subnet.zone[2]']   (6 node(s) in parallel)
+  wave 2: ['aws_instance.app']   (1 node(s) in parallel)
+  wave 3: ['aws_eip.app']   (1 node(s) in parallel)
+
+WATCH WAVE 1: aws_subnet.zone[0..2] (the count=3 block) all sit in the
+same wave as aws_subnet.main and aws_security_group.app -- none of them
+depend on each other, so Terraform creates them concurrently.
+
+widest wave has 6 nodes -> up to 6 concurrent
+API calls. Sequential creation would take as many round-trips as nodes
+(10); waves collapse it to 4 rounds.
+
+[check] no intra-wave edges (each wave is a safe parallel set)?  OK
+
+========================================================================
+  SECTION D: Implicit (refs) vs explicit (depends_on) dependencies
+========================================================================
+IMPLICIT -- inferred from an attribute reference. The instance block:
+  resource "aws_instance" "app" {
+    subnet_id              = aws_subnet.main.id          # <- ref
+    vpc_security_group_ids = [aws_security_group.app.id] # <- ref
+  }
+makes Terraform draw two edges WITHOUT depends_on:
+    aws_subnet.main         -> aws_instance.app
+    aws_security_group.app  -> aws_instance.app
+
+EXPLICIT -- added by you, for cases no reference exposes. The instance
+also has:
+    depends_on = [aws_iam_role_policy.app]
+There is no data flowing from the policy to the instance, but the app
+needs the policy attached at runtime -- so you force the edge:
+
+    aws_iam_role_policy.app -> aws_instance.app   (explicit)
+
+aws_instance.app implicit deps : ['aws_security_group.app', 'aws_subnet.main']
+aws_instance.app explicit deps : ['aws_iam_role_policy.app']
+aws_instance.app combined deps : ['aws_iam_role_policy.app', 'aws_security_group.app', 'aws_subnet.main']
+
+KEY POINT: an edge is an edge. Once built, Terraform treats implicit
+and explicit dependencies identically for ordering -- both must be
+satisfied before the node runs. depends_on is the escape hatch for
+ordering that no reference can express.
+
+[check] combined deps == implicit | explicit for aws_instance.app?  OK
+
+========================================================================
+  SECTION E: count / for_each -- generate N separate nodes
+========================================================================
+The meta-argument 'count = 3' generates three resources from one block:
+  resource "aws_subnet" "zone" {
+    count       = 3
+    vpc_id      = aws_vpc.main.id
+    cidr_block  = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
+  }
+Expands to THREE nodes in the graph, each a distinct address:
+
+  aws_subnet.zone[0]   refs -> ['aws_vpc.main']
+  aws_subnet.zone[1]   refs -> ['aws_vpc.main']
+  aws_subnet.zone[2]   refs -> ['aws_vpc.main']
+
+Each aws_subnet.zone[i] depends on aws_vpc.main (its vpc_id ref), and
+NOTHING else -- they are siblings with no edges among them:
+
+  aws_subnet.zone[0]: depends on ['aws_vpc.main'] ; wave 1
+  aws_subnet.zone[1]: depends on ['aws_vpc.main'] ; wave 1
+  aws_subnet.zone[2]: depends on ['aws_vpc.main'] ; wave 1
+
+So all three land in the SAME wave and Terraform creates them in
+parallel. 'for_each' works identically: each map key becomes a node
+with an indexed address like aws_subnet.zone["a"].
+[check] count=3 made 3 independent sibling nodes (same wave)?  OK
+
+========================================================================
+  APPENDIX: `terraform graph` -> DOT (render with Graphviz)
+========================================================================
+digraph G {
+  "aws_vpc.main" -> "aws_subnet.main";
+  "aws_vpc.main" -> "aws_subnet.zone[0]";
+  "aws_vpc.main" -> "aws_subnet.zone[1]";
+  "aws_vpc.main" -> "aws_subnet.zone[2]";
+  "aws_vpc.main" -> "aws_security_group.app";
+  "aws_iam_role.app" -> "aws_iam_role_policy.app";
+  "aws_iam_role_policy.app" -> "aws_instance.app";
+  "aws_security_group.app" -> "aws_instance.app";
+  "aws_subnet.main" -> "aws_instance.app";
+  "aws_instance.app" -> "aws_eip.app";
+}
+
+========================================================================
+  DONE - all sections printed
+========================================================================

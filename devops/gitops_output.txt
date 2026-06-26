@@ -1,0 +1,208 @@
+gitops.py - reference simulation.
+All numbers below feed GITOPS.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: GitOps flow -- dev pushes to Git -> ArgoCD syncs to cluster
+========================================================================
+The controller (ArgoCD/Flux) runs a reconcile loop:
+  1. pull desired state from Git (poll every ~3 min, or a webhook)
+  2. compare desired vs actual (the cluster's live state)
+  3. if they differ -> SYNC: apply Git to the cluster
+
+Step 0 - initial state (cluster == Git, IN SYNC):
+  Git (desired):
+    deployment/web: replicas=2, image=v1.0.0
+  cluster (actual):
+    deployment/web: replicas=2, image=v1.0.0
+  in sync? True
+
+Step 1 - developer edits manifests and pushes to Git:
+         git commit -m 'bump web to v1.1.0, scale to 3 replicas'
+  Git (desired):
+    deployment/web: replicas=3, image=v1.1.0
+  cluster (actual):
+    deployment/web: replicas=2, image=v1.0.0
+  drift detected: 2 field(s) differ
+    deployment/web.replicas: Git=3  cluster=2
+    deployment/web.image: Git=v1.1.0  cluster=v1.0.0
+  in sync? False
+
+Step 2 - ArgoCD detects the drift and syncs (applies Git -> cluster):
+  Git (desired):
+    deployment/web: replicas=3, image=v1.1.0
+  cluster (actual):
+    deployment/web: replicas=3, image=v1.1.0
+  in sync? True
+
+RESULT: the cluster now matches Git exactly. No one ran kubectl apply
+-- the controller PULLED the change from Git and reconciled.
+
+GOLD (pinned for gitops.html):
+  after sync, deployment/web = replicas=3, image=v1.1.0
+[check] cluster == Git after sync?  OK
+
+========================================================================
+  SECTION B: Drift detection -- manual kubectl edit -> caught + corrected
+========================================================================
+Start: cluster == Git (in sync), replicas=3.
+
+An operator hot-fixes a pod count by hand (NEVER do this in GitOps):
+  $ kubectl scale deployment web --replicas=5
+
+  Git (desired):
+    deployment/web: replicas=3, image=v1.1.0
+  cluster (actual):
+    deployment/web: replicas=5, image=v1.1.0
+
+  drift detected: 1 field(s)
+    deployment/web.replicas: Git=3  cluster=5  <-- OUT OF SYNC
+  in sync? False
+
+With AUTO-SYNC enabled, the controller does not just alert -- it FIXES:
+  ArgoCD re-applies Git -> cluster (reverts replicas 5 -> 3):
+  cluster (actual):
+    deployment/web: replicas=3, image=v1.1.0
+  in sync? True
+
+Without auto-sync (manual sync mode), the controller would instead:
+  - mark the application 'Out Of Sync'
+  - fire an alert (Slack/PagerDuty)
+  - WAIT for a human to click 'Sync' in the UI or run 'argocd app sync'
+
+Either way, the drift is VISIBLE. That is the safety win: nothing
+changes the cluster silently -- every change is either in Git, or it
+gets flagged/reverted on the next reconcile.
+
+GOLD drift corrected: deployment/web.replicas = 3 (reverted from 5)
+[check] drift detected AND auto-corrected (cluster==Git)?  OK
+
+========================================================================
+  SECTION C: Pull vs Push -- GitOps pulls; traditional CI/CD pushes
+========================================================================
+The difference is the DIRECTION of the call and WHO holds credentials.
+
+  PUSH model (traditional CI/CD):
+    CI server ---> pushes manifests ---> cluster
+    - CI server needs cluster credentials (kubeconfig, service account)
+    - CI needs NETWORK ACCESS into the cluster (inbound)
+    - cluster is passive: it accepts whatever CI pushes
+    - who changed the cluster? -> check the CI server's logs
+
+  PULL model (GitOps):
+    Git <--- controller pulls --- cluster (controller runs IN cluster)
+    - NO outside system has cluster credentials
+    - NO inbound access needed (the controller reaches OUT to Git)
+    - cluster actively reconciles itself to Git
+    - who changed the cluster? -> check git log (the audit trail)
+
+Credential footprint comparison:
+
+                        PUSH (CI/CD)            PULL (GitOps)           
+  creds location        CI server               cluster (sealed)        
+  inbound to cluster    YES (CI -> cluster)     NO                      
+  audit trail           CI logs                 git history             
+  rollback              re-run old job          git revert              
+  drift detection       none (push & forget)    built-in                
+
+ROLLBACK is the killer feature: to undo a deployment, just
+  git revert <commit>   ->  controller pulls the old manifest -> cluster
+rolls back. No 'rollback pipeline' to maintain; git IS the rollback.
+
+[check] pull model needs NO inbound cluster access?  OK
+
+========================================================================
+  SECTION D: Multi-environment -- dev/staging/prod as directories in Git
+========================================================================
+Each environment is a DIRECTORY (or branch) in the SAME Git repo. The
+controller watches each path and syncs it to the matching cluster.
+
+  Git repo structure:
+    env/dev/deployment.yaml          replicas=1, image=v1.1.0
+    env/staging/deployment.yaml      replicas=2, image=v1.0.0
+    env/prod/deployment.yaml         replicas=3, image=v1.0.0
+
+  Each cluster syncs from its own path:
+    cluster-dev      <- env/dev/   in sync? True
+    cluster-staging  <- env/staging/   in sync? True
+    cluster-prod     <- env/prod/   in sync? True
+
+PROMOTION = a git operation, not a deploy command.
+
+Promote v1.1.0 from dev -> staging:
+  $ git checkout staging
+  $ git merge dev           # <-- this IS the deployment
+  $ git push origin staging
+  After merge + sync:
+    env/staging/deployment.yaml -> replicas=2, image=v1.1.0
+    cluster-staging now runs image=v1.1.0
+
+Promote v1.1.0 from staging -> prod:
+  $ git checkout prod
+  $ git merge staging        # <-- the prod deployment
+  $ git push origin prod
+  After merge + sync:
+    env/prod/deployment.yaml -> replicas=3, image=v1.1.0
+    cluster-prod now runs image=v1.1.0
+
+Every environment converges to its Git path. To know what's running
+ANYWHERE, just read the repo. That is the audit trail.
+
+GOLD prod image after promotion = v1.1.0
+[check] all 3 clusters match their Git paths?  OK
+
+========================================================================
+  SECTION E: Helm + GitOps -- controller renders the chart, then applies
+========================================================================
+Git stores a Helm CHART (values.yaml + templates). The controller does
+NOT install Helm on the cluster; it RENDERS the chart (helm template)
+into plain manifests, then applies those -- exactly like Section A.
+
+values.yaml (committed to Git):
+  replicas: 3
+  image: registry.example.com/web:v2.0.0
+  port: 8080
+
+templates/deployment.yaml (the chart template):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+  spec:
+    replicas: {{ .Values.replicas }}
+    template:
+      spec:
+        containers:
+        - image: {{ .Values.image }}
+          ports:
+          - containerPort: {{ .Values.port }}
+
+RENDERED manifest (what ArgoCD actually applies):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+  spec:
+    replicas: 3
+    template:
+      spec:
+        containers:
+        - image: registry.example.com/web:v2.0.0
+          ports:
+          - containerPort: 8080
+
+  cluster (actual) after sync:
+    deployment/web: replicas=3, image=registry.example.com/web:v2.0.0
+
+  in sync? True
+
+The Helm VALUES in Git, the RENDERED manifest, and the CLUSTER all
+agree on replicas=3 and image=v2.0.0. The render step is transparent --
+you can always see exactly what will be applied by running 'helm template'.
+
+GOLD helm rendered replicas = 3, image = v2.0.0
+[check] rendered chart == cluster after sync?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

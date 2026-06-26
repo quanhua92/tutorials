@@ -1,0 +1,248 @@
+rolling_update.py - reference simulation.
+All numbers below feed ROLLING_UPDATE.md.
+python stdlib only; deterministic; no network, no clock.
+
+
+========================================================================
+  SECTION A: canonical rollout - 5 replicas, maxSurge=1, maxUnavailable=1
+========================================================================
+Five v1 pods (all ready). We change the image to v2. The Deployment
+creates a NEW ReplicaSet (new pod-template-hash) and rolls pods over,
+one reconcile pass at a time, never breaking either guardrail:
+
+  (1) total     <= replicas + maxSurge       = 5 + 1 = 6
+  (2) available >= replicas - maxUnavailable = 5 - 1 = 4
+
+  step   v1   v2  v2rdy  total  avail  action
+  ----  ---  ---  -----  -----  -----  ------
+     0    5    0      0      5      5  start: 5 x v1 (ready), 0 x v2
+        grid: [v1][v1][v1][v1][v1]
+     1    4    1      0      5      4  surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+        grid: [v1][v1][v1][v1][v2.]
+     2    3    2      1      5      4  v2 readiness OK +1 (probe passed) | surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+        grid: [v1][v1][v1][v2][v2.]
+     3    2    3      2      5      4  v2 readiness OK +1 (probe passed) | surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+        grid: [v1][v1][v2][v2][v2.]
+     4    1    4      3      5      4  v2 readiness OK +1 (probe passed) | surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+        grid: [v1][v2][v2][v2][v2.]
+     5    0    5      4      5      4  v2 readiness OK +1 (probe passed) | surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+        grid: [v2][v2][v2][v2][v2.]
+     6    0    5      5      5      5  v2 readiness OK +1 (probe passed)
+        grid: [v2][v2][v2][v2][v2]
+
+[check] total <= 6 at every step?     True
+[check] available >= 4 at every step?  True
+
+Read the staircase: every step the new RS surges ONE v2 pod (a spare
+slot opens under maxSurge), and because maxUnavailable=1 the controller
+immediately drains ONE v1 pod. So v1 walks 5->4->3->2->1->0 while v2
+walks 0->1->2->3->4->5 in lockstep. Availability dips to exactly 4
+(= replicas - maxUnavailable) and never lower -> zero outage, one pod
+of tolerated capacity loss, no extra pods left running at the end.
+
+Legend:  [v1] old serving   [v2.] new starting (readiness pending)
+         [v2] new serving (readiness passed)
+
+========================================================================
+  SECTION B: the knobs - maxSurge & maxUnavailable combos
+========================================================================
+These two ints are the ENTIRE tuning surface of a rolling update.
+
+  maxSurge       -> scale-UP speed & extra capacity needed.
+  maxUnavailable -> scale-DOWN speed & capacity you're willing to lose.
+
+Percent values round DIFFERENTLY (kubernetes.io verified):
+  maxSurge rounds UP, maxUnavailable rounds DOWN.
+
+Default 25%/25% on 5 replicas -> maxSurge=ceil(5*25/100)=2, maxUnavailable=floor(5*25/100)=1
+
+                             combo  surge  unavail  minAvail  maxTotal  steps  note
+  --------------------------------  -----  -------  --------  --------  -----  ----
+                   default 25%/25%      2        1         4         7      4  fast & cheap: surge 2, lose 1
+      maxSurge=1, maxUnavailable=0      1        0         5         6     10  zero capacity loss, needs 1 spare
+      maxSurge=0, maxUnavailable=1      0        1         4         5     11  never exceed replicas, lose 1
+      maxSurge=0, maxUnavailable=0      0        0        --        --  stuck  ILLEGAL: cannot roll (no room)
+
+What the trade-off looks like (5 replicas):
+
+  default 25%/25%:
+    OLD   : 5  4  2  1  0
+    NEW   : 0  2  3  5  5
+    avail : 5  4  4  4  5
+    guardrails: total<=7, avail>=4
+
+  maxSurge=1, maxUnavailable=0:
+    OLD   : 5  5  4  4  3  3  2  2  1  1  0
+    NEW   : 0  1  1  2  2  3  3  4  4  5  5
+    avail : 5  5  5  5  5  5  5  5  5  5  5
+    guardrails: total<=6, avail>=5
+
+  maxSurge=0, maxUnavailable=1:
+    OLD   : 5  4  4  3  3  2  2  1  1  0  0  0
+    NEW   : 0  0  1  1  2  2  3  3  4  4  5  5
+    avail : 5  4  4  4  4  4  4  4  4  4  4  5
+    guardrails: total<=5, avail>=4
+
+RULE (verified): maxSurge=0 AND maxUnavailable=0 is REJECTED - the
+controller has neither room to surge nor capacity to spare, so the
+rollout cannot start. At least one of the two must be > 0.
+
+Mental model: maxSurge buys SPEED with EXTRA PODS; maxUnavailable
+buys SPEED with LOST CAPACITY. Zero-downtime-with-no-spare is
+impossible - you must spend one or the other.
+
+========================================================================
+  SECTION C: the readiness gate - no v1 dies until a v2 is ready
+========================================================================
+A new pod is NOT 'available' just because it is Running. It must PASS
+its readiness probe first. With maxUnavailable=0 this becomes a HARD
+gate: the controller cannot terminate a v1 pod until a v2 pod clears
+readiness, otherwise available would drop below replicas.
+
+Case 1: maxSurge=1, maxUnavailable=0, readiness_lag=1 (snappy probe).
+
+  step   v1   v2  v2rdy  total  avail  action
+  ----  ---  ---  -----  -----  -----  ------
+     0    5    0      0      5      5  start: 5 x v1 (ready), 0 x v2
+     1    5    1      0      6      5  surge v2 +1 (total 6 <= 6)
+     2    4    1      1      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     3    4    2      1      6      5  surge v2 +1 (total 6 <= 6)
+     4    3    2      2      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     5    3    3      2      6      5  surge v2 +1 (total 6 <= 6)
+     6    2    3      3      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     7    2    4      3      6      5  surge v2 +1 (total 6 <= 6)
+     8    1    4      4      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     9    1    5      4      6      5  surge v2 +1 (total 6 <= 6)
+    10    0    5      5      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+
+[check] total <= 6 at every step?     True
+[check] available >= 5 at every step?  True
+
+Notice the SHAPE differs from Section A: because maxUnavailable=0,
+the drain is BLOCKED until the surged v2 becomes ready. So total
+oscillates 5->6 (surge) ->5 (drain) instead of staying flat, and
+availability holds rock-steady at 5. The readiness probe is literally
+the door the v2 pod must walk through before a v1 pod is shown out.
+
+Case 2: same knobs but readiness_lag=3 (slow probe, e.g. cold start).
+
+  step   v1   v2  v2rdy  total  avail  action
+  ----  ---  ---  -----  -----  -----  ------
+     0    5    0      0      5      5  start: 5 x v1 (ready), 0 x v2
+     1    5    1      0      6      5  surge v2 +1 (total 6 <= 6)
+     2    5    1      0      6      5  wait (no room / not ready)
+     3    5    1      0      6      5  wait (no room / not ready)
+     4    4    1      1      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     5    4    2      1      6      5  surge v2 +1 (total 6 <= 6)
+     6    4    2      1      6      5  wait (no room / not ready)
+     7    4    2      1      6      5  wait (no room / not ready)
+     8    3    2      2      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+     9    3    3      2      6      5  surge v2 +1 (total 6 <= 6)
+    10    3    3      2      6      5  wait (no room / not ready)
+    11    3    3      2      6      5  wait (no room / not ready)
+    12    2    3      3      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+    13    2    4      3      6      5  surge v2 +1 (total 6 <= 6)
+    14    2    4      3      6      5  wait (no room / not ready)
+    15    2    4      3      6      5  wait (no room / not ready)
+    16    1    4      4      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+    17    1    5      4      6      5  surge v2 +1 (total 6 <= 6)
+    18    1    5      4      6      5  wait (no room / not ready)
+    19    1    5      4      6      5  wait (no room / not ready)
+    20    0    5      5      5      5  v2 readiness OK +1 (probe passed) | drain v1 -1 (avail 5 >= 5)
+
+A slower probe does NOT change the guardrails - it only STRETCHES the
+timeline (20 steps vs 10). The v2 pod sits 'pending' (v2.) for 3 steps before it is ready, and
+the v1 pod is held alive that whole time. This is why a misconfigured
+readiness probe is the #1 cause of slow rollouts - the gate never opens.
+
+========================================================================
+  SECTION D: rollback - kubectl rollout undo reverses the process
+========================================================================
+`kubectl rollout undo` does NOT re-download an old image. It re-points
+the rollout target at a PREVIOUS ReplicaSet (kept up to
+revisionHistoryLimit, default 10) and runs the SAME interleaved
+rollout - just with the roles swapped: the now-current v2 RS drains
+while the previous v1 RS surges back. Same guardrails, same shape.
+
+Combined timeline: forward (v1->v2) then undo (v2->v1).
+
+  FORWARD  v1->v2 :
+    v2(new): 0  1  2  3  4  5  5
+    avail  : 5  4  4  4  4  4  5
+    guardrails: total<=6, avail>=4
+
+  --- kubectl rollout undo deployment/web ---
+
+  UNDO     v2->v1 :
+    v1(new): 0  1  2  3  4  5  5
+    avail  : 5  4  4  4  4  4  5
+    guardrails: total<=6, avail>=4
+
+The undo trace is the forward trace played back: v2 drops 6->0
+while v1 climbs 0->{n-1}. Availability never breaks. Because each RS is
+a full snapshot of a revision, undo is cheap and instant to start -
+no image re-pull, no template reconstruction, just re-scale.
+
+[check] guardrails hold during rollback?  total:True  avail:True
+
+========================================================================
+  SECTION E: health monitoring - bad rollout HALTS (progressDeadline)
+========================================================================
+The Deployment WATCHES the rollout. If the new pods keep failing their
+readiness probe (bad image, crash loop, broken config), no v2 pod ever
+becomes available, so the rollout makes no progress. After
+progressDeadlineSeconds (default 600s) the Deployment is marked
+Progressing=False / reason=ProgressDeadlineExceeded and the rollout
+HALTS. The controller stops surging; the old v1 pods keep serving.
+
+Simulated: 5 replicas, maxSurge=1, maxUnavailable=1, but the v2 image
+never passes readiness (fails_readiness=True). Watch it stall:
+
+  step   v1   v2  v2rdy  total  avail  action
+  ----  ---  ---  -----  -----  -----  ------
+     0    5    0      0      5      5  start: 5 x v1 (ready), 0 x v2
+     1    4    1      0      5      4  surge v2 +1 (total 6 <= 6) | drain v1 -1 (avail 4 >= 4)
+     2    4    2      0      6      4  surge v2 +1 (total 6 <= 6)
+     3    4    2      0      6      4  wait (no room / not ready)
+     4    4    2      0      6      4  wait (no room / not ready)
+
+  !! HALTED at step 4: no v2 pod became ready in 4 steps -> ProgressDeadlineExceeded (HALT)
+
+  halted? True
+  reason : no v2 pod became ready in 4 steps -> ProgressDeadlineExceeded (HALT)
+
+Final state: v1=4 (still serving), v2=2 (all stuck 'pending'), available=4.
+The service stays UP on the old pods - Kubernetes detected the bad
+release and refused to complete it. This is exactly why you set a
+readiness probe + progressDeadlineSeconds: they turn a bad deploy from
+an outage into an automatic, safe abort. (Higher-level controllers or
+a human can then `kubectl rollout undo` to recover.)
+
+DANGER note: with maxUnavailable>0 the controller may still drain a
+few v1 pods before noticing the failure, so availability can dip to
+replicas-maxUnavailable while it figures out the new pods are dead.
+That capacity dip is the price of a non-zero maxUnavailable during a
+failed rollout - another reason conservative teams set it to 0.
+
+========================================================================
+  GOLD CHECK: both guardrails hold at EVERY step of the 5/1/1 rollout
+========================================================================
+Canonical rollout (replicas=5, maxSurge=1, maxUnavailable=1):
+
+  step  : 0  1  2  3  4  5  6
+  v1    : 5  4  3  2  1  0  0
+  v2    : 0  1  2  3  4  5  5
+  avail : 5  4  4  4  4  4  5
+
+Guardrails:  total <= 6   |   available >= 4
+[check] total <= replicas+maxSurge (6) every step?   True
+[check] available >= replicas-maxUnavailable (4) every step?  True
+[pin] min available seen during rollout = 4  (>= 4)
+[pin] max total seen during rollout      = 5  (<= 6)
+[pin] # reconcile steps to complete      = 6
+[pin] final state                        = v1:0 v2:5 avail:5
+[check] all gold pins reproduced:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

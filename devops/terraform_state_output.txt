@@ -1,0 +1,175 @@
+terraform_state.py - reference simulation.
+All output below feeds TERRAFORM_STATE.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: State structure -- the terraform.tfstate ledger
+========================================================================
+tfstate is a JSON file. The 'resources' array has one entry per
+managed resource. Each entry pins type, name, provider, and an
+'instances' array holding the real cloud attributes + ID.
+
+After applying CONFIG_V1, tfstate contains 3 resources. Here are the
+first two (an EC2 instance and an S3 bucket):
+
+{
+  "mode": "managed",
+  "type": "aws_instance",
+  "name": "web",
+  "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+  "instances": [
+    {
+      "schema_version": 0,
+      "attributes": {
+        "ami": "ami-aaa",
+        "instance_type": "t3.micro",
+        "tags": {
+          "Name": "web"
+        }
+      }
+    }
+  ]
+}
+
+{
+  "mode": "managed",
+  "type": "aws_s3_bucket",
+  "name": "data",
+  "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+  "instances": [
+    {
+      "schema_version": 0,
+      "attributes": {
+        "bucket": "data-prod",
+        "tags": {}
+      }
+    }
+  ]
+}
+
+KEY POINTS:
+  * The address 'aws_instance.web' is the join key between a config
+    block 'resource "aws_instance" "web"' and this state entry.
+  * 'attributes' holds the REAL values the provider read back from
+    the cloud (id, instance_type, ami, tags). This is the ledger.
+  * 'serial' (shown next) increments on every state WRITE.
+
+top-level keys: ['version', 'terraform_version', 'serial', 'lineage', 'outputs', 'resources']
+resource addresses in state: ['aws_instance.web', 'aws_s3_bucket.data', 'aws_s3_bucket.logs']
+
+========================================================================
+  SECTION B: Plan -- diff(CONFIG_V2, state)  (GOLD: 4 actions)
+========================================================================
+CONFIG_V2 differs from CONFIG_V1 in four ways, designed to exercise
+every plan action:
+
+  aws_instance.web   ami  ami-aaa -> ami-bbb     (ForceNew => REPLACE)
+  aws_instance.api   brand new                  => CREATE
+  aws_s3_bucket.data tags {} -> {Env:prod}      => UPDATE (in-place)
+  aws_s3_bucket.logs removed from config        => DESTROY
+
+terraform plan  ->  4 action(s):
+
+  # CREATE  aws_instance.api   (present in config, absent in state)
+  # REPLACE aws_instance.web   (ami: ami-aaa -> ami-bbb  [forces new resource])
+  # UPDATE  aws_s3_bucket.data   (tags: {} -> {'Env': 'prod'}  [in-place])
+  # DESTROY aws_s3_bucket.logs   (present in state, absent in config)
+
+Grouped by action:
+  create  -> ['aws_instance.api']
+  update  -> ['aws_s3_bucket.data']
+  replace -> ['aws_instance.web']
+  destroy -> ['aws_s3_bucket.logs']
+
+GOLD (pinned for terraform_state.html):
+  create  -> ['aws_instance.api']
+  update  -> ['aws_s3_bucket.data']
+  replace -> ['aws_instance.web']
+  destroy -> ['aws_s3_bucket.logs']
+[check] plan classifies create/update/replace/destroy correctly?  OK
+
+========================================================================
+  SECTION C: Apply -- execute the plan, rewrite tfstate (serial += 1)
+========================================================================
+apply carries out each action against the cloud, then rewrites
+tfstate so the ledger matches reality. Every apply bumps 'serial'.
+
+serial BEFORE apply = 1
+serial AFTER  apply = 2   (+1)
+
+addresses BEFORE: ['aws_instance.web', 'aws_s3_bucket.data', 'aws_s3_bucket.logs']
+addresses AFTER : ['aws_instance.api', 'aws_instance.web', 'aws_s3_bucket.data']
+
+What happened:
+  * aws_instance.api    CREATED  -> now in state
+  * aws_s3_bucket.logs  DESTROYED -> gone from state
+  * aws_instance.web    REPLACED -> ami now ami-bbb (old entry removed,
+                                       new entry added; new cloud id)
+  * aws_s3_bucket.data  UPDATED  -> tags now {Env: prod}
+
+aws_s3_bucket.data:
+  {"bucket": "data-prod", "tags": {"Env": "prod"}}
+aws_instance.web:
+  {"ami": "ami-bbb", "instance_type": "t3.micro", "tags": {"Name": "web"}}
+
+Re-planning CONFIG_V2 against the NEW state: 0 action(s)
+  -> config now matches state => idempotent. A second apply is a no-op.
+[check] apply made config and state converge (no-op re-plan)?  OK
+
+========================================================================
+  SECTION D: Backend -- S3 stores tfstate, DynamoDB locks it
+========================================================================
+For teams, tfstate lives in a shared BACKEND: an S3 bucket holds the
+file; a DynamoDB table provides a LOCK so two concurrent applies
+cannot both rewrite (and clobber) the state.
+
+Lock lifecycle (one DynamoDB row, keyed by LockID, per apply):
+  1. apply starts   -> acquire_lock(run_id). If held -> BLOCKED (wait).
+  2. apply runs      -> mutates cloud + builds new tfstate in memory.
+  3. apply finishes  -> write_state (only allowed while lock held).
+  4.                 -> release_lock. The waiting run may now proceed.
+
+Simulation: engineers Alice and Bob both run `apply` at once.
+
+  Alice acquires lock: True   -> lock_held_by = 'run-alice'
+  Bob   acquires lock: False   -> BLOCKED (must wait; state unsafe
+                                   to write without the lock)
+
+  Alice writes state (serial 1 -> 2), then releases the lock.
+  Bob retries:        True   -> lock_held_by = 'run-bob'
+     Bob now reads serial = 2 (Alice's write), NOT the stale value. No clobber.
+
+WITHOUT the lock: both would read serial=N, both write serial=N+1, and
+Alice's apply would silently vanish (lost update). The DynamoDB lock
+is what makes shared state safe for teams.
+
+[check] lock blocked the 2nd apply until the 1st released?  OK
+
+========================================================================
+  SECTION E: Drift -- out-of-band change surfaces via refresh
+========================================================================
+Someone edits the EC2 instance_type in the AWS CONSOLE: t3.micro ->
+t3.large. Neither the config nor tfstate know about it yet.
+
+  config (main.tf)  : instance_type = t3.micro   (desired)
+  tfstate (ledger)  : instance_type = t3.micro   (last known)
+  real cloud (drift): instance_type = t3.large   (someone's console edit)
+
+plan WITHOUT refresh  diff(CONFIG_V1, tfstate): 0 action(s)
+  -> config matches tfstate, so the drift is INVISIBLE. Dangerous:
+     the next apply would silently 'fix' it back to t3.micro.
+
+plan WITH refresh  (refresh first, then diff):
+  # UPDATE  aws_instance.web   (instance_type: t3.large -> t3.micro  [in-place])
+
+WHY: `terraform plan` runs a REFRESH by default -- it re-reads every
+resource's current cloud attributes into state BEFORE diffing. So the
+drift (t3.micro wanted vs t3.large real) shows up as an UPDATE that
+would change instance_type back to t3.micro. `terraform plan
+-refresh-only` would instead just update tfstate to record the drift.
+
+[check] refresh made plan detect the drift (t3.large)?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

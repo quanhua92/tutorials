@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes Ingress — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=text]{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+       padding:5px 9px;font-size:.84rem;font-family:ui-monospace,monospace;width:230px}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .dim{color:var(--muted)}
+  table{border-collapse:collapse;font-size:.8rem;margin-top:.4rem;font-variant-numeric:tabular-nums}
+  table td,table th{border:1px solid #30363d;padding:4px 9px;text-align:left}
+  table th{color:var(--muted);font-weight:600}
+  table tr.hit td{color:var(--green);background:#16261c}
+  table tr.miss td{color:var(--red)}
+  table tr.def td{color:var(--orange)}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  #tls{display:block;width:100%;max-width:980px;height:200px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Kubernetes Ingress — interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/INGRESS.md">INGRESS.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/ingress.py">ingress.py</a></h1>
+  <div class="sub">An <b style="color:var(--green)">Ingress</b> is a set of <b>L7 routing rules</b> (host + path → backend Service). The <b>Ingress Controller</b>
+    (nginx/traefik/envoy) reads them and serves traffic. Type a request below and watch the controller walk the
+    2-level decision tree. The page re-runs the <i>identical</i> routing engine as <code>ingress.py</code> and checks the
+    gold map. &nbsp;|&nbsp; <a href="./service_endpoints.html">how the backend ClusterIP → pod works →</a></div>
+
+  <!-- ===== PANEL 1: ROUTING ENGINE ===== -->
+  <h2>① The routing engine — (host, path) → backend, decided live</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> type a host + path. The controller asks <b>1)</b> does any host rule match?
+      <b>2)</b> which is the <b>longest</b> matching path prefix? <b>3)</b> forward to that backend. No host rule → <b>default-backend</b> (404).</div>
+    <div class="controls">
+      <label>host
+        <select id="hostSel">
+          <option value="api.example.com">api.example.com</option>
+          <option value="admin.example.com">admin.example.com</option>
+          <option value="shop.example.com">shop.example.com</option>
+        </select></label>
+      <label>path <input type="text" id="pathIn" value="/api/v1/users"></label>
+      <button id="tryBtn">route this request</button>
+    </div>
+    <div class="readout" id="routeReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Rules live in the Ingress (config). The controller <b>watches</b> them and generates its proxy config — without a controller deployed, Ingress resources do nothing.</div>
+  </div>
+
+  <!-- ===== PANEL 2: ROUTING TABLE (GOLD) ===== -->
+  <h2>② The full routing table — eight requests, recomputed in JS</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> these backends are not made up — the page re-runs the host + longest-prefix engine on the <b>identical</b> rules as
+      <code>ingress.py</code> Section B. The green <span class="badge" style="padding:1px 6px">check: OK</span> confirms the JS routing map matches the .py gold exactly.</div>
+    <div style="overflow-x:auto;min-width:0"><table id="routeTable"></table></div>
+  </div>
+
+  <!-- ===== PANEL 3: TLS TERMINATION FLOW ===== -->
+  <h2>③ TLS termination — HTTPS in, HTTP out</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to look at:</b> the controller holds the cert (Secret) and decrypts HTTPS, then talks <b>plain HTTP</b> to the backend. One cert at the edge secures many backends; the backend sees the controller's IP, not the client's (hence <code>X-Forwarded-For</code>).</div>
+    <canvas id="tls" width="980" height="200"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--gold)"></i>HTTPS (TLS)</span>
+      <span><i class="sw" style="background:var(--green)"></i>controller terminates TLS</span>
+      <span><i class="sw" style="background:var(--blue)"></i>plain HTTP to backend</span>
+      <span><i class="sw" style="background:var(--purple)"></i>cert-manager → Secret</span>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 4: ANNOTATIONS / REWRITE ===== -->
+  <h2>④ Annotations — rewrite-target (the #1 footgun)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> <code>rewrite-target=/</code> strips the matched prefix before forwarding. Toggle it off and the <b>full path</b> is sent. These keys are <b>nginx-only</b> — not portable across controllers (a core reason Gateway API exists).</div>
+    <div class="controls">
+      <button id="bRewrite" class="active">rewrite-target=/</button>
+      <button id="bNoRewrite">no rewrite (full path)</button>
+    </div>
+    <div id="rewriteBox"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS routing engine matches ingress.py Section B (all 8 (host,path) → backend decisions).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth cluster model + routing engine, copied from ingress.py ===== */
+const SERVICES={
+  'service-api':   {ip:'10.96.10.1',  port:8080},
+  'service-web':   {ip:'10.96.10.2',  port:8080},
+  'service-admin': {ip:'10.96.10.3',  port:8080},
+  'default-backend':{ip:'10.96.10.99',port:8080}
+};
+const INGRESS_RULES=[
+  ['api.example.com',  '/api','service-api'],
+  ['api.example.com',  '/web','service-web'],
+  ['api.example.com',  '/',   'service-web'],
+  ['admin.example.com','/',   'service-admin']
+];
+
+/* route(host, path) -> decision dict, mirrors route() in ingress.py */
+function matchHost(host){ return INGRESS_RULES.filter(r=>r[0]===host); }
+function matchPath(path, hostRules){
+  let best=null;
+  for(const [,prefix,svc] of hostRules){
+    if(path.startsWith(prefix) && (best===null || prefix.length>best[0].length)) best=[prefix,svc];
+  }
+  return best;
+}
+function route(host, path){
+  const hostRules=matchHost(host);
+  if(!hostRules.length) return {host,path,hostMatched:false,prefix:null,backend:'default-backend',reason:'no host rule -> default backend (404)'};
+  const best=matchPath(path,hostRules);
+  if(!best) return {host,path,hostMatched:true,prefix:null,backend:'default-backend',reason:'host matched, no path prefix -> default backend'};
+  return {host,path,hostMatched:true,prefix:best[0],backend:best[1],reason:"longest prefix '"+best[0]+"' -> "+best[1]};
+}
+function applyRewrite(path,prefix,target){
+  if(target===null) return path;
+  let stripped=path.slice(prefix.length);
+  if(!stripped.startsWith('/')) stripped='/'+stripped;
+  if(stripped==='/') stripped='';
+  return target.replace(/\/$/,'')+stripped || '/';
+}
+
+/* ===== PANEL 1: interactive route ===== */
+function doRoute(){
+  const host=document.getElementById('hostSel').value;
+  let path=document.getElementById('pathIn').value.trim()||'/';
+  const d=route(host,path);
+  const svc=SERVICES[d.backend]||{ip:'?',port:'?'};
+  const el=document.getElementById('routeReadout');
+  const step1 = d.hostMatched ? 'yes: '+host : 'NO host rule';
+  const step2 = d.prefix ? d.prefix : 'none';
+  const cls = d.backend==='default-backend' ? 'bad' : 'b';
+  el.innerHTML =
+    'REQ '+host+path+'\n'+
+    '  1. host match? -> '+step1+'\n'+
+    '  2. path match? -> '+step2+'\n'+
+    '  3. forward to  -> <'+cls+'>'+d.backend+' ('+svc.ip+':'+svc.port+')</'+cls+'>   '+d.reason;
+}
+
+/* ===== PANEL 2: routing table (gold) ===== */
+const QUERIES=[
+  ['api.example.com','/api/v1/users'],
+  ['api.example.com','/api'],
+  ['api.example.com','/web/index.html'],
+  ['api.example.com','/web'],
+  ['api.example.com','/blog'],
+  ['admin.example.com','/'],
+  ['admin.example.com','/dashboard'],
+  ['shop.example.com','/api']
+];
+const GOLD={
+  'api.example.com|/api/v1/users':'service-api',
+  'api.example.com|/api':'service-api',
+  'api.example.com|/web/index.html':'service-web',
+  'api.example.com|/web':'service-web',
+  'api.example.com|/blog':'service-web',
+  'admin.example.com|/':'service-admin',
+  'admin.example.com|/dashboard':'service-admin',
+  'shop.example.com|/api':'default-backend'
+};
+function renderTable(){
+  let H='<tr><th>host</th><th>path</th><th>host?</th><th>matched</th><th>backend</th></tr>';
+  for(const [host,path] of QUERIES){
+    const d=route(host,path);
+    const cls = d.backend==='default-backend' ? 'def' : 'hit';
+    const mh = d.hostMatched?'yes':'NO';
+    const mp = d.prefix||'-';
+    H+='<tr class="'+cls+'"><td>'+host+'</td><td>'+path+'</td><td>'+mh+'</td><td>'+mp+'</td><td>'+d.backend+'</td></tr>';
+  }
+  document.getElementById('routeTable').innerHTML=H;
+  // gold check
+  let ok=true;
+  for(const [host,path] of QUERIES){
+    if(route(host,path).backend !== GOLD[host+'|'+path]){ ok=false; break; }
+  }
+  const chk=document.getElementById('check');
+  chk.textContent = ok ? 'check: OK — JS routing matches ingress.py (all 8 decisions)' : 'check: FAIL — mismatch!';
+  chk.style.borderColor=ok?'#27ae60':'#c0392b'; chk.style.color=ok?'#27ae60':'#c0392b';
+  chk.style.background=ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== PANEL 3: TLS flow canvas ===== */
+const tc=document.getElementById('tls');
+function setup(cv){ const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth||980, h=cv.clientHeight||200;
+  const bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx; }
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function drawTLS(){
+  const ctx=setup(tc), w=tc.clientWidth, h=tc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const nodes=[
+    {x:30,    c:'#f1c40f', t:'client', s:'HTTPS (TLS)\napi.example.com/api'},
+    {x:230,   c:'#27ae60', t:'controller\nterminates TLS', s:'decrypt w/\napi-tls-secret'},
+    {x:480,   c:'#2980b9', t:'service-api\nClusterIP', s:'plain HTTP\n10.96.10.1:8080'},
+    {x:760,   c:'#2980b9', t:'pod', s:'10.244.1.5:8080\n(see X-Forwarded-*)'}
+  ];
+  const bw=140, bh=64, by=h/2-bh/2;
+  nodes.forEach((n,i)=>{
+    ctx.fillStyle=i===0?'#3a2f12':(i===1?'#1c3a25':'#16263b'); ctx.strokeStyle=n.c; ctx.lineWidth=2;
+    roundRect(ctx,n.x,by,bw,bh,8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=n.c; ctx.font='bold 12px ui-monospace,monospace'; ctx.textAlign='left';
+    n.t.split('\n').forEach((ln,k)=>ctx.fillText(ln,n.x+10,by+20+k*14));
+    ctx.fillStyle='#8b949e'; ctx.font='10px ui-monospace,monospace';
+    n.s.split('\n').forEach((ln,k)=>ctx.fillText(ln,n.x+10,by+bh+14+k*12));
+    // arrow to next
+    if(i<nodes.length-1){
+      const ax1=n.x+bw, ax2=nodes[i+1].x, ay=by+bh/2;
+      ctx.strokeStyle=n.c; ctx.globalAlpha=0.8; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(ax1,ay); ctx.lineTo(ax2-6,ay); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ax2-6,ay-4); ctx.lineTo(ax2,ay); ctx.lineTo(ax2-6,ay+4); ctx.stroke();
+      ctx.globalAlpha=1;
+    }
+  });
+  // cert-manager -> secret -> controller
+  ctx.strokeStyle='#8e7cc3'; ctx.lineWidth=1.5; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(230+bw/2,30); ctx.lineTo(230+bw/2,by); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='#1c1426'; ctx.strokeStyle='#8e7cc3';
+  roundRect(ctx,200,8,150,20,5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle='#8e7cc3'; ctx.font='10px ui-monospace,monospace'; ctx.textAlign='center';
+  ctx.fillText('cert-manager -> Secret api-tls-secret', 275, 22);
+}
+
+/* ===== PANEL 4: rewrite-target ===== */
+let rewriteOn=true;
+function renderRewrite(){
+  const cases=[['/api/v1/users','/api'],['/api','/api'],['/web/a.css','/web']];
+  let h='<div class="readout" style="margin-top:.5rem">';
+  cases.forEach(([path,prefix])=>{
+    const out=applyRewrite(path,prefix, rewriteOn?'/':null);
+    const note = rewriteOn ? 'prefix stripped' : 'full path sent';
+    h+='path '+path+'  prefix '+prefix+'  ->  <b>'+out+'</b>   <span class="dim">('+note+')</span>\n';
+  });
+  h+='</div>';
+  h+='<div class="micro" style="margin-top:.4rem">rewrite-target is an <b>nginx annotation</b> — traefik/ALB have different keys or ignore it. Ingress portability gap = why Gateway API exists.</div>';
+  document.getElementById('rewriteBox').innerHTML=h;
+}
+
+/* ===== events ===== */
+document.getElementById('tryBtn').addEventListener('click',doRoute);
+document.getElementById('pathIn').addEventListener('keydown',e=>{ if(e.key==='Enter') doRoute(); });
+document.getElementById('hostSel').addEventListener('change',doRoute);
+document.getElementById('bRewrite').addEventListener('click',function(){ rewriteOn=true; this.classList.add('active'); document.getElementById('bNoRewrite').classList.remove('active'); renderRewrite(); });
+document.getElementById('bNoRewrite').addEventListener('click',function(){ rewriteOn=false; this.classList.add('active'); document.getElementById('bRewrite').classList.remove('active'); renderRewrite(); });
+window.addEventListener('resize',drawTLS);
+
+doRoute(); renderTable(); drawTLS(); renderRewrite();
+</script>
+</body>
+</html>

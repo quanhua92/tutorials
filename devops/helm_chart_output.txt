@@ -1,0 +1,427 @@
+helm_chart.py - reference model. All output feeds HELM_CHART.md.
+
+========================================================================
+  SECTION A: chart structure - Chart.yaml + values.yaml + templates/
+========================================================================
+webapp/
+├── Chart.yaml          # metadata: name, version, appVersion, deps, type
+├── values.yaml         # DEFAULT values for the template holes
+├── charts/             # subchart tarballs (populated by `helm dependency update`)
+└── templates/
+    ├── deployment.yaml # main app Deployment (.Values.replicas, .Values.image)
+    ├── workers.yaml    # {{ range }} loop -> one Deployment per worker
+    ├── service.yaml    # Service exposing the app
+    ├── hooks.yaml      # pre-install / post-install hook templates
+    └── _helpers.tpl    # {{ define }} named snippets (reusable; NOT a resource)
+
+Chart.yaml:
+  apiVersion: v2
+  name: webapp
+  description: A tiny web application chart
+  type: application
+  version: 0.1.0
+  appVersion: "1.16"
+values.yaml (shown as a dict; on disk it is YAML):
+  {
+    "replicas": 3,
+    "image": {
+      "repository": "nginx",
+      "tag": "1.16",
+      "pullPolicy": "IfNotPresent"
+    },
+    "service": {
+      "type": "ClusterIP",
+      "port": 80
+    },
+    "bootstrapToken": "Ym9vdHN0cmFw",
+    "workers": [
+      {
+        "name": "ingestion",
+        "replicas": 2
+      },
+      {
+        "name": "processor",
+        "replicas": 4
+      }
+    ]
+  }
+
+  => templates/ has the HOLES; values.yaml has the DEFAULT fillings;
+     `helm install web ./webapp` pours values into holes -> finished YAML.
+
+[check] chart has Chart.yaml + values.yaml + templates/: OK
+
+========================================================================
+  SECTION B: template rendering - {{ .Values.X }} -> value, {{ range }} -> loop
+========================================================================
+BEFORE (deployment.yaml, with Go-template holes):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: {{ .Release.Name }}
+    labels:
+      app: {{ .Values.image.repository }}
+  spec:
+    replicas: {{ .Values.replicas }}
+    selector:
+      matchLabels:
+        app: {{ .Values.image.repository }}
+    template:
+      metadata:
+        labels:
+          app: {{ .Values.image.repository }}
+      spec:
+        containers:
+          - name: {{ .Values.image.repository }}
+            image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+AFTER  (`helm template web ./webapp` renders it with values.yaml):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+    labels:
+      app: nginx
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: nginx
+    template:
+      metadata:
+        labels:
+          app: nginx
+      spec:
+        containers:
+          - name: nginx
+            image: "nginx:1.16"
+            imagePullPolicy: IfNotPresent
+
+{{ range }} loop - workers.yaml iterates over .Values.workers (2 items):
+BEFORE (template):
+  {{ range .Values.workers }}---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: {{ .Release.Name }}-{{ .name }}
+    labels:
+      app: {{ .Values.image.repository }}
+  spec:
+    replicas: {{ .replicas }}
+    selector:
+      matchLabels:
+        app: {{ .Values.image.repository }}
+  {{ end }}
+
+AFTER (one Deployment per worker, {{ .name }}/{{ .replicas }} per item):
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web-ingestion
+    labels:
+      app: nginx
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: nginx
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web-processor
+    labels:
+      app: nginx
+  spec:
+    replicas: 4
+    selector:
+      matchLabels:
+        app: nginx
+
+[check] replicas=3, image=nginx:1.16, 2 workers (ingestion=2, processor=4): OK
+
+========================================================================
+  SECTION C: values override - --set (scalar) and --values (deep-merge)
+========================================================================
+helm install web ./webapp --set image.tag=v2
+  merged image.tag = 'v2'  (repository unchanged)
+  rendered image   = "nginx:v2"
+
+helm install web ./webapp --values prod.yaml
+  prod.yaml:
+    {
+      "replicas": 10,
+      "image": {
+        "tag": "1.20"
+      }
+    }
+  merged values (deep-merge: base + prod, prod wins):
+    {
+      "replicas": 10,
+      "image": {
+        "repository": "nginx",
+        "tag": "1.20",
+        "pullPolicy": "IfNotPresent"
+      },
+      "service": {
+        "type": "ClusterIP",
+        "port": 80
+      },
+      "bootstrapToken": "Ym9vdHN0cmFw",
+      "workers": [
+        {
+          "name": "ingestion",
+          "replicas": 2
+        },
+        {
+          "name": "processor",
+          "replicas": 4
+        }
+      ]
+    }
+  rendered deployment (prod):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+    labels:
+      app: nginx
+  spec:
+    replicas: 10
+    selector:
+      matchLabels:
+        app: nginx
+    template:
+      metadata:
+        labels:
+          app: nginx
+      spec:
+        containers:
+          - name: nginx
+            image: "nginx:1.20"
+            imagePullPolicy: IfNotPresent
+
+  --set image.tag=v2  -> image: "nginx:v2"  (one scalar swapped)
+  --values prod.yaml  -> replicas=10, image: "nginx:1.20" (deep merge;
+     repository/pullPolicy fall through from base values.yaml).
+
+[check] --set -> nginx:v2 ; --values prod -> replicas=10, nginx:1.20: OK
+
+========================================================================
+  SECTION D: hooks - pre-install Secret + post-install smoke-test Job
+========================================================================
+A hook is a NORMAL template plus the helm.sh/hook annotation. Helm does
+NOT apply it as a steady-state resource; it runs the hook at the named
+lifecycle phase, ordered by hook-weight (lower first).
+
+| event         | when                        | typical use             |
+|---------------|-----------------------------|-------------------------|
+| pre-install   | before any resource is created | create a bootstrap secret |
+| post-install  | after all resources are created | run a smoke-test Job    |
+| pre-upgrade   | before applying the new revision | run a DB migration Job  |
+| post-upgrade  | after the upgrade is applied | warm a cache / notify   |
+| pre-rollback  | before rolling back         | take a backup           |
+| post-rollback | after a rollback completes  | flush caches            |
+| pre-delete    | before uninstalling         | drain / export data     |
+| post-delete   | after uninstalling          | cleanup cloud resources |
+| test          | `helm test` only            | run integration tests   |
+
+install lifecycle execution order (phase, then hook-weight):
+
+  [pre-install] bootstrap-token-secret  (weight=-5)
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: web-bootstrap-token
+      annotations:
+        "helm.sh/hook": pre-install
+        "helm.sh/hook-weight": "-5"
+        "helm.sh/hook-delete-policy": before-hook-creation
+    type: Opaque
+    data:
+      token: Ym9vdHN0cmFw
+
+  [install] main templates  (weight=0)
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: web
+      labels:
+        app: nginx
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: nginx
+      template:
+        metadata:
+          labels:
+            app: nginx
+        spec:
+          containers:
+            - name: nginx
+              image: "nginx:1.16"
+              imagePullPolicy: IfNotPresent
+
+  [post-install] smoke-test-job  (weight=5)
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: web-smoke-test
+      annotations:
+        "helm.sh/hook": post-install
+        "helm.sh/hook-weight": "5"
+    spec:
+      template:
+        spec:
+          containers:
+            - name: smoke
+              image: "busybox:1.36"
+              command: ["wget", "-qO-", "http://web/healthz"]
+          restartPolicy: Never
+
+  pre-install (weight -5) -> install (main) -> post-install (weight 5).
+  The Secret/Job are NOT part of `helm get manifest` steady-state output
+  (unless hook-delete-policy keeps them); they fire at their phase.
+
+[check] hook ordering pre-install(-5) < install < post-install(+5): OK
+
+========================================================================
+  SECTION E: subcharts + GOLD (webapp + redis subchart, prod values)
+========================================================================
+Chart.yaml declares the subchart as a dependency:
+  apiVersion: v2
+  name: webapp
+  description: A tiny web application chart (with a redis subchart)
+  type: application
+  version: 0.1.0
+  appVersion: "1.16"
+  dependencies:
+    - name: redis
+      version: 0.4.x
+      repository: oci://registry.example.com/charts
+`helm dependency update` resolves it into charts/redis-0.4.x.tgz and
+writes Chart.lock. At render time each subchart gets its OWN scoped
+values: the parent's .Values.redis block (+ shared `global`).
+
+parent values (webapp prod + scoped redis + global):
+  {
+    "replicas": 10,
+    "image": {
+      "repository": "nginx",
+      "tag": "1.20",
+      "pullPolicy": "IfNotPresent"
+    },
+    "service": {
+      "type": "ClusterIP",
+      "port": 80
+    },
+    "bootstrapToken": "Ym9vdHN0cmFw",
+    "workers": [
+      {
+        "name": "ingestion",
+        "replicas": 2
+      },
+      {
+        "name": "processor",
+        "replicas": 4
+      }
+    ],
+    "redis": {
+      "architecture": "standalone",
+      "auth": {
+        "enabled": true
+      },
+      "service": {
+        "ports": {
+          "redis": 6379
+        }
+      }
+    },
+    "global": {
+      "imageRegistry": "registry.example.com"
+    }
+  }
+
+redis subchart SEES ONLY .Values.redis (+ global), NOT webapp values:
+  {
+    "architecture": "standalone",
+    "auth": {
+      "enabled": true
+    },
+    "service": {
+      "ports": {
+        "redis": 6379
+      }
+    },
+    "global": {
+      "imageRegistry": "registry.example.com"
+    }
+  }
+
+webapp Deployment (prod, parent scope):
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: web
+    labels:
+      app: nginx
+  spec:
+    replicas: 10
+    selector:
+      matchLabels:
+        app: nginx
+    template:
+      metadata:
+        labels:
+          app: nginx
+      spec:
+        containers:
+          - name: nginx
+            image: "nginx:1.20"
+            imagePullPolicy: IfNotPresent
+
+redis Service + auth Secret (subchart scope, {{ if .Values.auth.enabled }}):
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: web-redis
+  spec:
+    selector:
+      app: redis
+    ports:
+      - name: redis
+        port: 6379
+  
+  ---
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: web-redis
+    annotations:
+      app.kubernetes.io/managed-by: redis-subchart
+  type: Opaque
+
+library chart: type: library -> defines {{ define }} snippets only;
+  renders NO resources itself (other charts {{ include }} them).
+
+[check] webapp prod replicas=10:               True
+[check] webapp prod image=nginx:1.20:          True
+[check] redis Service port=6379:               True
+[check] redis auth Secret rendered (if=True):  True
+[check] global visible to subchart:            True
+[check] GOLD: chart+subchart render as expected: OK
+
+[check] auth.enabled=False -> Secret DROPPED by { if }: OK
+
+GOLD scalars for helm_chart.html:
+  webapp image line   = 'image: "nginx:1.20"'
+  webapp replicas     = 10
+  redis Service port  = 6379
+  redis auth enabled  = True  (Secret rendered)
+
+========================================================================
+  DONE - all sections printed; all [check]s asserted
+========================================================================

@@ -1,0 +1,233 @@
+service_mesh.py - reference simulation.
+All numbers below feed SERVICE_MESH.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: Sidecar injection -- the pod topology
+========================================================================
+A service mesh does NOT rewrite your app. It adds TWO things to the
+pod, both invisible to the app container:
+
+  1. init container 'istio-init'  -- runs once, BEFORE the app. Installs
+     iptables rules that hijack EVERY TCP connection into Envoy.
+  2. sidecar 'istio-proxy' (Envoy)-- runs alongside the app, forever.
+     Owns port 15001 (outbound) and 15006 (inbound).
+
+BEFORE injection (a plain pod):
+
+name: payment-7d9-xyz
+containers:
+- name: payment
+  image: registry/payment:2.1
+  port: 8080
+initContainers: 
+
+AFTER Istio injection (same app container, untouched):
+
+name: payment-7d9-xyz
+initContainers:
+- name: istio-init
+  image: istio/proxyv2:1.22
+  job: iptables redirect: inbound->15006, outbound->15001
+containers:
+- name: payment
+  image: registry/payment:2.1
+  port: 8080
+- name: istio-proxy
+  image: istio/proxyv2:1.22
+  ports:
+  outbound: 15001
+  inbound: 15006
+  admin: 15020
+  role: Envoy sidecar -- mTLS, retry, LB, metrics
+
+Traffic path once the sidecar is in place (the app is NEVER aware):
+  INBOUND : client -> pod eth0 -> iptables -> Envoy:15006 -> app:8080
+                                   (mTLS terminates here)
+  OUTBOUND: app:8080 -> iptables -> Envoy:15001 -> (mTLS) -> remote Envoy
+                                              -> remote app:8080
+
+KEY POINT: the app still binds 0.0.0.0:8080 and talks to remote
+services by DNS as before. The iptables redirect is what makes the
+interception transparent -- the app's sockets see plaintext on the
+loopback; the wire between pods is encrypted by Envoy.
+
+[check] injection added 1 init + 1 sidecar, app unchanged?  OK   (init=1, app=1, sidecar=1)
+
+========================================================================
+  SECTION B: mTLS -- Envoy-to-Envoy mutual TLS (SPIFFE identity)
+========================================================================
+Without a mesh, every service must obtain+rotate its own TLS cert and
+verify peers. Almost nobody does it correctly. The mesh does it FOR you:
+
+Istiod runs a CA. Every pod's Envoy asks it for a short-lived cert whose
+Subject Alternative Name (SAN) is the pod's SPIFFE identity:
+
+  SPIFFE ID  = spiffe://cluster.local/ns/default/sa/payment
+
+workload_certificate:
+  san (identity): spiffe://cluster.local/ns/default/sa/payment
+  issuer: Istio CA (trust domain cluster.local)
+  serial: 1A:2B:3C:4D:5E:6F
+  key: ECDSA P-256
+  validity: 24h  (notBefore=T0, notAfter=T0+24h)
+  rotate_at: 80% of TTL = 19h12m  (Envoy fetches a fresh cert in advance)
+
+The handshake between two pods (both have Envoy sidecars):
+  1. client Envoy opens TLS to server Envoy, presents ITS cert
+     (SAN = spiffe://.../ns/default/sa/frontend).
+  2. server Envoy presents ITS cert (SAN = spiffe://.../sa/payment),
+     verifies the client cert chains to the shared CA.
+  3. both sides now share an AES-256-GCM channel. The APP on each end
+     only ever sees plaintext on 127.0.0.1.
+
+PeerAuthn policy can REQUIRE mTLS ('STRICT') so plaintext is rejected:
+  PeerAuthentication:
+    mode: STRICT
+    mtls: auto (Envoy negotiates TLS 1.3)
+
+WHY auto-rotation matters: a 24h cert rotated at 80% lifetime means a
+compromised cert is useless within hours. Operators set policy once;
+rotation, distribution, and verification are the mesh's job, not the
+app team's. Zero cert logic in application code.
+
+[check] 24h cert rotated at 80% -> 19.2h (long before expiry)?  OK
+
+========================================================================
+  SECTION C: Traffic management -- VirtualService 90/10 split  (GOLD)
+========================================================================
+The operator writes two control-plane objects. Istiod reads them and
+programs every Envoy via xDS. The data plane (Envoy) does the split.
+
+VirtualService -- the routing rules:
+
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+name: payment
+host: payment
+routes:
+- to: payment
+  subset: v1
+  weight: 90
+- to: payment
+  subset: v2
+  weight: 10
+
+DestinationRule -- subsets, LB, and policy for 'payment':
+
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+name: payment
+host: payment
+subsets:
+- name: v1
+  label: version=v1
+- name: v2
+  label: version=v2
+trafficPolicy:
+  loadBalancer: ROUND_ROBIN
+  connectionPool:
+    maxConnections: 100
+    maxPendingRequests: 10
+  outlierDetection:
+    consecutive5xxErrors: 5
+    baseEjectionTime: 30
+retryPolicy:
+  attempts: 3
+  perTryTimeout: 2s
+  retryOn: 5xx,connect-failure,reset
+
+How the weights become reality: Envoy's cluster for 'payment' has two
+subsets (v1, v2). The VirtualService sets their LB weights to 90 and 10.
+Envoy then runs a WEIGHTED ROUND ROBIN over the subsets.
+
+Configured weights: {'v1': 90, 'v2': 10}   (sum = 100)
+WRR guarantee: over every 100 consecutive requests, v1 gets
+exactly 90 and v2 exactly 10.
+
+Simulated 1000 requests through Envoy's WRR (deterministic):
+  v1 ->  900 requests  (90.0%)
+  v2 ->  100 requests  (10.0%)
+
+GOLD (pinned for service_mesh.html):
+  per-cycle counts over 100 requests = {'v1': 90, 'v2': 10}
+  configured weights                       = {'v1': 90, 'v2': 10}
+  1000-req split                           = {v1: 900, v2: 100}  ratio 90:10
+[check] WRR per-cycle counts == VirtualService weights?  OK
+
+========================================================================
+  SECTION D: Resilience -- retries + outlier detection + circuit break
+========================================================================
+Three independent protections live in the sidecar (DestinationRule):
+
+  retry          : re-send on {5xx,connect-failure,reset}, up to 3 tries,
+                   each try capped at perTryTimeout=2s.
+  outlier detect : per-HOST. After 5 consecutive 5xx, EJECT the host for
+                   baseEjectionTime=30s; the LB skips it. (host health)
+  circuit break  : per-CLUSTER pool. If maxConnections=100 is exceeded,
+                   return 503 LOCALLY (UPSTREAM_OVERFLOW) -- never even
+                   call the struggling upstream. (overflow protection)
+
+Cluster v1 = ['pod-a', 'pod-b']. pod-a returns [503 x5] then heals; pod-b = 200.
+retry: attempts=3; eject a host after 5 consecutive 5xx.
+
+  req | WITHOUT mesh (app calls upstream directly) | WITH mesh (Envoy retries + ejects)
+  ----|--------------------------------------------|----------------------------------------------
+    1 | 503!  pod-a:503                             | 200   pod-a:503 -> pod-b:200  (2 tries)
+    2 | 200   pod-b:200                             | 200   pod-a:503 -> pod-b:200  (2 tries)
+    3 | 503!  pod-a:503                             | 200   pod-a:503 -> pod-b:200  (2 tries)
+    4 | 200   pod-b:200                             | 200   pod-a:503 -> pod-b:200  (2 tries)
+    5 | 503!  pod-a:503                             | 200   pod-a:503 -> pod-a:EJECT -> pod-b:200  (2 tries)
+    6 | 200   pod-b:200                             | 200   pod-b:200  (1 tries)
+    7 | 503!  pod-a:503                             | 200   pod-b:200  (1 tries)
+    8 | 200   pod-b:200                             | 200   pod-b:200  (1 tries)
+
+User-visible failures:  WITHOUT mesh = 4/8     WITH mesh = 0/8
+pod-a ejected on request 5 (after 5 consecutive 5xx).
+
+READ THIS: WITHOUT the mesh, every call that lands on pod-a while it is
+erroring is a 503 the USER sees. WITH the mesh, Envoy retries the same
+request to pod-b on failure -- the user gets a clean 200 -- and once
+pod-a has erred 5x in a row, outlier detection EJECTS it so later
+requests are not even routed there. The caller never knows pod-a broke.
+
+Circuit breaking -- per-CLUSTER overflow protection (separate trace):
+  connectionPool.maxConnections = 100. A burst of 105 simultaneous requests arrives.
+  Envoy forwards the first 100 and rejects the remaining 5 LOCALLY (503 UPSTREAM_OVERFLOW) -- it never drowns the
+  upstream with 105 concurrent calls. This is overflow protection
+  at the CALLER; outlier detection above is health protection at the HOST.
+  forwarded=100   locally rejected (overflow)=5
+[check] retries+ejection hid all upstream failures (OK)   circuit breaker capped overflow at maxConnections (OK)
+
+========================================================================
+  SECTION E: Observability -- the four golden signals (for free)
+========================================================================
+Envoy sits on EVERY connection, so it sees EVERY request. It emits the
+four golden signals (Google SRE ch.6) with ZERO changes to app code:
+
+  Latency   : per-request histogram -> p50 / p90 / p99  (scraped by
+              Prometheus from Envoy's /stats, label istio_requests_total).
+  Traffic   : requests/sec, in/out bytes (the load on the service).
+  Errors    : rate of 1xx-4xx-5xx, esp. 5xx / 4xx split.
+  Saturation: how 'full' the service is -- connection-pool util vs
+              maxConnections, CPU, queue depth.
+
+Tracing is the same story: Envoy generates/propagates W3C Traceparent
+headers and ships spans to Jaeger -- one click in the UI shows the full
+request hop chain across services, again with no app change.
+
+Sample window: 20 requests over 1s to 'payment' (deterministic).
+  latency (ms): min=39  p50=49.0  p90=59.0  p99=62.6  max=63
+  traffic    : 20 req/s
+  errors     : 2 5xx  (10.0%)
+  saturation : 73/100 connections = 73% of pool
+
+These are GOLDEN because they tell you, in four numbers, whether a
+service is healthy: rising latency + rising errors + high saturation =
+a service in trouble -- and the mesh gave you all of it automatically.
+[check] p50<p90<p99 ordering + valid saturation window?  OK
+GOLD (pinned for service_mesh.html): p50=49.0ms, p90=59.0ms, p99=62.6ms, sat=73%, err=10.0%
+
+========================================================================
+  DONE - all sections printed
+========================================================================

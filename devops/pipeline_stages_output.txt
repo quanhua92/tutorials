@@ -1,0 +1,177 @@
+pipeline_stages.py - reference simulation.
+All numbers below feed PIPELINE_STAGES.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: Linear pipeline -- checkout -> build -> test -> package -> deploy
+========================================================================
+The six canonical stages of a delivery pipeline:
+
+  1. Source   - git push triggers the pipeline
+  2. Build    - compile / containerize
+  3. Test     - unit / integration / e2e
+  4. Package  - publish artifact / push image
+  5. Deploy   - roll out to staging, then prod
+  6. Verify   - health checks post-deploy
+
+A LINEAR pipeline runs them strictly one after another. Fail any stage
+and the pipeline halts -- the commit does not advance.
+
+  stage       duration  cumulative
+  checkout         20s         20s
+  build          1m30s       1m50s
+  test           3m00s       4m50s
+  package          40s       5m30s
+  deploy           30s       6m00s
+
+  TOTAL (sequential) = sum of all = 6m00s  (360s)
+
+Watch the 'test' stage: 180s = 3m00s. That is unit+integration+lint run
+BACK TO BACK. Section B shows what happens when they run AT THE SAME TIME.
+
+GOLD linear_total = 360s  (= 6m00s)
+
+========================================================================
+  SECTION B: Parallel test stage -- unit + integration + lint AT THE SAME TIME
+========================================================================
+The test stage fans out into 3 INDEPENDENT jobs. They touch different
+things, so nothing stops them running concurrently:
+
+  job             duration
+  unit               1m00s
+  integration        1m30s
+  lint                 30s
+
+  Sequential test wall-clock = sum  = 3m00s  (180s)
+  Parallel   test wall-clock = max  = 1m30s  (90s)
+  speedup = 180/90 = 2.00x
+
+WHY max not sum: all three jobs start at t=0. Integration (the slowest,
+90s) defines when the GROUP is done. Unit (60s) and lint (30s) finish
+early and just wait. The clock only ticks for the longest one.
+
+Full pipeline with the parallel test group:
+  pre  (checkout+build)     = 1m50s
+  test (parallel, = max)    = 1m30s
+  post (package+deploy)     = 1m10s
+  PARALLEL TOTAL            = 4m30s  (270s)
+
+  vs LINEAR TOTAL           = 6m00s  (360s)
+  SAVED                     = 1m30s  (25% faster)
+
+GOLD (pinned for pipeline_stages.html):
+  parallel_test (group wall-clock) = 90s  (= max of jobs)
+  parallel_total                   = 270s  (= 4m30s)
+[check] parallel_total == pre+max(test)+post?  OK
+[check] parallel_total < linear_total?         OK
+
+========================================================================
+  SECTION C: Matrix build -- test on Python 3.10/3.11/3.12 x Ubuntu/Mac
+========================================================================
+A matrix runs the SAME job across every combination of axes. Each cell
+is an independent job, and ALL cells run in parallel.
+
+  axis 1: python = ['3.10', '3.11', '3.12']
+  axis 2: os     = ['ubuntu-latest', 'macos-latest']
+
+  matrix = 3 python x 2 os = 6 jobs
+
+  py 3.10 | py 3.11 | py 3.12  <- python axis
+  ubuntu-latest    55s |   58s |   61s
+  macos-latest     62s |   65s |   68s
+
+  Sequential (sum of all 6 cells) = 6m09s  (369s)
+  Parallel   (max of all cells)            = 1m08s  (68s)
+  speedup = 369/68 = 5.4x  -- 6 cells for the
+  price of one on the wall clock.
+
+CAVEAT: parallelism is bounded by runner count. 6 cells need 6 runners
+(or a runner allowing 6 concurrent jobs). With only 2 runners, the 6
+cells run in 3 waves -> total ~= 3 * max(cell), not 1 * max(cell).
+
+GOLD matrix_parallel_total = 68s  (6 cells, 1 wave)
+
+========================================================================
+  SECTION D: Caching -- restore node_modules/.m2, skip the re-download
+========================================================================
+Dependency download is the biggest time sink in most builds. A cache
+stores the downloaded deps keyed by the lockfile hash; a later run with
+the SAME lockfile restores them in seconds instead of re-downloading.
+
+  build step        no cache   cache HIT
+  restore_cache           2s          3s
+  download_deps          45s          0s  <- skip
+  compile                45s         45s
+
+  build total (no cache)  = 1m32s  (92s)
+  build total (cache HIT) = 48s  (48s)
+  saved per run           = 44s  (48%)
+
+CACHE KEY: hash of the lockfile (package-lock.json / pom.xml).
+  - lockfile UNCHANGED -> key matches -> HIT -> restore ~3s.
+  - lockfile CHANGED   -> key differs  -> MISS -> re-download (45s),
+    then the new deps are saved back to the cache for next time.
+
+Over 10 runs with an unchanged lockfile:
+  no cache : 10 x 1m32s  = 15m20s
+  cache HIT: 10 x 48s = 8m00s
+  saved    : 7m20s
+
+GOLD cache_hit_build = 48s  (vs 92s uncached)
+[check] cache HIT faster by >=40s?  OK
+
+========================================================================
+  SECTION E: Pipeline as code -- the pipeline lives in the repo
+========================================================================
+The pipeline definition is a FILE checked into the repo alongside the
+code it ships. It is versioned, code-reviewed, and diffable -- change
+the pipeline in a PR and reviewers see exactly what changed.
+
+------------------------------------------------------------------------
+GitHub Actions YAML (.github/workflows/ci.yaml):
+------------------------------------------------------------------------
+name: ci
+on: [push]                       # <- Source: trigger on git push
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4        # checkout
+      - uses: actions/setup-node@v4      # install toolchain
+      - run: npm ci                       # Build: install + compile
+      - run: npm run build
+      - run: npm test &                   # Test (parallel group)
+             npm run integration &
+             npm run lint
+      - run: npm pack                     # Package: artifact
+      - run: ./deploy.sh staging          # Deploy + Verify
+------------------------------------------------------------------------
+Jenkinsfile (Groovy, declarative):
+------------------------------------------------------------------------
+pipeline {
+  agent any
+  stages {
+    stage('Build')   { steps { sh 'make build' } }
+    stage('Test')    {
+      parallel {                       // <- parallel block
+        stage('unit')        { steps { sh 'make test-unit' } }
+        stage('integration') { steps { sh 'make test-int'  } }
+        stage('lint')        { steps { sh 'make lint'      } }
+      }
+    }
+    stage('Package') { steps { sh 'make package' } }
+    stage('Deploy')  { steps { sh 'make deploy'  } }
+  }
+}
+------------------------------------------------------------------------
+
+Read either file top-to-bottom and you see the SAME six stages. The
+parallel block in both is Section B's fan-out, written down. That is
+the point: the pipeline IS code, and this code IS the pipeline.
+
+[check] both definitions encode checkout->build->test->package->deploy?
+        OK  (the stage names map 1:1 to the canonical six.)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,285 @@
+observability.py - reference model. All numbers below feed OBSERVABILITY.md.
+Deterministic (single seeded RNG). observability.html re-derives them in JS.
+
+
+========================================================================
+  SECTION A: METRICS - counter / gauge / histogram (Prometheus)
+========================================================================
+A metric is a named NUMBER with LABELS, sampled over time. Three
+sub-types cover everything Prometheus stores:
+
+  counter    : only goes UP  -> 'how many so far'.  rate()/increase().
+  gauge      : goes up OR down -> 'what is it now'. avg_over_time().
+  histogram  : buckets observations  -> percentiles via
+                histogram_quantile().
+
+A1) COUNTER  http_requests_total{method,status}
+    A counter NEVER decreases; you ask it rate()/increase() over a
+    window. We simulate 20 scrapes (5 min); each scrape the GET/200
+    counter climbs by a deterministic number of new requests.
+
+    per-scrape new GET requests (first 8 scrapes): [16, 9, 19, 24, 19, 17, 13, 17]
+    cumulative GET/200 at scrape 0  : 16
+    cumulative GET/200 at scrape 19: 289
+    cumulative GET/500 at scrape 19: 11
+
+    PromQL ->  rate(http_requests_total{status="200"}[5m])
+            = (last - first) / 300s  = (289 - 16) / 300
+            = 0.9100 req/s   (~0.91 GET/200 per second)
+
+    PromQL ->  increase(http_requests_total{status="200"}[5m])
+            = 289 - 16 = 273 requests added in the window
+
+    error rate (from the counter) = rate(500)/rate(total) = 0.0367/0.9467 = 3.87%
+    [check] final counter value 200+500 == sum(increments): 300.0 == 300  (counter is monotonic):  OK
+
+A2) GAUGE  memory_usage_bytes
+    A gauge tracks an instantaneous VALUE that moves both ways. We
+    sample memory every scrape; avg_over_time() smooths the noise.
+
+    samples (MiB, first 8): [530, 594, 534, 502, 476, 621, 433, 582]
+    peak over window : 632 MiB
+    PromQL -> avg_over_time(memory_usage_bytes[5m]) = 518.6 MiB
+    PromQL -> max_over_time(...)                   = 632 MiB
+    [check] avg_over_time matches statistics.fmean:  OK
+
+A3) HISTOGRAM  http_request_duration_seconds_bucket{le}
+    A histogram does NOT store each value; it counts how many fell
+    into each bucket (cumulative) and keeps a _sum + _count. That is
+    enough to reconstruct percentiles. We observe 60 latencies:
+
+    buckets (upper bound le=) : [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0] +Inf
+    cumulative counts (<= le) : [1, 4, 14, 25, 46, 49, 54, 60, 60]
+    _count = 60   _sum = 8.8032s
+
+    percentile from RAW data : p50=60.7ms  p95=790.2ms  p99=853.1ms
+    histogram_quantile(0.95) : 750.0ms  (from buckets)
+
+    PromQL -> histogram_quantile(0.95, sum by (le) (
+                rate(http_request_duration_seconds_bucket[5m]) ))
+           -> 750.0ms
+
+    NOTE the trade-off: buckets cost O(buckets) memory no matter how
+    many requests, but the p95 is only as precise as the bucket width.
+    [check] _count==N(60), _sum==sum(obs), +Inf==N, buckets monotonic:  OK
+    [check] bucket p95 within one bucket width of raw p95 (|40.2ms| <= 500ms):  OK
+
+========================================================================
+  SECTION B: LOGS - structured JSON, trace_id correlation, Loki
+========================================================================
+A log is one TIMESTAMPED EVENT. STRUCTURED logging (JSON fields, not
+free text) turns logs into queryable data. The single most important
+field is trace_id: it ties a log line to the trace + metric of the
+SAME request, so an alert can jump straight to the culprit.
+
+B1) Three services handle one checkout request. They all stamp the
+    SAME trace_id (a4f9...) into their logs. This is the correlation
+    that makes the pillars ONE system:
+
+    {"ts":"12:01:03.112","level":"INFO","service":"api-gateway","trace_id":"a4f9c21b8e7d4061","span_id":"1a2b3c4d","msg":"GET /checkout","user":"u_8821","latency_ms":0}
+    {"ts":"12:01:03.118","level":"INFO","service":"auth-svc","trace_id":"a4f9c21b8e7d4061","span_id":"5e6f7a8b","parent_span_id":"1a2b3c4d","msg":"validating token","token_id":"tk_42"}
+    {"ts":"12:01:03.141","level":"WARN","service":"auth-svc","trace_id":"a4f9c21b8e7d4061","span_id":"5e6f7a8b","parent_span_id":"1a2b3c4d","msg":"token near expiry","ttl_s":90}
+    {"ts":"12:01:03.207","level":"INFO","service":"db-svc","trace_id":"a4f9c21b8e7d4061","span_id":"9c0d1e2f","parent_span_id":"1a2b3c4d","msg":"SELECT orders","rows":3,"query_ms":58}
+    {"ts":"12:01:03.430","level":"ERROR","service":"api-gateway","trace_id":"a4f9c21b8e7d4061","span_id":"1a2b3c4d","msg":"upstream timeout","status":504,"latency_ms":318}
+
+B2) Because every line is JSON, Loki can aggregate with LogQL:
+    count_over_time({app="checkout"} |= "ERROR" [5m])
+    sum by (service) (count_over_time({app="checkout"} | json | level="ERROR" [5m]))
+
+    Aggregated 40 lines over [5m]:
+    count by level:
+        INFO  22
+        WARN  9
+        ERROR 9
+    sum by (service) where level=ERROR:
+        api-gateway  3
+        auth-svc     1
+        cache-svc    1
+        db-svc       4
+
+    [check] sum(levels)==N and sum(errors_by_service)==ERRORs and the 5-line demo shares exactly 1 trace_id:  OK
+
+========================================================================
+  SECTION C: TRACES - span tree, self-time, critical path (Jaeger)
+========================================================================
+A TRACE is a tree of SPANS for ONE request. Each span = one hop with
+(op, service, start, end, parent). The parent pointer builds the tree;
+the trace_id stamps them all as one request. Traces answer 'where did
+the time go?' - and for that you need SELF-TIME, not raw duration.
+
+C1) Canonical request flow  API -> Auth -> DB -> Cache  (a pure nested
+    call chain, like synchronous RPCs). Each service waits for its
+    child before returning, so the spans nest perfectly:
+
+    trace_id = a4f9c21b8e7d4061   (same id as the logs in Section B)
+    span        service      op              start  end   dur   parent
+    ------------------------------------------------------------------
+    1a2b3c4d  api-gateway  GET /checkout       0   400   400  (root)
+    5e6f7a8b  auth-svc     ValidateToken      10   160   150  API
+    9c0d1e2f  db-svc       SELECT users       30   130   100  Auth
+    0f1a2b3c  cache-svc    GET session        50   100    50  DB
+
+    Span TREE (indent = parent/child):
+
+    1a2b3c4d [api-gateway] GET /checkout  [0->400] 400ms  (self 250ms)
+      5e6f7a8b [auth-svc] ValidateToken  [10->160] 150ms  (self 50ms)
+        9c0d1e2f [db-svc] SELECT users  [30->130] 100ms  (self 50ms)
+          0f1a2b3c [cache-svc] GET session  [50->100] 50ms  (self 50ms)
+
+    SELF-TIME = duration - measure(union of children). That is the
+    part the span was ACTUALLY working, not waiting for a child:
+
+    span    dur   children-union   self-time
+    ------------------------------------------------
+    API      400          150         250
+    Auth     150          100          50
+    DB       100           50          50
+    Cache     50            0          50
+
+    trace duration = max(end) - min(start) = 400 - 0 = 400 ms
+    critical path  = API -> Auth -> DB -> Cache
+    sum(self-time on critical path) = 400 ms
+
+    GOLD: for a pure nested call chain the critical path IS the whole
+    trace, so:
+        trace_duration == sum(self-time on critical path)
+        400 == 400   ->  OK
+    [check] trace_duration(400) == sum(critical-path self-times)(400):  OK
+
+C2) Now a BRANCHING trace: the API fires Auth, then Cache and DB-main
+    in PARALLEL (non-overlapping siblings). The critical path is only
+    PART of the trace - the rest is parallel work you can't avoid:
+
+    a1b2 [api-gateway] GET /search  [0->300] 300ms  (self 30ms)
+      c3d4 [auth-svc] ValidateToken  [5->55] 50ms  (self 50ms)
+      e5f6 [cache-svc] GET result  [60->100] 40ms  (self 40ms)
+      7890 [db-svc] SELECT docs  [100->280] 180ms  (self 180ms)
+
+    trace duration            = 300 ms
+    sum(self-time ALL spans)  = 300 ms
+    critical path             = API -> DB
+    sum(self-time crit path)  = 210 ms  (< trace duration: the rest is parallel/Auth work)
+
+    Two different facts, both true:
+      * trace_duration == sum(self-time over ALL spans): 300 == 300  (OK)
+      * critical-path self-time (210ms) <= trace_duration (300ms) when there is parallelism.
+    [check] sum(all self-times)==duration OK; crit-path<300 (parallel) OK
+
+========================================================================
+  SECTION D: USE (resources) vs RED (services)
+========================================================================
+Two checklists make sure you instrument the RIGHT signals:
+
+  USE method (Brendan Gregg, 2012) - for RESOURCES (CPU, disk, NIC):
+     U tilization  : how busy            (CPU busy %)
+     S aturation   : how queued          (run-queue length, disk full)
+     E rrors       : hard failures       (dropped packets, ECC errors)
+  RED method (Tom Wilkie, 2015) - for SERVICES / endpoints:
+     R ate         : requests per second
+     E rrors       : failed requests
+     D uration     : latency distribution
+
+Rule of thumb: USE the metal (nodes), RED the traffic (services).
+Check BOTH: a saturated CPU (USE) explains a service's rising
+Duration (RED).
+
+D1) USE on a CPU core over 8 samples (each = 1s):
+    utilization% (busy) : [55, 95, 44, 60, 76, 38, 39, 87]
+    saturation (run-q)  : [4, 0, 2, 4, 0, 4, 1, 0]
+    errors (drops)      : [0, 0, 1, 0, 0, 0, 0, 0]
+
+    U : avg 61.8% , peak 95%
+    S : 3 samples with run-queue >= 3 (pressure)
+    E : 1 dropped interrupts
+
+    Interpretation: avg utilization is fine, but peak 95% + 3 sat samples -> the core is occasionally saturated; that is the lead to chase.
+D2) RED on the /checkout service over the same window:
+    Rate (req/s)         : [120, 135, 128, 140, 118, 160, 200, 142]
+    Errors (per sample)  : [0, 1, 0, 2, 0, 3, 8, 2]
+    Duration p95 (ms)    : [42, 45, 41, 60, 44, 88, 318, 70]
+
+    R : mean 142.9 req/s , peak 200 req/s
+    E : 16 errors over window (1.40% of requests)
+    D : p95 ranges 41..318 ms, peak 318 ms coincides with the error spike -> the same root cause.
+
+D3) Side-by-side:
+    | aspect  | USE (CPU resource)        | RED (/checkout service)   |
+    |---------|---------------------------|----------------------------|
+    | primary | Utilization avg 62%      | Rate mean 143 req/s       |
+    | queue   | Saturation: 3 pressured | Errors: 16 (1.4%)     |
+    | failure | Errors: 1 drops          | Duration p95 peak 318 ms   |
+
+    Notice the spike aligns: sample 7 has peak Rate, peak Duration,
+    and peak Errors (RED) right when the CPU saturated (USE). That is
+    USE explaining RED - the whole point of running both.
+    [check] RED spike (sample 7) coincides with peak p95 + peak errors:  OK
+
+========================================================================
+  SECTION E: SLO / SLI / SLA, error budget, burn-rate alerting
+========================================================================
+  SLI : the MEASUREMENT.  'fraction of requests that were good'
+        good = (status < 500) AND (latency < 800ms), over 5 min.
+  SLO : the TARGET on that SLI.  '99.9% of 5-min windows good.'
+  SLA : the CONTRACT.  'miss 99.9% for a month -> refund X%.'
+  The SLO is internal and STRICTER than the SLA; the SLA is the legal
+  fallback. The gap is your safety margin.
+
+E1) Error budget = 1 - SLO. For SLO = 99.9% over a 30-day month:
+    month window = 30 * 24 * 60 = 43200 min
+    error budget = 1 - 0.999 = 0.001 (= 0.1%)
+    allowed downtime = 43200 * 0.001 = 43.2 min / month
+      -> 99.9% = 43.2 min downtime allowed (43.2 min)
+
+    [check] 99.9% over 30d -> 43.2 min budget (== 43.2):  OK
+        99.5% ->   216.0 min / month downtime allowed
+        99.9% ->    43.2 min / month downtime allowed
+        99.95% ->    21.6 min / month downtime allowed
+        99.99% ->     4.3 min / month downtime allowed
+
+E2) Burn rate = how fast you spend the budget:
+        burn_rate = observed_error_rate / (1 - SLO)
+
+    If burn_rate = 1 you spend the budget EXACTLY evenly over the
+    window. >1 means you bust the SLO before the window ends. Google
+    SRE Workbook ch.5 recommends MULTI-WINDOW MULTI-BURN alerting so
+    you page on FAST burns (a lot wasted quickly) AND slow burns:
+
+    | alert   | long window | short window | burn threshold | meaning        |
+    |---------|-------------|--------------|----------------|----------------|
+    | PAGE    |   1h        |   5m         |    > 14.4x     | 2% budget in 1h|
+    | PAGE    |   6h        |  30m         |    >  6.0x     | 5% budget in 6h|
+    | TICKET  |   3d        |   6h         |    >  1.0x     | on-pace to miss|
+
+    Worked example: observed error rate this hour = 2.0%
+        burn_rate = 0.020 / 0.001 = 20.0x
+        -> 20.0x > 14.4x ?  YES -> PAGE (fast burn)
+        budget consumed in this 1h = burn * (1h/30d) = 2.78% of the monthly budget
+
+    [check] burn_rate(20.0x) = err_rate/budget -> PAGE (fast burn):  OK
+E3) Attainment over a month of 5-min windows. Each window has a
+    measured good-ratio; the month's SLI = mean of those ratios.
+
+    windows this month        = 8640
+    bad (below-threshold) windows = 7
+    SLI (good windows / total) = 8633/8640 = 99.919%
+    SLO target                 = 99.900%
+    result                     = MEET the SLO
+    budget remaining           = +0.019 pts vs target
+
+    -> the month's incidents (7 bad windows) stayed inside the 43.2-min budget. No SLA penalty.
+    [check] attainment computed as good/windows = 99.919%:  OK
+
+========================================================================
+  GOLD-CHECK SUMMARY
+========================================================================
+  A counter   : increase(200)+increase(500) == sum(increments)        OK
+  A gauge     : avg_over_time == statistics.fmean                      OK
+  A histogram : _count==N, _sum==sum, +Inf==N, monotonic, p95 in range OK
+  B logs      : aggregations consistent; demo shares 1 trace_id        OK
+  C traces    : trace_duration == sum(critical-path self-times) =400ms OK
+  D USE/RED   : RED spike coincides with USE saturation               OK
+  E SLO       : 99.9% -> 43.2 min/month; burn_rate = err/(1-SLO)      OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

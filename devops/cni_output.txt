@@ -1,0 +1,214 @@
+cni.py - reference model of the Container Network Interface.
+All traces below feed CNI.md.
+pure Python stdlib ; deterministic logical packet-routing model.
+
+========================================================================
+  SECTION A: pod CIDR allocation + IPAM (each node owns a /24)
+========================================================================
+Cluster pod network = 10.244.0.0/16. The controller-manager
+CARVES it into per-node /24 pod CIDRs and hands one to each node:
+
+  | node   | eth0 (underlay) | pod CIDR       | gw (.1)    |
+  |--------|-----------------|----------------|------------|
+  | node-1 | 192.168.1.11    | 10.244.1.0/24  | 10.244.1.1 |
+  | node-2 | 192.168.1.12    | 10.244.2.0/24  | 10.244.2.1 |
+  | node-3 | 192.168.1.13    | 10.244.3.0/24  | 10.244.3.1 |
+
+A pod IP's THIRD OCTET names the node it lives on:
+  10.244.1.5   -> node-1  (octet 3 = 1)
+  10.244.1.9   -> node-1  (octet 3 = 1)
+  10.244.2.3   -> node-2  (octet 3 = 2)
+  10.244.3.7   -> node-3  (octet 3 = 3)
+
+node-1 IPAM (host-local) - /var/lib/cni/network/ calico-pool:
+  gateway : 10.244.1.1
+  leased  : ['10.244.1.5', '10.244.1.9']
+  next_free() -> 10.244.1.2   (lowest un-leased ordinal >= 2)
+  (a new pod scheduled on node-1 would draw this IP deterministically)
+
+[check] every pod IP's node-octet matches its node: OK
+[check] node-1 gateway = 10.244.1.1, .5 and .9 leased: OK
+
+========================================================================
+  SECTION B: Calico (BGP) - direct routing, pod IPs visible end-to-end
+========================================================================
+Each node runs a BGP agent that advertises its pod CIDR to peers, so
+every kernel learns a real route to every remote pod CIDR:
+
+  | node   | BGP advertises  | learned route on the OTHER nodes        |
+  |--------|-----------------|-----------------------------------------|
+  | node-1 | 10.244.1.0/24   | 10.244.1.0/24 via 192.168.1.11 (node-1) |
+  | node-2 | 10.244.2.0/24   | 10.244.2.0/24 via 192.168.1.12 (node-2) |
+  | node-3 | 10.244.3.0/24   | 10.244.3.0/24 via 192.168.1.13 (node-3) |
+
+Cross-node pod-to-pod: web-a@node-1 -> web-c@node-3:
+
+CALICO CROSS-NODE route (6 hops):
+     pod/web-a eth0 10.244.1.5 @ node-1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  app sends; default route via node gw; src/dst = pod IPs
+  -> node-1 kernel route table @ 192.168.1.11
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  BGP-learned route: 10.244.3.0/24 via 192.168.1.13 (node-3); direct routing, NO encap
+  -> node-1 eth0 192.168.1.11 -> node-3 eth0 192.168.1.13
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  forwarded over the underlay; pod IPs stay visible (no tunnel)
+  -> node-3 kernel route table @ 192.168.1.13
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  10.244.3.0/24 is LOCAL (this node owns it); route to cni0/10.244.3.7
+  -> node-3 cni0 -> veth vethC1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  Linux bridge forwards to the pod's veth port
+  -> pod/web-c eth0 10.244.3.7 @ node-3
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  delivered; src/dst never rewritten (Calico = routable)
+
+[check] Calico: inner packet unchanged, 0 encap, 1 underlay hop: OK
+
+========================================================================
+  SECTION C: Flannel (VXLAN) - L2 overlay, packets encapsulated
+========================================================================
+Flannel's default backend wraps each cross-node L2 frame in a UDP/8472
+envelope (VNI 1). The underlay sees only node-to-node
+traffic; pod IPs are HIDDEN inside the tunnel. (Note: 8472 is the Linux
+default VXLAN port; the IANA standard is 4789.)
+
+  | src node | flannel.1 endpoint  | remote CIDR    | FDB next-hop |
+  |----------|--------------------|----------------|--------------|
+  | node-1   | 192.168.1.11:8472  | 10.244.2.0/24  | 192.168.1.12 |
+  | node-2   | 192.168.1.12:8472  | 10.244.1.0/24  | 192.168.1.11 |
+  | node-3   | 192.168.1.13:8472  | 10.244.1.0/24  | 192.168.1.11 |
+
+Cross-node pod-to-pod: web-a@node-1 -> web-c@node-3:
+
+FLANNEL VXLAN CROSS-NODE route (7 hops):
+     pod/web-a eth0 10.244.1.5 @ node-1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  app sends; inner packet src/dst = pod IPs
+  -> node-1 flannel.1 (VXLAN tunnel iface)
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  dst 10.244.3.7 in remote CIDR 10.244.3.0/24; FDB next-hop = 192.168.1.13; encapsulate
+  -> VXLAN encap VNI 1 @ node-1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80  [ENCAP]
+       note  L2 frame wrapped in UDP/8472: OUTER 192.168.1.11 -> 192.168.1.13; INNER unchanged [ENCAP]
+  -> underlay: 192.168.1.11 -> 192.168.1.13 (node-1->node-3)
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  tunnel packet routed over the physical network by node eth0 IP
+  -> VXLAN decap @ node-3
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80  [ENCAP]
+       note  UDP/8472 stripped; original L2 frame restored [ENCAP]
+  -> node-3 flannel.1 -> cni0
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  decapsulated frame handed to the bridge; forward to pod port
+  -> pod/web-c eth0 10.244.3.7 @ node-3
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  delivered; inner pod addresses unchanged across the tunnel
+
+[check] Flannel: inner pod IPs unchanged, 1 encap + 1 decap: OK
+
+========================================================================
+  SECTION D: Cilium (eBPF) - bypass iptables, direct kernel routing
+========================================================================
+Cilium (native-routing mode) routes pod-to-pod DIRECTLY like Calico,
+but the data plane is an eBPF program attached to the NIC's TC hook.
+The packet is routed + policy-checked INSIDE BPF and never enters the
+iptables/netfilter traversal. In kube-proxy-replacement mode Cilium
+removes kube-proxy entirely (see kube_proxy.py).
+
+Cross-node pod-to-pod: web-a@node-1 -> web-c@node-3:
+
+CILIUM eBPF CROSS-NODE route (6 hops):
+     pod/web-a eth0 10.244.1.5 @ node-1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  app sends; eBPF at TC egress intercepts BEFORE netfilter
+  -> node-1 eBPF (TC egress) @ 192.168.1.11
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  BPF route map: 10.244.3.0/24 via 192.168.1.13; policy check PASSED; BYPASS iptables
+  -> node-1 eth0 192.168.1.11 -> node-3 eth0 192.168.1.13
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  forwarded over the underlay; pod IPs visible (native routing)
+  -> node-3 eBPF (TC ingress) @ 192.168.1.13
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  BPF handles L3->L2 + policy; no conntrack/iptables walk
+  -> node-3 -> veth vethC1
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  BPF forwards straight to the pod's veth
+  -> pod/web-c eth0 10.244.3.7 @ node-3
+       pkt   tcp 10.244.1.5:40000 -> 10.244.3.7:80
+       note  delivered; full path skipped netfilter (eBPF data plane)
+
+[check] Cilium: inner packet unchanged, 0 encap, iptables BYPASSED: OK
+
+========================================================================
+  SECTION E: network policy - default allow vs default deny + labels
+========================================================================
+Two scenarios. The dst is always db-0 (app=db, tier=backend).
+
+  | dst pod | labels                      |
+  |---------|-----------------------------|
+  | db-0    | app=db, tier=backend        |
+
+(1) DEFAULT (no NetworkPolicy selects db-0):
+    web-a -> db-0 : ALLOW
+    no policy selects dst -> default ALLOW ALL
+
+(2) NetworkPolicy 'db-allow-frontend' selects app=db; allows ingress
+    ONLY from tier=frontend (a partial default-deny for db pods):
+
+  | src     | src labels                | verdict | reason           |
+  |---------|---------------------------|---------|------------------|
+  | web-a   | app=web, tier=frontend    | ALLOW   | frontend matches |
+  | web-b   | app=web, tier=frontend    | ALLOW   | frontend matches |
+  | db-0    | app=db, tier=backend      | DENY    | no allow rule    |
+
+KEY POINT: once a policy selects db-0, db-0 is in DEFAULT-DENY for
+ingress - only a matching fromSelector (here tier=frontend) opens a
+hole. db->db is DENIED because tier=backend != tier=frontend.
+
+[check] default=ALLOW; default-deny+frontend rule: web-a ALLOW, db-0 DENY: OK
+
+========================================================================
+  GOLD: pinned routing paths per plugin - the .html replays these
+========================================================================
+One cross-node pod-to-pod trace per plugin (web-a@node-1 -> web-c@node-3).
+The node sequence + encap count is the gold the .html recomputes from the IDENTICAL
+routing functions.
+
+GOLD 1 - Calico (web-a@node-1 -> web-c@node-3):
+    pod/web-a eth0 10.244.1.5 @ node-1
+    node-1 kernel route table @ 192.168.1.11
+    node-1 eth0 192.168.1.11 -> node-3 eth0 192.168.1.13
+    node-3 kernel route table @ 192.168.1.13
+    node-3 cni0 -> veth vethC1
+    pod/web-c eth0 10.244.3.7 @ node-3
+
+GOLD 2 - Flannel VXLAN (web-a@node-1 -> web-c@node-3):
+    pod/web-a eth0 10.244.1.5 @ node-1
+    node-1 flannel.1 (VXLAN tunnel iface)
+    VXLAN encap VNI 1 @ node-1
+    underlay: 192.168.1.11 -> 192.168.1.13 (node-1->node-3)
+    VXLAN decap @ node-3
+    node-3 flannel.1 -> cni0
+    pod/web-c eth0 10.244.3.7 @ node-3
+
+GOLD 3 - Cilium eBPF (web-a@node-1 -> web-c@node-3):
+    pod/web-a eth0 10.244.1.5 @ node-1
+    node-1 eBPF (TC egress) @ 192.168.1.11
+    node-1 eth0 192.168.1.11 -> node-3 eth0 192.168.1.13
+    node-3 eBPF (TC ingress) @ 192.168.1.13
+    node-3 -> veth vethC1
+    pod/web-c eth0 10.244.3.7 @ node-3
+
+GOLD summary (node_seq + encap per plugin) - feeds cni.html:
+
+  | # | plugin          | hops | inner packet | encap (encap+decap) |
+  |---|-----------------|------|--------------|---------------------|
+  | 1 | Calico (BGP)    | 6    | unchanged    | 0                   |
+  | 2 | Flannel (VXLAN) | 7    | unchanged    | 2                   |
+  | 3 | Cilium (eBPF)   | 6    | unchanged    | 0                   |
+
+[check] all 3 gold traces reproduced from the routing functions: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

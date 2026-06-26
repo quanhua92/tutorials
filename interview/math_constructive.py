@@ -8,7 +8,7 @@ This is the SINGLE SOURCE OF TRUTH for MATH.md. Every number, table, and
 worked example in the guide is printed by this file. If you change something
 here, re-run and re-paste the output into the guide.
 
-    python3 math.py > math_output.txt
+    python3 math.py > math_constructive_output.txt
 
 Pure Python stdlib only. Deterministic (a fixed-seed LCG drives every
 "random" value so the .html can reproduce it byte-for-byte).

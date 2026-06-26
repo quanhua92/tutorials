@@ -1,9 +1,9 @@
 # Math / Constructive — Poor Pigs, Random Point, Largest Palindrome — A Visual, Worked-Example Guide
 
-> **Companion code:** [`math.py`](./math.py). **Every number is printed by
-> `python3 math.py`** — nothing is hand-computed.
+> **Companion code:** [`math_constructive.py`](./math_constructive.py). **Every number is printed by
+> `python3 math_constructive.py`** — nothing is hand-computed.
 >
-> **Live animation:** [`math.html`](./math.html) — open in a browser, step the pigs, circle, and palindrome mirror yourself.
+> **Live animation:** [`math_constructive.html`](./math_constructive.html) — open in a browser, step the pigs, circle, and palindrome mirror yourself.
 
 ---
 
@@ -135,7 +135,7 @@ def largest_palindrome(n):
 
 ### Worked example — `(4, 15, 15)` → `2`
 
-> From `math.py` Section A. `tests = 15 // 15 = 1`, so `base = tests + 1 = 2`.
+> From `math_constructive.py` Section A. `tests = 15 // 15 = 1`, so `base = tests + 1 = 2`.
 
 | pigs | (tests+1)^pigs | ≥ buckets? | decision |
 |---|---|---|---|
@@ -149,7 +149,7 @@ With 2 pigs and base 2 you get a 2-bit address `00,01,10,11` → 4 buckets.
 
 ### Worked example — `(4, 15, 30)` → `2`
 
-> From `math.py` Section A. `tests = 30 // 15 = 2`, so `base = tests + 1 = 3`.
+> From `math_constructive.py` Section A. `tests = 30 // 15 = 2`, so `base = tests + 1 = 3`.
 
 | pigs | (tests+1)^pigs | ≥ buckets? | decision |
 |---|---|---|---|
@@ -163,7 +163,7 @@ Two rounds give each pig 3 states (die round 0, die round 1, survive) → `3² =
 
 ### Stress case — `(1000, 15, 60)` → `5`
 
-> From `math.py` Section A. `tests = 60 // 15 = 4`, so `base = 5`.
+> From `math_constructive.py` Section A. `tests = 60 // 15 = 4`, so `base = 5`.
 
 | pigs | 5^pigs | ≥ 1000? | decision |
 |---|---|---|---|
@@ -191,7 +191,7 @@ graph LR
     style P5 fill:#1abc9c,stroke:#16a085,color:#0d1117
 ```
 
-**More canonical checks** (from `math.py` Section A): `poor_pigs(1,1,1) = 0` (one bucket needs no pig); `poor_pigs(125,1,4) = 3` (`5³ = 125` exactly); `poor_pigs(25,1,1) = 5` (`2⁴=16 < 25 ≤ 2⁵=32`).
+**More canonical checks** (from `math_constructive.py` Section A): `poor_pigs(1,1,1) = 0` (one bucket needs no pig); `poor_pigs(125,1,4) = 3` (`5³ = 125` exactly); `poor_pigs(25,1,1) = 5` (`2⁴=16 < 25 ≤ 2⁵=32`).
 
 ---
 
@@ -225,7 +225,7 @@ Area grows with `r²`: a uniform radius over-represents the small-`r` ring (whic
 
 ### Worked example — first 8 proposals (seed 42, unit disk)
 
-> From `math.py` Section B. `seed=42`, deterministic LCG (reproduced byte-for-byte in `math.html`).
+> From `math_constructive.py` Section B. `seed=42`, deterministic LCG (reproduced byte-for-byte in `math_constructive.html`).
 
 | attempt | x | y | x²+y² | decision |
 |---|---|---|---|---|
@@ -242,7 +242,7 @@ Only proposal 5 is rejected (`x²+y² = 1.5376 > 1`).
 
 ### Empirical acceptance — 20 000 proposals
 
-> From `math.py` Section B.
+> From `math_constructive.py` Section B.
 
 - accepted = **15735 / 20000 = 0.7867**
 - theory = π/4 = **0.7854**
@@ -252,7 +252,7 @@ The empirical rate converges to `π/4` — rejection sampling is uniform and unb
 
 ### Scaled disk — radius 2, center (1, 3), seed 7
 
-> From `math.py` Section B. Accepted points scaled by `radius` and offset by the center.
+> From `math_constructive.py` Section B. Accepted points scaled by `radius` and offset by the center.
 
 | call | point | offset from center |
 |---|---|---|
@@ -271,7 +271,7 @@ Every offset has magnitude `≤ 2` (= the radius) — all inside the disk.
 
 ### Worked example — `n=2`: scan from `left=99` downward
 
-> From `math.py` Section C. Mirror `left` → palindrome, then factor-scan `right` from `99` down, stopping at `right² < pal`.
+> From `math_constructive.py` Section C. Mirror `left` → palindrome, then factor-scan `right` from `99` down, stopping at `right² < pal`.
 
 | left | palindrome | factorable? |
 |---|---|---|
@@ -305,7 +305,7 @@ The `right² < pal` guard is what makes this efficient: for `9999`, `99² = 9801
 
 ### Full table — n=1..8
 
-> From `math.py` Section C.
+> From `math_constructive.py` Section C.
 
 | n | largest palindrome = factors | mod 1337 |
 |---|---|---|
@@ -318,7 +318,7 @@ The `right² < pal` guard is what makes this efficient: for `9999`, `99² = 9801
 | 7 | 99956644665999 = 9998017 × 9997647 | 877 |
 | 8 | 9999000000009999 = 99999999 × 99990001 | 475 |
 
-**Canonical LeetCode checks** (from `math.py` Section C): `largest_palindrome(1) = 9`, `largest_palindrome(2) = 987`. Every reported palindrome for `n=2..8` is verified to read the same forwards and backwards.
+**Canonical LeetCode checks** (from `math_constructive.py` Section C): `largest_palindrome(1) = 9`, `largest_palindrome(2) = 987`. Every reported palindrome for `n=2..8` is verified to read the same forwards and backwards.
 
 ---
 
@@ -334,7 +334,7 @@ The `right² < pal` guard is what makes this efficient: for `9999`, `99² = 9801
 
 ### Complexity
 
-> From `math.py` Section D.
+> From `math_constructive.py` Section D.
 
 | Problem | Time | Space |
 |---|---|---|
@@ -357,7 +357,7 @@ The `right² < pal` guard is what makes this efficient: for `9999`, `99² = 9801
 
 ### Problem Table
 
-> From `math.py` Section D.
+> From `math_constructive.py` Section D.
 
 | Problem | Essence | Key Trick |
 |---|---|---|

@@ -142,7 +142,8 @@ def pattern_template(...):
 - **Step-through controls:** play / step / reset buttons
 - **`[check: OK]` gold badge** — recompute a known value in JS, compare to `.py`
 - **Links to `.md` and `.py`** in the header
-- **`← all tutorials`** link to `../index.html`
+- **`← all tutorials`** link to `./index.html` (the interview dashboard, NOT `../index.html`)
+- **`.md` and `.py` links** must use full GitHub URLs: `https://github.com/quanhua92/tutorials/blob/main/interview/<STEMUP>.md` and `.../interview/<stem>.py` (NOT relative links)
 - **Zero external dependencies** — vanilla JS, inline CSS/SVG
 - **Interactive:** user can step through the algorithm, change inputs, see state
 

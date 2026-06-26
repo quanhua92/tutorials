@@ -1,0 +1,200 @@
+overlayfs.py - reference simulation of the overlay2 storage model.
+All numbers below feed OVERLAYFS.md and overlayfs.html.
+Python 3.14.5
+
+========================================================================
+  SECTION A: the image as a stack of read-only layers
+========================================================================
+Image 'flask-app:1.0' is built from 3 layers,
+BOTTOM (base OS) to TOP (latest change):
+
+  #   LAYER                      id             files  size        
+  --------------------------------------------------------------
+  0   ubuntu:22.04 (base)        3edf864cc3cb   14     72.1 MiB    
+  1   apt: python3               2d064fbf6330   7      48.1 MiB    
+  2   pip: flask                 4ef1ca91458f   10     9.5 MiB     
+
+  image total: 3 layers, 31 files, 129.8 MiB
+
+All three layers are READ-ONLY. They are the lowerdir of every
+container that runs this image, and they are stored on disk ONCE.
+
+The stack, drawn top-to-bottom (how OverlayFS sees it):
+        +------------------------- merged (what the container sees)
+        | upperdir  (container's writable layer -- added on `run`)
+        +-------------------------
+        | lower  3edf864cc3cb  ubuntu:22.04 (base)
+        | lower  2d064fbf6330  apt: python3
+        | lower  4ef1ca91458f  pip: flask
+        +------------------------- (bottom = base OS)
+
+[check] content-addressed ids are reproducible: True
+[check] layer sizes sum to image size: True
+
+========================================================================
+  SECTION B: copy-on-write -- edit /etc/passwd, lower stays pristine
+========================================================================
+Container c1 starts. Its '/' is an OverlayFS mount:
+
+    lowerdir = ['4ef1ca91458f', '2d064fbf6330', '3edf864cc3cb']  (top-most first: pip, apt, base)
+    upperdir  = bde2603cbfd5  (empty, writable)
+    merged    = union view the container sees
+
+The container's process performs these writes (the canonical demo):
+
+  PATH                 NEW SIZE   OP         NOTE
+  ----------------------------------------------------------------------
+  /etc/passwd          2.5 KiB    copy-up    appends 'appuser:x:1000:'  (file is in base L0)
+  /etc/hostname        5 B        copy-up    sets hostname 'c1'         (file is in base L0)
+  /var/log/flask.log   488.3 KiB  new        writes a fresh log          (file is NEW)
+  /app/data.json       4.0 KiB    new        writes app state           (file is NEW)
+  /etc/passwd          2.5 KiB    in-place   appends ANOTHER line       (already in upper)
+  /etc/hostname        8 B        in-place   retypes hostname           (already in upper)
+
+After the writes, where does each path PHYSICALLY live?
+
+  PATH                 merged size  in base L0?  in upper? 
+  --------------------------------------------------------
+  /etc/passwd          2.5 KiB      yes          yes       
+  /etc/hostname        8 B          yes          yes       
+  /var/log/flask.log   488.3 KiB    no           yes       
+  /app/data.json       4.0 KiB      no           yes       
+
+Base layer 3edf864cc3cb files dict BEFORE == AFTER: True
+  -> the printed sheet is PRISTINE. 100 containers can do this and
+     none of them ever mutate the shared image. THAT is the win.
+
+copy-up count        = 2
+distinct lower files = ['/etc/hostname', '/etc/passwd']  (len=2)
+
+[check] cow_count == number of distinct lower files written: True
+[check] /etc/passwd was copied up EXACTLY ONCE despite 2 writes: True
+[check] read-only base layer untouched by container writes: True
+
+========================================================================
+  SECTION C: storage savings -- 100 containers, one shared image
+========================================================================
+Image 'flask-app:1.0': 129.8 MiB shared read-only, stored ONCE.
+Each container's upperdir (its private writes): 494.8 KiB.
+
+Run 100 containers off this one image. Compare two strategies:
+
+  strategy                           math                       disk used
+  ----------------------------------------------------------------------
+  naive (copy full image each)       100 x 129.8 MiB            12.7 GiB
+  overlay2 (share lowers, thin uppers) 129.8 MiB + 100x494.8 KiB  178.1 MiB
+
+  savings ratio  = naive / overlay  =  72.9x smaller
+  bytes saved    =  12.5 GiB
+
+  Of the 178.1 MiB overlay total:
+     129.8 MiB  the 3 image layers, counted once, shared by all 100 containers
+      48.3 MiB  100 writable uppers, 494.8 KiB each
+
+  Scaling -- how the savings ratio grows with container count:
+  N containers   naive        overlay      savings
+  ----------------------------------------------
+  1              129.8 MiB    130.3 MiB      1.0x
+  5              648.9 MiB    132.2 MiB      4.9x
+  10             1.3 GiB      134.6 MiB      9.6x
+  50             6.3 GiB      153.9 MiB     42.2x
+  100            12.7 GiB     178.1 MiB     72.9x
+  500            63.4 GiB     371.4 MiB    174.7x
+
+With ONE container there is no sharing win (you pay image + 1 upper).
+The win appears the moment a SECOND container reuses the lowers, and
+grows toward N as N rises: each new container adds only its own upper.
+
+[check] overlay formula: image + N*upper == 178.1 MiB: True
+[check] 100 containers share the SAME 3 lower layers: each lower stored once (refcount=100, copy count=1)
+
+========================================================================
+  SECTION D: image pull -- download by digest, cache, reuse
+========================================================================
+Layers are content-addressed: the digest IS the cache key. Pulling an
+image downloads only the layers you do not already have on disk.
+
+
+  pull flask-app:1.0  (cold cache)
+    layer 3edf864cc3cb  ubuntu:22.04 (base)     PULL    (72.1 MiB)
+    layer 2d064fbf6330  apt: python3            PULL    (48.1 MiB)
+    layer 4ef1ca91458f  pip: flask              PULL    (9.5 MiB)
+    -> 0 cache hit(s), downloaded 129.8 MiB of 129.8 MiB image bytes
+
+  pull api-server:2.3  (warm cache -- base layer already present)
+    layer 3edf864cc3cb  ubuntu:22.04 (base)     CACHED  (0 B downloaded)
+    layer 320972c7add5  apt: nodejs             PULL    (104.9 MiB)
+    layer 2f182094b990  copy: /app (api code)   PULL    (63.7 KiB)
+    -> 1 cache hit(s), downloaded 105.0 MiB of 177.1 MiB image bytes
+
+Both images were built FROM ubuntu:22.04, so their base layers are
+byte-identical -> SAME digest -> the base layer downloads ONCE ever.
+
+  flask-app base id = 3edf864cc3cb
+  api-server base id = 3edf864cc3cb  (same object: True)
+  second pull skipped the base layer -> downloaded only 105.0 MiB (its 2 new layers).
+
+This is why `docker pull` of an image that shares a base you already
+have is fast: deduplication is by content hash, at the LAYER level.
+
+[check] both images share the identical base digest: True
+[check] cold pull downloaded full image: True
+[check] warm pull downloaded < full second image: True
+
+========================================================================
+  SECTION E: storage drivers -- overlay2 vs aufs vs devicemapper ...
+========================================================================
+Docker abstracts image storage behind a pluggable 'storage driver'.
+They all present the SAME lower/upper/merged model to the container;
+they differ in HOW the copy-up and the union are implemented.
+
+| driver        | mechanism              | CoW? | status            | note                          |
+|---------------|------------------------|------|-------------------|-------------------------------|
+| overlay2      | in-kernel OverlayFS    | yes  | DEFAULT (17.06+)  | fastest; needs Linux >= 4.0   |
+| fuse-overlayfs | userspace (FUSE)       | yes  | rootless only     | Podman/buildah, no privilege  |
+| aufs          | out-of-tree union      | yes  | DEPRECATED        | Docker's first driver; rejected by mainline |
+| devicemapper  | block-device snapshots | yes  | legacy/removed    | RHEL old default; loop-lvm was slow |
+| btrfs         | btrfs subvolumes       | yes  | optional          | needs the host FS formatted btrfs |
+| zfs           | zfs clones             | yes  | optional          | needs the host FS formatted zfs |
+| vfs           | full DIRECTORY COPY    | NO   | fallback/debug    | 1:1 disk use, NO copy-on-write |
+
+ vfs is the diagnostic baseline: with NO copy-on-write it stores a
+ FULL copy of the image per container -- the naive number from Section
+ C. Every other driver reproduces the overlay win via different means.
+
+ overlay2 wins because the union + copy-up are in the kernel: no
+ context switch, no extra daemon, page-cache shared across containers.
+
+[check] only vfs lacks copy-on-write: True
+
+========================================================================
+  SECTION F: the GOLD check -- CoW semantics, re-derived cleanly
+========================================================================
+Run the canonical scenario in a FRESH mount and pin the numbers the
+.html must reproduce from the identical model.
+
+  write /etc/passwd          2.5 KiB    -> copy-up
+  write /etc/hostname        5 B        -> copy-up
+  write /var/log/flask.log   488.3 KiB  -> new
+  write /app/data.json       4.0 KiB    -> new
+  write /etc/passwd          2.5 KiB    -> in-place
+  write /etc/hostname        8 B        -> in-place
+
+GOLD values (pinned for overlayfs.html):
+    cow_count                        = 2
+    distinct_lower_files_written     = ['/etc/hostname', '/etc/passwd']
+    passwd_copyup_count              = 1
+    upper_size_bytes                 = 506644
+    image_size_bytes                 = 136088178
+    image_layers                     = 3
+    savings_ratio_100ctrs            = 72.8708
+    overlay_total_100ctrs            = 186752578
+
+[check] GOLD: cow_count == len(distinct lower written): True
+[check] GOLD: passwd copied up once despite 2 writes: True
+[check] GOLD: 100-container savings ratio > 50x: True
+[check] GOLD: all assertions passed -> OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

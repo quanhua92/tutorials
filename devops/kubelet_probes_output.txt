@@ -1,0 +1,192 @@
+kubelet_probes.py - reference simulation. All output feeds KUBELET_PROBES.md.
+
+========================================================================
+  SECTION A: the three probe KINDS x three HANDLERS
+========================================================================
+A probe = (a KIND, a HANDLER). The KIND decides what a failure DOES;
+the HANDLER decides how the question is physically ASKED.
+
+KINDS (what a failure triggers):
+| kind      | on failureThreshold breached           | restarts? |
+|-----------|----------------------------------------|-----------|
+| liveness  | KILL container + RESTART it            |    YES    |
+| readiness | remove pod from Service endpoints     |    NO     |
+| startup   | KILL + RESTART (boot took too long)   |    YES    |
+
+HANDLERS (how pass/fail is measured - all reduce to one bool):
+| handler   | mechanism                          | pass if          |
+|-----------|------------------------------------|------------------|
+| httpGet   | HTTP GET <path> on :<port>          | status 200-399   |
+| tcpSocket | open TCP to :<port>                 | connection ok    |
+| exec      | run command inside the container    | exit code 0      |
+
+KEY DISTINCTION: liveness is about the CONTAINER (deadlock? restart
+it). readiness is about the NETWORK (can clients reach it? route
+around it). startup is a one-shot gate so slow boots are not punished.
+
+========================================================================
+  SECTION B: LIVENESS - HTTP GET /healthz every 10s, 3 fails => restart
+========================================================================
+Manifest fragment:
+  livenessProbe:
+    httpGet: { path: /healthz, port: 8080 }
+    initialDelaySeconds: 0
+    periodSeconds: 10
+    failureThreshold: 3
+
+App goes unhealthy during the RELATIVE window t_rel in [40, 70):
+  /healthz returns 500 for t_rel in [40,70), 200 otherwise.
+
+   t(s)  t_rel  probe      result     note
+   ----  -----  ---------- ---------- ----
+      0      0  liveness   OK         
+     10     10  liveness   OK         
+     20     20  liveness   OK         
+     30     30  liveness   OK         
+     40     40  liveness   FAIL       consec_fail=1
+     50     50  liveness   FAIL       consec_fail=2
+     60     60  liveness   FAIL       consec_fail=3
+     60     60  liveness   RESTART    restart #1 <==
+     70     10  liveness   OK         
+     80     20  liveness   OK         
+     90     30  liveness   OK         
+
+READING THE TIMELINE:
+  t=0,10,20,30 : probe OK (app healthy).
+  t=40,50,60   : three CONSECUTIVE fails => failureThreshold=3 hit at
+                 t=60 => kubelet KILLS the container and restarts it.
+  => restart_count = 1  (gold value for the .html)
+
+FORMULA: restart tick = first_fail + (failureThreshold-1)*period
+       = 40 + (3-1)*10 = 60
+[check] sim restart tick [60] == [60]: OK
+
+========================================================================
+  SECTION C: READINESS - fail => leave Service endpoints (no restart)
+========================================================================
+Manifest fragment (note: failureThreshold=1 - pull fast, don't wait):
+  readinessProbe:
+    httpGet: { path: /ready, port: 8080 }
+    periodSeconds: 10   failureThreshold: 1
+
+App is NOT ready during t_rel in [20, 50), ready otherwise.
+
+   t(s)  t_rel  probe      result     note
+   ----  -----  ---------- ---------- ----
+      0      0  readiness  OK         
+      0      0  readiness  READY      ready <==
+     10     10  readiness  OK         
+     20     20  readiness  FAIL       consec_fail=1
+     20     20  readiness  NOT_READY  not ready <==
+     30     30  readiness  FAIL       consec_fail=2
+     40     40  readiness  FAIL       consec_fail=3
+     50     50  readiness  OK         
+     50     50  readiness  READY      ready <==
+     60     60  readiness  OK         
+
+ENDPOINT / TRAFFIC MEMBERSHIP over time (single pod):
+  [ 0, 20) : READY    -> in Service endpoints   -> gets traffic
+  [20, 50) : NOT READY-> removed from endpoints -> NO traffic (no restart!)
+  [50, 60) : READY    -> re-added to endpoints  -> traffic resumes
+[check] state transitions: [(0, 'READY'), (20, 'NOT_READY'), (50, 'READY')]
+[check] readiness restart_count == 0 (it never restarts): OK
+
+TRAFFIC RE-ROUTING with 3 replicas (pod-B goes not-ready at t=20):
+  t=10: endpoints=['A', 'B', 'C']  traffic% = A=33%, B=33%, C=33%
+  t=30: endpoints=['A', 'C']  traffic% = A=50%, B=0%, C=50%
+  t=55: endpoints=['A', 'B', 'C']  traffic% = A=33%, B=33%, C=33%
+  => B's share is spread across A and C while B is sick. No restart.
+
+========================================================================
+  SECTION D: STARTUP - protect a slow-booting JVM from liveness
+========================================================================
+A JVM app needs ~45s to boot. Its /healthz does not answer 200 until
+t_rel >= 45. Compare two configs for the SAME slow app:
+
+(1) NO startup probe (BAD): liveness runs from t=0, app still booting
+   t(s)  t_rel  probe      result     note
+   ----  -----  ---------- ---------- ----
+      0      0  liveness   FAIL       consec_fail=1
+     10     10  liveness   FAIL       consec_fail=2
+     20     20  liveness   FAIL       consec_fail=3
+     20     20  liveness   RESTART    restart #1 <==
+     30     10  liveness   FAIL       consec_fail=1
+     40     20  liveness   FAIL       consec_fail=2
+     50     30  liveness   FAIL       consec_fail=3
+     50     30  liveness   RESTART    restart #2 <==
+     60     10  liveness   FAIL       consec_fail=1
+   => liveness fails at t=0,10,20 -> 3 fails -> RESTART at t=20.
+   => restart_count = 2  (killed DURING boot!)
+
+(2) WITH startup probe (GOOD): it gates liveness until boot succeeds
+   t(s)  t_rel  probe      result     note
+   ----  -----  ---------- ---------- ----
+      0      0  startup    FAIL       consec_fail=1
+     10     10  startup    FAIL       consec_fail=2
+     20     20  startup    FAIL       consec_fail=3
+     30     30  startup    FAIL       consec_fail=4
+     40     40  startup    FAIL       consec_fail=5
+     50     50  startup    OK         
+     50     50  startup    STARTED    started <==
+     60     60  liveness   OK         
+   => startup keeps failing (allowed, FT=6 => up to ~60s grace) until
+      it passes at t_rel=50; THEN liveness wakes up. restart_count = 0
+
+MANIFEST fragment for the good config:
+  startupProbe:   { httpGet: { path: /startup }, failureThreshold: 6, periodSeconds: 10 }
+  livenessProbe:  { httpGet: { path: /healthz }, failureThreshold: 3, periodSeconds: 10 }
+
+[check] restarts: no-startup=2 (crash-loop, boot resets each restart), with-startup=0  -> startup probe saved the boot: OK
+
+========================================================================
+  SECTION E: common misconfigurations that cascade
+========================================================================
+MISCONFIG 1 - too-aggressive liveness during a slow deploy/rollout.
+  initialDelay=0, period=10, FT=3, app boots in ~45s => killed at t=20
+  (same as Section D case 1). FIX: add a startup probe, OR raise
+  initialDelaySeconds above the known boot time.
+
+MISCONFIG 2 - sharing ONE endpoint between liveness AND readiness.
+  If /health serves both, a slow-under-load response trips BOTH:
+    readiness fail -> pod leaves endpoints (load shifts to others)
+    liveness  fail -> pod is KILLED + RESTARTED (cold start -> even
+                       slower -> MORE load on survivors -> they trip
+                       too). This is the classic 'cascading restart'.
+  sim (3 replicas, all share /health, all hit the same load spike):
+    pod leaves endpoints at t=[20, 60] AND restarts at t=[40]
+    restart_count=1. Leaving endpoints + restarting
+    at once is the signature of the shared-endpoint anti-pattern.
+
+  FIX: split them. readiness=/ready (cheap, fast), liveness=/healthz
+  (deeper check, higher FT). They measure DIFFERENT things.
+
+MISCONFIG 3 - liveness FT=1. A single transient hiccup (GC pause,
+  one slow DB query) => immediate kill. Always use FT>=2 for liveness.
+
+========================================================================
+  SECTION F: tuning (initialDelay/period/failureThreshold) + GOLD
+========================================================================
+Time-to-ACTION (restart for liveness/startup) measured from the FIRST
+failing probe:
+  action_tick = first_fail_tick + (failureThreshold - 1) * periodSeconds
+Time-to-action is what you are really tuning. Bigger window = more
+tolerant, but slower to recover a truly dead container.
+
+| initialDelay | period | failureThreshold | tolerance window  |
+|-------------|--------|------------------|-------------------|
+| 0           | 10     | 1                | 0s after 1st fail |
+| 0           | 10     | 3                | 20s after 1st fail |
+| 30          | 10     | 3                | 20s after 1st fail |
+| 0           | 5      | 3                | 10s after 1st fail |
+| 0           | 10     | 6                | 50s after 1st fail |
+
+GOLD re-derivation (must match Section B sim, and the .html):
+  expected: restart_count=1, tick=[60]
+  sim     : restart_count=1, tick=[60]
+  [check] GOLD match: OK
+
+GOLD scalar for the .html: restart_count = 1, restart_tick = 60
+
+========================================================================
+  DONE - all sections printed; all [check]s asserted
+========================================================================

@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Container Runtime — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad; --teal:#16a085;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  input[type=checkbox]{accent-color:var(--green)}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 8px;font-size:.82rem}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;line-height:1.5;white-space:pre-wrap;max-height:340px;overflow:auto}
+  .readout b{color:var(--green)}
+  .readout .k{color:#79c0ff}
+  .readout .s{color:#a5d6a7}
+  .readout .ns{color:var(--gold)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  code{background:#0a0e14;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:.78rem}
+  table.cmp{border-collapse:collapse;font-size:.76rem;font-variant-numeric:tabular-nums;margin-top:.5rem;width:100%}
+  table.cmp td,table.cmp th{border:1px solid #30363d;padding:5px 8px;text-align:left;vertical-align:top}
+  table.cmp th{color:var(--muted);font-weight:600}
+  table.cmp td.c{color:var(--green);font-weight:700}
+  table.cmp td.k{color:var(--gold);font-weight:700}
+  #stack{display:block;width:100%;max-width:1000px;height:300px}
+  #overlay{display:block;width:100%;max-width:1000px;height:280px}
+  .nsgrid{display:flex;flex-wrap:wrap;gap:.4rem;margin:.4rem 0}
+  .nspill{display:inline-flex;align-items:center;gap:.3rem;background:#0a0e14;border:1px solid #30363d;
+          border-radius:14px;padding:3px 10px;font-size:.74rem;font-family:ui-monospace,monospace}
+  .nspill.on{border-color:var(--green);color:var(--green)}
+  .nspill.off{opacity:.4;text-decoration:line-through}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Container Runtime — interactive
+    <a class="badge" href="./CONTAINER_RUNTIME.md">CONTAINER_RUNTIME.md</a>
+    <a class="badge" href="./container_runtime.py">container_runtime.py</a></h1>
+  <div class="sub">Running a container is two jobs split by a clean seam: the <b style="color:var(--blue)">high-level</b>
+    runtime (containerd) pulls images &amp; assembles rootfs; the <b style="color:var(--orange)">low-level</b> runtime
+    (<b style="color:var(--orange)">runc</b>) creates namespaces + cgroups and execs the process. The contract between them is one
+    <code>config.json</code> (<b style="color:var(--gold)">OCI Runtime Spec</b>). Step through the stack, build the overlay rootfs,
+    and toggle namespaces — everything recomputes live, gold-checked against <code>container_runtime.py</code>.</div>
+
+  <!-- ===== PANEL 1: THE STACK ===== -->
+  <h2>① The runtime stack — step through `docker run nginx`; runc exits after exec</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> drag <b>step</b>. Each layer hands a NARROWER contract down.
+      The <b style="color:var(--orange)">low-level</b> layer (<b>runc</b>) receives only <code>config.json + rootfs</code> and then <b>exits</b> —
+      the <b style="color:var(--teal)">shim</b> becomes the container's parent so it survives containerd restarting.</div>
+    <div class="controls">
+      <label>step <input type="range" id="step" min="0" max="4" step="1" value="0">
+        <span class="val" id="stepVal">0</span></label>
+      <span class="micro" id="layerDesc">—</span>
+    </div>
+    <canvas id="stack" width="1000" height="300"></canvas>
+    <div class="readout" id="trace"></div>
+    <div class="micro" style="margin-top:.5rem"><b>Key seam:</b> runc is oblivious to images/registries/networks; containerd never creates a
+      namespace (it asks runc). That seam is why Docker, containerd, CRI-O and Podman all share ONE runc.</div>
+  </div>
+
+  <!-- ===== PANEL 2: OCI SPEC + OVERLAY ===== -->
+  <h2>② The OCI spec (config.json) + overlayfs rootfs — toggle namespaces, watch the spec + mount change</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the <code>config.json</code> containerd hands runc (recomputed in JS), and the
+      <b style="color:var(--gold)">overlayfs</b> stack — 3 readonly image <span style="color:var(--blue)">lowerdirs</span> + 1 writable
+      <span style="color:var(--green)">upperdir</span> (the container's writes) = the merged rootfs.</div>
+    <div class="controls">
+      <label>namespaces (clone CLONE_NEW*):</label>
+      <div class="nsgrid" id="nsgrid"></div>
+    </div>
+    <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-start;margin-top:.4rem">
+      <div style="flex:1;min-width:340px">
+        <div class="micro"><b>config.json</b> (runc consumes ONLY this + rootfs):</div>
+        <div class="readout" id="spec"></div>
+      </div>
+      <div style="flex:1;min-width:300px">
+        <div class="micro"><b>overlayfs mount</b> (becomes root.path):</div>
+        <canvas id="overlay" width="640" height="280"></canvas>
+        <div class="readout" id="mount" style="font-size:.72rem"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== PANEL 3: ALT RUNTIMES + GOLD CHECK ===== -->
+  <h2>③ Swap the isolation boundary — same config.json, different kernel wall</h2>
+  <div class="panel">
+    <div class="micro">Because every low-level runtime accepts the SAME <code>config.json</code>, you trade isolation strength for
+      boot time / density without changing the app. The <span class="badge" style="padding:1px 6px">check: OK</span> confirms JS
+      reproduces every <code>container_runtime.py</code> GOLD field.</div>
+    <table class="cmp" id="rtTable"></table>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS OCI-spec + overlay mount reproduces container_runtime.py Section GOLD (all fields).
+  </div>
+
+<script>
+"use strict";
+/* ===== constants — identical to container_runtime.py ===== */
+const OCI_VERSION="1.0.2";
+const DEFAULT_NS=["pid","ipc","uts","mnt","net","cgroup"];
+const OVERLAY_ROOT="/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots";
+
+/* ===== OCI spec generator (port of gen_oci_spec) ===== */
+function defaultMounts(){
+  const cid="CONTAINER_ID";
+  return [
+    {destination:"/proc",type:"proc",source:"proc",options:["nosuid","noexec","nodev"]},
+    {destination:"/dev",type:"tmpfs",source:"tmpfs",options:["nosuid","strictatime","mode=755","size=65536k"]},
+    {destination:"/dev/pts",type:"devpts",source:"devpts",options:["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620","gid=5"]},
+    {destination:"/sys",type:"sysfs",source:"sysfs",options:["nosuid","noexec","nodev","ro"]},
+    {destination:"/sys/fs/cgroup",type:"cgroup",source:"cgroup",options:["nosuid","noexec","nodev","relatime","ro"]},
+    {destination:"/dev/mqueue",type:"mqueue",source:"mqueue",options:["nosuid","noexec","nodev"]},
+    {destination:"/dev/shm",type:"tmpfs",source:"shm",options:["nosuid","noexec","nodev","mode=1777","size=65536k"]},
+    {destination:"/etc/resolv.conf",type:"bind",source:`/var/lib/docker/containers/${cid}/resolv.conf`,options:["rbind","rprivate"]},
+    {destination:"/etc/hostname",type:"bind",source:`/var/lib/docker/containers/${cid}/hostname`,options:["rbind","rprivate"]},
+    {destination:"/etc/hosts",type:"bind",source:`/var/lib/docker/containers/${cid}/hosts`,options:["rbind","rprivate"]},
+  ];
+}
+function genOciSpec({name,rootfsPath,args,namespaces,mounts,cgroupsPath}){
+  const ns=namespaces||DEFAULT_NS;
+  return {
+    ociVersion:OCI_VERSION,
+    root:{path:rootfsPath,readonly:false},
+    process:{
+      terminal:false,user:{uid:0,gid:0},args:args.slice(),
+      env:["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME="+name],
+      cwd:"/",
+      capabilities:{bounding:["CAP_NET_BIND_SERVICE"],effective:["CAP_NET_BIND_SERVICE"],permitted:["CAP_NET_BIND_SERVICE"]},
+      noNewPrivileges:true
+    },
+    hostname:name,
+    mounts:mounts||defaultMounts(),
+    linux:{
+      namespaces:ns.map(t=>({type:t})),
+      cgroupsPath:cgroupsPath,
+      resources:{memory:{limit:536870912},cpu:{shares:1024},pids:{limit:2048}},
+      seccomp:{defaultAction:"SCMP_ACT_ERRNO"}
+    }
+  };
+}
+/* overlay mount (port of build_overlay_mount) */
+function snapPaths(i){return {fs:`${OVERLAY_ROOT}/${i}/fs`,work:`${OVERLAY_ROOT}/${i}/work`};}
+function buildOverlayMount(layerCount,activeIdx){
+  const lower=[]; for(let i=1;i<=layerCount;i++) lower.push(snapPaths(i).fs);
+  const active=snapPaths(activeIdx);
+  const opts=`lowerdir=${lower.join(":")},upperdir=${active.fs},workdir=${active.work}`;
+  return {lowerdir:lower,upperdir:active.fs,workdir:active.work,mount_opts:opts,
+          rootfs:`${OVERLAY_ROOT}/${activeIdx}/merged`,layer_count:layerCount};
+}
+
+/* ===== stack data ===== */
+const STACK=[
+  {name:"docker",kind:"cli",color:"#2980b9",
+   role:"user-facing REST/CLI client",
+   does:"POSTs /containers/create + /containers/start to dockerd over the REST API",
+   handoff:"HTTP REST calls to dockerd"},
+  {name:"dockerd",kind:"high",color:"#8e44ad",
+   role:"daemon: API, image build, volumes, networks, auth",
+   does:"validates the request, resolves the image, asks containerd to create the container",
+   handoff:"containerd gRPC API (image ref + container config)"},
+  {name:"containerd",kind:"high",color:"#2980b9",
+   role:"image mgmt, snapshotter, lifecycle, CRI plugin",
+   does:"pulls image, stacks layers via overlayfs -> rootfs, writes config.json -> OCI bundle",
+   handoff:"an OCI bundle (config.json + rootfs) + spawn a shim"},
+  {name:"containerd-shim",kind:"shim",color:"#16a085",
+   role:"per-container supervisor: parent, signal fwd, reaper",
+   does:"execs `runc create`; then becomes the container process's parent (outlives runc)",
+   handoff:"OCI bundle + container id -> runc"},
+  {name:"runc",kind:"low",color:"#e67e22",
+   role:"OCI runtime: namespaces, cgroups, pivot_root, exec",
+   does:"clone(CLONE_NEW*), write cgroups, pivot_root, mount /proc /sys ..., exec nginx; then EXITS",
+   handoff:"a running container process (shim is now its parent)"},
+];
+
+/* ===== PANEL 1: stack canvas ===== */
+const sc=document.getElementById('stack');
+function setup(c){const dpr=window.devicePixelRatio||1;
+  const w=c.clientWidth||1000,h=c.clientHeight||300;
+  const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(c.width!==bw||c.height!==bh){c.width=bw;c.height=bh;}
+  const x=c.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);return x;}
+function drawStack(){
+  const ctx=setup(sc),w=sc.clientWidth,h=sc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const step=+document.getElementById('step').value;
+  const n=STACK.length;
+  const boxW=170,boxH=92,gap=18;
+  const totalW=n*boxW+(n-1)*gap;
+  const x0=(w-totalW)/2;
+  const y0=(h-boxH)/2;
+  STACK.forEach((L,i)=>{
+    const x=x0+i*(boxW+gap),y=y0;
+    const lit=(i===step);
+    const done=(i<step);
+    ctx.globalAlpha=lit?1:(done?0.55:0.35);
+    ctx.fillStyle="#0a0e14";ctx.strokeStyle=L.color;ctx.lineWidth=lit?3:1.5;
+    ctx.beginPath();ctx.roundRect(x,y,boxW,boxH,10);ctx.fill();ctx.stroke();
+    ctx.fillStyle=L.color;ctx.globalAlpha=lit?1:0.5;
+    ctx.beginPath();ctx.roundRect(x,y,6,boxH,[10,0,0,10]);ctx.fill();
+    ctx.globalAlpha=lit?1:(done?0.7:0.45);
+    ctx.fillStyle=lit?"#e6edf3":"#8b949e";ctx.textAlign="center";
+    ctx.font="bold 13px system-ui";ctx.fillText(L.name,x+boxW/2,y+22);
+    ctx.font="9px ui-monospace,monospace";ctx.fillStyle=lit?L.color:"#8b949e";
+    ctx.fillText(`[${L.kind}]`,x+boxW/2,y+36);
+    ctx.fillStyle=lit?"#c9d1d9":"#8b949e";ctx.font="9.5px system-ui";
+    wrapText(ctx,L.role,x+9,y+50,boxW-18,12);
+    ctx.globalAlpha=1;
+    // arrow
+    if(i<n-1){
+      ctx.strokeStyle=lit?L.color:"#30363d";ctx.lineWidth=lit?2.5:1.2;ctx.globalAlpha=lit?0.95:0.4;
+      const ax=x+boxW,bx=x+boxW+gap,ay=y+boxH/2;
+      ctx.beginPath();ctx.moveTo(ax,ay);ctx.lineTo(bx,ay);
+      ctx.lineTo(bx-5,ay-4);ctx.moveTo(bx,ay);ctx.lineTo(bx-5,ay+4);ctx.stroke();ctx.globalAlpha=1;
+    }
+  });
+}
+function wrapText(ctx,text,x,y,maxw,lh){
+  const words=text.split(' ');let line='';let yy=y;
+  for(const wd of words){const t=line?line+' '+wd:wd;if(ctx.measureText(t).width>maxw&&line){ctx.fillText(line,x+ (ctx.textAlign==='center'?0:0),yy);line=wd;yy+=lh;}else line=t;}
+  if(line)ctx.fillText(line,x,yy);
+}
+function renderTrace(){
+  const step=+document.getElementById('step').value;
+  const L=STACK[step];
+  document.getElementById('layerDesc').textContent=`${L.name} — ${L.role}`;
+  let out=`<b>step ${step}: ${L.name}</b>  [${L.kind}]\n`;
+  out+=`role     : ${L.role}\n`;
+  out+=`does     : ${L.does}\n`;
+  out+=`handoff  : ${L.handoff}\n\n`;
+  out+=`full request path  docker run nginx:\n`;
+  STACK.forEach((s,i)=>{
+    const m=i===step?`\u25b6`:`\u00b7`;
+    out+=`  ${m} ${s.name.padEnd(16)} ${s.kind.padEnd(5)} ${i<STACK.length-1?'-> '+STACK[i+1].name:'-> running container'}\n`;
+  });
+  document.getElementById('trace').innerHTML=out;
+}
+
+/* ===== PANEL 2: namespace pills + spec + overlay ===== */
+let activeNS=new Set(DEFAULT_NS);
+function renderNsPills(){
+  const all=["pid","ipc","uts","mnt","net","cgroup","user"];
+  const el=document.getElementById('nsgrid');
+  el.innerHTML=all.map(t=>{
+    const on=activeNS.has(t);
+    return `<span class="nspill ${on?'on':'off'}" data-ns="${t}">${on?'\u2713':'\u2717'} ${t}</span>`;
+  }).join('');
+  el.querySelectorAll('.nspill').forEach(p=>p.addEventListener('click',function(){
+    const t=this.getAttribute('data-ns');
+    if(activeNS.has(t))activeNS.delete(t); else activeNS.add(t);
+    renderNsPills();renderSpec();drawOverlay();
+  }));
+}
+function renderSpec(){
+  const mount=buildOverlayMount(3,4);
+  const ns=Array.from(activeNS).filter(t=>DEFAULT_NS.includes(t)||t==='user');
+  // keep canonical order
+  const order=["pid","ipc","uts","mnt","net","user","cgroup"];
+  const nsOrdered=order.filter(t=>activeNS.has(t));
+  const spec=genOciSpec({name:"nginx",rootfsPath:mount.rootfs,
+    args:["nginx","-g","daemon off;"],namespaces:nsOrdered,cgroupsPath:"/docker/nginx"});
+  // pretty JSON with light syntax highlighting
+  let j=JSON.stringify(spec,null,2);
+  j=j.replace(/("[^"]+")(:)/g,'<span class="k">$1</span>$2');
+  j=j.replace(/: ("[^"]*")/g,': <span class="s">$1</span>');
+  document.getElementById('spec').innerHTML=j;
+  // overlay mount text
+  let m=`<b>mount_opts:</b>\n  ${mount.mount_opts}\n\n`;
+  m+=`<b>rootfs</b> (root.path) = ${mount.rootfs}\n`;
+  m+=`<b>lowerdir</b> count = ${mount.lowerdir.length}  (readonly image layers)\n`;
+  m+=`<b>upperdir</b> = ${mount.upperdir}  (container writes)\n`;
+  document.getElementById('mount').innerHTML=m;
+}
+const oc=document.getElementById('overlay');
+function drawOverlay(){
+  const ctx=setup(oc),w=oc.clientWidth,h=oc.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  const mount=buildOverlayMount(3,4);
+  const layers=[
+    {label:"layer 3  CMD nginx                8 MB",digest:"sha256:g7h8i9",color:"#2980b9",lower:mount.lowerdir[2]},
+    {label:"layer 2  apt install nginx       52 MB",digest:"sha256:d4e5f6",color:"#2980b9",lower:mount.lowerdir[1]},
+    {label:"layer 1  FROM debian            28 MB",digest:"sha256:a1b2c3",color:"#2980b9",lower:mount.lowerdir[0]},
+  ];
+  const upper={label:"upperdir  ACTIVE (container writes)",color:"#27ae60",path:mount.upperdir};
+  const boxW=300,boxH=34,x0=40;
+  let y=30;
+  ctx.textAlign="left";
+  // upperdir on top
+  ctx.fillStyle="#0a0e14";ctx.strokeStyle=upper.color;ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(x0,y,boxW,boxH,7);ctx.fill();ctx.stroke();
+  ctx.fillStyle=upper.color;ctx.beginPath();ctx.roundRect(x0,y,5,boxH,[7,0,0,7]);ctx.fill();
+  ctx.fillStyle=upper.color;ctx.font="bold 10px ui-monospace,monospace";ctx.fillText("writable",x0+boxW-58,y+12);
+  ctx.fillStyle="#e6edf3";ctx.font="10px ui-monospace,monospace";ctx.fillText(upper.label,x0+12,y+21);
+  y+=boxH+6;
+  // lowerdirs
+  layers.forEach((L,i)=>{
+    ctx.fillStyle="#0a0e14";ctx.strokeStyle=L.color;ctx.lineWidth=1.4;ctx.globalAlpha=0.85;
+    ctx.beginPath();ctx.roundRect(x0,y,boxW,boxH,7);ctx.fill();ctx.stroke();
+    ctx.fillStyle=L.color;ctx.globalAlpha=1;ctx.beginPath();ctx.roundRect(x0,y,5,boxH,[7,0,0,7]);ctx.fill();
+    ctx.fillStyle="#79c0ff";ctx.font="9px ui-monospace,monospace";ctx.fillText("readonly",x0+boxW-52,y+12);
+    ctx.fillStyle="#c9d1d9";ctx.font="10px ui-monospace,monospace";ctx.fillText(L.label,x0+12,y+21);
+    y+=boxH+6;
+  });
+  ctx.globalAlpha=1;
+  // bracket + merged rootfs arrow
+  const by=30+boxH/2, ey=y-6-boxH/2;
+  ctx.strokeStyle="#8b949e";ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.moveTo(x0+boxW+10,by);ctx.lineTo(x0+boxW+22,by);
+  ctx.lineTo(x0+boxW+22,ey);ctx.lineTo(x0+boxW+10,ey);ctx.stroke();
+  ctx.fillStyle="#8b949e";ctx.font="9px ui-monospace,monospace";ctx.textAlign="center";
+  ctx.fillText("overlay",x0+boxW+38,(by+ey)/2);
+  ctx.fillText("merge",x0+boxW+38,(by+ey)/2+11);
+  // merged rootfs box
+  const mx=x0+boxW+70,mw=w-mx-20;
+  ctx.strokeStyle="#f1c40f";ctx.fillStyle="#0a0e14";ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(mx,30,mw,(ey-30+boxH),10);ctx.fill();ctx.stroke();
+  ctx.fillStyle="#f1c40f";ctx.font="bold 11px system-ui";ctx.textAlign="left";
+  ctx.fillText("merged rootfs",mx+12,52);
+  ctx.fillStyle="#c9d1d9";ctx.font="9px ui-monospace,monospace";
+  ctx.fillText("= root.path",mx+12,68);
+  ctx.fillText("what the container",mx+12,90);
+  ctx.fillText("sees as '/'",mx+12,103);
+  ctx.fillStyle="#27ae60";ctx.font="9px ui-monospace,monospace";
+  ctx.fillText("writes -> upperdir",mx+12,128);
+  ctx.fillStyle="#79c0ff";
+  ctx.fillText("reads -> top lowerdir",mx+12,143);
+  ctx.fillText("       that has the file",mx+12,156);
+  ctx.fillStyle="#8b949e";ctx.font="8px ui-monospace,monospace";
+  ctx.fillText("(copy-on-write: first write",mx+12,178);
+  ctx.fillText(" copies the file up to",mx+12,190);
+  ctx.fillText(" the upperdir)",mx+12,202);
+}
+
+/* ===== PANEL 3: alt runtimes table ===== */
+function renderRtTable(){
+  const rts=[
+    ["runc","namespaces + cgroups","shares the HOST kernel","~immediate (fork/exec)","lowest overhead; weakest isolation (kernel vuln = escape)"],
+    ["gVisor (runsc)","user-space kernel (ptrace/KVM)","PARAVIRTUALIZED kernel (Sentry)","tens of ms","intercepts syscalls; strong app isolation; some incompat"],
+    ["Kata Containers","hardware VM (QEMU)","GUEST kernel in a lightweight VM","100-250 ms","hardware-grade isolation; near-native; heavier memory"],
+    ["Firecracker","microVM (Rust, minimal devices)","GUEST kernel in a tiny VM","~125 ms","minimal device model; dense; powers Lambda/Fargate"],
+    ["crun","namespaces + cgroups (C impl)","shares the HOST kernel","~immediate (faster than runc)","drop-in runc replacement; smaller/faster; same threat model"],
+  ];
+  let H="<tr><th>runtime</th><th>isolation</th><th>kernel the container sees</th><th>cold start</th><th>trade-off</th></tr>";
+  rts.forEach(r=>{
+    H+=`<tr><td class="c">${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td></tr>`;
+  });
+  document.getElementById('rtTable').innerHTML=H;
+}
+
+/* ===== GOLD CHECK: JS spec + overlay == container_runtime.py Section GOLD ===== */
+const GOLD={
+  ociVersion:"1.0.2",
+  root_path:`${OVERLAY_ROOT}/4/merged`,
+  process_args:["nginx","-g","daemon off;"],
+  namespaces:["pid","ipc","uts","mnt","net","cgroup"],
+  ns_count:6,
+  mounts_count:10,
+  cgroupsPath:"/docker/nginx",
+  lowerdir_count:3,
+  lowerdirs:[`${OVERLAY_ROOT}/1/fs`,`${OVERLAY_ROOT}/2/fs`,`${OVERLAY_ROOT}/3/fs`],
+  upperdir:`${OVERLAY_ROOT}/4/fs`,
+  workdir:`${OVERLAY_ROOT}/4/work`,
+};
+function eqArr(a,b){return a.length===b.length&&a.every((x,i)=>x===b[i]);}
+function runCheck(){
+  const mount=buildOverlayMount(3,4);
+  const spec=genOciSpec({name:"nginx",rootfsPath:mount.rootfs,
+    args:["nginx","-g","daemon off;"],namespaces:DEFAULT_NS.slice(),
+    cgroupsPath:"/docker/nginx"});
+  const got={
+    ociVersion:spec.ociVersion,
+    root_path:spec.root.path,
+    process_args:spec.process.args,
+    namespaces:spec.linux.namespaces.map(n=>n.type),
+    ns_count:spec.linux.namespaces.length,
+    mounts_count:spec.mounts.length,
+    cgroupsPath:spec.linux.cgroupsPath,
+    lowerdir_count:mount.lowerdir.length,
+    lowerdirs:mount.lowerdir,
+    upperdir:mount.upperdir,
+    workdir:mount.workdir,
+  };
+  const checks=[
+    ["ociVersion",got.ociVersion===GOLD.ociVersion],
+    ["root.path",got.root_path===GOLD.root_path],
+    ["process.args",eqArr(got.process_args,GOLD.process_args)],
+    ["namespaces",eqArr(got.namespaces,GOLD.namespaces)],
+    ["namespace count",got.ns_count===GOLD.ns_count],
+    ["mounts count",got.mounts_count===GOLD.mounts_count],
+    ["cgroupsPath",got.cgroupsPath===GOLD.cgroupsPath],
+    ["lowerdir count",got.lowerdir_count===GOLD.lowerdir_count],
+    ["lowerdirs",eqArr(got.lowerdirs,GOLD.lowerdirs)],
+    ["upperdir",got.upperdir===GOLD.upperdir],
+    ["workdir",got.workdir===GOLD.workdir],
+  ];
+  const ok=checks.every(c=>c[1]);
+  const chk=document.getElementById('check');
+  chk.textContent= ok? 'check: OK — JS OCI spec + overlay matches container_runtime.py (all GOLD fields)'
+                     : 'check: FAIL — mismatch: '+checks.filter(c=>!c[1]).map(c=>c[0]).join(', ');
+  chk.style.borderColor=ok?'#27ae60':'#c0392b';
+  chk.style.color=ok?'#27ae60':'#c0392b';
+  chk.style.background=ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== events ===== */
+document.getElementById('step').addEventListener('input',function(){
+  document.getElementById('stepVal').textContent=this.value;
+  drawStack();renderTrace();
+});
+window.addEventListener('resize',()=>{drawStack();drawOverlay();});
+
+drawStack();renderTrace();
+renderNsPills();renderSpec();drawOverlay();
+renderRtTable();
+runCheck();
+</script>
+</body>
+</html>

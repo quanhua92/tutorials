@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes Scheduler — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button.active{border-color:var(--green);color:var(--green);background:#1c3a25}
+  .micro{color:var(--muted);font-size:.74rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .nodes{display:flex;flex-wrap:wrap;gap:.6rem;margin:.5rem 0}
+  .node{background:#0a0e14;border:1px solid #30363d;border-radius:8px;padding:.55rem .7rem;min-width:150px;font-family:ui-monospace,monospace;font-size:.78rem}
+  .node .nm{font-weight:700;color:var(--ink)}
+  .node.feas{border-color:var(--green)}
+  .node.feas .nm{color:var(--green)}
+  .node.reject{border-color:var(--red);opacity:.7}
+  .node.reject .nm{color:var(--red);text-decoration:line-through}
+  .node .why{color:var(--muted);font-size:.72rem;margin-top:.2rem}
+  .node.winner{box-shadow:0 0 0 2px var(--gold) inset}
+  .node.winner .nm::after{content:' ★ winner';color:var(--gold)}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .barwrap .lab{width:80px;color:var(--ink);font-size:.8rem;font-family:ui-monospace,monospace}
+  .barwrap .track{flex:1;height:18px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px}
+  .barwrap .num{width:110px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  table{border-collapse:collapse;font-size:.8rem;margin-top:.4rem;font-variant-numeric:tabular-nums}
+  table td,table th{border:1px solid #30363d;padding:4px 9px;text-align:left}
+  table th{color:var(--muted);font-weight:600}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Kubernetes Scheduler — interactive
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/SCHEDULER.md">SCHEDULER.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/scheduler.py">scheduler.py</a></h1>
+  <div class="sub">The scheduler assigns each Pending pod to ONE node in two phases: <b style="color:var(--green)">Filter</b>
+    (drop nodes that can't host it) then <b style="color:var(--green)">Score</b> (rank the survivors). Toggle the scoring policy and watch the
+    <b>winner flip</b>: <b>LeastAllocated</b> spreads (emptiest node), <b>MostAllocated</b> bin-packs (fullest node). All numbers recompute live
+    from the <i>same</i> model as <code>scheduler.py</code>.</div>
+
+  <!-- ===== PANEL 1: FILTER ===== -->
+  <h2>① Filter phase — can the pod run here? (hard constraints)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>Pod 'web'</b> requests <b>2 CPU + 4 GB</b>, no tolerations. Each node must pass ALL of:
+      enough free CPU, enough free memory, and all NoSchedule taints tolerated.</div>
+    <div class="nodes" id="filterNodes"></div>
+    <div class="readout" id="filterReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: SCORE (GOLD) ===== -->
+  <h2>② Score phase — rank feasible nodes (the winner flips with policy)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this proves:</b> the JS recomputes LeastAllocated / MostAllocated / Balanced scores from the same feasible set as
+      <code>scheduler.py</code> Section B. The green <span class="badge" style="padding:1px 6px">check: OK</span> confirms winners match the .py gold
+      (<b>Least→node-3</b>, <b>Most→node-1</b>).</div>
+    <div class="controls" style="margin:.4rem 0">
+      <button id="bLeast" class="active">LeastAllocated (SPREAD)</button>
+      <button id="bMost">MostAllocated (BIN-PACK)</button>
+      <button id="bBal">BalancedResource</button>
+    </div>
+    <div id="scoreBars"></div>
+    <div class="readout" id="scoreReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: ANTIAFFINITY PLACEMENT ===== -->
+  <h2>③ podAntiAffinity — 3 replicas spread across 3 nodes (HA)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> schedule 3 replicas one at a time. antiAffinity steers each later replica
+      AWAY from nodes already hosting a 'web' pod, so a node fault kills at most one replica.</div>
+    <button id="bPlace" style="margin:.3rem 0">▶ step through replicas</button>
+    <div class="nodes" id="placeNodes" style="align-items:stretch"></div>
+    <div class="readout" id="placeReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS scoring matches scheduler.py Section B (LeastAllocated→node-3, MostAllocated→node-1).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth cluster model + scorers, copied from scheduler.py ===== */
+const NODES=[
+  {name:'node-1',cpu_alloc:4,mem_alloc:16,cpu_used:1,mem_used:4,taints:[]},
+  {name:'node-2',cpu_alloc:4,mem_alloc:16,cpu_used:3,mem_used:10,taints:[]},
+  {name:'node-3',cpu_alloc:4,mem_alloc:16,cpu_used:0,mem_used:0,taints:[]},
+  {name:'node-4',cpu_alloc:8,mem_alloc:32,cpu_used:2,mem_used:8,taints:[]},
+  {name:'gpu-1', cpu_alloc:8,mem_alloc:32,cpu_used:1,mem_used:4,taints:[{key:'gpu',effect:'NoSchedule'}]},
+];
+const POD={name:'web',cpu_req:2,mem_req:4,tolerations:[]};
+const freeCpu=n=>n.cpu_alloc-n.cpu_used, freeMem=n=>n.mem_alloc-n.mem_used;
+function tolerates(pod,n){
+  const tol=new Set(pod.tolerations.map(t=>t.key+':'+(t.effect||'NoSchedule')));
+  for(const t of n.taints){ if(t.effect!=='NoSchedule') continue;
+    if(!tol.has(t.key+':'+t.effect)) return false; }
+  return true;
+}
+function filterNodes(nodes,pod){
+  const out=[];
+  for(const n of nodes){
+    if(freeCpu(n)<pod.cpu_req) continue;
+    if(freeMem(n)<pod.mem_req) continue;
+    if(!tolerates(pod,n)) continue;
+    out.push(n);
+  }
+  return out;
+}
+const uCpu=(n,p)=>(n.cpu_used+p.cpu_req)/n.cpu_alloc;
+const uMem=(n,p)=>(n.mem_used+p.mem_req)/n.mem_alloc;
+const sLeast=(n,p)=>((1-uCpu(n,p))+(1-uMem(n,p)))/2*100;
+const sMost =(n,p)=>(uCpu(n,p)+uMem(n,p))/2*100;
+const sBal  =(n,p)=>(1-Math.abs(uCpu(n,p)-uMem(n,p)))*100;
+function rank(nodes,pod,sc){ return nodes.map(n=>[sc(n,pod),n.name]).sort((a,b)=>b[0]-a[0]||a[1].localeCompare(b[1])); }
+
+/* ===== PANEL 1: filter ===== */
+function renderFilter(){
+  const box=document.getElementById('filterNodes'); let html='';
+  for(const n of NODES){
+    const reasons=[];
+    if(freeCpu(n)<POD.cpu_req) reasons.push('cpu short ('+freeCpu(n)+'<'+POD.cpu_req+')');
+    if(freeMem(n)<POD.mem_req) reasons.push('mem short ('+freeMem(n)+'<'+POD.mem_req+')');
+    if(!tolerates(POD,n)) reasons.push('taint '+n.taints[0].key+':NoSchedule');
+    const feas=reasons.length===0;
+    html+='<div class="node '+(feas?'feas':'reject')+'"><div class="nm">'+n.name+'</div>'+
+      'cpu '+n.cpu_alloc+'/'+n.cpu_used+'/'+freeCpu(n)+'<br>mem '+n.mem_alloc+'/'+n.mem_used+'/'+freeMem(n)+
+      '<div class="why">'+(feas?'FEASIBLE':'✗ '+reasons.join('; '))+'</div></div>';
+  }
+  box.innerHTML=html;
+  const feas=filterNodes(NODES,POD);
+  document.getElementById('filterReadout').textContent =
+    'Feasible set = ['+feas.map(n=>n.name).join(', ')+']\n'+
+    'node-2 dropped (cpu short) ; gpu-1 dropped (taint, no toleration) -> only 3 nodes reach scoring.';
+}
+
+/* ===== PANEL 2: score ===== */
+let scoreMode='least';
+const feas=filterNodes(NODES,POD);
+function renderScore(){
+  let sc, col, label;
+  if(scoreMode==='least'){ sc=sLeast; col='#27ae60'; label='LeastAllocated (SPREADING — prefer least-loaded)'; }
+  else if(scoreMode==='most'){ sc=sMost; col='#e67e22'; label='MostAllocated (BIN-PACKING — prefer most-loaded)'; }
+  else { sc=sBal; col='#8e7cc3'; label='BalancedResourceAllocation (prefer cpu≈mem)'; }
+  const ranked=rank(feas,POD,sc);
+  const maxv=Math.max.apply(null,ranked.map(r=>r[0]));
+  let html='<div class="micro" style="margin:.2rem 0">'+label+'</div>';
+  ranked.forEach(r=>{
+    const nm=r[1], v=r[0];
+    html+='<div class="barwrap"><span class="lab">'+nm+'</span>'+
+      '<span class="track"><span class="fill" style="width:'+(v/maxv*100).toFixed(1)+'%;background:'+col+'"></span></span>'+
+      '<span class="num">'+v.toFixed(2)+'</span></div>';
+  });
+  document.getElementById('scoreBars').innerHTML=html;
+  const winner=ranked[0][1];
+  document.getElementById('scoreReadout').innerHTML =
+    'winner = <b>'+winner+'</b>   ranked = ['+ranked.map(r=>r[1]).join(', ')+']\n'+
+    'util after placing (cpu/mem):  '+feas.map(n=>n.name+' '+uCpu(n,POD).toFixed(2)+'/'+uMem(n,POD).toFixed(2)).join('   ');
+  // gold check: both LeastAllocated and MostAllocated winners must match the .py
+  const leastW=rank(feas,POD,sLeast)[0][1], mostW=rank(feas,POD,sMost)[0][1];
+  const ok = leastW==='node-3' && mostW==='node-1';
+  const chk=document.getElementById('check');
+  chk.textContent = ok ? 'check: OK — JS scoring matches scheduler.py (Least→node-3, Most→node-1)' : 'check: FAIL — mismatch!';
+  chk.style.borderColor=ok?'#27ae60':'#c0392b'; chk.style.color=ok?'#27ae60':'#c0392b'; chk.style.background=ok?'#1c3a25':'#3a1414';
+}
+
+/* ===== PANEL 3: antiAffinity placement ===== */
+function makeState(){ return NODES.filter(n=>['node-1','node-3','node-4'].includes(n.name)).map(n=>Object.assign({},n)); }
+let placeStep=0, placeState=makeState(), placement=[];
+function renderPlace(){
+  const names=['node-1','node-3','node-4'];
+  const webPod={name:'web',cpu_req:2,mem_req:4,tolerations:[]};
+  // advance one step
+  if(placeStep<3){
+    const hosting=new Set(placement);
+    const cand=placeState.filter(n=>freeCpu(n)>=webPod.cpu_req && freeMem(n)>=webPod.mem_req);
+    const spread=cand.filter(n=>!hosting.has(n.name)); const pool=spread.length?spread:cand;
+    const ranked=rank(pool,webPod,sLeast); const chosen=placeState.find(n=>n.name===ranked[0][1]);
+    chosen.cpu_used+=webPod.cpu_req; chosen.mem_used+=webPod.mem_req;
+    placement.push(chosen.name); placeStep++;
+  }
+  const box=document.getElementById('placeNodes'); let html='';
+  for(const nm of names){
+    const n=placeState.find(x=>x.name===nm); const reps=placement.filter(p=>p===nm).length;
+    const used=placement.includes(nm);
+    html+='<div class="node '+(used?'feas':'')+'" style="min-width:180px"><div class="nm">'+nm+'</div>'+
+      'hosting web replicas: <b style="color:'+(reps?'var(--green)':'var(--muted)')+'">'+reps+'</b><br>'+
+      'cpu used '+n.cpu_used+'/'+n.cpu_alloc+' · mem '+n.mem_used+'/'+n.mem_alloc+
+      (used?'<div class="why">✓ replica placed (antiAffinity)</div>':'<div class="why">available</div>')+'</div>';
+  }
+  box.innerHTML=html;
+  const done=placeStep>=3;
+  document.getElementById('placeReadout').innerHTML =
+    'placement order = <b>['+placement.join(', ')+']</b>'+(done?'   ✓ '+new Set(placement).size+' distinct nodes (HA achieved)':'')+'\n'+
+    (done ? 'GOLD antiAffinity placement = [node-3, node-4, node-1]   match? '+(JSON.stringify(placement)===JSON.stringify(['node-3','node-4','node-1'])?'<b>OK</b>':'<span class="bad">FAIL</span>')
+           : 'click again to place the next replica ('+placeStep+'/3)');
+  document.getElementById('bPlace').textContent = done ? '↻ reset' : '▶ step through replicas  ('+placeStep+'/3)';
+}
+
+/* ===== events ===== */
+document.getElementById('bLeast').addEventListener('click',function(){ scoreMode='least'; setActiveScore(this); renderScore(); });
+document.getElementById('bMost').addEventListener('click',function(){ scoreMode='most'; setActiveScore(this); renderScore(); });
+document.getElementById('bBal').addEventListener('click',function(){ scoreMode='bal'; setActiveScore(this); renderScore(); });
+function setActiveScore(b){ ['bLeast','bMost','bBal'].forEach(id=>document.getElementById(id).classList.remove('active')); b.classList.add('active'); }
+document.getElementById('bPlace').addEventListener('click',function(){
+  if(placeStep>=3){ placeStep=0; placeState=makeState(); placement=[]; }
+  renderPlace();
+});
+
+renderFilter(); renderScore(); renderPlace();
+</script>
+</body>
+</html>

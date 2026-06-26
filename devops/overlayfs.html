@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OverlayFS — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.74rem}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.45rem;align-items:center}
+  .val{color:var(--green);font-weight:700;min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
+  .controls{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:center;margin:.3rem 0 .4rem}
+  input[type=range]{width:240px;accent-color:var(--green);vertical-align:middle}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;
+         text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.55rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .dim{color:var(--muted)}
+  /* the layer stack */
+  .stack{display:flex;flex-direction:column;gap:4px;max-width:560px;margin:.3rem 0}
+  .lyr{display:flex;align-items:center;gap:.6rem;border:1px solid #30363d;border-radius:7px;
+       padding:.45rem .7rem;background:#0a0e14;font-size:.8rem;font-variant-numeric:tabular-nums}
+  .lyr .tag{width:54px;font-weight:700;font-size:.72rem;text-align:center;border-radius:4px;padding:2px 0}
+  .lyr .id{font-family:ui-monospace,monospace;color:var(--gold);font-size:.76rem}
+  .lyr .nm{color:var(--ink);flex:1}
+  .lyr .sz{color:var(--muted);font-size:.76rem}
+  .lyr.upper{border-color:var(--green)}
+  .lyr.merged{border:1px dashed var(--purple);color:var(--purple)}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .barwrap .lab{width:96px;color:var(--muted);font-size:.78rem}
+  .barwrap .track{flex:1;height:20px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px}
+  .barwrap .num{width:150px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+  table.w{border-collapse:collapse;font-size:.8rem;width:100%;margin-top:.4rem;font-variant-numeric:tabular-nums}
+  table.w td,table.w th{border:1px solid #30363d;padding:4px 8px;text-align:left}
+  table.w th{color:var(--muted);font-weight:600}
+  td.cow{color:var(--gold);font-weight:700}
+  td.new{color:var(--blue)}
+  td.ip{color:var(--muted)}
+  .chk{display:flex;flex-wrap:wrap;gap:.8rem;margin:.2rem 0 .5rem}
+  .chk label{cursor:pointer;background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:4px 9px}
+  .chk input{accent-color:var(--green)}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>OverlayFS — how Docker stores images & containers
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/OVERLAYFS.md">OVERLAYFS.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/overlayfs.py">overlayfs.py</a></h1>
+  <div class="sub">Think of image layers as <b style="color:var(--gold)">printed acetate sheets</b> and the running
+    container as a <b style="color:var(--green)">blank sheet on top</b>. To edit a printed note you first
+    <b style="color:var(--gold)">trace</b> it onto your sheet (copy-on-write) — the printed original is never touched,
+    so 100 containers share the same stack. Toggle writes below and watch the copy-up count. The numbers are recomputed
+    in JS from the <i>identical</i> model as <code>overlayfs.py</code>. &nbsp;|&nbsp;
+    <a href="./dockerfile.html">→ how those layers are built (Dockerfile)</a> &nbsp;|&nbsp;
+    <a href="./namespaces.html">namespaces</a></div>
+
+  <!-- ===== PANEL 1: THE LAYER STACK ===== -->
+  <h2>① The image as a stack of read-only layers + one writable top sheet</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> image <code>flask-app:1.0</code> = 3 read-only
+      layers (bottom = ubuntu base, top = pip flask) stored <b>once</b>. A container adds a thin writable
+      <b style="color:var(--green)">upperdir</b>; the union view the container sees as '/' is <b style="color:var(--purple)">merged</b>.</div>
+    <div class="stack" id="stack"></div>
+    <div class="micro" style="margin-top:.5rem">Layer ids are content-addressed (sha256 of name + files) and pinned
+      from <code>overlayfs.py</code> Section A. Same files ⇒ same id ⇒ shared on disk and across pulls (Section D).</div>
+  </div>
+
+  <!-- ===== PANEL 2: COPY-ON-WRITE PLAYGROUND ===== -->
+  <h2>② Copy-on-write — toggle the container's writes, watch the copy-up count</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> check the files the container writes. Files that
+      live in a <b>lower</b> layer get <b style="color:var(--gold)">copy-up</b>'d into upper ONCE (the trace); brand-new
+      files go straight to upper (<b style="color:var(--blue)">new</b>); re-editing an already-copied file is
+      <b style="color:var(--muted)">in-place</b> (no new copy). The <b>lower originals never change</b>.</div>
+    <div class="chk" id="toggles"></div>
+    <table class="w" id="cowTable">
+      <tr><th>path</th><th>in a lower layer?</th><th>copied to upper?</th><th>operation</th><th>merged size</th></tr>
+    </table>
+    <div class="readout" id="cowReadout"></div>
+    <div class="micro" style="margin-top:.5rem">The canonical scenario (all four writes) reproduces
+      <code>overlayfs.py</code> Section B: <b>cow_count = 2</b>, <code>/etc/passwd</code> copied up exactly once despite
+      two edits, and base layer <code>3edf864cc3cb</code> is byte-identical before/after.</div>
+  </div>
+
+  <!-- ===== PANEL 3: STORAGE SAVINGS ===== -->
+  <h2>③ Storage savings — N containers share the lowers, each pays only its own upper</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .4rem"><b>What to do:</b> drag N. <b>naive</b> (vfs) copies the whole image
+      per container; <b style="color:var(--green)">overlay2</b> stores the image once + N thin uppers.</div>
+    <div class="controls">
+      <label>containers N <input type="range" id="n" min="1" max="500" value="100">
+        <span class="val" id="nVal">100</span></label>
+    </div>
+    <div id="bars"></div>
+    <div class="readout" id="savReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS overlay model recomputes <code>overlayfs.py</code> Section F: image = 136,088,178 B, canonical cow_count = 2,
+    passwd copy-up = 1, upper = 506,644 B, savings(100) = 72.8708×.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth layer model, copied verbatim from overlayfs.py ===== */
+/* layer ids pinned from `python3 overlayfs.py` (Section A) */
+const LAYERS=[
+  {tag:"L0 base", nm:"ubuntu:22.04 (base)", id:"3edf864cc3cb", files:14, size:75644198},
+  {tag:"L1 apt",  nm:"apt: python3",         id:"2d064fbf6330", files:7,  size:50443980},
+  {tag:"L2 pip",  nm:"pip: flask",           id:"4ef1ca91458f", files:10, size:10000000}
+];
+const IMAGE_SIZE = LAYERS.reduce((a,l)=>a+l.size,0);   /* 136088178, matches .py */
+
+/* which container-writeable paths originate in a lower layer (here: base L0)?
+   everything else is "new" (no copy-up). Matches overlayfs.py CANONICAL_WRITES. */
+const LOWER_FILES = {"/etc/passwd":true, "/etc/hostname":true};
+/* final on-disk size after the canonical writes (passwd re-edited to 2540, hostname to 8) */
+const WRITE_SIZE  = {"/etc/passwd":2540, "/etc/hostname":8,
+                     "/var/log/flask.log":500000, "/app/data.json":4096};
+
+/* ===== the copy-on-write model (mirrors overlayfs.py OverlayMount.write) ===== */
+function runMount(writtenPaths){
+  /* writtenPaths: array of paths the container writes (each at least once).
+     Returns {upper: {path:size}, cowFiles: [...], cowCount, ops: [{path,inLower,inUpper,op,merged}]} */
+  const upper={}, cowFiles=[];
+  const ops=writtenPaths.map(p=>{
+    const inLower = !!LOWER_FILES[p];
+    const inUpper = p in upper;
+    let op;
+    if(!inUpper && inLower){ upper[p]=LOWER_FILES[p]; cowFiles.push(p); upper[p]=WRITE_SIZE[p]; op="copy-up"; }
+    else if(!inUpper && !inLower){ upper[p]=WRITE_SIZE[p]; op="new"; }
+    else { upper[p]=WRITE_SIZE[p]; op="in-place"; }
+    return {path:p, inLower, inUpper:(p in upper), op, merged:upper[p]};
+  });
+  const upperSize=Object.values(upper).reduce((a,b)=>a+b,0);
+  return {upper, cowFiles, cowCount:cowFiles.length, ops, upperSize};
+}
+
+/* ===== PANEL 1: draw the stack (top = pip, bottom = base; upper + merged on top) ===== */
+function drawStack(){
+  const el=document.getElementById('stack');
+  let h=`<div class="lyr merged"><span class="tag" style="background:#2a2233">merged</span><span class="nm">union view the container sees as '/'</span></div>`;
+  h+=`<div class="lyr upper"><span class="tag" style="background:#1c3a25;color:var(--green)">upper</span><span class="nm">container writable layer (thin, per-container)</span></div>`;
+  for(let i=LAYERS.length-1;i>=0;i--){
+    const L=LAYERS[i];
+    h+=`<div class="lyr"><span class="tag" style="background:#0d2438;color:#58a6ff">${L.tag}</span>`+
+       `<span class="id">${L.id}</span><span class="nm">${L.nm}</span>`+
+       `<span class="sz">${L.files} files · ${human(L.size)}</span></div>`;
+  }
+  el.innerHTML=h;
+}
+
+/* ===== PANEL 2: copy-on-write playground ===== */
+const TOGGLES=["/etc/passwd","/etc/hostname","/var/log/flask.log","/app/data.json"];
+function drawToggles(){
+  const el=document.getElementById('toggles');
+  el.innerHTML=TOGGLES.map((p,i)=>
+    `<label><input type="checkbox" data-p="${p}" ${i<4?'checked':''}> write ${p}</label>`).join('');
+  el.querySelectorAll('input').forEach(c=>c.addEventListener('change',renderCow));
+}
+function renderCow(){
+  const paths=[...document.querySelectorAll('#toggles input')].filter(c=>c.checked).map(c=>c.dataset.p);
+  const m=runMount(paths);
+  /* table */
+  const t=document.getElementById('cowTable');
+  let H='<tr><th>path</th><th>in a lower layer?</th><th>copied to upper?</th><th>operation</th><th>merged size</th></tr>';
+  m.ops.forEach(o=>{
+    const cls=o.op==='copy-up'?'cow':(o.op==='new'?'new':'ip');
+    H+=`<tr><td>${o.path}</td><td>${o.inLower?'yes':'no'}</td>`+
+        `<td>${o.inUpper?'yes':'no'}</td><td class="${cls}">${o.op}</td><td>${human(o.merged)}</td></tr>`;
+  });
+  if(m.ops.length===0) H+='<tr><td colspan="5" style="color:var(--muted)">— no writes —</td></tr>';
+  t.innerHTML=H;
+  /* readout */
+  const r=document.getElementById('cowReadout');
+  const passwdOnce = m.cowFiles.filter(p=>p==='/etc/passwd').length;
+  r.innerHTML = `cow_count = <b>${m.cowCount}</b> &nbsp; distinct lower files copied up = <b>${m.cowCount}</b> `+
+    `&nbsp; <span class="dim">| /etc/passwd copy-ups = ${passwdOnce} (once per file, even if written twice)</span><br>`+
+    `upper size = <b>${human(m.upperSize)}</b> &nbsp; <span class="dim">| lower layers: READ-ONLY, never mutated `+
+    `(base 3edf864cc3cb identical before & after)</span>`;
+}
+
+/* ===== PANEL 3: storage savings ===== */
+const UPPER_PER_CTR = runMount(TOGGLES).upperSize;   /* 506644, matches .py gold */
+function renderSav(){
+  const n=+document.getElementById('n').value;
+  document.getElementById('nVal').textContent=n;
+  const naive=n*IMAGE_SIZE, overlay=IMAGE_SIZE+n*UPPER_PER_CTR;
+  const ratio=naive/overlay;
+  const maxN=500, maxBar=maxN*IMAGE_SIZE;
+  const bars=[
+    {lab:'naive (vfs)', v:naive, c:'#c0392b', note:`${n} × ${human(IMAGE_SIZE)}`},
+    {lab:'overlay2',    v:overlay, c:'#27ae60', note:`${human(IMAGE_SIZE)} + ${n}×${human(UPPER_PER_CTR)}`}
+  ];
+  let h='';
+  bars.forEach(b=>{
+    const frac=Math.max(0.004,b.v/maxBar);
+    h+=`<div class="barwrap"><span class="lab">${b.lab}</span>`+
+       `<span class="track"><span class="fill" style="width:${(frac*100).toFixed(2)}%;background:${b.c}"></span></span>`+
+       `<span class="num">${human(b.v)} · ${b.note}</span></div>`;
+  });
+  document.getElementById('bars').innerHTML=h;
+  document.getElementById('savReadout').innerHTML=
+    `savings = naive / overlay = <b>${ratio.toFixed(1)}×</b> smaller &nbsp; `+
+    `<span class="dim">| bytes saved = ${human(naive-overlay)}</span>`;
+}
+
+/* ===== gold check vs overlayfs.py Section F ===== */
+function human(n){
+  n=Math.abs(n); if(n<1024) return n+' B';
+  const u=['KiB','MiB','GiB','TiB']; let f=n/1024,i=0;
+  while(f>=1024&&i<u.length-1){f/=1024;i++;}
+  return f.toFixed(1)+' '+u[i];
+}
+const GOLD={imageSize:136088178, cowCount:2, passwdOnce:1, upperSize:506644,
+            savings100:72.8708, overlayTotal100:186752578, layers:3};
+const canon=runMount(TOGGLES);                       /* all four canonical writes */
+const sav100=(100*IMAGE_SIZE)/(IMAGE_SIZE+100*canon.upperSize);
+const ok = IMAGE_SIZE===GOLD.imageSize
+        && canon.cowCount===GOLD.cowCount
+        && canon.upperSize===GOLD.upperSize
+        && (canon.cowFiles.filter(p=>p==='/etc/passwd').length)===GOLD.passwdOnce
+        && Math.abs(sav100-GOLD.savings100)<1e-3
+        && LAYERS.length===GOLD.layers;
+const chk=document.getElementById('check');
+chk.textContent = ok
+  ? 'check: OK — JS overlay model matches overlayfs.py (cow_count=2, upper=506,644 B, savings(100)=72.87×)'
+  : 'check: FAIL — mismatch!';
+chk.style.borderColor = ok?'#27ae60':'#c0392b';
+chk.style.color = ok?'#27ae60':'#c0392b';
+chk.style.background = ok?'#1c3a25':'#3a1414';
+
+/* ===== events + init ===== */
+document.getElementById('n').addEventListener('input',renderSav);
+function render(){ drawStack(); renderCow(); renderSav(); }
+drawToggles();
+render();
+</script>
+</body>
+</html>

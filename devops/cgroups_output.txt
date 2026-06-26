@@ -1,0 +1,197 @@
+cgroups.py - reference model of Linux control groups (v2).
+All numbers below feed CGROUPS.md and cgroups.html.
+Python 3.14.5
+
+========================================================================
+  SECTION A: cgroup v2 unified hierarchy (vs v1 per-controller)
+========================================================================
+cgroup v1 had ONE mount tree PER controller, so a task could live in
+different nodes of the cpu tree vs the memory tree -- confusing. v2
+(2016, Tejun Heo) collapsed everything into a SINGLE tree:
+
+
+    /                      (the root cgroup = the whole machine)
+    |-- system.slice       (systemd services)
+    |-- user.slice         (user sessions)
+    `-- kubepods.slice      (K8s pods) / docker-*.scope (Docker)
+        `-- pod-abc/
+            |-- c1   <- this container's booth
+            `-- c2
+
+Each booth enables the controllers it needs (cgroup.subtree_control):
+
+    /sys/fs/cgroup/kubepods.slice/pod-abc/c1/
+        cgroup.procs        <- PIDs placed in this booth
+        cpu.max             <- 'quota period'  (hard cap)
+        cpu.weight          <- relative share under contention
+        memory.max          <- bytes ceiling
+        io.max              <- per-device rbps/wbps/riops/wiops
+        pids.max            <- max process count
+        cpu.stat            <- 'throttled_usec ...' (accounting)
+
+Limits INHERIT down: a child booth can be TIGHTER than its parent, but
+never looser. The root cgroup (the machine) is the absolute ceiling.
+
+| controller | v1 file          | v2 file      | what it caps       |
+|------------|------------------|--------------|--------------------|
+| cpu        | cpu.cfs_quota_us | cpu.max      | CPU time (hard throttle) |
+| cpu        | cpu.shares       | cpu.weight   | CPU share (relative) |
+| memory     | memory.limit_in_bytes | memory.max   | RAM (OOM kill)     |
+| blkio      | blkio.throttle... | io.max       | I/O bytes/ops per device |
+| pids       | pids.max         | pids.max     | process count (fork refused) |
+
+Docker / K8s mapping (the flags you actually type):
+    docker run --cpus 1          ->  cpu.max = '100000 100000'
+    docker run --cpu-shares 512  ->  cpu.weight = 512
+    docker run --memory 512m     ->  memory.max = 536870912
+    docker run --pids-limit 100  ->  pids.max = 100
+    K8s limits.memory: 512Mi     ->  memory.max = 536870912
+
+========================================================================
+  SECTION B: CPU -- hard cap (cpu.max) vs relative share (cpu.weight)
+========================================================================
+Two independent knobs. They feel similar but enforce VERY different
+things, and beginners mix them up constantly.
+
+  cpu.max    : HARD cap. The cgroup is literally PAUSED once it has
+               used quota/period CPUs in a period. Guaranteed ceiling.
+  cpu.weight : RELATIVE. Only matters when two+ cgroups FIGHT over the
+               same busy CPU. Splits spare capacity by weight. No cap.
+
+DEMO 1 -- hard cap (cpu.max), NO contention
+--------------------------------------------------------
+Machine: 4 CPUs (4000 m). Container A capped at 1 CPU, idle machine.
+
+  A wants 4.00 CPU, cpu.max caps it at 1.00 CPU
+  -> A runs 1.00 CPU, THROTTLED 3.00 CPU (3 CPUs of demand, paused)
+  -> idle (unused): 3.00 CPU
+
+DEMO 2 -- two hard-capped containers, total cap < machine
+--------------------------------------------------------
+  A capped at 1 CPU, B capped at 1 CPU. Both want 4 CPUs. Machine 4.
+  /A: runs 1.00 CPU, throttled 3.00 CPU
+  /B: runs 1.00 CPU, throttled 3.00 CPU
+  -> total used 2.00 CPU, idle 2.00 CPU (caps bind, 2 CPUs wasted -- a reason to over-commit)
+
+DEMO 3 -- NO hard cap, only cpu.weight (the contention case)
+--------------------------------------------------------
+  A weight 200, B weight 100. Both want all 4 CPUs (busy).
+  -> A gets 4 * 200/(200+100) = 2.67 CPU  B gets 4 * 100/(200+100) = 1.33 CPU
+  (proportional to weight; if either goes idle the other gets 100%)
+
+DEMO 4 -- cap + weight together (cap binds first, spare by weight)
+--------------------------------------------------------
+  A capped at 1 CPU (weight irrelevant); B,C no cap, equal weight.
+  A takes its 1 CPU, leaving 3; B and C split the 3 evenly (1.5 each).
+  /A: runs 1.00 CPU
+  /B: runs 1.50 CPU
+  /C: runs 1.50 CPU
+
+[check] DEMO 4 accounting: A+B+C used = 4.00 CPU == capacity 4.00 CPU -> OK
+
+========================================================================
+  SECTION C: memory -- memory.max and the OOM killer
+========================================================================
+memory.max is a HARD bytes ceiling. Unlike CPU throttling (which
+PAUSES a task and resumes it next period), going over memory.max
+cannot be 'paused' -- the kernel must FREE memory immediately, so it
+invokes the OOM killer, which SIGKILLs a process in the cgroup.
+
+cgroup /app, memory.max = 512 MB. Workload allocates in
+100 MB steps:
+
+  step  alloc MB  usage    event                   
+  --------------------------------------------------
+  1     100       100      OK
+  2     200       200      OK
+  3     300       300      OK
+  4     400       400      OK
+  5     500       500      OK
+  6     600       512      OOM KILL (x1)
+
+After OOM, the cgroup's usage is pinned at memory.max (512 MB); the
+killed process is gone and the survivors continue. The accounting
+invariant holds: at NO step did usage exceed memory.max.
+
+[check] memory accounting: max usage observed 512 <= limit 512 -> OK
+[check] OOM kills = 1 (one, at the 600 MB alloc) -> OK
+
+========================================================================
+  SECTION D: io (blkio) -- per-device IOPS and bytes/s caps
+========================================================================
+The io controller caps throughput to a block device, per cgroup. The
+v2 file io.max takes 'rbps wbps riops wiops', each 'max' or a number.
+This protects the SHARED disk from one noisy container saturating it.
+
+cgroup /batch, io.max rbps = 10485760 B/s (= 10 MB/s).
+A workload tries to read 50 MB as fast as possible:
+
+  demand         : 50 MB
+  device raw rate: ~500 MB/s (no limit -> would finish in 0.1 s)
+  io.max rbps    : 10 MB/s
+  -> effective   : 10 MB/s, 50 MB takes 5.0 s
+
+The kernel delays each read so the rolling rate never exceeds rbps.
+This is THROTTLING (like CPU), not killing -- the I/O completes, just
+slowly. Same idea for riops (random IOPS) on SSDs.
+
+[check] io accounting: effective 10 MB/s <= limit 10 MB/s -> OK
+
+========================================================================
+  SECTION E: pids -- fork-bomb fuse (pids.max)
+========================================================================
+A classic fork bomb (:(){ :|:& };:) doubles processes every
+generation. Without a limit it exhausts the PID table and wedges the
+box. pids.max is the fuse: a fork that would push the cgroup's process
+count over the limit returns EAGAIN (the fork is REFUSED, not killed).
+
+cgroup /untrusted, pids.max = 100. Simulating a fork bomb
+(each surviving process forks one child per generation):
+
+  gen  processes   event                     
+  ------------------------------------------
+  1    2           OK
+  2    4           OK
+  3    8           OK
+  4    16          OK
+  5    32          OK
+  6    64          OK
+  7    100         OK
+  8    100         FORK REFUSED (EAGAIN)
+
+The bomb hit the ceiling at 100 processes in 8 generations and then every further fork was REFUSED. The host is
+untouched -- the limit is per-cgroup, so the fork bomb cannot escape /untrusted.
+
+[check] pids accounting: current 100 <= max 100 -> OK
+
+========================================================================
+  SECTION F: GOLD check -- for every controller, USAGE <= LIMIT
+========================================================================
+The single invariant that defines correct cgroup behaviour: no
+cgroup ever consumes more than its configured limit, on ANY axis.
+If this ever fails, a container has escaped its cage.
+
+  controller  limit          usage          result  
+  --------------------------------------------------
+  cpu         1.00 CPU       1.00 CPU       OK      
+  memory      512 MB         512 MB         OK      
+  io          10 MB/s        10 MB/s        OK      
+  pids        100            100            OK      
+
+[check] resource-accounting invariant (usage <= limit, all 4 axes): OK
+
+GOLD values (pinned for cgroups.html):
+    app_cpu_used_m           = 1000
+    app_cpu_limit_m          = 1000
+    app_memory_used_mb       = 512
+    app_memory_limit_mb      = 512
+    app_oom_kills            = 1
+    app_pids_current         = 100
+    app_pids_max             = 100
+    io_effective_mbs         = 10
+    axes_ok                  = 1
+[check] gold assertions (4/4 axes, 1 CPU cap, 1 OOM, pids pegged): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

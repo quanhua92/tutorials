@@ -1,0 +1,130 @@
+scheduler.py - reference simulation.
+All numbers below feed SCHEDULER.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: Filter phase -- find feasible nodes
+========================================================================
+Pod to schedule:
+  name=web   requests: 2 CPU, 4 GB   tolerations: []
+
+Nodes (allocatable vs currently requested/used):
+  name   cpu(alloc/used/free)   mem(alloc/used/free)   taints
+  node-1 4/1/3             16/4/12            -
+  node-2 4/3/1             16/10/6             -
+  node-3 4/0/4             16/0/16            -
+  node-4 8/2/6             32/8/24            -
+  gpu-1  8/1/7             32/4/28            [{'key': 'gpu', 'effect': 'NoSchedule'}]
+
+Hard constraints applied (all must pass):
+  1. free_cpu >= 2
+  2. free_mem >= 4
+  3. every NoSchedule taint is tolerated by the pod
+
+Per-node verdict:
+  node-1 -> FEASIBLE
+  node-2 -> REJECTED (cpu short (free 1 < 2))
+  node-3 -> FEASIBLE
+  node-4 -> FEASIBLE
+  gpu-1  -> REJECTED (taint [{'key': 'gpu', 'effect': 'NoSchedule'}] not tolerated)
+
+Feasible set: ['node-1', 'node-3', 'node-4']
+  (node-2 dropped: only 1 CPU free ; gpu-1 dropped: taint gpu:NoSchedule, pod has no toleration)
+
+========================================================================
+  SECTION B: Score phase -- rank feasible nodes  (bin-pack vs spread)
+========================================================================
+Three built-in scoring policies (NodeResourcesFit scoring):
+
+  LeastAllocated          : prefer LEAST-loaded node -> SPREADS pods out
+  MostAllocated           : prefer MOST-loaded node  -> BIN-PACKS onto few nodes
+  BalancedResourceAllocation: prefer cpu & mem utilization balanced
+
+Scores are 0..100 (higher wins). Utilization is measured AFTER placing
+the pod on that node (i.e. used + request).
+
+  node     LeastAlloc   MostAlloc   Balanced   cpu_util / mem_util (after)
+  node-1        37.50       62.50      75.00   0.750 / 0.500
+  node-3        62.50       37.50      75.00   0.500 / 0.250
+  node-4        56.25       43.75      87.50   0.500 / 0.375
+
+Ranked (score desc):
+  LeastAllocated -> ['node-3', 'node-4', 'node-1']   winner: node-3  (SPREADING)
+  MostAllocated  -> ['node-1', 'node-4', 'node-3']   winner: node-1  (BIN-PACKING)
+  Balanced       -> ['node-4', 'node-1', 'node-3']   winner: node-4
+
+WATCH THE WINNER FLIP: LeastAllocated picks the EMPTIEST feasible node
+(node-3) to spread load; MostAllocated picks the FULLEST feasible node
+(node-1) to pack tightly and leave whole nodes free. Same pod, same
+feasible set, opposite placement -- the only difference is policy.
+
+GOLD (pinned for scheduler.html):
+  LeastAllocated winner = node-3
+  MostAllocated  winner = node-1
+[check] the two policies pick DIFFERENT nodes (spread vs pack)?  OK
+
+========================================================================
+  SECTION C: Taints & tolerations -- keeping plain pods off the GPU node
+========================================================================
+Node gpu-1 carries a taint: {'key': 'gpu', 'effect': 'NoSchedule'}  (effect = NoSchedule)
+
+A NoSchedule taint means: any pod WITHOUT a matching toleration is
+REJECTED from that node during the FILTER phase (Section A). It never
+reaches scoring.
+
+  pod 'web'   (no toleration)   feasible on gpu-1? False   -> EXCLUDED
+  pod 'train' (tolerates gpu)   feasible on gpu-1? True   -> ALLOWED
+
+WHY: taints reserve special hardware (GPUs, dedicated/infra nodes) for
+the workloads that explicitly tolerate them, so a plain web pod can
+never accidentally grab an expensive GPU node.
+
+[check] toleration correctly gates gpu-1 access?  OK
+
+========================================================================
+  SECTION D: podAntiAffinity -- spread replicas across nodes (HA)
+========================================================================
+Goal: 3 replicas of 'web' should land on 3 DIFFERENT nodes, so a single
+node failure kills at most 1 replica. podAntiAffinity tells the
+scheduler: 'avoid (or forbid) a node that already hosts a web pod.'
+
+Simulation: schedule the 3 replicas one at a time onto the Section A
+feasible set {node-1, node-3, node-4}; each placement commits its usage;
+ antiAffinity steers later replicas AWAY from already-hosting nodes.
+
+  replica 0: feasible ['node-1', 'node-3', 'node-4'] ; avoid hosting {} ; -> placed on node-3
+  replica 1: feasible ['node-1', 'node-3', 'node-4'] ; avoid hosting ['node-3'] ; -> placed on node-4
+  replica 2: feasible ['node-1', 'node-3', 'node-4'] ; avoid hosting ['node-3', 'node-4'] ; -> placed on node-1
+
+Placement order: ['node-3', 'node-4', 'node-1']
+Distinct nodes used: 3
+
+RESULT: each replica got its OWN node. A node fault now takes down at
+most one replica -- the HA goal of podAntiAffinity.
+
+GOLD (pinned for scheduler.html):
+  antiAffinity placement = ['node-3', 'node-4', 'node-1']
+[check] all 3 replicas on distinct nodes (HA)?  OK
+
+========================================================================
+  SECTION E: Cluster Autoscaler -- no feasible node -> add one
+========================================================================
+Pod 'big' requests 16 CPU / 32 GB -- more
+free capacity than ANY current node offers.
+Filter result: 0 feasible node(s) -> []
+
+The pod is now Pending. The Cluster Autoscaler notices a pod stuck
+in Pending due to Insufficient cpu/memory, and reacts:
+  1. requests a new node from the cloud provider (right shape/size)
+  2. waits for the node to boot, join the cluster, and register
+  3. the scheduler re-runs; the pod now finds a feasible node
+
+After autoscaler adds node-5 (32 CPU / 64 GB allocatable):
+  Filter result: ['node-5']
+  -> 'big' schedules on node-5
+
+[check] autoscaler resolved the Pending pod (node-5 feasible)?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

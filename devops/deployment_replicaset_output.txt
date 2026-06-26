@@ -1,0 +1,160 @@
+deployment_replicaset.py - reference simulation.
+All numbers below feed DEPLOYMENT_REPLICASET.md.
+python stdlib only; deterministic; no network, no clock.
+
+
+========================================================================
+  SECTION A: Deployment -> ReplicaSet -> Pods  (the hierarchy)
+========================================================================
+A Deployment named 'web' wants 3 replicas of image 'web:v1'.
+It does NOT create Pods directly. It creates ONE ReplicaSet per pod
+template revision (named with a pod-template-hash), and that ReplicaSet
+creates and owns the Pods.
+
+  Deployment: web              (desired: 3, template: image=web:v1)
+    └─ ReplicaSet: web-7b9c        (selector: app=web, template-hash=7b9c)
+         └─ Pod: web-7b9c-abcd0      (labels: app=web, pod-template-hash=7b9c)
+         └─ Pod: web-7b9c-abcd1      (labels: app=web, pod-template-hash=7b9c)
+         └─ Pod: web-7b9c-abcd2      (labels: app=web, pod-template-hash=7b9c)
+
+Ownership chain:  Deployment web  --owns-->  RS web-7b9c  --owns-->  3 Pods
+Each object owns the one below it. The pod-template-hash ties a Pod to
+ITS ReplicaSet, and a new image tag -> a new hash -> a NEW ReplicaSet.
+
+Who does what:
+  Deployment : holds desired count + pod template; drives rollouts.
+  ReplicaSet : enforces actual == desired; SELF-HEALS lost pods (Section E).
+  Pod        : the disposable worker; the only thing that actually runs.
+
+========================================================================
+  SECTION B: RollingUpdate - interleaved scale up/down, two guardrails
+========================================================================
+On a template change (e.g. image web:v1 -> web:v2) the Deployment creates
+a NEW ReplicaSet (new hash) and rolls pods from the old RS to the new one.
+The controller NEVER violates either guardrail:
+
+  (1) total     <= replicas + maxSurge          (bound resource cost)
+  (2) available >= replicas - maxUnavailable    (bound downtime)
+
+Canonical scenario: replicas=3, maxSurge=1, maxUnavailable=0, ready_lag=1.
+
+Guardrails: total <= 4, available >= 3
+
+  step    v1 RS    v2 RS  total  avail  action
+  ----  -------  -------  -----  -----  ------
+     0        3        0      3      3  start: OLD rs at desired, NEW rs at 0
+     1        3        1      4      3  surge NEW +1 (total 4 <= 4)
+     2        2        1      3      3  scale OLD -1 (avail 3 >= 3)
+     3        2        2      4      3  surge NEW +1 (total 4 <= 4)
+     4        1        2      3      3  scale OLD -1 (avail 3 >= 3)
+     5        1        3      4      3  surge NEW +1 (total 4 <= 4)
+     6        0        3      3      3  scale OLD -1 (avail 3 >= 3)
+
+[check] total <= replicas+maxSurge (4) at every step?  True
+[check] available >= replicas-maxUnavailable (3) at every step?  True
+
+Read the sawtooth: the v2 RS surges +1 (total hits 4), then once that
+pod is ready the v1 RS scales -1 (avail stays 3). Repeat until v1=0.
+=> zero downtime (avail never below 3), at the cost of 1 extra pod (surge).
+
+========================================================================
+  SECTION C: Rollback - undo rolls back to the PREVIOUS ReplicaSet
+========================================================================
+`kubectl rollout undo` makes the PREVIOUS ReplicaSet the target and
+re-runs the SAME interleaved rollout, just with the roles swapped:
+the current RS scales down while the previous one scales back up.
+
+Rolling from v2 (current) BACK to v1 (previous) - same trace, swapped labels:
+
+Guardrails: total <= 4, available >= 3
+
+  step    v2 RS    v1 RS  total  avail  action
+  ----  -------  -------  -----  -----  ------
+     0        3        0      3      3  start: OLD rs at desired, NEW rs at 0
+     1        3        1      4      3  surge NEW +1 (total 4 <= 4)
+     2        2        1      3      3  scale OLD -1 (avail 3 >= 3)
+     3        2        2      4      3  surge NEW +1 (total 4 <= 4)
+     4        1        2      3      3  scale OLD -1 (avail 3 >= 3)
+     5        1        3      4      3  surge NEW +1 (total 4 <= 4)
+     6        0        3      3      3  scale OLD -1 (avail 3 >= 3)
+
+[check] guardrails hold during rollback too?  total:True  avail:True
+
+Why this works: the Deployment keeps old ReplicaSets up to
+revisionHistoryLimit (default 10). Each RS is a complete snapshot of a
+revision, so 'undo' = re-point the target at an existing RS and roll.
+
+========================================================================
+  SECTION D: strategy - RollingUpdate (default) vs Recreate
+========================================================================
+spec.strategy.type picks the rollout strategy:
+
+  RollingUpdate (default): interleave up/down. Two versions briefly
+    coexist. Zero downtime IF maxUnavailable=0 (needs spare capacity = surge).
+  Recreate: kill ALL old pods FIRST, then create new. Guaranteed single
+    version, but there is a DOWNTIME window (0 pods available).
+
+Recreate, replicas=3 - watch the 'avail' column hit 0:
+
+  step  v1 RS  v2 RS  avail  action
+  ----  -----  -----  -----  ------
+     0      3      0      3  start: v1 at desired
+     1      2      0      2  Recreate: scale v1 -1 (kill before create)
+     2      1      0      1  Recreate: scale v1 -1 (kill before create)
+     3      0      0      0  Recreate: scale v1 -1 (kill before create)
+     4      0      1      0  Recreate: scale v2 +1 (create after kill)
+     5      0      2      1  Recreate: scale v2 +1 (create after kill)
+     6      0      3      2  Recreate: scale v2 +1 (create after kill)
+     7      0      3      3  settle: readiness catching up
+
+[check] Recreate has a downtime step (avail == 0)?  True
+Use Recreate only when two versions CANNOT coexist: a breaking DB schema
+migration, a singleton that must own a resource exclusively, or a job
+that rejects duplicate runs. Otherwise prefer RollingUpdate.
+
+========================================================================
+  SECTION E: ReplicaSet self-healing - actual == desired, always
+========================================================================
+Self-healing is the ReplicaSet's job (not the Deployment's). Its
+reconcile loop constantly compares desired vs actual. If a Pod
+disappears - node loss, crash, eviction, manual delete - the RS sees
+desired != actual and creates a replacement to restore the count.
+
+  step  desired  actual  event
+  ----  -------  ------  -----
+     0        3       3  steady state: replicas match desired
+     3        3       2  pod died (node loss / crash / eviction)
+     4        3       3  RS reconcile: desired=3 != actual=2 -> create 1 replacement
+     7        3       2  pod died (node loss / crash / eviction)
+     8        3       3  RS reconcile: desired=3 != actual=2 -> create 1 replacement
+
+Key points:
+  - The Deployment is not involved; the RS reconciles on its own.
+  - Replacement is a NEW Pod (new name, same template-hash) - the dead
+    one is gone for good. Stateful workloads use a StatefulSet instead,
+    where a replacement keeps the same sticky identity.
+  - This is why you almost never `kubectl run` a bare Pod in prod:
+    a bare Pod has no ReplicaSet, so if it dies nothing recreates it.
+
+========================================================================
+  GOLD CHECK: available >= replicas - maxUnavailable at EVERY rollout step
+========================================================================
+Canonical rollout (replicas=3, maxSurge=1, maxUnavailable=0):
+
+  step  : 0  1  2  3  4  5  6
+  OLD   : 3  3  2  2  1  1  0
+  NEW   : 0  1  1  2  2  3  3
+  avail : 3  3  3  3  3  3  3
+
+Guardrails:  total <= 4   |   available >= 3
+[check] total guardrail holds every step?       True
+[check] available guardrail holds every step?    True
+[pin] min available seen during rollout = 3  (>= 3)
+[pin] max total seen during rollout      = 4  (<= 4)
+[pin] # reconcile steps to complete      = 6
+[pin] final state                        = v1:0 v2:3 avail:3
+[check] all gold pins reproduced:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

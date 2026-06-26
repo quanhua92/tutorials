@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dockerfile build — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e7cc3;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.74rem}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.45rem;align-items:center}
+  .controls{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:center;margin:.3rem 0 .4rem}
+  select{background:#0a0e14;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 8px;font-size:.82rem}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;
+         text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.55rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .dim{color:var(--muted)}
+  table.df{border-collapse:collapse;font-size:.8rem;width:100%;margin-top:.4rem;font-variant-numeric:tabular-nums}
+  table.df td,table.df th{border:1px solid #30363d;padding:5px 8px;text-align:left}
+  table.df th{color:var(--muted);font-weight:600}
+  table.df tr.hit td{background:#0e2418}
+  table.df tr.miss td{background:#2a1414}
+  td.cache-hit{color:var(--green);font-weight:700}
+  td.cache-miss{color:var(--red);font-weight:700}
+  td.cold{color:var(--orange);font-weight:700}
+  td.cfg{color:var(--purple);font-size:.72rem}
+  .id{font-family:ui-monospace,monospace;color:var(--gold);font-size:.76rem}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .barwrap .lab{width:96px;color:var(--muted);font-size:.78rem}
+  .barwrap .track{flex:1;height:22px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d}
+  .barwrap .fill{height:100%;border-radius:3px;display:flex;align-items:center;padding-left:6px;
+                 color:#0d1117;font-weight:700;font-size:.72rem}
+  .barwrap .num{width:130px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Dockerfile build — layers, cache cascade & multi-stage
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/DOCKERFILE.md">DOCKERFILE.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/dockerfile.py">dockerfile.py</a></h1>
+  <div class="sub">Think of each instruction as a <b style="color:var(--gold)">workstation</b> on an assembly line:
+    after each one a <b>photographer snaps a photo</b> (= a layer). On the next build, the photographer reuses a photo
+    if everything up to that workstation is identical (<b style="color:var(--green)">HIT</b>); the first thing that
+    changed has no matching photo (<b style="color:var(--red)">MISS</b>) — and so does everything after it (the cascade).
+    Pick which line you edited below. &nbsp;|&nbsp;
+    <a href="./overlayfs.html">→ how those layers are stored (OverlayFS)</a> &nbsp;|&nbsp;
+    <a href="./namespaces.html">namespaces</a></div>
+
+  <!-- ===== PANEL 1: THE DOCKERFILE -> LAYERS ===== -->
+  <h2>① Each instruction commits a layer — the canonical build (cold cache)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What this shows:</b> a 4-instruction Dockerfile. The 3
+      <code>FROM/RUN/COPY</code> instructions each commit a filesystem layer; <code>CMD</code> only edits the image
+      config (no layer). The layer id encodes its whole ancestry, so an ancestor change rewrites every descendant id.</div>
+    <table class="df" id="layersTable"></table>
+    <div class="readout" id="layersRO"></div>
+    <div class="micro" style="margin-top:.5rem">Layer ids pinned from <code>dockerfile.py</code> Section A
+      (<code>sha256(parent_key + kind + content_tag)</code>).</div>
+  </div>
+
+  <!-- ===== PANEL 2: CACHE CASCADE PLAYGROUND ===== -->
+  <h2>② The build cache — pick which line you edited, watch the cascade</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> choose the instruction whose INPUT changed (an
+      edited file under <code>COPY</code> counts even though the line text is identical — its checksum is part of the
+      key). From that line onward every instruction is a <b style="color:var(--red)">MISS</b> and must re-run.</div>
+    <div class="controls">
+      <label>you edited&nbsp;
+        <select id="editSel">
+          <option value="-1">— nothing (rebuild identical) —</option>
+          <option value="0">line 1: FROM (base image)</option>
+          <option value="1">line 2: RUN apt-get (deps)</option>
+          <option value="2" selected>line 3: COPY app/ (your source)</option>
+          <option value="3">line 4: CMD</option>
+        </select>
+      </label>
+    </div>
+    <table class="df" id="cacheTable"></table>
+    <div class="readout" id="cacheRO"></div>
+    <div class="micro" style="margin-top:.5rem">Editing <b>COPY</b> (the common case: you changed app source) reuses
+      the expensive ubuntu + apt layers and re-runs only <code>COPY</code> + <code>CMD</code>. That is why you order
+      least-changing inputs first (Section B of the .py).</div>
+  </div>
+
+  <!-- ===== PANEL 3: MULTI-STAGE ===== -->
+  <h2>③ Multi-stage — build fat (800 MB), ship thin (20 MB)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .4rem"><b>What this shows:</b> stage 1 (<b style="color:var(--orange)">builder</b>)
+      has the Go compiler + source and produces a binary; stage 2 (<b style="color:var(--green)">runtime</b>) is alpine
+      + just that binary. The final image is the <b>last stage only</b> — the compiler never ships.</div>
+    <div id="msBars"></div>
+    <div class="readout" id="msRO"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS build model recomputes <code>dockerfile.py</code> Section F: fs_layer_count = 3, cache vector for COPY edit =
+    [HIT, HIT, MISS, MISS], re-run = 2, multi-stage final = 20 MB, ratio = 40.0×.
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth Dockerfile model, copied from dockerfile.py ===== */
+/* layer ids pinned from `python3 dockerfile.py` Section A (cache_keys chain). */
+const DF=[
+  {n:0, text:"FROM ubuntu:22.04",                                 kind:"FROM", size:72000000, fs:true,  id:"30970ed4af28", tag:"ubuntu:22.04"},
+  {n:1, text:"RUN apt-get update && apt-get install -y python3",  kind:"RUN",  size:48000000, fs:true,  id:"9d0c75233047", tag:"apt-get ... python3"},
+  {n:2, text:'COPY app/ /app/',                                   kind:"COPY", size:8500000,  fs:true,  id:"ee747f76da3a", tag:"app@sha256:a1b2c3"},
+  {n:3, text:'CMD ["python3", "/app/main.py"]',                   kind:"CMD",  size:0,        fs:false, id:"ca94af79b8ef", tag:'["python3","/app/main.py"]'}
+];
+/* edited layer ids when COPY's content_tag changes (pinned from .py Section B) */
+const EDITED_ID={2:"1d39409f5818", 3:"75422f83e547"};
+
+function human(n){
+  n=Math.abs(n); if(n<1024) return n+' B';
+  const u=['KiB','MiB','GiB','TiB']; let f=n/1024,i=0;
+  while(f>=1024&&i<u.length-1){f/=1024;i++;}
+  return f.toFixed(1)+' '+u[i];
+}
+const fsLayers = DF.filter(d=>d.fs).length;
+const imageSize = DF.filter(d=>d.fs).reduce((a,d)=>a+d.size,0);
+
+/* the cascade: editing instruction j (0-indexed) -> HIT up to j, MISS from j on */
+function cacheVector(editIdx){
+  return DF.map((_,i)=> (editIdx<0 || i<editIdx) ? "HIT" : "MISS");
+}
+
+/* ===== PANEL 1: canonical layers (cold build) ===== */
+function renderLayers(){
+  let H='<tr><th>#</th><th>instruction</th><th>layer id</th><th>adds</th><th>kind</th><th>cache (cold)</th></tr>';
+  DF.forEach(d=>{
+    H+=`<tr><td>${d.n}</td><td>${d.text}</td>`+
+       `<td class="id">${d.id}</td>`+
+       `<td>${d.fs?human(d.size):'<span class="cfg">— config —</span>'}</td>`+
+       `<td>${d.fs?'layer':'<span class="cfg">cfg</span>'}</td>`+
+       `<td class="cold">COLD</td></tr>`;
+  });
+  document.getElementById('layersTable').innerHTML=H;
+  document.getElementById('layersRO').innerHTML=
+    `<b>${DF.length}</b> instructions &rarr; <b>${fsLayers}</b> filesystem layer(s) + 1 config (CMD). `+
+    `Final image = <b>${human(imageSize)}</b> (sum of the ${fsLayers} fs layers).`;
+}
+
+/* ===== PANEL 2: cache cascade playground ===== */
+function renderCache(){
+  const editIdx=+document.getElementById('editSel').value;
+  const vec=cacheVector(editIdx);
+  let H='<tr><th>#</th><th>instruction</th><th>layer id</th><th>adds</th><th>cache</th><th></th></tr>';
+  DF.forEach((d,i)=>{
+    const st=vec[i];
+    const idShow = (st==="HIT") ? d.id : (EDITED_ID[i]||("rebuilt"));
+    H+=`<tr class="${st.toLowerCase()}"><td>${d.n}</td><td>${d.text}</td>`+
+       `<td class="id">${idShow}</td>`+
+       `<td>${d.fs?human(d.size):'<span class="cfg">config</span>'}</td>`+
+       `<td class="${st==='HIT'?'cache-hit':'cache-miss'}">${st}</td>`+
+       `<td>${st==='HIT'?'reused':'re-run'}</td></tr>`;
+  });
+  document.getElementById('cacheTable').innerHTML=H;
+  const rerun=vec.filter(v=>v==="MISS").length;
+  const reused=vec.length-rerun;
+  const vecStr = vec.map(v=>`<span class="${v==='HIT'?'cache-hit':'cache-miss'}" style="font-weight:700">${v}</span>`).join(',&nbsp;');
+  document.getElementById('cacheRO').innerHTML=
+    `cache vector = ${vecStr} &nbsp; <span class="dim">|</span> `+
+    `reused = <b>${reused}</b> &nbsp; re-run = <b style="color:var(--red)">${rerun}</b><br>`+
+    `<span class="dim">Editing ${editIdx<0?'nothing':`line ${editIdx+1} (${DF[editIdx].kind})`} `+
+    `invalidates that line and everything after it — the cascade. `+
+    `Worst case = edit FROM (${rerunMax()} re-run); best case for app code = edit COPY near the bottom.</span>`;
+}
+function rerunMax(){return DF.length;}
+
+/* ===== PANEL 3: multi-stage ===== */
+function renderMS(){
+  const builder=784000000+4000000+12000000;   /* golang + src + build = 800 MB */
+  const runtime=8000000+12000000;             /* alpine + binary = 20 MB */
+  const ratio=builder/runtime;
+  const max=builder;
+  const bars=[
+    {lab:'stage 1 builder', v:builder, c:'#e67e22', sub:'golang:1.21 + source + go build — DISCARDED'},
+    {lab:'stage 2 runtime', v:runtime, c:'#27ae60', sub:'alpine + binary ONLY — THIS SHIPS'}
+  ];
+  let h='';
+  bars.forEach(b=>{
+    const frac=Math.max(0.02,b.v/max);
+    h+=`<div class="barwrap"><span class="lab">${b.lab}</span>`+
+       `<span class="track"><span class="fill" style="width:${(frac*100).toFixed(1)}%;background:${b.c}">${human(b.v)}</span></span>`+
+       `<span class="num">${b.sub}</span></div>`;
+  });
+  document.getElementById('msBars').innerHTML=h;
+  document.getElementById('msRO').innerHTML=
+    `final image = <b>stage 2 only = ${human(runtime)}</b>. The ${human(builder)} builder (compiler, source, `+
+    `toolchain) never reaches the registry. &nbsp; savings = <b>${ratio.toFixed(1)}×</b> smaller.`;
+}
+
+/* ===== gold check vs dockerfile.py Section F ===== */
+const GOLD={fsLayers:3, instr:4, copyVec:["HIT","HIT","MISS","MISS"], rerun:2,
+            msFinal:20000000, msRatio:40.0};
+const copyVec=cacheVector(2);          /* editing COPY (index 2) */
+const copyRerun=copyVec.filter(v=>v==="MISS").length;
+const msB=800000000, msR=20000000, msRatio=msB/msR;
+const ok = fsLayers===GOLD.fsLayers
+        && DF.length===GOLD.instr
+        && JSON.stringify(copyVec)===JSON.stringify(GOLD.copyVec)
+        && copyRerun===GOLD.rerun
+        && msR===GOLD.msFinal
+        && msRatio===GOLD.msRatio;
+const chk=document.getElementById('check');
+chk.textContent = ok
+  ? 'check: OK — JS build model matches dockerfile.py (3 fs layers, [HIT,HIT,MISS,MISS], final 20 MB, 40.0×)'
+  : 'check: FAIL — mismatch!';
+chk.style.borderColor = ok?'#27ae60':'#c0392b';
+chk.style.color = ok?'#27ae60':'#c0392b';
+chk.style.background = ok?'#1c3a25':'#3a1414';
+
+/* ===== events + init ===== */
+document.getElementById('editSel').addEventListener('change',renderCache);
+function render(){ renderLayers(); renderCache(); renderMS(); }
+render();
+</script>
+</body>
+</html>

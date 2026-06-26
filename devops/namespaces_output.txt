@@ -1,0 +1,211 @@
+namespaces.py - reference model of Linux namespaces.
+All numbers below feed NAMESPACES.md and namespaces.html.
+Python 3.14.5
+
+========================================================================
+  SECTION A: the six namespace types (the six pairs of glasses)
+========================================================================
+Every namespace isolates ONE category of kernel resource. A container
+wears all six. Without namespaces, every process shares one reality.
+
+| type | clone flag       | isolates                        | what differs vs host      |
+|------|-----------------|---------------------------------|---------------------------|
+| PID  | CLONE_NEWPID    | process IDs                     | container's PID 1 != host PID 1 |
+| NET  | CLONE_NEWNET    | network stack                   | own lo/eth0, IP, routes   |
+| MNT  | CLONE_NEWNS     | mount points                    | own / tree, overlayfs     |
+| UTS  | CLONE_NEWUTS    | hostname / domainname           | own uname -n              |
+| IPC  | CLONE_NEWIPC    | SysV IPC, POSIX mqueues, shm    | own ipcs list             |
+| USER | CLONE_NEWUSER   | uid/gid mapping                 | uid 0 inside == uid 100000 outside |
+
+Identity rule (the whole game): two tasks share a namespace iff their
+/proc/<pid>/ns/<type> symlinks point to the SAME inode. We model exactly
+that -- each Namespace has an `inode`, and the gold check compares inodes.
+
+Host's initial namespace inodes (big numbers, like a real box):
+  /proc/1/ns/pid  -> inode 0xEFFFFFF9
+  /proc/1/ns/net  -> inode 0xEFFFFFFA
+  /proc/1/ns/mnt  -> inode 0xEFFFFFFB
+  /proc/1/ns/uts  -> inode 0xEFFFFFFC
+  /proc/1/ns/ipc  -> inode 0xEFFFFFFD
+  /proc/1/ns/user -> inode 0xEFFFFFFE
+
+========================================================================
+  SECTION B: PID namespace -- 'I am PID 1' (but only in here)
+========================================================================
+On the HOST (the true, combined view) -- `ps aux` from the host:
+
+  HOST PID  NAME           PID-ns inode  local-pid-in-ns
+  --------------------------------------------------------
+  1         systemd        0xEFFFFFF9    host-local=1  (host)
+  2         sshd           0xEFFFFFF9    host-local=2  (host)
+  3         /bin/sh        0xF0000000    host-local=3  -> inside ns: 1
+  4         sleep 600      0xF0000000    host-local=4  -> inside ns: 2
+  5         nginx: worker  0xF0000000    host-local=5  -> inside ns: 3
+
+INSIDE the container's PID ns (inode 0xF0000000):
+The kernel hands the container a DIFFERENT pid numbering. The very first
+task in a new PID ns is ALWAYS renumbered to 1 -- so the container's
+'/bin/sh' believes it is the init of a fresh machine.
+
+  CONTAINER PID NAME           == HOST PID (hidden)
+  --------------------------------------------------
+  1             /bin/sh        3                   
+  2             sleep 600      4                   
+  3             nginx: worker  5                   
+
+THE MAPPING TABLE (what the host must keep, to translate signals):
+  container-local PID  ->  global/host PID
+    1                   ->  3
+    2                   ->  4
+    3                   ->  5
+
+[check] container's PID 1 is NOT host's PID 1: True (container init host-pid = 3 )
+[check] isolation: inode(container pid ns) != inode(host pid ns): True -> 0xF0000000 != 0xEFFFFFF9
+
+========================================================================
+  SECTION C: NET namespace -- own loopback, own eth0, own routes
+========================================================================
+A NET namespace is a FULL, independent network stack: its own loopback,
+its own interfaces, its own IP addresses, its own routing table, and its
+own iptables. Nothing crosses the boundary except via an explicit bridge
+(docker0) + a veth pair.
+
+HOST's view (inode 0xEFFFFFFA):
+  interfaces:
+    lo    127.0.0.1/8
+    eth0  10.0.0.5/24
+  routing table:
+    default          via 10.0.0.1    dev eth0
+    10.0.0.0/24      via direct      dev eth0
+
+CONTAINER's view (inode 0xF0000007) -- a DIFFERENT stack:
+  interfaces:
+    lo    127.0.0.1/8
+    eth0  172.17.0.2/16
+  routing table:
+    default          via 172.17.0.1  dev eth0
+    172.17.0.0/16    via direct      dev eth0
+
+Both stacks call their main interface 'eth0', but the IPs differ
+(10.0.0.5 on host vs 172.17.0.2 in container) and the routing tables are
+unrelated. The container can `ping 127.0.0.1` and hit its OWN loopback,
+completely invisible to the host's loopback -- that is full stack isolation.
+
+[check] isolation: container eth0 IP != host eth0 IP: True -> 172.17.0.2 != 10.0.0.5
+[check] isolation: net inodes differ: True -> 0xF0000007 != 0xEFFFFFFA
+
+========================================================================
+  SECTION D: MNT namespace -- own / tree, the overlayfs trick
+========================================================================
+A MNT namespace gives a process its OWN mount table -- its OWN view of
+what is mounted on /. The host's `mount` and the container's `mount` show
+DIFFERENT filesystems, even though they share the same physical disk.
+
+HOST's mount table (inode 0xEFFFFFFB):
+  /dev/sda1    on /        type ext4
+  proc         on /proc    type proc
+  tmpfs        on /run     type tmpfs
+
+CONTAINER's mount table (inode 0xF000000E):
+  overlay      on /        type overlay
+  proc         on /proc    type proc
+  tmpfs        on /tmp     type tmpfs
+
+The container's '/' is an OVERLAYFS, the core of every Docker image:
+    lowerdir = read-only image layers (ubuntu, then python, then app)
+    upperdir = container's own writable scratch space
+    merged   = the unified view the container sees as '/'
+When the container writes /etc/foo, it lands in upperdir. The image layer
+(lowerdir) is never mutated -- so 100 containers share ONE ubuntu image.
+
+A file mounted in the container NEVER shows up in `mount` on the host's
+shell (unless you nsenter the container's MNT ns first). That is MNT
+isolation: same disk, different mount tables.
+
+[check] isolation: container '/' fstype != host '/' fstype: True -> overlay != ext4
+[check] isolation: mnt inodes differ: True -> 0xF000000E != 0xEFFFFFFB
+
+========================================================================
+  SECTION E: USER namespace -- 'I am root' (but the host disagrees)
+========================================================================
+A USER namespace is a LOOKUP TABLE between uids. The container says
+'uid 0', the kernel looks it up, and on the host it is uid 100000. The
+container has FULL root powers INSIDE its namespace (can bind port 80, can
+kill its own children), but ZERO real privilege OUTSIDE -- it cannot touch
+host /etc/passwd. This is how rootless containers (Podman) work.
+
+uid_map format:  <inside_first> <outside_first> <count>
+
+HOST USER ns uid_map (inode 0xEFFFFFFE):
+    uid 0      -> uid 0      count 65536   (identity)
+
+CONTAINER USER ns uid_map (inode 0xF0000017):
+    uid 0      -> uid 100000 count 65536   (shifted!)
+
+Translate some uids through the container's map:
+    container: 'I am uid 0     '   host sees: uid 100000
+    container: 'I am uid 1     '   host sees: uid 100001
+    container: 'I am uid 1000  '   host sees: uid 101000
+    container: 'I am uid 65535 '   host sees: uid 165535
+
+Note the boundary: inside-uid 65536 is NOT covered by the map -- the
+kernel refuses to create such a process (writes 'No mapping' in
+/proc/<pid>/uid_map semantics). That caps a container's identity space.
+
+[check] isolation: container uid 0 != host uid 0: True -> host sees uid 100000 for container's root
+[check] isolation: user inodes differ: True -> 0xF0000017 != 0xEFFFFFFE
+
+========================================================================
+  SECTION F: unshare(2) / clone(2) -- birthing a container, and the GOLD check
+========================================================================
+Two syscalls create namespaces:
+
+  unshare(flags) : the CALLING process swaps its OWN namespaces for fresh
+                   ones (e.g. `unshare --pid --fork bash`). Used by `unshare`
+                   and by tools that re-self-containerize.
+
+  clone(flags)   : fork() a CHILD that is ALREADY in fresh namespaces.
+                   This is what runc/containerd do. The child wakes up as
+                   PID 1 in a new PID ns with a new network stack, etc.
+
+The flags are bitmasks. To make a full container you OR them all together:
+    ALL_SIX = CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWPID
+            | CLONE_NEWNET | CLONE_NEWUSER
+            = 0x7C020000
+
+Flag bit decode of ALL_SIX = 0x7C020000:
+    CLONE_NEWNS    0x00020000  -> ON   (new mnt ns)
+    CLONE_NEWUTS   0x04000000  -> ON   (new uts ns)
+    CLONE_NEWIPC   0x08000000  -> ON   (new ipc ns)
+    CLONE_NEWUSER  0x10000000  -> ON   (new user ns)
+    CLONE_NEWPID   0x20000000  -> ON   (new pid ns)
+    CLONE_NEWNET   0x40000000  -> ON   (new net ns)
+
+clone(child_fn, ALL_SIX) -- runc launches a container with all 6 set:
+GOLD CHECK -- isolation property across all 6 types:
+  A real container must be isolated on EVERY axis, not just some.
+
+  TYPE  host inode   container inode  isolated? 
+  ----------------------------------------------
+  PID   0xEFFFFFF9   0xF0000018       OK        
+  NET   0xEFFFFFFA   0xF0000019       OK        
+  MNT   0xEFFFFFFB   0xF000001A       OK        
+  UTS   0xEFFFFFFC   0xF000001B       OK        
+  IPC   0xEFFFFFFD   0xF000001C       OK        
+  USER  0xEFFFFFFE   0xF000001D       OK        
+
+[check] all 6 namespaces isolated from host: OK
+
+GOLD values (pinned for namespaces.html):
+    container_init_host_pid      = 3
+    container_init_local_pid     = 1
+    isolated_count               = 6
+    total_types                  = 6
+    container_uid0_on_host       = 100000
+    container_eth0_ip            = 172.17.0.2
+    container_hostname           = c1.containers.internal
+[check] gold assertions (PID 1 inside != 1 outside, 6/6 isolated, uid shift): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

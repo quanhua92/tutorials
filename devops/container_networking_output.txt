@@ -1,0 +1,333 @@
+container_networking.py - reference model. All traces feed CONTAINER_NETWORKING.md.
+pure Python stdlib ; deterministic logical packet-routing model.
+
+========================================================================
+  SECTION A: the bridge topology - veth pairs -> docker0
+========================================================================
+host eth0 = eth0 @ 192.168.1.10
+docker0 = Linux bridge @ 172.17.0.1, subnet 172.17.0.0/16
+
+Each container gets a VETH PAIR: one end (eth0) in its netns, the other enslaved to docker0.
+
+  | container | eth0 ip   | veth (host side) | netns      |
+  |-----------|-----------|-------------------|------------|
+  | web       | 172.17.0.2 | veth3a91          | ns-web   |
+  | db        | 172.17.0.3 | veth7c22          | ns-db    |
+
+  docker0 ports: ['veth3a91', 'veth7c22'] (+ its own gw iface)
+
+The view from INSIDE a container netns (isolated copy of the stack):
+  ip addr  -> eth0: 172.17.0.2/16,  lo: 127.0.0.1/8
+  routes   -> default via 172.17.0.1 dev eth0
+  resolve  -> nameserver 127.0.0.11  (the embedded DNS; Section D)
+
+$ docker network inspect bridge (abbreviated):
+
+  "IPAM": {"Config": [{"Subnet": "172.17.0.0/16",
+                        "Gateway": "172.17.0.1"]]},
+  "Containers": {"...0.2": {"Name": "web", "IPv4": "172.17.0.2/16"}, ...}
+
+[check] 2 veth pairs, both in 172.17.0.0/16, web=172.17.0.2: OK
+
+========================================================================
+  SECTION B: bridge routing - container-to-container then to the world
+========================================================================
+(1) CONTAINER -> CONTAINER (web -> db) on the SAME docker0:
+
+REQUEST route (5 hops):
+     container/web eth0 172.17.0.2
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  app sends; ARP for dst MAC resolved on docker0
+  -> veth veth3a91 (host side)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  veth pair: exits container netns, appears at a docker0 port
+  -> docker0 172.17.0.1 (L2 bridge)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  bridge forward: dst MAC learned on port veth veth7c22
+  -> veth veth7c22 (host side)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  veth pair: into container netns
+  -> container/db eth0 172.17.0.3
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432  [NAT]
+       note  delivered; NO NAT anywhere (same L2 broadcast domain)
+
+[check] c2c: packet unchanged end-to-end, single docker0 hop: OK
+
+(2) CONTAINER -> EXTERNAL (web -> 93.184.216.34:80) with MASQUERADE:
+
+REQUEST route (5 hops):
+     container/web eth0 172.17.0.2
+       pkt   tcp 172.17.0.2:40000 -> 93.184.216.34:80
+       note  app sends to external dst; default route via docker0 gw
+  -> veth veth3a91
+       pkt   tcp 172.17.0.2:40000 -> 93.184.216.34:80
+       note  veth pair onto docker0
+  -> docker0 172.17.0.1
+       pkt   tcp 172.17.0.2:40000 -> 93.184.216.34:80
+       note  bridge forwards to its gateway (the host)
+  -> host eth0 192.168.1.10
+       pkt   tcp 192.168.1.10:51234 -> 93.184.216.34:80  [NAT]
+       note  MASQUERADE (SNAT): src rewritten -> host eth0 ip:port [NAT]; conntrack records the mapping
+  -> internet via eth0
+       pkt   tcp 192.168.1.10:51234 -> 93.184.216.34:80
+       note  leaves the host; outsider sees host eth0 ip, never 172.17.0.x
+
+REPLY route (4 hops):
+     internet via eth0
+       pkt   tcp 93.184.216.34:80 -> 192.168.1.10:51234
+       note  reply arrives at host eth0 ip:masq_port
+  -> host eth0 192.168.1.10
+       pkt   tcp 93.184.216.34:80 -> 172.17.0.2:40000  [NAT]
+       note  conntrack REVERSE SNAT: dst rewritten -> container ip:port [NAT]
+  -> docker0 172.17.0.1
+       pkt   tcp 93.184.216.34:80 -> 172.17.0.2:40000
+       note  bridge forwards to dst container port
+  -> container/web eth0 172.17.0.2
+       pkt   tcp 93.184.216.34:80 -> 172.17.0.2:40000
+       note  delivered; app sees the reply as if from the internet directly
+
+[check] c2ext: MASQUERADE rewrites src->host; reply reverses to container: OK
+
+========================================================================
+  SECTION C: port publishing -p 8080:80  (DNAT inbound + reply)
+========================================================================
+`docker run -p 8080:80 web` inserts a DNAT rule in the DOCKER chain:
+
+  iptables -t nat -A DOCKER -p tcp --dport 8080 \
+    -j DNAT --to-destination 172.17.0.2:80
+
+REQUEST (external -> host:8080 -> container:80) route (5 hops):
+     internet via eth0
+       pkt   tcp 203.0.113.9:50000 -> 192.168.1.10:8080
+       note  client connects to host 192.168.1.10:8080
+  -> host eth0 192.168.1.10 (iptables PREROUTING)
+       pkt   tcp 203.0.113.9:50000 -> 172.17.0.2:80  [NAT]
+       note  DNAT (DOCKER chain): dst rewritten -> 172.17.0.2:80 [NAT]; conntrack records the flow
+  -> docker0 172.17.0.1
+       pkt   tcp 203.0.113.9:50000 -> 172.17.0.2:80
+       note  bridge forwards to the container port
+  -> veth veth3a91
+       pkt   tcp 203.0.113.9:50000 -> 172.17.0.2:80
+       note  veth pair into container netns
+  -> container/web eth0 172.17.0.2
+       pkt   tcp 203.0.113.9:50000 -> 172.17.0.2:80
+       note  delivered to web:80
+
+REPLY (conntrack reverses the DNAT) route (4 hops):
+     container/web eth0 172.17.0.2
+       pkt   tcp 172.17.0.2:80 -> 203.0.113.9:50000
+       note  app replies; conntrack owns the flow
+  -> docker0 172.17.0.1
+       pkt   tcp 172.17.0.2:80 -> 203.0.113.9:50000
+       note  bridge to host
+  -> host eth0 192.168.1.10 (iptables OUTPUT)
+       pkt   tcp 192.168.1.10:8080 -> 203.0.113.9:50000  [NAT]
+       note  conntrack REVERSE DNAT: src rewritten -> host:ext_port [NAT]
+  -> internet via eth0
+       pkt   tcp 192.168.1.10:8080 -> 203.0.113.9:50000
+       note  client sees the reply from host:ext_port, as expected
+
+[check] DNAT host:8080 -> container:80; reply src -> host:8080: OK
+
+========================================================================
+  SECTION D: embedded DNS at 127.0.0.11 - name -> container ip
+========================================================================
+On a USER-DEFINED bridge (not the default docker0), the daemon maintains a
+container-name -> ip table and answers queries sent to 127.0.0.11.
+
+  container /etc/resolv.conf:
+    nameserver 127.0.0.11
+
+  | query   | resolved ip   |
+  |---------|---------------|
+  | web     | 172.18.0.2    |
+  | db      | 172.18.0.3    |
+  | cache   | 172.18.0.4    |
+
+  resolve('missing') -> 'NXDOMAIN: missing not on this network'
+
+So `web` and `db` find each other by NAME on a user-defined net:
+  curl http://web:8080   ->   172.18.0.2:8080   (no hardcoded ip)
+
+NOTE: the DEFAULT bridge (docker0) does NOT resolve names - that is
+why you almost always create a user-defined network for multi-container
+apps (`docker network create appnet`).
+
+[check] 'web' -> 172.18.0.2, 'missing' -> NXDOMAIN: OK
+
+========================================================================
+  SECTION E: network modes - bridge vs host vs none vs macvlan
+========================================================================
+`docker run --network <MODE>` chooses the netns wiring. The packet PATH and whether NAT happens differ per mode:
+
+  | mode    | wiring                              | trade-off            |
+  |---------|-------------------------------------|----------------------|
+  | bridge  | container netns with eth0+veth -> docker0 -> NAT | default; isolated, needs -p to publish |
+  | host    | container SHARES host netns; app binds host eth0 | fastest; no isolation; port conflicts with host |
+  | none    | netns with ONLY lo; no eth0         | fully isolated; app must open its own socket manually |
+  | macvlan | own MAC/IP on host's physical subnet | L2 on the wire; no NAT; CANNOT reach the host |
+
+--- bridge (web -> db) ---------------------------------------------
+REQUEST route (5 hops):
+     container/web eth0 172.17.0.2
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  app sends; ARP for dst MAC resolved on docker0
+  -> veth veth3a91 (host side)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  veth pair: exits container netns, appears at a docker0 port
+  -> docker0 172.17.0.1 (L2 bridge)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  bridge forward: dst MAC learned on port veth veth7c22
+  -> veth veth7c22 (host side)
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432
+       note  veth pair: into container netns
+  -> container/db eth0 172.17.0.3
+       pkt   tcp 172.17.0.2:40000 -> 172.17.0.3:5432  [NAT]
+       note  delivered; NO NAT anywhere (same L2 broadcast domain)
+
+--- host (app@host eth0 -> internet) -------------------------------
+REQUEST route (3 hops):
+     container/app (host netns, no isolation)
+       pkt   tcp 192.168.1.10:8080 -> 93.184.216.34:80
+       note  app binds host eth0 ip:app_port directly; NO veth, NO docker0
+  -> host eth0 192.168.1.10
+       pkt   tcp 192.168.1.10:8080 -> 93.184.216.34:80
+       note  this IS the host network stack; nothing to translate
+  -> internet via eth0
+       pkt   tcp 192.168.1.10:8080 -> 93.184.216.34:80  [NAT]
+       note  leaves as a normal host packet; NO NAT (already the host ip)
+
+--- none (app -> external, no route) -------------------------------
+REQUEST route (2 hops):
+     container (no eth0, only lo)
+       pkt   tcp 127.0.0.1:40000 -> 93.184.216.34:80
+       note  app tries to send; only interface is lo
+  -> [DROP]
+       pkt   tcp 127.0.0.1:40000 -> 93.184.216.34:80
+       note  no route to dst; ENETUNREACH. none = fully isolated
+
+--- macvlan (container@192.168.1.50 -> internet) -------------------
+REQUEST route (4 hops):
+     container/app eth0 192.168.1.50 mac 02:42:c0:a8:01:32
+       pkt   tcp 192.168.1.50:40000 -> 93.184.216.34:80
+       note  own MAC on the physical subnet; L2 straight to the wire
+  -> macvlan sub-if on host eth0
+       pkt   tcp 192.168.1.50:40000 -> 93.184.216.34:80  [NAT]
+       note  no bridge, no NAT; parent NIC just forwards the frame
+  -> physical gateway 192.168.1.1
+       pkt   tcp 192.168.1.50:40000 -> 93.184.216.34:80
+       note  routed by the physical network like any other host
+  -> internet via eth0
+       pkt   tcp 192.168.1.50:40000 -> 93.184.216.34:80  [NAT]
+       note  leaves with the container's OWN ip (no SNAT); host unreachable from here (macvlan restriction)
+
+[check] bridge=4-hop NAT-free, host=3-hop, none=DROP, macvlan=no-NAT: OK
+
+========================================================================
+  SECTION F: overlay networking - VXLAN spans multiple hosts
+========================================================================
+Overlay subnet 10.0.0.0/24 is the SAME on every host; the real
+underlay addresses carry the VXLAN tunnel (UDP/4789, VNI 25678).
+
+  | host  | underlay eth0 | overlay bridge | container | overlay ip |
+  |-------|---------------|----------------|-----------|------------|
+  | hostA | 10.0.1.10     | overlay0 10.0.0.1 | app       | 10.0.0.2   |
+  | hostB | 10.0.1.20     | overlay0 10.0.0.1 | web       | 10.0.0.3   |
+
+Cross-host: app@hostA -> web@hostB (same overlay subnet, different physical host):
+
+OVERLAY CROSS-HOST route (7 hops):
+     container/app eth0 10.0.0.2 @ host hostA
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80
+       note  app sends; inner overlay packet src->dst (10.0.0.x)
+  -> overlay0 10.0.0.1 @ host hostA
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80
+       note  overlay bridge: dst MAC is remote -> forward to the VXLAN tunnel
+  -> VXLAN encap VNI 25678 @ host hostA
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80  [ENCAP]
+       note  L2 frame wrapped in UDP/4789: OUTER 10.0.1.10 -> 10.0.1.20; INNER unchanged [ENCAP]
+  -> underlay: 10.0.1.10 -> 10.0.1.20 (host hostA->hostB)
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80
+       note  tunnel packet routed over the PHYSICAL network by underlay ip
+  -> VXLAN decap @ host hostB
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80  [ENCAP]
+       note  UDP/4789 stripped; original L2 frame restored [ENCAP]
+  -> overlay0 10.0.0.1 @ host hostB
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80
+       note  overlay bridge forwards to dst container port
+  -> container/web eth0 10.0.0.3 @ host hostB
+       pkt   tcp 10.0.0.2:40000 -> 10.0.0.3:80
+       note  delivered; inner addresses unchanged across the tunnel
+
+[check] inner 10.0.0.x addrs unchanged; one VXLAN encap + one decap: OK
+
+========================================================================
+  GOLD: pinned routing paths per mode - the .html replays these
+========================================================================
+One representative request per mode. The node sequence (node_seq) is
+the gold the .html recomputes from the IDENTICAL routing functions.
+
+GOLD 1 - bridge c2c (web -> db):
+    container/web eth0 172.17.0.2
+    veth veth3a91 (host side)
+    docker0 172.17.0.1 (L2 bridge)
+    veth veth7c22 (host side)
+    container/db eth0 172.17.0.3
+
+GOLD 2 - bridge c2ext (web -> 93.184.216.34:80):
+    container/web eth0 172.17.0.2
+    veth veth3a91
+    docker0 172.17.0.1
+    host eth0 192.168.1.10
+    internet via eth0
+    NAT: src 172.17.0.2:40000 -> 192.168.1.10:51234
+
+GOLD 3 - publish -p 8080:80 (203.0.113.9 -> host:8080 -> web:80):
+    internet via eth0
+    host eth0 192.168.1.10 (iptables PREROUTING)
+    docker0 172.17.0.1
+    veth veth3a91
+    container/web eth0 172.17.0.2
+    NAT: dst 192.168.1.10:8080 -> 172.17.0.2:80
+
+GOLD 4 - host mode (app -> 93.184.216.34):
+    container/app (host netns, no isolation)
+    host eth0 192.168.1.10
+    internet via eth0
+
+GOLD 5 - none mode (-> external):
+    container (no eth0, only lo)
+    [DROP]
+
+GOLD 6 - macvlan (192.168.1.50 -> ext):
+    container/app eth0 192.168.1.50 mac 02:42:c0:a8:01:32
+    macvlan sub-if on host eth0
+    physical gateway 192.168.1.1
+    internet via eth0
+
+GOLD 7 - overlay cross-host (app@hostA -> web@hostB):
+    container/app eth0 10.0.0.2 @ host hostA
+    overlay0 10.0.0.1 @ host hostA
+    VXLAN encap VNI 25678 @ host hostA
+    underlay: 10.0.1.10 -> 10.0.1.20 (host hostA->hostB)
+    VXLAN decap @ host hostB
+    overlay0 10.0.0.1 @ host hostB
+    container/web eth0 10.0.0.3 @ host hostB
+
+GOLD summary (node_seq + nat label per mode) - feeds container_networking.html:
+
+  | # | mode                          | hops | nat / encap            |
+  |---|-------------------------------|------|------------------------|
+  | 1 | bridge c2c (web->db)          | 5    | no NAT                 |
+  | 2 | bridge c2ext (web->93.184.216.34:80) | 5    | MASQUERADE SNAT        |
+  | 3 | publish -p 8080:80 (ext->web) | 5    | DNAT                   |
+  | 4 | host mode (app->93.184.216.34:80) | 3    | no NAT                 |
+  | 5 | none mode (->external)        | 2    | DROP                   |
+  | 6 | macvlan (192.168.1.50->ext)   | 4    | no NAT                 |
+  | 7 | overlay cross-host (app@A->web@B) | 7    | VXLAN encap, inner no NAT |
+
+[check] all 7 gold traces reproduced from the routing functions: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,234 @@
+pod_lifecycle.py - reference simulation. All numbers below feed POD_LIFECYCLE.md.
+python stdlib only; deterministic; no network, no clock.
+
+
+========================================================================
+  SECTION A: Pod creation timeline  (API server -> etcd -> scheduler -> kubelet -> runtime)
+========================================================================
+A Pod moves Pending -> Running -> Succeeded. Each row is ONE tick of
+the control-plane + data-plane machinery. Watch the 'component' column
+shift from control-plane (kubectl, API server, scheduler) to the
+data-plane agent on the Node (kubelet, container runtime).
+
+  tick  phase       component           event
+  ----  -----       ---------           -----
+     0  Pending     kubectl             POST /api/v1/namespaces/default/pods  (pod 'web-7b9c')
+     1  Pending     API-server          validate spec; authenticate; persist to etcd
+     2  Pending     kube-scheduler      score Nodes; bind Pod -> Node 'node-a'  (condition PodScheduled=True)
+     3  Pending     kubelet             observe bound Pod on this Node; pull images; create sandbox
+     3  Pending     kubelet             start init container 'init-db'
+     4  Pending     container-runtime   'init-db' running ...
+     5  Pending     container-runtime   'init-db' running ...
+     6  Pending     container-runtime   'init-db' exited 0
+     6  Pending     kubelet             start init container 'init-config'
+     7  Pending     container-runtime   'init-config' running ...
+     8  Pending     container-runtime   'init-config' exited 0
+     9  Pending     kubelet             all init containers complete -> condition Initialized=True
+     9  Running     container-runtime   start main container(s) -> Pod phase -> RUNNING (conditions ContainersReady=True, Ready=True)
+    10  Running     main-container      serving traffic ...
+    11  Running     main-container      serving traffic ...
+    12  Running     main-container      serving traffic ...
+    13  Succeeded   kubelet             main container exited 0 -> Pod phase -> SUCCEEDED
+
+Final phase: Succeeded
+
+Read the timeline as four acts:
+  Act 1 (control-plane admit):  submit -> validate -> persist to etcd
+  Act 2 (scheduling):           scheduler scores Nodes, binds this Pod
+  Act 3 (init containers):      each runs to completion, in order,
+                                Pod stays Pending the WHOLE time
+  Act 4 (main containers):      phase flips to Running, serves traffic
+
+========================================================================
+  SECTION B: init containers - sequential, each must exit 0
+========================================================================
+Init containers run BEFORE app containers, in ORDER. The next one does
+not start until the previous exits 0. The Pod's 'Initialized' condition
+stays False - and phase stays Pending - until ALL of them finish.
+
+Case 1 - happy path (both init containers succeed):
+
+  tick  phase       component           event
+  ----  -----       ---------           -----
+     0  Pending     kubectl             POST /api/v1/namespaces/default/pods  (pod 'api-1')
+     1  Pending     API-server          validate spec; authenticate; persist to etcd
+     2  Pending     kube-scheduler      score Nodes; bind Pod -> Node 'node-1'  (condition PodScheduled=True)
+     3  Pending     kubelet             observe bound Pod on this Node; pull images; create sandbox
+     3  Pending     kubelet             start init container 'wait-for-db'
+     4  Pending     container-runtime   'wait-for-db' running ...
+     5  Pending     container-runtime   'wait-for-db' running ...
+     6  Pending     container-runtime   'wait-for-db' exited 0
+     6  Pending     kubelet             start init container 'render-config'
+     7  Pending     container-runtime   'render-config' running ...
+     8  Pending     container-runtime   'render-config' exited 0
+     9  Pending     kubelet             all init containers complete -> condition Initialized=True
+     9  Running     container-runtime   start main container(s) -> Pod phase -> RUNNING (conditions ContainersReady=True, Ready=True)
+    10  Running     main-container      serving traffic ...
+    11  Running     main-container      serving traffic ...
+    12  Succeeded   kubelet             main container exited 0 -> Pod phase -> SUCCEEDED
+
+  -> phase reached: Succeeded
+
+Case 2 - init container FAILS (exit 1). The Pod never reaches Running;
+it stays Pending (with restartPolicy=Always the kubelet would retry; with
+Never it goes straight to Failed). Here we model Never-style termination:
+
+  tick  phase       component           event
+  ----  -----       ---------           -----
+     0  Pending     kubectl             POST /api/v1/namespaces/default/pods  (pod 'api-2')
+     1  Pending     API-server          validate spec; authenticate; persist to etcd
+     2  Pending     kube-scheduler      score Nodes; bind Pod -> Node 'node-1'  (condition PodScheduled=True)
+     3  Pending     kubelet             observe bound Pod on this Node; pull images; create sandbox
+     3  Pending     kubelet             start init container 'wait-for-db'
+     4  Pending     container-runtime   'wait-for-db' running ...
+     5  Pending     container-runtime   'wait-for-db' running ...
+     6  Pending     container-runtime   'wait-for-db' exited 0
+     6  Pending     kubelet             start init container 'migrate-schema'
+     7  Pending     container-runtime   'migrate-schema' running ...
+     8  Pending     container-runtime   'migrate-schema' exited 1
+     8  Failed      kubelet             init container failed -> Pod phase -> FAILED
+
+  -> phase reached: Failed   (init 'migrate-schema' exited 1 -> abort)
+
+Note the main container never starts. That is the whole point of init
+containers: gate the app on prerequisites, fail fast if setup breaks.
+
+========================================================================
+  SECTION C: restartPolicy + CrashLoopBackOff (exponential backoff)
+========================================================================
+restartPolicy is pod-level and decides what the kubelet does when a
+container exits:
+
+  Always    : restart on ANY exit (0 or nonzero). Default for
+              Deployments / DaemonSets / ReplicaSets.
+  OnFailure : restart only on NONZERO exit. Used by Jobs.
+  Never     : never restart. Pod -> Succeeded (exit 0) or Failed.
+
+When a container keeps dying and restartPolicy asks to retry, the kubelet
+backs off EXPONENTIALLY - the CrashLoopBackOff state:
+
+  delay(n) = min(10 * 2**n, 300) seconds
+
+| restart # | formula 10*2**n | capped delay |
+|-----------|----------------|--------------|
+| 0         | 10             |    10s                       |
+| 1         | 20             |    20s                       |
+| 2         | 40             |    40s                       |
+| 3         | 80             |    80s                       |
+| 4         | 160            |   160s                       |
+| 5         | 320            |   300s  (capped from 320)    |
+| 6         | 640            |   300s  (capped from 640)    |
+
+The cap is 300s (5 minutes). The status you see in `kubectl get pods`
+is 'CrashLoopBackOff' once attempt >= 1. It is NOT a terminal state -
+the kubelet keeps trying forever at the 5-minute cadence until the spec
+is fixed or the Pod is deleted.
+
+Worked example - a pod whose container exits 1 every time, restartPolicy
+= Always. Wall-clock of the first 4 restart attempts:
+
+  event                        attempt  backoff  wall-clock
+  container crashed (exit 1)         0     10s         0s
+  kubelet waits (back-off)                 10s        10s
+  container crashed (exit 1)         1     20s        10s
+  kubelet waits (back-off)                 20s        30s
+  container crashed (exit 1)         2     40s        30s
+  kubelet waits (back-off)                 40s        70s
+  container crashed (exit 1)         3     80s        70s
+  kubelet waits (back-off)                 80s       150s
+
+  4 crash/restart cycles span 150s of wall-clock. That long gap
+  between 'Running' flickers is the visible signature of CrashLoopBackOff.
+
+========================================================================
+  SECTION D: graceful shutdown  (preStop -> SIGTERM -> grace -> SIGKILL)
+========================================================================
+Pod deletion is NOT instant. The kubelet gives the app a grace period
+(terminationGracePeriodSeconds, default 30s) to wind down. The precise
+sequence, per the kubelet killContainer path:
+
+  1. DELETE -> Pod marked Terminating; removed from Service endpoints
+     (so the load balancer stops sending NEW requests).
+  2. kubelet runs the preStop hook (if any) and BLOCKS until it returns.
+  3. THEN kubelet sends SIGTERM to PID 1.
+  4. App catches SIGTERM, drains in-flight work, exits.
+  5. If still alive when the grace period elapses -> SIGKILL.
+
+KEY POINT: preStop time counts AGAINST the grace period (not additive).
+preStop's job is to buy drain time BEFORE SIGTERM - e.g. sleep 5s so the
+endpoint-controller has propagated the removal and clients stop sending.
+
+Case 1 - clean shutdown (grace=30, preStop=5, app needs 8s after SIGTERM):
+
+  t=   0s  API-server            DELETE received; Pod -> Terminating; deletionTimestamp set
+  t=   0s  kube-proxy/endpoints  Pod removed from Service endpoints (stop NEW traffic) [async]
+  t=   0s  kubelet               run preStop hook (blocks; runs BEFORE SIGTERM) - 5s
+  t=   5s  preStop hook          finished at 5s
+  t=   5s  kubelet               send SIGTERM to PID 1 at t=5s
+  t=  13s  app                   drained & exited cleanly at t=13s (<= grace 30s)
+  t=  13s  kubelet               container stopped; NO SIGKILL; Pod removed from node
+
+  -> SIGKILL fired? False   (total needed 13s <= grace 30s)
+
+Case 2 - grace exceeded -> SIGKILL (grace=30, preStop=5, app needs 40s):
+
+  t=   0s  API-server            DELETE received; Pod -> Terminating; deletionTimestamp set
+  t=   0s  kube-proxy/endpoints  Pod removed from Service endpoints (stop NEW traffic) [async]
+  t=   0s  kubelet               run preStop hook (blocks; runs BEFORE SIGTERM) - 5s
+  t=   5s  preStop hook          finished at 5s
+  t=   5s  kubelet               send SIGTERM to PID 1 at t=5s
+  t=  30s  kubelet               grace period (30s) elapsed; still alive -> SIGKILL
+  t=  30s  app                   force-killed (unclean; in-flight requests may be dropped)
+
+  -> SIGKILL fired? True   (total needed 45s > grace 30s)
+
+The FIX when your app needs more than 30s: raise
+terminationGracePeriodSeconds, OR add a preStop hook (e.g. `sleep 15`)
+to let endpoints converge + give the app a head start before SIGTERM.
+
+========================================================================
+  SECTION E: QoS classes - Guaranteed / Burstable / BestEffort
+========================================================================
+The kubelet computes (you never set) a QoS class per Pod from its
+containers' cpu/memory requests vs limits. Under Node memory pressure,
+the class decides eviction order: BestEffort first, then Burstable;
+Guaranteed Pods are evicted only as a last resort.
+
+Rules (kubernetes.io/docs/tasks/configure-pod-container/quality-service-pod):
+  Guaranteed  : EVERY container has cpu AND mem, request == limit.
+  BestEffort  : NO container sets ANY request or limit.
+  Burstable   : anything in between.
+
+| example pod                       | computed QoS  |
+|-----------------------------------|---------------|
+| Guaranteed                        | Guaranteed    |
+| Burstable (req != lim)            | Burstable     |
+| Burstable (only request set)      | Burstable     |
+| BestEffort (nothing set)          | BestEffort    |
+| Mixed (two containers -> Burstable) | Burstable     |
+
+Eviction priority under memory pressure (first evicted = top):
+  1. BestEffort   (no reservations -> cheapest to kill)
+  2. Burstable    (exceeds its request first)
+  3. Guaranteed   (only when the Node is critically out of memory)
+
+Practical recipe: for latency-critical services, set request == limit
+on BOTH cpu and memory for EVERY container -> Guaranteed -> last evicted.
+
+========================================================================
+  GOLD CHECK: Pod phase transitions match the expected lifecycle
+========================================================================
+Per-tick phase array (14 ticks):
+  ['Pending', 'Pending', 'Pending', 'Pending', 'Pending', 'Pending', 'Pending', 'Pending', 'Pending', 'Running', 'Running', 'Running', 'Running', 'Succeeded']
+Deduped transitions: ['Pending', 'Running', 'Succeeded']
+
+Expected transitions: ['Pending', 'Running', 'Succeeded']
+[check] transitions == [Pending, Running, Succeeded]?  True
+[pin] phase counts -> Pending:9  Running:4  Succeeded:1  total:14
+[pin] Pending->Running  at tick 9
+[pin] Running->Succeeded at tick 13
+[check] all gold pins reproduced:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

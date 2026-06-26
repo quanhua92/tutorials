@@ -1,0 +1,386 @@
+container_runtime.py - reference model. All specs feed CONTAINER_RUNTIME.md.
+pure Python stdlib ; deterministic OCI-spec + snapshot model.
+
+========================================================================
+  SECTION A: the runtime stack - 4 layers, 4 processes
+========================================================================
+`docker run nginx` does NOT call one program. It walks a stack of
+specialised layers, each handing a SMALLER, more privileged job down:
+
+  | layer            | kind  | role                                   | consumes -> produces          | lifetime        |
+  |------------------|-------|----------------------------------------|-------------------------------|-----------------|
+  | docker           | cli   | user-facing REST/CLI client            | typed commands -> HTTP REST cal | exits after each command |
+  | dockerd          | high  | daemon: API, image build, volumes, networks, auth | REST requests f-> containerd AP | 1 long-lived daemon per host |
+  | containerd       | high  | image management, snapshotter, lifecycle, CRI plugin | containerd API -> an OCI bundle | 1 long-lived daemon per host |
+  | containerd-shim  | shim  | per-container supervisor: parent, signal fwd, reaper | the OCI bundle -> execs runc cr | 1 per container (outlives runc) |
+  | runc             | low   | OCI runtime: namespaces, cgroups, pivot_root, exec | config.json + r-> a running con | exits immediately after exec |
+
+Each downward arrow is a NARROWER contract:
+  CLI      -> dockerd       : HTTP REST (typed commands)
+  dockerd  -> containerd    : containerd gRPC API (image ref + config)
+  containerd -> shim        : an OCI bundle (config.json + rootfs)
+  shim     -> runc          : `runc create <id>` from the bundle
+
+KEY SEAM: runc receives ONLY config.json + rootfs. It has no idea an
+image, registry, or network exists. containerd never creates a single
+namespace - it asks runc. That seam is why Docker, containerd, CRI-O,
+and Podman all share ONE runc.
+
+[check] 5 layers, runc is the low-level (OCI) one that exits after exec: OK
+
+========================================================================
+  SECTION B: the OCI runtime spec (config.json) - the handoff
+========================================================================
+The contract between containerd and runc is a single JSON file. runc
+consumes it and creates exactly what it says - nothing more.
+
+nginx container config.json  (ociVersion 1.0.2):
+
+{
+  "ociVersion": "1.0.2",
+  "root": {
+    "path": "/var/lib/docker/overlay2/7f3a/merged",
+    "readonly": false
+  },
+  "process": {
+    "terminal": false,
+    "user": {
+      "uid": 0,
+      "gid": 0
+    },
+    "args": [
+      "nginx",
+      "-g",
+      "daemon off;"
+    ],
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "NGINX_VERSION=1.25.3",
+      "HOSTNAME=nginx"
+    ],
+    "cwd": "/",
+    "capabilities": {
+      "bounding": [
+        "CAP_NET_BIND_SERVICE"
+      ],
+      "effective": [
+        "CAP_NET_BIND_SERVICE"
+      ],
+      "permitted": [
+        "CAP_NET_BIND_SERVICE"
+      ]
+    },
+    "noNewPrivileges": true
+  },
+  "hostname": "nginx",
+  "mounts": [
+    {
+      "destination": "/proc",
+      "type": "proc",
+      "source": "proc",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    },
+    {
+      "destination": "/dev",
+      "type": "tmpfs",
+      "source": "tmpfs",
+      "options": [
+        "nosuid",
+        "strictatime",
+        "mode=755",
+        "size=65536k"
+      ]
+    },
+    {
+      "destination": "/dev/pts",
+      "type": "devpts",
+      "source": "devpts",
+      "options": [
+        "nosuid",
+        "noexec",
+        "newinstance",
+        "ptmxmode=0666",
+        "mode=0620",
+        "gid=5"
+      ]
+    },
+    {
+      "destination": "/sys",
+      "type": "sysfs",
+      "source": "sysfs",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "ro"
+      ]
+    },
+    {
+      "destination": "/sys/fs/cgroup",
+      "type": "cgroup",
+      "source": "cgroup",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "relatime",
+        "ro"
+      ]
+    },
+    {
+      "destination": "/dev/mqueue",
+      "type": "mqueue",
+      "source": "mqueue",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev"
+      ]
+    },
+    {
+      "destination": "/dev/shm",
+      "type": "tmpfs",
+      "source": "shm",
+      "options": [
+        "nosuid",
+        "noexec",
+        "nodev",
+        "mode=1777",
+        "size=65536k"
+      ]
+    },
+    {
+      "destination": "/etc/resolv.conf",
+      "type": "bind",
+      "source": "/var/lib/docker/containers/CONTAINER_ID/resolv.conf",
+      "options": [
+        "rbind",
+        "rprivate"
+      ]
+    },
+    {
+      "destination": "/etc/hostname",
+      "type": "bind",
+      "source": "/var/lib/docker/containers/CONTAINER_ID/hostname",
+      "options": [
+        "rbind",
+        "rprivate"
+      ]
+    },
+    {
+      "destination": "/etc/hosts",
+      "type": "bind",
+      "source": "/var/lib/docker/containers/CONTAINER_ID/hosts",
+      "options": [
+        "rbind",
+        "rprivate"
+      ]
+    }
+  ],
+  "linux": {
+    "namespaces": [
+      {
+        "type": "pid"
+      },
+      {
+        "type": "ipc"
+      },
+      {
+        "type": "uts"
+      },
+      {
+        "type": "mnt"
+      },
+      {
+        "type": "net"
+      },
+      {
+        "type": "cgroup"
+      }
+    ],
+    "cgroupsPath": "/docker/nginx",
+    "resources": {
+      "memory": {
+        "limit": 536870912
+      },
+      "cpu": {
+        "shares": 1024
+      },
+      "pids": {
+        "limit": 2048
+      }
+    },
+    "seccomp": {
+      "defaultAction": "SCMP_ACT_ERRNO"
+    }
+  }
+}
+
+The fields runc actually ACTS on:
+  root.path          -> pivot_root target (the merged rootfs)
+  process.args       -> the exec'd command: ['nginx', '-g', 'daemon off;']
+  linux.namespaces   -> clone(CLONE_NEW*) flags: ['pid', 'ipc', 'uts', 'mnt', 'net', 'cgroup']
+  linux.cgroupsPath  -> the resource-limit group: /docker/nginx
+  mounts             -> 10 mounts set up before exec
+  linux.resources    -> memory/cpu/pids limits written to cgroupsPath
+
+Give the SAME bundle to ANY OCI runtime (runc, crun, runsc, kata) and
+you get the same container with a different isolation boundary (Sec E).
+
+[check] root.path, process.args, 6 namespaces, cgroupsPath all set: OK
+
+========================================================================
+  SECTION C: image pull + snapshotter - layers stack into rootfs
+========================================================================
+An image is a manifest pointing at N ordered LAYERS (each a tar.gz
+delta, content-addressed by SHA256). containerd's snapshotter stacks
+them with overlayfs: image layers are readonly lowerdirs, the
+container's writes go to a fresh upperdir. The merged view = rootfs.
+
+image nginx:1.25: 3 layers, 88 MB total
+
+  | # | digest        | size MB | Dockerfile step                                |
+  |---|---------------|---------|------------------------------------------------|
+  | 1 | sha256:a1b2c3 | 28      | FROM debian:bookworm                           |
+  | 2 | sha256:d4e5f6 | 52      | RUN apt-get update && apt-get install -y nginx |
+  | 3 | sha256:g7h8i9 | 8       | CMD ["nginx","-g","daemon off;"]               |
+
+containerd prepares one snapshot per layer, then a fresh ACTIVE
+snapshot (#4) for the container's own writes:
+
+  snapshot 1  (layer 1, readonly)   -> lowerdir
+  snapshot 2  (layer 2, readonly)   -> lowerdir
+  snapshot 3  (layer 3, readonly)   -> lowerdir
+  snapshot 4  (ACTIVE, read-write)  -> upperdir + workdir
+
+The merged overlay mount becomes root.path in config.json:
+
+  mount -t overlay overlay -o \
+    lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs:/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs:/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/fs,upperdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/fs,workdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/work \
+    /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/merged
+
+  lowerdir count = 3  (one per image layer)
+  upperdir       = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/fs  (container writes land here)
+  workdir        = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/work  (overlayfs internal)
+
+[check] 3 lowerdirs (image layers) + 1 upperdir (active), overlay opts well-formed: OK
+
+========================================================================
+  SECTION D: Kubernetes CRI - kubelet -> CRI gRPC -> OCI (runc)
+========================================================================
+On a node, kubelet does NOT call dockerd. It speaks the CRI gRPC to a
+pluggable runtime (containerd's cri plugin, or CRI-O). The CRI shim
+compiles each request down to an OCI bundle + a runc call.
+
+  kubelet --[CRI gRPC]--> containerd/cri (or CRI-O) --[OCI bundle]--> runc
+
+  | service          | method           | args                      | returns          |
+  |------------------|------------------|---------------------------|------------------|
+  | ImageService     | PullImage        | {image, auth}             | {image_ref}      |
+  | ImageService     | ListImages       | {filter}                  | {images[]}       |
+  | ImageService     | ImageStatus      | {image}                   | {image_info}     |
+  | RuntimeService   | RunPodSandbox    | {config}                  | {pod_sandbox_id} |
+  | RuntimeService   | CreateContainer  | {sandbox_id,config}       | {container_id}   |
+  | RuntimeService   | StartContainer   | {container_id}            | {}               |
+  | RuntimeService   | StopContainer    | {container_id,timeout}    | {}               |
+  | RuntimeService   | RemoveContainer  | {container_id}            | {}               |
+  | RuntimeService   | ListContainers   | {filter}                  | {containers[]}   |
+  | RuntimeService   | ContainerStatus  | {container_id}            | {status}         |
+  | RuntimeService   | ExecSync         | {container_id,cmd}        | {stdout,stderr}  |
+
+Trace: a pod with one nginx container
+
+  kubelet: PullImage('nginx:1.25')              -> CRI pulls via containerd
+  kubelet: RunPodSandbox(podConfig)             -> CRI sets up the pod netns
+  kubelet: CreateContainer(sandbox, nginxConfig)-> CRI builds config.json
+  kubelet: StartContainer(nginx_id)             -> CRI: runc create + start
+  kubelet: ContainerStatus(nginx_id)            -> CRI: reports via shim
+
+Same runc, same OCI spec, same namespaces - just a different general
+contractor (CRI plugin) above it. dockershim (Docker's CRI bridge) was
+REMOVED in Kubernetes 1.24; containerd/CRI-O are now the defaults.
+
+[check] CRI exposes RuntimeService + ImageService, incl. the 4 core lifecycle calls: OK
+
+========================================================================
+  SECTION E: alternative runtimes - swap the isolation boundary
+========================================================================
+Because runc consumes a GENERIC OCI bundle, you can swap the low-level
+runtime for a different isolation model without changing the app or
+the high-level stack:
+
+  | runtime         | isolation                    | kernel the container sees         | cold start      | trade-off                              |
+  |-----------------|------------------------------|-----------------------------------|-----------------|----------------------------------------|
+  | runc            | namespaces + cgroups         | shares the HOST kernel            | ~immediate (fork/exec) | lowest overhead; weakest isolation (kernel vuln = container escape) |
+  | gVisor (runsc)  | user-space kernel (ptrace/KVM) | a PARAVIRTUALIZED kernel (gofer + Sentry) | tens of ms      | intercepts syscalls; strong app isolation; some syscall incompat |
+  | Kata Containers | hardware VM (QEMU)           | a GUEST kernel inside a lightweight VM | 100-250 ms (VM boot) | hardware-grade isolation; near-native perf; heavier memory |
+  | Firecracker     | microVM (Rust, minimal devices) | a GUEST kernel in a tiny VM       | ~125 ms (boot)  | minimal device model; very dense; powers Lambda/Fargate |
+  | crun            | namespaces + cgroups (C impl) | shares the HOST kernel            | ~immediate (faster than runc) | drop-in runc replacement; smaller/faster; same threat model |
+
+All four accept the SAME config.json. The difference is HOW the process
+is walled off from the host:
+
+  runc      : the process runs directly on the host kernel, just hidden
+              by namespaces. A host kernel CVE = a container escape.
+  gVisor    : syscalls are intercepted by a user-space 'Sentry' kernel;
+              the container never issues raw host syscalls.
+  Kata      : the container runs inside a real VM (QEMU) with its own
+              guest kernel -> hardware-enforced isolation.
+  Firecracker: like Kata but a stripped-down microVM (Rust, ~minimal
+              devices) optimized for boot speed and density.
+
+Trade-off axis: isolation strength  vs  boot time + memory density.
+runc wins on density; Kata/Firecracker win on defense-in-depth.
+
+[check] runc shares host kernel; >=2 VM-isolated runtimes listed: OK
+
+========================================================================
+  GOLD: pinned OCI spec + overlay mount - the .html reproduces these
+========================================================================
+GOLD spec fields (pinned for container_runtime.html):
+
+  ociVersion       = 1.0.2
+  root_path        = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/merged
+  root_readonly    = False
+  process_args     = ['nginx', '-g', 'daemon off;']
+  hostname         = nginx
+  namespaces       = ['pid', 'ipc', 'uts', 'mnt', 'net', 'cgroup']
+  ns_count         = 6
+  mounts_count     = 10
+  mount_dests      = ['/proc', '/dev', '/dev/pts'] ... (10 total)
+  cgroupsPath      = /docker/nginx
+  mem_limit        = 536870912
+
+GOLD overlay mount (pinned for container_runtime.html):
+
+  lowerdir count = 3
+    /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs
+    /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs
+    /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/3/fs
+  upperdir = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/fs
+  workdir  = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/work
+  rootfs   = /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/merged
+
+GOLD summary (the .html recomputes these from the same logic):
+
+  | field            | gold value                                    |
+  |------------------|-----------------------------------------------|
+  | ociVersion       | 1.0.2                                         |
+  | root.path        | /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/4/merged |
+  | process.args     | nginx -g daemon off;                          |
+  | linux.namespaces | pid,ipc,uts,mnt,net,cgroup                    |
+  | namespace count  | 6                                             |
+  | mounts count     | 10                                            |
+  | cgroupsPath      | /docker/nginx                                 |
+  | overlay lowerdirs | 3 (image layers)                              |
+  | overlay upperdir | active snapshot (container writes)            |
+
+[check] all GOLD spec fields + overlay mount reproduce from the generators: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

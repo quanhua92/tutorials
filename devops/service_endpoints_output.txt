@@ -1,0 +1,176 @@
+service_endpoints.py - reference simulation.
+All numbers below feed SERVICE_ENDPOINTS.md.
+stdlib only; deterministic. RNG = xorshift32 (portable to JS).
+
+========================================================================
+  SECTION A: the Service + the Endpoints object  (selector -> pod IPs)
+========================================================================
+Service 'web' (the stable front desk):
+  name       : web
+  namespace  : default
+  clusterIP  : 10.96.0.10
+  port       : 80
+  targetPort : 8080
+  selector   : {'app': 'web'}
+
+Pods in the cluster (the desks behind the front desk):
+  name   ip           port  node    labels
+  web-a  10.244.1.5   8080  node-1  {'app': 'web'}
+  web-b  10.244.2.3   8080  node-2  {'app': 'web'}
+  web-c  10.244.3.7   8080  node-3  {'app': 'web'}
+  db-0   10.244.1.9   5432  node-1  {'app': 'db'}
+
+Endpoints controller: select pods matching selector {'app': 'web'}
+  -> 3 endpoint(s):
+     10.244.1.5:8080   (pod web-a on node-1)
+     10.244.2.3:8080   (pod web-b on node-2)
+     10.244.3.7:8080   (pod web-c on node-3)
+  (db-0 ignored: labels app=db do not match app=web)
+
+The Endpoints object the controller writes:
+  kind: Endpoints
+  metadata: name: web  namespace: default
+  subsets:
+    - addresses:
+        - ip: 10.244.1.5        # pod web-a
+        - ip: 10.244.2.3        # pod web-b
+        - ip: 10.244.3.7        # pod web-c
+      ports:
+        - port: 8080  protocol: TCP
+
+KEY POINT: the Service's ClusterIP (10.96.0.10) and the Endpoints
+list are SEPARATE objects. The Service points at pods only via the
+selector; the Endpoints object is the materialized RESULT. If a pod
+dies, the controller rewrites Endpoints -- the Service never changes.
+
+========================================================================
+  SECTION B: kube-proxy iptables DNAT + traffic simulation  (GOLD)
+========================================================================
+kube-proxy runs on EVERY node. It reads the Endpoints object and
+writes kernel rules so a packet to the ClusterIP is rewritten to a
+pod IP BEFORE it leaves the node (DNAT happens in the originating
+node's kernel -- the packet never really 'travels to the VIP').
+
+Generated iptables rules (-m statistic --mode random chaining):
+  -A KUBE-SVC-WEB -m statistic --mode random --probability 0.33333333 -j KUBE-SEP-0
+  -A KUBE-SVC-WEB -m statistic --mode random --probability 0.50000000 -j KUBE-SEP-1
+  -A KUBE-SVC-WEB -j KUBE-SEP-2
+  -A KUBE-SEP-0 -p tcp -j DNAT --to-destination 10.244.1.5:8080
+  -A KUBE-SEP-1 -p tcp -j DNAT --to-destination 10.244.2.3:8080
+  -A KUBE-SEP-2 -p tcp -j DNAT --to-destination 10.244.3.7:8080
+
+Probabilities (each pod gets an equal 1/3 share via the chain):
+  rule 0: 1/3 of all flow            -> pod web-a (KUBE-SEP-0)
+  rule 1: 1/2 of the remaining 2/3    -> pod web-b (KUBE-SEP-1)
+  rule 2: all remaining (= 1/3)       -> pod web-c (KUBE-SEP-2)
+
+Simulating 300 requests to 10.96.0.10:80 (seeded xorshift32, seed=1):
+  pod        hits   share
+  web-a      102     34.0%
+  web-b      103     34.3%
+  web-c      95      31.7%
+  total      300
+
+First 5 routed endpoints (deterministic, pinned for .html):
+  req -> pod
+  #0  -> web-a (10.244.1.5)
+  #1  -> web-a (10.244.1.5)
+  #2  -> web-b (10.244.2.3)
+  #3  -> web-a (10.244.1.5)
+  #4  -> web-b (10.244.2.3)
+
+GOLD (pinned for service_endpoints.html):
+  hit counts vector = [102, 103, 95]   (sum=300)
+  req #0 -> endpoint index 0 (web-a)
+[check] simulation deterministic (recompute identical)?  OK
+[check] balanced (each pod within 30 of 100)?  OK
+
+========================================================================
+  SECTION C: Service types -- ClusterIP / NodePort / LoadBalancer / Headless
+========================================================================
+A Service's .spec.type controls how it is exposed:
+
+  type            address                     what it does                       reachable from
+  ClusterIP       10.96.0.10                  cluster-internal only (default)    inside the cluster
+  NodePort        30000-32767 (+ VIP)         opens a port on EVERY node's IP    inside + node IPs
+  LoadBalancer    cloud VIP -> NodePort       cloud provisions an external LB    public internet
+  Headless        None (clusterIP: None)      no VIP; DNS returns pod IPs directly StatefulSet / own-LB
+
+Exposure is a STACK -- each type adds a layer on top of ClusterIP:
+  LoadBalancer
+    -> cloud LB forwards external traffic to ->
+  NodePort (<nodeIP>:31080)
+    -> which is itself backed by the ->
+  ClusterIP (10.96.0.10) -> pods
+  So a LoadBalancer Service STILL has a ClusterIP and a NodePort;
+  it just adds a cloud load balancer in front.
+
+NodePort allocation: kube-proxy picks a free port in the configured range.
+  valid range: 30000..32767  (2768 ports)
+  example: type=NodePort -> nodePort=31080, reachable on EVERY node
+           at <any-node-IP>:31080
+  [check] 31080 within [30000,32767]?  OK
+
+Headless (full detail in Section D): ClusterIP=None -> kube-proxy writes
+NO rules at all; DNS is the only routing mechanism.
+
+========================================================================
+  SECTION D: Headless Service (clusterIP: None) -- DNS returns pod IPs
+========================================================================
+Set spec.clusterIP: None and the Service gets NO virtual IP and NO
+kube-proxy rules. A DNS A-record query instead returns the pod IPs
+DIRECTLY (the DNS server shuffles / round-robins them).
+
+StatefulSet 'web' with 3 replicas (each gets a STABLE ordinal name):
+
+  web-0: 10.244.1.20
+  web-1: 10.244.2.21
+  web-2: 10.244.3.22
+
+NORMAL (ClusterIP) Service 'web' -- DNS A query -> 1 record (the VIP):
+  web.default.svc.cluster.local.   A   10.96.0.10
+
+HEADLESS Service 'web' -- DNS A query -> N records (the pod IPs):
+  web.default.svc.cluster.local.   A   10.244.1.20
+  web.default.svc.cluster.local.   A   10.244.2.21
+  web.default.svc.cluster.local.   A   10.244.3.22
+
+Per-pod stable DNS (StatefulSet + headless): each pod has its OWN name:
+  web-0.web.default.svc.cluster.local.   A   10.244.1.20
+  web-1.web.default.svc.cluster.local.   A   10.244.2.21
+  web-2.web.default.svc.cluster.local.   A   10.244.3.22
+
+WHY: stateful systems (etcd, Kafka, Cassandra, Galera) need peers to
+reach EACH SPECIFIC pod by a stable name, not a random one. Headless +
+StatefulSet gives every replica a fixed DNS identity that survives pod
+restarts -- the pod name and DNS name stay; only the underlying IP may
+change, and the controller rewrites the A record.
+
+[check] headless returns N pod IPs, ClusterIP returns 1 VIP:  OK
+
+========================================================================
+  SECTION E: EndpointSlice -- scalable endpoint tracking
+========================================================================
+The legacy Endpoints object is ONE object per Service holding ALL
+addresses. A 1000-pod Service ships a 1000-entry object; any single pod
+change rewrites the WHOLE object and notifies every watcher. EndpointSlice
+(GA since 1.21) splits the list into chunks (default max 100) addressed
+by a label (kubernetes.io/service-name=...).
+
+Service with 250 backing pods, maxEndpointsPerSlice=100:
+  slice 0: 100 endpoints   (labels: kubernetes.io/service-name=big)
+  slice 1: 100 endpoints   (labels: kubernetes.io/service-name=big)
+  slice 2:  50 endpoints   (labels: kubernetes.io/service-name=big)
+  -> 3 slices total  (250 endpoints covered)
+
+Why it scales better:
+  * a watcher receives only the SLICES that changed, not the whole list
+  * each slice is small (<=100 entries) -> cheap to serialize & notify
+  * adding pod #251 appends a NEW slice; existing slices are untouched
+
+[check] slices cover all endpoints (sum == 250)?  OK
+[check] no slice exceeds the 100 cap?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

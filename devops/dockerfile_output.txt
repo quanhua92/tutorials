@@ -1,0 +1,218 @@
+dockerfile.py - reference model of the Dockerfile build process.
+All numbers below feed DOCKERFILE.md and dockerfile.html.
+Python 3.14.5
+
+========================================================================
+  SECTION A: each instruction commits a layer (FROM -> RUN -> COPY -> CMD)
+========================================================================
+A 4-instruction Dockerfile. Each row is one workstation; the layer id
+is the photographer's photo of the belt at that point:
+
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM ubuntu:22.04                                30970ed4af28   68.7 MiB        layer
+  1   RUN apt-get update && apt-get install -y python3 9d0c75233047   45.8 MiB        layer
+  2   COPY app/ /app/                                  ee747f76da3a   8.1 MiB         layer
+  3   CMD ["python3", "/app/main.py"]                  ca94af79b8ef   (config)        cfg   
+
+  -> 4 instructions: 3 filesystem layer(s) + 1 config-only (CMD).
+  -> final image = 122.5 MiB on disk (sum of the 3 fs layers).
+
+Layer id = sha256(parent_key + kind + inputs). Each id ENCODES its
+ancestry, so changing ANY ancestor changes this id -- the seed of the
+cache cascade in Section B. CMD writes no layer: it only sets the
+image's default process (stored in the config JSON, ~0 bytes).
+
+The key chain (each key depends on the one above):
+    key = sha256(ROOT + FROM + ubuntu:22.04)
+         = 30970ed4af28
+    key = sha256(30970ed4af28 + RUN  + apt-get update && apt-get install -y python3)
+         = 9d0c75233047
+    key = sha256(9d0c75233047 + COPY + app@sha256:a1b2c3)
+         = ee747f76da3a
+    key = sha256(ee747f76da3a + CMD  + ["python3","/app/main.py"])
+         = ca94af79b8ef
+
+[check] number of fs layers == count of FROM/RUN/COPY: True
+[check] image size == sum of fs-layer sizes: True
+
+========================================================================
+  SECTION B: the build cache -- one MISS cascades; order by change rate
+========================================================================
+SCENARIO 1 -- you edit a file in app/ and rebuild. The COPY line TEXT
+is identical, but its content_tag (the checksum of app/) changed, so
+the cache key for line 2 differs -> MISS, and CMD after it cascades:
+
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM ubuntu:22.04                                30970ed4af28   68.7 MiB   HIT   layer
+  1   RUN apt-get update && apt-get install -y python3 9d0c75233047   45.8 MiB   HIT   layer
+  2   COPY app/ /app/                                  1d39409f5818   8.3 MiB    MISS  layer
+  3   CMD ["python3", "/app/main.py"]                  75422f83e547   (config)   MISS  cfg   
+
+  -> cache vector = ['HIT', 'HIT', 'MISS', 'MISS']
+  -> instructions re-executed = 2 of 4 (the COPY + the CMD config). The 2 expensive layers (ubuntu, apt)
+     are REUSED -- zero apt-get, zero download.
+
+SCENARIO 2 -- ordering by change frequency (the cardinal rule).
+
+Two Dockerfiles that DO the same thing, ordered differently. You
+edit app/main.py and rebuild. Watch which layers re-run:
+
+  BAD order (COPY app before pip install):
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM python:3.10-slim                            6444519236da   42.9 MiB   HIT   layer
+  1   COPY app/ /app/                                  74327a9bf3a5   8.2 MiB    MISS  layer
+  2   RUN pip install -r /app/requirements.txt         92e50d641733   57.2 MiB   MISS  layer
+  3   CMD ["python3","/app/main.py"]                   9c9edca23571   (config)   MISS  cfg   
+     re-runs 3 incl. the slow `pip install` (60 MB) -- EVERY edit.
+
+  GOOD order (deps first, app last):
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM python:3.10-slim                            6444519236da   42.9 MiB   HIT   layer
+  1   COPY requirements.txt /tmp/                      1a4e87f5f567   300 B      HIT   layer
+  2   RUN pip install -r /tmp/requirements.txt         b75879caf624   57.2 MiB   HIT   layer
+  3   COPY app/ /app/                                  7c69523917e8   8.2 MiB    MISS  layer
+  4   CMD ["python3","/app/main.py"]                   3f513a7d3b8f   (config)   MISS  cfg   
+     re-runs only 2 -- the COPY + CMD. pip install is CACHED.
+
+Same outcome, radically different rebuild cost. Rule: LEAST-changing
+inputs first (base OS, system deps, package lists), MOST-changing last
+(your application source). Then a code tweak reuses everything above.
+
+[check] bad order re-runs pip install (MISS at line 2): True
+[check] good order caches pip install (HIT at line 2): True
+
+========================================================================
+  SECTION C: multi-stage builds -- build fat, ship thin
+========================================================================
+One Dockerfile, two FROM blocks. Stage 1 ('builder') has the compiler
+and source; it produces a binary. Stage 2 ('runtime') is a MINIMAL
+image that copies ONLY that binary. The final image = the LAST stage
+-- the compiler and source never ship.
+
+  stage 1  -- builder (golang + source + build):
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM golang:1.21 AS builder                      6c827822049b   747.7 MiB       layer
+  1   COPY . /src                                      028ba7b03ac8   3.8 MiB         layer
+  2   RUN go build -o /out/server                      d0d4aa095e5f   11.4 MiB        layer
+
+     builder image total = 762.9 MiB
+
+  stage 2  -- runtime (alpine + just the binary):
+  #   INSTRUCTION                                      layer          adds       cache
+  --------------------------------------------------------------------------------------
+  0   FROM alpine:3.19                                 c04cfa4cfb41   7.6 MiB         layer
+  1   COPY --from=builder /out/server /server          4c3b6bdec510   11.4 MiB        layer
+  2   CMD ["/server"]                                  757eb6512ac3   (config)        cfg   
+
+     runtime image total = 19.1 MiB   <-- THIS is what ships
+
+  final image = stage 2 only = 19.1 MiB.
+  the 762.9 MiB builder is discarded -- its compiler, source,
+  build caches, and 200+ MB of Go toolchain never reach the registry.
+
+  savings = builder / final = 762.9 MiB / 19.1 MiB = 40.0x smaller.
+
+The same trick in any language: compile in the full SDK image, then
+COPY --from=builder the single artifact into alpine/distroless/scratch.
+
+[check] runtime < builder: True
+[check] final image is the LAST stage only: 19.1 MiB (not 762.9 MiB): True
+
+========================================================================
+  SECTION D: .dockerignore -- what you send the daemon matters
+========================================================================
+`docker build` TARs up the build-context directory and ships it to the
+daemon BEFORE any instruction runs. Everything in it is sent, even
+files no COPY ever references -- so a fat context = a slow start AND
+spurious COPY-cache invalidation (editing node_modules busts `COPY .`)
+
+  PATH                 SIZE         sent without .dockerignore?
+  ------------------------------------------------------------
+  app/                 7.6 MiB      yes
+  package.json         293.0 KiB    yes
+  requirements.txt     1.2 KiB      yes
+  node_modules/        200.3 MiB    NO (excluded)
+  .git/                45.8 MiB     NO (excluded)
+  dist/                14.3 MiB     NO (excluded)
+  npm-debug.log        1.9 MiB      NO (excluded)
+  .env                 1.4 KiB      NO (excluded)
+  ------------------------------------------------------------
+  full context  = 270.2 MiB
+  trimmed       = 7.9 MiB   (5 patterns excluded)
+  reduction     = 34.1x smaller; the .env SECRET stays local.
+
+  .dockerignore used:
+    .env
+    .git/
+    dist/
+    node_modules/
+    npm-debug.log
+
+Excluding .git/node_modules/dist cuts a ~280 MB context to ~8 MB, so
+the build starts in milliseconds instead of seconds -- and `COPY . /app`
+no longer busts its cache when node_modules changes under you.
+
+[check] .env (secret) is excluded: True
+[check] trimmed context < full context: True
+
+========================================================================
+  SECTION E: base image -- the biggest single lever on size + security
+========================================================================
+The FROM line dominates final image size. Pick the smallest base that
+still runs your app. Smaller = faster pull, less RAM, fewer CVEs, and
+no shell/package-manager for an attacker to use.
+
+| base image                      | size      | shell? | pkg mgr | best for                |
+|---------------------------------|-----------|--------|---------|-------------------------|
+| ubuntu:22.04                     | 72.1 MiB  | yes    | apt     | general; full userspace |
+| python:3.10                      | 350.0 MiB | yes    | apt+pip | DEV (has build tools)   |
+| python:3.10-slim                 | 45.0 MiB  | yes    | apt(min) | PROD python (glibc)     |
+| python:3.10-alpine               | 16.0 MiB  | yes    | apk     | tiny; watch musl ABI gaps |
+| gcr.io/distroless/python3-deb12  | 28.0 MiB  | NO     | NONE    | PROD secure (no shell)  |
+| scratch                          | 0 B       | NO     | NONE    | static binary ONLY      |
+
+ Same Flask app, same function, six possible bases:
+   ubuntu  -> 72 MiB   (a full Debian userland you never use)
+   slim    -> 45 MiB   (drops the ~300 MB of build tools -- usually right)
+   alpine  -> 16 MiB   (musl libc; some wheels/C-extensions break)
+   distroless -> 28 MiB(NO /bin/sh; if you get a shell, you are already pwned)
+   scratch -> 0 MiB base + your binary (only works for static Go/Rust/Zig)
+
+ distroless is the prod sweet spot for interpreted runtimes: it ships the
+interpreter + your app and NOTHING else -- no shell, no package manager,
+no curl for an attacker. Pair it with multi-stage (Section C) to build
+in python:3.10 and run in distroless.
+
+[check] smallest non-empty base is alpine (16.0 MiB): True
+[check] distroless ships no shell: True
+
+========================================================================
+  SECTION F: the GOLD check -- layers, cache vector, multi-stage size
+========================================================================
+Re-derive the canonical numbers the .html must reproduce from the
+identical model.
+
+GOLD values (pinned for dockerfile.html):
+    instruction_count            = 4
+    fs_layer_count               = 3
+    cache_vector_app_edit        = ['HIT', 'HIT', 'MISS', 'MISS']
+    rerun_instructions           = 2
+    multistage_builder_bytes     = 800000000
+    multistage_final_bytes       = 20000000
+    multistage_ratio             = 40.0
+    context_full_bytes           = 266000000
+    context_trimmed_bytes        = 8000000
+
+[check] GOLD: fs_layer_count == 3: True
+[check] GOLD: cache vector for app edit == [HIT,HIT,MISS,MISS]: True
+[check] GOLD: multi-stage final 20 MiB, ratio 40.0x: True
+[check] GOLD: all assertions passed -> OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

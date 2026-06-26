@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cgroups — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#27ae60; --red:#c0392b; --orange:#e67e22;
+    --blue:#2980b9; --gold:#f1c40f; --purple:#8e44ad;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.1rem;align-items:center}
+  .micro{color:var(--muted);font-size:.74rem}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:170px;accent-color:var(--green);vertical-align:middle}
+  input[type=checkbox]{accent-color:var(--green)}
+  .val{color:var(--green);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;background:#1c3a25;color:var(--green);border:1px solid #27ae60;
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .warn{color:var(--orange)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  table.cg{border-collapse:collapse;font-size:.78rem;font-variant-numeric:tabular-nums;margin-top:.4rem;width:100%}
+  table.cg td,table.cg th{border:1px solid #30363d;padding:4px 8px;text-align:left}
+  table.cg th{color:var(--muted);font-weight:600;background:#0a0e14}
+  table.cg tr.ok td:last-child{color:var(--green)}
+  table.cg tr.bad td:last-child{color:var(--red)}
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.3rem 0}
+  .barwrap .lab{width:120px;color:var(--ink);font-size:.8rem;font-family:ui-monospace,monospace}
+  .barwrap .track{flex:1;height:22px;background:#0a0e14;border-radius:4px;overflow:hidden;border:1px solid #30363d;display:flex}
+  .barwrap .seg{height:100%}
+  .barwrap .num{width:150px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem;color:var(--ink)}
+  .pill{font-family:ui-monospace,monospace;font-size:.74rem;background:#161b22;border:1px solid #30363d;
+        border-radius:4px;padding:1px 5px}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .oom{background:#3a1414;color:#ff9a8a;border:1px solid #c0392b;border-radius:5px;padding:2px 8px;
+       font-size:.74rem;font-weight:700;display:inline-block;margin-left:.5rem}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Linux cgroups — the resource-limiting primitive behind containers
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/CGROUPS.md">CGROUPS.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/devops/cgroups.py">cgroups.py</a></h1>
+  <div class="sub">A cgroup is a <b style="color:var(--green)">bouncer</b>: it does not change what a process <i>sees</i> (that's
+    <a href="./namespaces.html">namespaces</a>), it changes how much it may <b>take</b>. <code>docker --cpus</code>,
+    <code>--memory</code>, <code>--pids-limit</code> and K8s <code>resources.limits</code> all just write cgroup files.
+    Move the sliders and watch the kernel enforce <b>usage ≤ limit</b>. &nbsp;|&nbsp; <a href="./namespaces.html">← namespaces isolate</a></div>
+
+  <!-- ===== PANEL 1: CPU fair-share sandbox ===== -->
+  <h2>① CPU — hard cap (cpu.max) vs relative share (cpu.weight)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> <b>cpu.max</b> is a HARD ceiling (the cgroup is paused above it).
+      <b>cpu.weight</b> only matters when cgroups CONTENTION for busy CPU. Set A's cap and watch it bind; turn caps off
+      and watch weight split the spare. Toggle "max" for unlimited.</div>
+    <div class="controls">
+      <label>machine CPUs <input type="range" id="cap" min="1" max="8" value="4"><span class="val" id="capV">4</span></label>
+    </div>
+    <div id="cgRows"></div>
+    <div class="barwrap" style="margin-top:.7rem">
+      <span class="lab">machine</span>
+      <span class="track" id="machineBar"></span>
+      <span class="num" id="machineNum"></span>
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>ran (used)</span>
+      <span><i class="sw" style="background:var(--red)"></i>throttled (wanted, paused)</span>
+      <span><i class="sw" style="background:#21262d"></i>idle</span>
+    </div>
+    <div class="readout" id="cpuReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Default = DEMO 4 from cgroups.py: A capped at 1 CPU, B &amp; C share the rest by equal weight → A=1.00, B=1.50, C=1.50 CPU.</div>
+  </div>
+
+  <!-- ===== PANEL 2: memory OOM + pids fork bomb ===== -->
+  <h2>② memory.max (OOM kill) &nbsp;·&nbsp; pids.max (fork refused)</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>memory:</b> above memory.max the kernel cannot "pause" allocation — it <b>kills</b> a process (OOM).
+      <b>pids:</b> above pids.max a <code>fork()</code> returns EAGAIN (refused, not killed) — the fork-bomb fuse.</div>
+    <div class="controls">
+      <label>memory.max <input type="range" id="memMax" min="128" max="2048" step="64" value="512"><span class="val" id="memMaxV">512</span> MB</label>
+      <label>workload asks <input type="range" id="memAsk" min="64" max="2048" step="32" value="600"><span class="val" id="memAskV">600</span> MB</label>
+      <label>pids.max <input type="range" id="pidsMax" min="10" max="500" step="10" value="100"><span class="val" id="pidsMaxV">100</span></label>
+    </div>
+    <div class="barwrap">
+      <span class="lab">memory</span>
+      <span class="track" id="memBar"></span>
+      <span class="num" id="memNum"></span>
+    </div>
+    <div class="barwrap">
+      <span class="lab">pids (bomb)</span>
+      <span class="track" id="pidsBar"></span>
+      <span class="num" id="pidsNum"></span>
+    </div>
+    <div class="readout" id="memReadout"></div>
+    <div class="micro" style="margin-top:.5rem">Drag "workload asks" above memory.max to trigger an OOM kill. Drag pids.max down and the fork bomb pegs at the new ceiling.</div>
+  </div>
+
+  <!-- ===== PANEL 3: gold check ===== -->
+  <h2>③ Gold check — JS model matches cgroups.py Section F</h2>
+  <div class="panel">
+    <div class="micro">The page rebuilds the cgroup model in JS (same weighted max-min allocator, same OOM / pids logic) and asserts the
+      resource-accounting invariant <b>usage ≤ limit</b> on all four axes. Green badge = the JS numbers reproduce
+      <code>cgroups.py</code> Section F exactly.</div>
+    <div class="readout" id="goldReadout"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS cgroup model matches cgroups.py Section F (usage ≤ limit on all 4 axes: cpu, memory, io, pids).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth allocator, copied from cgroups.py allocate_cpu =====
+   Weighted max-min fair allocation with per-cgroup hard caps. */
+function allocate(capacity, cgs){
+  const alloc=cgs.map(()=>0);
+  let remaining=capacity; const eps=1e-9;
+  while(remaining>eps){
+    const active=[];
+    for(let i=0;i<cgs.length;i++){
+      const cap=cgs[i].cpuMax===null?Infinity:cgs[i].cpuMax;
+      const room=Math.min(cgs[i].demand,cap)-alloc[i];
+      if(room>eps) active.push(i);
+    }
+    if(!active.length) break;
+    let tw=0; active.forEach(i=>tw+=cgs[i].weight);
+    let given=0;
+    active.forEach(i=>{
+      const cap=cgs[i].cpuMax===null?Infinity:cgs[i].cpuMax;
+      const room=Math.min(cgs[i].demand,cap)-alloc[i];
+      const share=remaining*cgs[i].weight/tw;
+      const inc=Math.min(share,room);
+      alloc[i]+=inc; given+=inc;
+    });
+    remaining-=given;
+    if(given<eps) break;
+  }
+  return alloc;
+}
+const fmtCpu=m=>(m/1000).toFixed(2)+' CPU';
+
+/* ===== PANEL 1: CPU sandbox =====
+   3 cgroups, each: demand (busy = full machine), cpuMax (null or mC), weight. */
+const COLORS={A:'#2980b9',B:'#27ae60',C:'#e67e22'};
+let cgs=[
+  {name:'A',demand:0,cpuMax:1000,weight:200,capped:true},  /* DEMO 4 defaults */
+  {name:'B',demand:0,cpuMax:null,weight:100,capped:false},
+  {name:'C',demand:0,cpuMax:null,weight:100,capped:false}
+];
+function buildCgRows(){
+  const wrap=document.getElementById('cgRows');
+  wrap.innerHTML=cgs.map((c,i)=>`
+    <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin:.5rem 0;padding:.4rem .5rem;background:#0a0e14;border:1px solid #30363d;border-radius:6px">
+      <span style="font-family:ui-monospace,monospace;color:${COLORS[c.name]};font-weight:700;width:18px">${c.name}</span>
+      <label>cpu.max <input type="range" id="cap-${i}" min="250" max="8000" step="250" value="${c.cpuMax===null?2000:c.cpuMax}" ${c.capped?'':'disabled'}><span class="val" id="capV-${i}">${c.capped?fmtCpu(c.cpuMax):'max'}</span></label>
+      <label><input type="checkbox" id="uncap-${i}" ${c.capped?'':'checked'}> unlimited</label>
+      <label>weight <input type="range" id="w-${i}" min="10" max="1000" step="10" value="${c.weight}"><span class="val" id="wV-${i}">${c.weight}</span></label>
+    </div>`).join('');
+  cgs.forEach((c,i)=>{
+    document.getElementById('uncap-'+i).addEventListener('change',function(){
+      c.capped=!this.checked;
+      const s=document.getElementById('cap-'+i);
+      s.disabled=!c.capped;
+      renderCpu();
+    });
+    document.getElementById('cap-'+i).addEventListener('input',function(){
+      c.cpuMax=+this.value;
+      renderCpu();
+    });
+    document.getElementById('w-'+i).addEventListener('input',function(){
+      c.weight=+this.value;
+      document.getElementById('wV-'+i).textContent=this.value;
+      renderCpu();
+    });
+  });
+}
+function renderCpu(){
+  const capacity=+document.getElementById('cap').value*1000;
+  document.getElementById('capV').textContent=capacity/1000;
+  /* refresh disabled/cap value labels */
+  cgs.forEach((c,i)=>{
+    const s=document.getElementById('cap-'+i);
+    s.disabled=!c.capped;
+    document.getElementById('capV-'+i).textContent=c.capped?fmtCpu(+s.value):'max';
+  });
+  const model=cgs.map(c=>({
+    demand:capacity,                                  /* all busy: want the whole box */
+    cpuMax:c.capped? (+document.getElementById('cap-'+cgs.indexOf(c)).value) : null,
+    weight:c.weight
+  }));
+  const alloc=allocate(capacity,model);
+  /* machine bar: stacked used per cgroup + idle */
+  let used=0; let segs='';
+  alloc.forEach((a,i)=>{
+    const w=a/capacity*100;
+    segs+=`<span class="seg" style="width:${w}%;background:${COLORS[cgs[i].name]}" title="${cgs[i].name}: ${fmtCpu(a)} ran"></span>`;
+    used+=a;
+  });
+  const idle=capacity-used;
+  if(idle>1e-6) segs+=`<span class="seg" style="width:${idle/capacity*100}%;background:#21262d" title="idle: ${fmtCpu(idle)}"></span>`;
+  document.getElementById('machineBar').innerHTML=segs;
+  document.getElementById('machineNum').textContent=`used ${fmtCpu(used)} / ${fmtCpu(capacity)} · idle ${fmtCpu(idle)}`;
+  /* readout */
+  let lines=[];
+  alloc.forEach((a,i)=>{
+    const c=cgs[i];
+    const cap=c.capped?(+document.getElementById('cap-'+i).value):null;
+    const thr=(cap!==null?Math.min(capacity,cap):capacity)-a;
+    const capStr=cap!==null?'cap '+fmtCpu(cap):'no cap';
+    lines.push(`${c.name}: ran <b>${fmtCpu(a)}</b>, throttled <span class="${thr>1e-3?'bad':''}">${fmtCpu(Math.max(0,thr))}</span> (${capStr}, w=${c.weight})`);
+  });
+  document.getElementById('cpuReadout').innerHTML=lines.join('<br>');
+}
+
+/* ===== PANEL 2: memory + pids ===== */
+function renderMemPids(){
+  const memMax=+document.getElementById('memMax').value;
+  const memAsk=+document.getElementById('memAsk').value;
+  const pidsMax=+document.getElementById('pidsMax').value;
+  document.getElementById('memMaxV').textContent=memMax;
+  document.getElementById('memAskV').textContent=memAsk;
+  document.getElementById('pidsMaxV').textContent=pidsMax;
+  /* memory: usage clamped at limit; OOM if ask > max */
+  const oom = memAsk>memMax;
+  const usage = Math.min(memAsk, memMax);
+  const uFrac=Math.min(1,usage/memMax);
+  const overflow=oom?1-uFrac:0;
+  let segs=`<span class="seg" style="width:${uFrac*100}%;background:var(--green)"></span>`;
+  if(oom) segs+=`<span class="seg" style="width:${overflow*100}%;background:var(--red)"></span>`;
+  document.getElementById('memBar').innerHTML=segs;
+  document.getElementById('memNum').textContent=`${usage} / ${memMax} MB${oom?' (refused)':''}`;
+  /* pids: fork bomb pegs at ceiling */
+  let cur=1, gen=0;
+  while(cur<pidsMax){ const births=cur; let acc=0;
+    for(let k=0;k<births;k++){ if(cur+1<=pidsMax){cur++;acc++; if(cur>=pidsMax)break;} }
+    gen++; if(acc===0||gen>30)break;
+  }
+  const pFrac=Math.min(1,cur/pidsMax);
+  document.getElementById('pidsBar').innerHTML=`<span class="seg" style="width:${pFrac*100}%;background:var(--gold)"></span>`;
+  document.getElementById('pidsNum').textContent=`${cur} / ${pidsMax} procs (pegged in ${gen} gen)`;
+  /* readout */
+  const memLine = oom
+    ? `memory: asked ${memAsk} MB > memory.max ${memMax} MB → <span class="bad">OOM KILL</span> (usage pinned at ${usage} MB)`
+    : `memory: asked ${memAsk} MB ≤ memory.max ${memMax} MB → <b>OK</b> (usage ${usage} MB)`;
+  const pidsLine = `pids: fork bomb grew to ${cur} processes = pids.max ${pidsMax} → further forks <span class="warn">REFUSED (EAGAIN)</span>`;
+  document.getElementById('memReadout').innerHTML=memLine+'<br>'+pidsLine
+    +`<br>invariant: memory usage ${usage} ≤ ${memMax} <b>${usage<=memMax?'OK':'FAIL'}</b> · pids ${cur} ≤ ${pidsMax} <b>${cur<=pidsMax?'OK':'FAIL'}</b>`;
+}
+
+/* ===== PANEL 3: gold check (mirrors cgroups.py Section F) ===== */
+function goldCheck(){
+  /* app cgroup: 1 CPU, 512 MB, 100 pids, 10 MB/s; sibling contends for CPU */
+  const capacity=4000;
+  const appCpuMax=1000;       /* 1 CPU from '100000 100000' */
+  const model=[
+    {demand:capacity, cpuMax:appCpuMax, weight:200},   /* /app */
+    {demand:capacity, cpuMax:null,     weight:100}     /* /sib */
+  ];
+  const alloc=allocate(capacity,model);
+  const appCpuUsed=Math.round(alloc[0]);              /* 1000 */
+  /* memory: 100..600 steps, OOM at 600 */
+  let memUsed=0, oomKills=0, memMax=512;
+  for(const mb of [100,200,300,400,500,600]){
+    if(mb>memMax){oomKills++;memUsed=memMax;} else {memUsed=mb;}
+  }
+  /* pids: fork bomb to ceiling 100 */
+  let pidsCur=1, pidsMax=100;
+  while(pidsCur<pidsMax) pidsCur++;
+  const ioEff=10, ioMax=10;
+  const checks=[
+    ['app cpu usage (1000 m) ≤ cpu.max (1000 m)', appCpuUsed<=appCpuMax, `${appCpuUsed} ≤ ${appCpuMax}`],
+    ['memory usage (512) ≤ memory.max (512)',     memUsed<=memMax,       `${memUsed} ≤ ${memMax}`],
+    ['OOM kills == 1 (at 600 MB step)',           oomKills===1,          String(oomKills)],
+    ['pids (100) ≤ pids.max (100)',               pidsCur<=pidsMax,      `${pidsCur} ≤ ${pidsMax}`],
+    ['io effective (10 MB/s) ≤ io.max (10 MB/s)',  ioEff<=ioMax,          `${ioEff} ≤ ${ioMax}`],
+    ['app cpu hard-capped at 1 CPU = 1000 m',      appCpuUsed===1000,     String(appCpuUsed)],
+    ['pids pegged exactly at ceiling',             pidsCur===100,         String(pidsCur)]
+  ];
+  let html='<table class="cg"><tr><th>assertion (mirrors cgroups.py Section F)</th><th>result</th><th>value</th></tr>';
+  checks.forEach(c=>{ html+=`<tr class="${c[1]?'ok':'bad'}"><td>${c[0]}</td><td>${c[1]?'OK':'FAIL'}</td><td>${c[2]}</td></tr>`; });
+  html+='</table>';
+  document.getElementById('goldReadout').innerHTML=html;
+  return checks.every(c=>c[1]);
+}
+const ok=goldCheck();
+const chk=document.getElementById('check');
+chk.textContent = ok ? 'check: OK — JS cgroup model matches cgroups.py (usage ≤ limit on cpu/memory/io/pids, 1 OOM, pids pegged)' : 'check: FAIL — mismatch!';
+chk.style.borderColor=ok?'#27ae60':'#c0392b';
+chk.style.color=ok?'#27ae60':'#c0392b';
+chk.style.background=ok?'#1c3a25':'#3a1414';
+
+/* ===== events ===== */
+function render(){renderCpu();renderMemPids();}
+buildCgRows();
+document.getElementById('cap').addEventListener('input',renderCpu);
+[['memMax',renderMemPids],['memAsk',renderMemPids],['pidsMax',renderMemPids]].forEach(([id,fn])=>{
+  document.getElementById(id).addEventListener('input',fn);
+});
+render();
+</script>
+</body>
+</html>

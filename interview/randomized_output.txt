@@ -1,0 +1,172 @@
+========================================================================
+SECTION A - P470 Implement Rand10() Using Rand7  (rejection sampling)
+========================================================================
+
+Two rand7() calls tile a uniform 7x7 = 49-cell grid:
+    idx = (row - 1) * 7 + col   ->   uniform in 1..49
+Each (row, col) pair has probability 1/49, so every cell is equally
+likely. To get a uniform 1..10 we accept a region whose size is a
+MULTIPLE of 10: the largest such region inside 49 is 40 = 4*10.
+Accept idx in 1..40 (each value 1..10 appears EXACTLY 4 times),
+REJECT the 9-cell overhang 41..49, and re-roll.
+
+The trap: (rand7()+rand7())%10 is a triangular sum, biased toward
+the middle. Always use the grid formula (row-1)*7 + col.
+
+--- the full 7x7 grid (idx | mapped value), accept <= 40 ---
+       col=1   col=2   col=3   col=4   col=5   col=6   col=7
+  row=1 |     1       2       3       4       5       6       7
+  row=2 |     8       9      10      11      12      13      14
+  row=3 |    15      16      17      18      19      20      21
+  row=4 |    22      23      24      25      26      27      28
+  row=5 |    29      30      31      32      33      34      35
+  row=6 |    36      37      38      39      40     41*     42*
+  row=7 |   43*     44*     45*     46*     47*     48*     49*
+  (* = rejected overhang 41..49; accept iff idx <= 40)
+
+--- accept-zone values: each of 1..10 appears exactly 4 times ---
+  value  1: 4 cells  ####
+  value  2: 4 cells  ####
+  value  3: 4 cells  ####
+  value  4: 4 cells  ####
+  value  5: 4 cells  ####
+  value  6: 4 cells  ####
+  value  7: 4 cells  ####
+  value  8: 4 cells  ####
+  value  9: 4 cells  ####
+  value 10: 4 cells  ####
+  total accepted cells = 40 = 4 * 10  OK
+
+--- first 12 grid proposals (seed=42) ---
+  proposal | rand7 row | rand7 col | idx  | decision
+  ---------+-----------+-----------+------+-------------------------
+     1     |     2     |     1     |  8  | ACCEPT -> Rand10 = 8
+     2     |     5     |     2     | 30  | ACCEPT -> Rand10 = 10
+     3     |     3     |     1     | 15  | ACCEPT -> Rand10 = 5
+     4     |     4     |     1     | 22  | ACCEPT -> Rand10 = 2
+     5     |     7     |     7     | 49  | reject (overhang), re-roll
+     6     |     6     |     4     | 39  | ACCEPT -> Rand10 = 9
+     7     |     5     |     7     | 35  | ACCEPT -> Rand10 = 5
+     8     |     5     |     1     | 29  | ACCEPT -> Rand10 = 9
+     9     |     1     |     7     |  7  | ACCEPT -> Rand10 = 7
+    10     |     7     |     7     | 49  | reject (overhang), re-roll
+    11     |     4     |     2     | 23  | ACCEPT -> Rand10 = 3
+    12     |     4     |     2     | 23  | ACCEPT -> Rand10 = 3
+
+--- empirical acceptance over 100000 proposals (seed=42) ---
+  accepted = 81659 / 100000 = 0.8166
+  theory   = 40/49 = 0.8163
+  relative error = 0.03%
+
+  value distribution among accepted (should be ~uniform, 1/10 each):
+    value  1:   8182 (10.02%)
+    value  2:   8143 (9.97%)
+    value  3:   8105 (9.93%)
+    value  4:   8129 (9.95%)
+    value  5:   8385 (10.27%)
+    value  6:   8124 (9.95%)
+    value  7:   8171 (10.01%)
+    value  8:   7919 (9.70%)
+    value  9:   8306 (10.17%)
+    value 10:   8195 (10.04%)
+
+--- expected cost ---
+  acceptance = 40/49 ~ 0.8163
+  expected proposals per Rand10 = 49/40 ~ 1.2250
+  each proposal = 2 rand7 calls  ->  ~2.450 rand7 per Rand10
+
+========================================================================
+SECTION B - P519 Random Flip Matrix  (virtual Fisher-Yates)
+========================================================================
+
+Uniformly sample a zero-cell of an m x n matrix without replacement.
+A real Fisher-Yates swap (drawn <-> last, then shrink) is O(1) per
+draw but needs the full m*n array -- impossible for m,n up to 10^4.
+The trick: store ONLY the swaps in a dict. To read index k return
+mapping.get(k, k). After drawing r, set mapping[r] = value-of-last,
+then delete mapping[last] ONLY IF r != last (else you erase the swap
+you just wrote). Decrement total.
+
+Decode flat index to (row, col):  row = res // n,  col = res % n
+
+--- worked example: m=2, n=3 (6 cells), 4 flips (seed=42) ---
+  step | total |  r  | res | last | last_val | swap? | -> (row,col)
+  -----+-------+-----+-----+------+----------+-------+------------
+   1   |   6   |   1 |   1 |    5 |     5    | yes   | -> [0, 1]
+   2   |   5   |   0 |   0 |    4 |     4    | yes   | -> [0, 0]
+   3   |   4   |   2 |   2 |    3 |     3    | yes   | -> [0, 2]
+   4   |   3   |   0 |   4 |    2 |     3    | yes   | -> [1, 1]
+
+  mapping after each step (only swaps are stored):
+    after flip 1: total=5, mapping={1: 5}
+    after flip 2: total=4, mapping={1: 5, 0: 4}
+    after flip 3: total=3, mapping={1: 5, 0: 4, 2: 3}
+    after flip 4: total=2, mapping={1: 5, 0: 3}
+
+--- the r==last edge case explained ---
+  When the random index r equals total-1 (the last live cell), the
+  swap mapping[r]=last_val would record mapping[last]=last (a no-op
+  value). If you then blindly `del mapping[last]` you DELETE the entry
+  just written, so a future read of r returns r again -> a DUPLICATE
+  draw. The guard `if last != r: del mapping[last]` prevents this.
+
+--- larger grid: m=3, n=3 (9 cells), all 9 flips exhausted (seed=42) ---
+  flip order (row, col): (0,2) -> (0,0) -> (1,1) -> (0,1) -> (1,2) -> (2,1) -> (2,0) -> (1,0) -> (2,2)
+  unique cells drawn = 9 / 9  (all distinct OK)
+
+--- reset restores the full deck ---
+  m=2,n=2: flip -> [0, 0], flip -> [0, 1], reset -> total=4, mapping={}
+  (total back to 2*2=4, mapping cleared)
+
+========================================================================
+SECTION C - Complexity, killer gotchas, problem table
+========================================================================
+
+Complexity
+----------
+  Problem                                Time              Space
+  -------------------------------------- ----------------- ------
+  P470 Rand10 from Rand7 (rejection)     O(1) expected     O(1)
+     ~49/40 = 1.225 proposals per draw, 2 rand7 each
+  P519 Random Flip Matrix (virtual FY)   O(1) per flip     O(k)
+     k = number of flips so far; reset() is O(1)
+  Real Fisher-Yates shuffle              O(n)              O(n)
+  Reservoir sampling (stream, k items)   O(n)              O(k)
+
+Killer gotchas
+--------------
+  1. NEVER ADD TWO ROLLS. (rand7()+rand7())%10 is a TRIANGULAR sum
+     heavily biased toward the middle (a 7+7=14 most likely). Always
+     use the 2D grid formula (row-1)*Y + col, which is uniform.
+  2. CUTOFF MUST BE A MULTIPLE OF THE TARGET. For Rand7->Rand10 the
+     cutoff is 40 = 4*10, NOT 42 or 49. Accepting up to 42 makes
+     values 1,2 appear 5/42 while 3..10 appear 4/42. The cutoff is
+     the largest multiple of the target that is <= Y*Y.
+  3. THE r==last ERASURE BUG. In virtual Fisher-Yates, deleting
+     mapping[last] unconditionally will erase the swap you JUST wrote
+     when r happened to equal last, causing a duplicate draw. Always
+     guard with `if last != r: del mapping[last]`.
+  4. DECODE 1D->2D WITH cols, NOT rows. row = x // n, col = x % n
+     where n = number of COLUMNS. Using rows for the modulo scrambles
+     the mapping. (Equivalently: row major, stride = n.)
+  5. SEED FOR DETERMINISM. Judges re-instantiate your object; using
+     a fixed seed makes traces reproducible (and lets the .html match
+     the .py byte-for-byte). On LeetCode use the system random.
+  6. ACCEPTANCE vs ITERATIONS. Rejection sampling is Las Vegas: it
+     always returns the right answer, only the RUNTIME is random.
+     Expected iterations = 1/acceptance = 49/40 ~ 1.225 here.
+
+Problem table
+-------------
+  Problem                          Diff    Key trick
+  -------------------------------- ------- -----------------------------------------
+  P470 Rand10() Using Rand7        Medium  7x7 grid -> 1..49; accept <=40 (mult of 10); (idx-1)%10+1
+  P519 Random Flip Matrix          Medium  Virtual Fisher-Yates; dict swap-with-last; r==last guard
+  P384 Shuffle an Array            Medium  Real Fisher-Yates: swap drawn with last, shrink
+  P382 Linked List Random Node     Medium  Reservoir sampling k=1: keep node i w.p. 1/i
+  P398 Random Pick Index           Medium  Reservoir k=1 over matching indices
+  P528 Random Pick with Weight     Medium  Prefix sums + binary search; randint(1,total)
+  P497 Random Point in Rectangles  Medium  Weighted rect pick; prefix counts + bisect
+========================================================================
+[check] rand10 / random_flip_matrix ... OK
+========================================================================

@@ -1,0 +1,188 @@
+============================================================================
+SECTION A - The Design pattern: O(1) ops + an eviction policy
+============================================================================
+
+Mental model: keep SEVERAL fast-access structures and update them
+together so they never disagree. The HashMap gives O(1) locate; a
+second structure (DLL / OrderedDict / frequency bucket) encodes the
+policy (recency or frequency) and gives O(1) splice + evict.
+
+  LRU = HashMap{key -> node}  +  DLL ordered MRU..LRU
+        get/put splice the node to the front (MRU); evict tail.prev
+
+  LFU = HashMap{key -> val}  +  HashMap{key -> freq}
+        + HashMap{freq -> OrderedDict{keys}}  +  min_freq counter
+        bump a key = pop from bucket[f], append to bucket[f+1];
+        evict = popitem(last=False) of bucket[min_freq]
+
+Pattern-recognition signals
+---------------------------
+  "Design a class", "implement a data structure"          -> design
+  "implement a cache", "eviction policy"                  -> design
+  "O(1) average time" for get/put/insert/delete           -> design
+  "Least Recently Used", "LRU"                            -> DLL+map
+  "Least Frequently Used", "LFU"                          -> freq buckets
+  "most/least recent", "recency", "last used"             -> DLL+map
+  "how many times used", "frequency", "use counter"       -> freq buckets
+
+The two interview skeletons (see module docstring for full code):
+
+  class LRUCache:                        class LFUCache:
+      self.map  = {}   # key->Node          self.key_to_val  = {}
+      self.head = Node()  # MRU side        self.key_to_freq = {}
+      self.tail = Node()  # LRU side        self.freq_to_keys = {}
+      get(k): map[k];                       self.min_freq = 0
+          _remove; _add_front
+      put(k,v): if k in map: update;        get(k): _bump(k); return val
+          else: add_front;                   put(k,v): if k present: _bump;
+          if over cap: evict tail.prev                else: evict min_freq;
+                                                   insert @freq1; min_freq=1
+
+============================================================================
+SECTION B - P460 LFU Cache  (HashMap + frequency buckets + DLL)
+============================================================================
+
+Three dicts + a min_freq counter. freq_to_keys[f] is an OrderedDict
+(= HashMap + DLL): its order encodes RECENCY within frequency f, so
+the LFU+LRU tie-break victim is just popitem(last=False) of the
+min_freq bucket - O(1).
+
+capacity = 2
+op sequence (LeetCode P460 Example 1):
+  put 1,1 ; put 2,2 ; get 1 ; put 3,3 ; get 2 ; get 3 ; put 4,4 ; get 1 ; get 3 ; get 4
+
+Step trace  (buckets list keys LRU..MRU within each frequency):
+
+  op          return  evict  min  freq buckets                  key->val
+  ----------  ------  -----  ---  -----------------------------  --------
+  (init)      null    -      0    (empty)                        (empty)
+  put(1,1)    null    -      1    1:[1]                          1:1
+  put(2,2)    null    -      1    1:[1, 2]                       1:1, 2:2
+  get(1)      1       -      1    1:[2], 2:[1]                   1:1, 2:2
+  put(3,3)    null    2      1    1:[3], 2:[1]                   1:1, 3:3
+  get(2)      -1      -      1    1:[3], 2:[1]                   1:1, 3:3
+  get(3)      3       -      2    2:[1, 3]                       1:1, 3:3
+  put(4,4)    null    1      1    1:[4], 2:[3]                   3:3, 4:4
+  get(1)      -1      -      1    1:[4], 2:[3]                   3:3, 4:4
+  get(3)      3       -      1    1:[4], 3:[3]                   3:3, 4:4
+  get(4)      4       -      2    2:[4], 3:[3]                   3:3, 4:4
+
+Notes per step:
+  put(1,1)    insert 1 at freq 1 (min_freq resets to 1)
+  put(2,2)    insert 2 at freq 1 (min_freq resets to 1)
+  get(1)      hit key 1; freq 1 -> 2, min_freq 1 -> 1
+  put(3,3)    cache full -> evict LFU key 2 (front of min_freq=1 bucket); insert 3 at freq 1, min_freq=1
+  get(2)      key 2 absent -> -1
+  get(3)      hit key 3; freq 1 -> 2, min_freq 1 -> 2
+  put(4,4)    cache full -> evict LFU key 1 (front of min_freq=2 bucket); insert 4 at freq 1, min_freq=1
+  get(1)      key 1 absent -> -1
+  get(3)      hit key 3; freq 2 -> 3, min_freq 1 -> 1
+  get(4)      hit key 4; freq 1 -> 2, min_freq 1 -> 2
+
+returns     = [null, null, 1, null, -1, 3, null, -1, 3, 4]
+LeetCode    = [null, null, 1, null, -1, 3, null, -1, 3, 4]
+match: True
+
+============================================================================
+SECTION C - P146 LRU Cache  (HashMap + doubly-linked list)
+============================================================================
+
+HashMap{key -> node} gives O(1) locate. A doubly-linked list with
+head/tail sentinels is ordered MRU (head side) .. LRU (tail side).
+get/put on a key splice it to the front (MRU) in O(1); when the
+cache overflows, tail.prev (the LRU) is removed in O(1).
+
+capacity = 2
+op sequence (representative; mirrors the LRU contract):
+  put 1,1 ; put 2,2 ; get 1 ; put 3,3 ; get 2 ; put 4,4 ; get 1 ; get 3 ; get 4
+
+Step trace  (order list is MRU -> LRU; first element = most recent):
+
+  op          return  evict  DLL order (MRU..LRU)   key->val
+  ----------  ------  -----  ---------------------  --------
+  (init)      null    -      []                     (empty)
+  put(1,1)    null    -      [1]                    1:1
+  put(2,2)    null    -      [2, 1]                 1:1, 2:2
+  get(1)      1       -      [1, 2]                 1:1, 2:2
+  put(3,3)    null    2      [3, 1]                 1:1, 3:3
+  get(2)      -1      -      [3, 1]                 1:1, 3:3
+  put(4,4)    null    1      [4, 3]                 3:3, 4:4
+  get(1)      -1      -      [4, 3]                 3:3, 4:4
+  get(3)      3       -      [3, 4]                 3:3, 4:4
+  get(4)      4       -      [4, 3]                 3:3, 4:4
+
+Notes per step:
+  put(1,1)    insert 1 at MRU (front)
+  put(2,2)    insert 2 at MRU (front)
+  get(1)      hit key 1; splice to MRU, return 1
+  put(3,3)    cache full -> evict LRU key 2 (tail.prev); insert 3 at MRU
+  get(2)      key 2 absent -> -1
+  put(4,4)    cache full -> evict LRU key 1 (tail.prev); insert 4 at MRU
+  get(1)      key 1 absent -> -1
+  get(3)      hit key 3; splice to MRU, return 3
+  get(4)      hit key 4; splice to MRU, return 4
+
+returns     = [null, null, 1, null, -1, null, -1, 3, 4]
+expected    = [null, null, 1, null, -1, null, -1, 3, 4]
+match: True
+
+============================================================================
+SECTION D - Complexity, killer gotchas, problem table
+============================================================================
+
+Complexity
+----------
+  Operation                  LRU        LFU        Space
+  -------------------------  ---------  ---------  ------
+  get (hit)                  O(1)       O(1)       O(cap)
+  get (miss)                 O(1)       O(1)       O(cap)
+  put (new key, no evict)    O(1)       O(1)       O(cap)
+  put (new key, evict)       O(1)       O(1)       O(cap)
+  put (update existing)      O(1)       O(1)       O(cap)
+  (all average; HashMap ops are O(1) amortized)
+
+Killer gotchas
+--------------
+  1. DELETE EMPTY FREQUENCY BUCKETS in LFU. When bucket[f] empties
+     after a bump, del freq_to_keys[f]. If you leave it, min_freq
+     can point at an empty bucket and eviction looks up a victim
+     that is not there -> KeyError / wrong eviction.
+  2. UPDATE min_freq CORRECTLY on a bump: only when the emptied
+     bucket was AT min_freq do you set min_freq = f + 1. If the
+     emptied bucket was above min_freq, min_freq is unchanged.
+  3. A NEW KEY ALWAYS RESETS min_freq = 1 (its frequency starts at
+     1, so it is the new global minimum). Forgetting this is the
+     classic 'works for a while then evicts the wrong key' bug.
+  4. UPDATE != INSERT. put() on an existing key changes the value
+     and bumps frequency / refreshes recency, but must NOT grow the
+     size and must NOT evict. Guard `if key in map` BEFORE the
+     capacity check.
+  5. ZERO / NEGATIVE CAPACITY: handle `cap <= 0` at the top of put
+     (and usually return -1 / no-op). LeetCode tests cap = 0.
+  6. DLL SENTINELS: always use a dummy head and tail so _remove and
+     _add_front never special-case an empty list. Update prev and
+     nxt in the right order, or you will orphan a node.
+  7. RECENCY WITHIN A FREQUENCY (the LFU tie-break): without an
+     OrderedDict / DLL per bucket, two keys at the same min freq
+     evict in an UNDEFINED order and your cache is non-deterministic.
+  8. PYTHON ORDEREDDICT IS THE DLL: move_to_end, popitem(last=False)
+     are O(1). For LRU you may use it directly; for LFU you need one
+     per frequency bucket.
+
+Problem table
+-------------
+  Problem                       Diff   Key trick
+  ----------------------------- ------  --------------------------------------
+  P460 LFU Cache                Hard   3 dicts + min_freq; OrderedDict/bucket
+                                       for O(1) LRU tie-break; del empty bucket
+  P146 LRU Cache                Medium HashMap + DLL (or OrderedDict); evict
+                                       tail.prev; splice-to-front on every touch
+  P380 InsertDeleteGetRandom    Medium list + val->idx map; remove = swap+pop
+  P355 Design Twitter           Medium heaps of (-timestamp, tweet) per followee
+  P432 All O(1) Data Structure  Hard   freq buckets like LFU but with inc/dec
+  P716 Max Stack                Hard   two stacks / DLL + sorted set for popMax
+  P1146 Snapshot Array          Medium version-stamped writes; per-snap read
+
+============================================================================
+[check] LFU Cache / LRU Cache design + traces ... OK
+============================================================================

@@ -1,0 +1,229 @@
+========================================================================
+SECTION A - Trie fundamentals: character-by-character tree building
+========================================================================
+
+Mechanism:  word -> walk root..leaf, create missing nodes, set is_end
+Edges ARE characters; nodes ARE positions; '*' marks a word's end.
+
+Insert 5 words: ['app', 'apple', 'apply', 'apt', 'bat']
+  raw characters = 19
+
+  Insert "app" (3 chars): 3 new, 0 shared
+    idx 0  char 'a'  NEW node
+    idx 1  char 'p'  NEW node
+    idx 2  char 'p'  NEW node
+
+  Insert "apple" (5 chars): 2 new, 3 shared
+    idx 0  char 'a'  shared
+    idx 1  char 'p'  shared
+    idx 2  char 'p'  shared  -> WORD END "apple"
+    idx 3  char 'l'  NEW node
+    idx 4  char 'e'  NEW node
+
+  Insert "apply" (5 chars): 1 new, 4 shared
+    idx 0  char 'a'  shared
+    idx 1  char 'p'  shared
+    idx 2  char 'p'  shared  -> WORD END "apply"
+    idx 3  char 'l'  shared
+    idx 4  char 'y'  NEW node
+
+  Insert "apt" (3 chars): 1 new, 2 shared
+    idx 0  char 'a'  shared
+    idx 1  char 'p'  shared
+    idx 2  char 't'  NEW node
+
+  Insert "bat" (3 chars): 3 new, 0 shared
+    idx 0  char 'b'  NEW node
+    idx 1  char 'a'  NEW node
+    idx 2  char 't'  NEW node
+
+Resulting prefix tree ('*' = is_end, a complete word):
+
+    root
+    |-- a
+    |   L__ p
+    |       |-- p (*)
+    |       |   L__ l
+    |       |       |-- e (*)
+    |       |       L__ y (*)
+    |       L__ t (*)
+    L__ b
+        L__ a
+            L__ t (*)
+
+  raw chars inserted = 19
+  trie nodes (excl root) = 10
+  shared characters = 9  (47% prefix compression)
+
+The is_end flag is what separates search from starts_with:
+    search("app")   -> True   (app was inserted)
+    search("ap")    -> False   (prefix only, no is_end)
+    search("apple") -> True   (full word)
+    search("apt")   -> True   (full word)
+    search("bat")   -> True   (full word)
+    search("ba")    -> False   (prefix only)
+
+    starts_with("ap")  -> True   (app/apple/apt...)
+    starts_with("app") -> True   (multiple words)
+    starts_with("xyz") -> False   (dead branch)
+
+search vs starts_with: search REQUIRES is_end; starts_with only
+requires that the walk reached the end of the prefix. Forgetting
+the is_end check is the #1 trie interview bug.
+
+========================================================================
+SECTION B - P211 Design Add and Search Words (wildcard '.')
+========================================================================
+
+Same trie as P208, but search treats '.' as 'match ANY character'.
+At a '.', branch into ALL children of the current node (DFS).
+
+addWord: bad, dad, mad
+
+Trie after inserts:
+
+    root
+    |-- b
+    |   L__ a
+    |       L__ d (*)
+    |-- d
+    |   L__ a
+    |       L__ d (*)
+    L__ m
+        L__ a
+            L__ d (*)
+
+  query      result   why
+  ---------- ------   -----------------------------------------
+  search("pad")  False    not in dictionary
+  search("bad")  True     exact word match
+  search(".ad")  True     '.' branches into all children at 1 level(s); a path reaches is_end
+  search("b..")  True     '.' branches into all children at 2 level(s); a path reaches is_end
+  search("...")  True     '.' branches into all children at 3 level(s); a path reaches is_end
+  search("..")  False    '.' branches into all children at 2 level(s); no path completes
+
+--- detail: trace of search('.ad') ---
+The '.' at depth 0 fans out into the three root children (b, d, m).
+Each then walks 'a','d' exactly; b->a->d and d->a->d and m->a->d
+all reach an is_end node, so the first success short-circuits.
+
+    depth 0: via '(root)'  char='.'  is_end=False
+    depth 1: via 'b'  char='a'  is_end=False
+    depth 2: via 'a'  char='d'  is_end=False
+    depth 3: via 'd'  char=''  is_end=True
+    => search(".ad") = True
+
+GOTCHA: even with wildcards you MUST check is_end at the end. A
+pattern that walks a valid prefix but stops short of a word end
+must return False (search("..") -> False: "ba","da","ma" are not words).
+
+========================================================================
+SECTION C - P212 Word Search II (trie + grid backtracking)
+========================================================================
+
+Build ONE trie from all words, then run a SINGLE DFS over the grid
+following trie edges. Found words are collected; dead branches are
+pruned so the same path is never re-explored (kills the TLE).
+
+board:
+    o a a n
+    e t a e
+    i h k r
+    i f l v
+words = ['oath', 'pea', 'eat', 'rain']
+
+Trie built from words:
+
+    root
+    |-- e
+    |   L__ a
+    |       L__ t (*)
+    |-- o
+    |   L__ a
+    |       L__ t
+    |           L__ h (*)
+    |-- p
+    |   L__ e
+    |       L__ a (*)
+    L__ r
+        L__ a
+            L__ i
+                L__ n (*)
+
+find_words(board, words) -> ['eat', 'oath']
+  (expected ['eat', 'oath'])
+
+--- focused trace: the grid path that spells 'oath' ---
+    step 0: char 'o' at cell (0,0)
+    step 1: char 'a' at cell (0,1)
+    step 2: char 't' at cell (1,1)
+    step 3: char 'h' at cell (2,1)
+    => 'oath' collected, node.word nulled to block duplicates
+
+Why the others fail:
+  "pea"  - no cell holds "p", so the trie root has no "p" child;
+           the DFS never starts.
+  "rain" - no connected r->a->i->n path exists on this board.
+
+trie nodes before search: 15 (incl root)
+After find_words, every fully-found word is pruned from the trie:
+  'oath' and 'eat' had their leaf chains popped, so re-scanning
+  the board touches a much smaller tree. This is the optimization
+  that turns the naive O(W * M*N * 4^L) into something tractable.
+
+smoke test: board=[['a', 'b'], ['c', 'd']], words=['abdc', 'abcd', 'acdb', 'acbd']
+  find_words -> ['abdc', 'acdb']  (expected ['abdc','acdb'])
+
+========================================================================
+SECTION D - Complexity, killer gotchas, problem table
+========================================================================
+
+Complexity (L = word length, N = number of words, s = alphabet size)
+----------------------------------------------------------------
+  Operation                       Time             Space
+  ------------------------------  ---------------  ---------
+  insert / search / starts_with   O(L)             O(N*L) total
+  wildcard search (k dots)        O(s^k * L) wc    O(L) stack
+  all words with prefix P         O(L + results)   O(results)
+  word search II (MxN grid)       O(M*N*4^L) wc    O(W*L) trie
+  delete with pruning             O(L)             O(L) stack
+
+Killer gotchas
+--------------
+  1. is_end IS THE WHOLE POINT: search('app') must check node.is_end.
+     If only 'apple' was inserted, search('app') is False but
+     starts_with('app') is True. Forgetting this collapses the two.
+  2. EMPTY STRING: search('') returns root.is_end; starts_with('')
+     is always True (the root is reachable with zero steps).
+  3. GRID DFS - RESTORE THE CELL: set board[r][c]='#' before
+     recursing, restore board[r][c]=ch AFTER. Forgetting the restore
+     silently breaks every subsequent search from a sibling cell.
+  4. GRID DFS - PRUNE OR TLE: after collecting a word, null
+     node.word AND pop childless nodes from their parent. Without
+     this the same word is found repeatedly and dead branches are
+     re-walked -> TLE on large boards.
+  5. PASS THE PARENT NODE into the grid DFS (not the current node)
+     so you have the reference needed to del parent.children[ch].
+  6. WILDCARD '...' CAN BE EXPENSIVE: k dots means s^k branches.
+     The trie prunes branches with no matching child, but an all-dot
+     query over a dense trie still fans out widely.
+  7. dict CHILDREN vs ARRAY[26]: dict handles any alphabet and is
+     space-efficient for sparse trees; array[26] is ~3-5x faster per
+     step but wastes memory. Use array[26] only for lowercase-only.
+
+Problem table
+-------------
+  Problem                         Diff   Key trick
+  ------------------------------- ------ ----------------------------------------
+  P208 Implement Trie             Medium insert/search/starts_with share _find; is_end separates search from starts_with
+  P211 Add & Search Words         Medium '.' branches into all children via DFS(node, i); check is_end at the end
+  P212 Word Search II             Hard   one trie + one grid DFS; store word at leaf; in-place '#' marking; prune childless branches
+  P421 Max XOR of Two Numbers     Medium binary trie over bits; greedily pick the opposite bit at each level
+  P648 Replace Words              Medium insert roots; find shortest prefix that is a word; replace on first hit
+  P677 Map Sum Pairs              Medium store value at is_end; prefix sum via subtree DFS or a count field
+  P745 Prefix & Suffix Search     Hard   insert 'suffix#word'; query with 'suffix#prefix'
+  P1268 Search Suggestions        Medium sort words; for each prefix binary-search the top 3 lexicographic matches
+
+========================================================================
+[check] trie / wildcard / word-search ... OK
+========================================================================

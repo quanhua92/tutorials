@@ -1,0 +1,192 @@
+dijkstra.py - reference impl. All numbers below feed DIJKSTRA.md.
+python stdlib only (heapq, collections); deterministic.
+
+
+========================================================================
+  SECTION A: build the weighted graph + step-by-step relaxation
+========================================================================
+Main graph (directed, non-negative weights):
+  S: S-[7]->A, S-[2]->B
+  A: A-[3]->B, A-[4]->C
+  B: B-[2]->A, B-[6]->D
+  C: C-[5]->D, C-[2]->T
+  D: D-[1]->C, D-[8]->T
+  T: (no out-edges)
+
+Source = S. At each step we pop the unsettled node with smallest dist,
+SETTLE it (dist is now final), then RELAX every out-edge:
+
+  STEP 1: pop (0,S)  ->  SETTLE S, dist[S] = 0  (final)
+             relax S-[7]->A: 0+7=7 < inf  ->  dist[A] = 7  (push (7,A))
+             relax S-[2]->B: 0+2=2 < inf  ->  dist[B] = 2  (push (2,B))
+  STEP 2: pop (2,B)  ->  SETTLE B, dist[B] = 2  (final)
+             relax B-[2]->A: 2+2=4 < 7  ->  dist[A] = 4  (push (4,A))
+             relax B-[6]->D: 2+6=8 < inf  ->  dist[D] = 8  (push (8,D))
+  STEP 3: pop (4,A)  ->  SETTLE A, dist[A] = 4  (final)
+             relax A-[3]->B: B already SETTLED -> skip (greedy commitment)
+             relax A-[4]->C: 4+4=8 < inf  ->  dist[C] = 8  (push (8,C))
+           : pop (7,A)  ->  STALE entry (dist[A] already smaller), discard
+  STEP 4: pop (8,C)  ->  SETTLE C, dist[C] = 8  (final)
+             relax C-[5]->D: 8+5=13 >= 8  (no improvement)
+             relax C-[2]->T: 8+2=10 < inf  ->  dist[T] = 10  (push (10,T))
+  STEP 5: pop (8,D)  ->  SETTLE D, dist[D] = 8  (final)
+             relax D-[1]->C: C already SETTLED -> skip (greedy commitment)
+             relax D-[8]->T: 8+8=16 >= 10  (no improvement)
+  STEP 6: pop (10,T)  ->  SETTLE T, dist[T] = 10  (final)
+
+Final distances:
+  dist = {S:0, A:4, B:2, C:8, D:8, T:10}
+
+The trace shows the two Dijkstra primitives at work:
+  - SETTLE: commit the closest unfinished node (its dist is permanent).
+  - RELAX : try to lower a neighbour; push it into the pq if improved.
+Notice A is settled at 4 even though edge S->A has weight 7: the cheaper
+two-hop route S->B->A (2+2=4) was found by relaxation BEFORE A settled.
+
+========================================================================
+  SECTION B: the min-priority-queue (binary min-heap) - O(log V) per op
+========================================================================
+The 'extract-min' that picks the next node is the heart of Dijkstra. With a
+binary heap (Python heapq), each push and pop is O(log V), so the whole run
+is O((V+E) log V). Here is the FRONTIER (sorted heap contents) after each
+operation on the main graph:
+
+  legend: frontier = unsettled candidates as (dist,node), sorted by dist
+          then node; a stale entry stays in the heap until it is popped.
+
+  op 1 POP (0,S)  -> SETTLE         frontier = (empty)
+  op 2 PUSH (7,A) (relax S->A)   frontier = (7,A)
+  op 3 PUSH (2,B) (relax S->B)   frontier = (2,B), (7,A)
+  op 4 POP (2,B)  -> SETTLE         frontier = (7,A)
+  op 5 PUSH (4,A) (relax B->A)   frontier = (4,A), (7,A)
+  op 6 PUSH (8,D) (relax B->D)   frontier = (4,A), (7,A), (8,D)
+  op 7 POP (4,A)  -> SETTLE         frontier = (7,A), (8,D)
+  op 8 PUSH (8,C) (relax A->C)   frontier = (7,A), (8,C), (8,D)
+  op 9 POP (7,A)  -> discard stale  frontier = (8,C), (8,D)
+  op10 POP (8,C)  -> SETTLE         frontier = (8,D)
+  op11 PUSH (10,T) (relax C->T)   frontier = (8,D), (10,T)
+  op12 POP (8,D)  -> SETTLE         frontier = (10,T)
+  op13 POP (10,T)  -> SETTLE         frontier = (empty)
+
+  total pushes = 7 (1 initial + 6 successful relaxations)
+  total pops   = 7 (6 settle + 1 stale discard)
+  each push/pop is O(log V) = O(log 6) ~ 3 comparisons.
+
+Cost accounting: E edges each cause at most one push, V nodes each pop once
+(plus stale dups). So total work = O((V+E) log V). A naive array-scan
+Dijkstra scans all V nodes to find each min -> O(V^2); the heap wins once
+the graph is even slightly sparse (E << V^2).
+
+========================================================================
+  SECTION C: the shortest-path tree (pred pointers) + reconstructed paths
+========================================================================
+After Dijkstra, the pred[] pointers form a TREE rooted at S. Following each
+node's pred chain back to S reconstructs a shortest path, whose total weight
+equals dist[node].
+
+  | node | dist | pred | shortest path        | edges               | total | check |
+  |------|------|------|----------------------|---------------------|-------|-------|
+  | S    | 0    | None | S                    | -                   | 0     | OK    |
+  | A    | 4    | B    | S -> B -> A          | 2+2                 | 4     | OK    |
+  | B    | 2    | S    | S -> B               | 2                   | 2     | OK    |
+  | C    | 8    | A    | S -> B -> A -> C     | 2+2+4               | 8     | OK    |
+  | D    | 8    | B    | S -> B -> D          | 2+6                 | 8     | OK    |
+  | T    | 10   | C    | S -> B -> A -> C -> T | 2+2+4+2             | 10    | OK    |
+
+[check] every reconstructed path's edge-weight sum == dist[v]:  OK
+
+The SPT itself (parent -> children):
+  S -> B
+  A -> C
+  B -> A, D
+  C -> T
+  D -> (leaf)
+  T -> (leaf)
+
+The S->T path is S -> B -> A -> C -> T (cost 10): cheaper than the direct
+S -> A (7) -> C (11) -> T (13) because going through B first saves 3 (A via
+B costs 4, not 7). This is relaxation doing its job: never trust the first
+edge you see - keep the cheapest known route to each node.
+
+========================================================================
+  SECTION D: why negative edges break Dijkstra (vs Bellman-Ford)
+========================================================================
+Negative graph (edge C->A = -5):
+  S: S-[1]->A, S-[4]->C
+  A: A-[2]->B
+  B: (no out-edges)
+  C: C-[-5]->A
+
+Run BOTH algorithms from S:
+
+  | node | Dijkstra | Bellman-Ford (TRUE) | match? |
+  |------|----------|---------------------|--------|
+  | S    | 0        | 0                   | OK     |
+  | A    | 1        | -1                  | WRONG  |
+  | B    | 3        | 1                   | WRONG  |
+  | C    | 4        | 4                   | OK     |
+
+  [check] Dijkstra == Bellman-Ford on the negative graph?  FAIL
+
+What went wrong - the greedy commitment, step by step:
+  1. pop S(0), settle. Relax S->A=1, S->C=4.   frontier: (1,A),(4,C)
+  2. pop A(1), SETTLE A=1. Relax A->B=3.        A is now PERMANENT.
+  3. pop B(3), settle B=3. (no out-edges)
+  4. pop C(4), settle C=4. Try C->A = 4+(-5) = -1 < 1 ... but A is ALREADY
+     SETTLED, so strict Dijkstra SKIPS it. The true cost A=-1 is lost, and
+     B (settled at 3, should be 1 via C->A->B) is wrong too.
+
+Bellman-Ford has no 'settle' step: it relaxes EVERY edge V-1 = 3 times, so the
+-5 edge is eventually applied. It needed 3 relaxation round(s) and
+reports a negative cycle? False (none here). Cost: O(V*E) = 4*4 per round.
+
+THE RULE: Dijkstra's correctness PROOF needs 'every edge weight >= 0'. The
+moment a negative edge exists, a node settled 'too early' can never be
+reopened. Bellman-Ford trades the O((V+E)log V) speed for the ability to
+handle negatives by brute-forcing V-1 relaxation sweeps.
+
+========================================================================
+  SECTION E: BFS / Dijkstra / Bellman-Ford - three regimes
+========================================================================
+Same main graph, three algorithms. BFS ignores weights (min #edges);
+Dijkstra and Bellman-Ford both minimise total weight (and must agree here
+since all weights are >= 0).
+
+  | node | BFS (edge count) | Dijkstra (weight) | Bellman-Ford (weight) | D==BF? |
+  |------|------------------|-------------------|-----------------------|--------|
+  | S    | 0                | 0                 | 0                     | OK     |
+  | A    | 1                | 4                 | 4                     | OK     |
+  | B    | 1                | 2                 | 2                     | OK     |
+  | C    | 2                | 8                 | 8                     | OK     |
+  | D    | 2                | 8                 | 8                     | OK     |
+  | T    | 3                | 10                | 10                    | OK     |
+
+BFS gives T = 3 (S->A->C->T = 3 edges) but Dijkstra gives T = 10 (cheapest
+by WEIGHT is S->B->A->C->T). Fewest edges != cheapest weight: that is why
+Dijkstra exists. When all weights are 1, Dijkstra degenerates to BFS.
+
+Complexity & capability table:
+  | algorithm     | weights allowed   | complexity       | detects neg cycle |
+  |---------------|-------------------|------------------|-------------------|
+  | BFS           | unweighted (=1)   | O(V+E)           | n/a               |
+  | Dijkstra      | >= 0              | O((V+E) log V)   | no                |
+  | Bellman-Ford  | any (incl. neg)   | O(V*E)           | yes               |
+
+Reach for BFS on unweighted graphs, Dijkstra whenever weights are
+non-negative (most maps, networks, games), and Bellman-Ford only when
+negative edges are possible (currency arbitrage, constraint systems).
+
+========================================================================
+  GOLD CHECK
+========================================================================
+Two independent shortest-path engines on the main graph (all weights >= 0):
+  Dijkstra    dist = {S:0, A:4, B:2, C:8, D:8, T:10}
+  BellmanFord dist = {S:0, A:4, B:2, C:8, D:8, T:10}
+  dist[T] (headline) = 10
+
+GOLD CHECK: OK - Dijkstra and Bellman-Ford agree on every node
+(dijkstra.html re-runs Dijkstra in JavaScript and re-checks these values.)
+
+========================================================================
+  DONE - all sections printed
+========================================================================

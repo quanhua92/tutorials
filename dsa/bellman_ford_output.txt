@@ -1,0 +1,205 @@
+bellman_ford.py - reference impl. All numbers below feed BELLMAN_FORD.md.
+python stdlib only; deterministic.
+
+========================================================================
+  SECTION A: relaxation - V-1 passes (negative edges, NO negative cycle)
+========================================================================
+Graph: V=5 vertices (S,A,B,C,D), E=8 directed edges, source = S.
+
+Edges (in relaxation order):
+  S -> A  w = 6
+  S -> B  w = 7
+  A -> C  w = 5
+  A -> D  w = -4
+  B -> A  w = 8
+  B -> C  w = -3
+  C -> D  w = 9
+  D -> B  w = 2
+
+There are negative edges (A->D = -4, B->C = -3) but the cycle
+costs are all >= 0 (e.g. B->A->D->B = 8-4+2 = 6), so shortest paths
+exist. V-1 = 4 passes guarantee convergence.
+
+pass  distances after pass                            #relaxations  
+--------------------------------------------------------------------
+init  S=0  A=inf  B=inf  C=inf  D=inf                 -             
+1     S=0  A=6  B=4  C=4  D=2                         6             
+2     S=0  A=6  B=4  C=1  D=2                         1             
+3     S=0  A=6  B=4  C=1  D=2                         0             
+4     S=0  A=6  B=4  C=1  D=2                         0             
+det.  S=0  A=6  B=4  C=1  D=2                         0 (no relax -> no neg cycle)
+
+Read it column by column: dist[B] starts at 7, then drops to 4 in pass 1
+(via S->A->D->B = 6-4+2), then dist[C] drops from 4 to 1 in pass 2 (via
+B->C once B reached 4). After pass 2 nothing changes - the shortest-path
+tree is complete.
+
+Shortest-path tree (source S = vertex 0):
+  to    dist      path                    path cost   
+  --------------------------------------------------
+  S     0         S                       
+  A     6         S -> A                  
+  B     4         S -> A -> D -> B        
+  C     1         S -> A -> D -> B -> C   
+  D     2         S -> A -> D             
+
+[check] final dist = [0, 6, 4, 1, 2] == [0, 6, 4, 1, 2]:  OK
+[check] no relaxation on V-th (detection) pass:  OK
+[check] V-1 = 4 passes suffice (passes 3,4 are pure verification):  OK
+
+========================================================================
+  SECTION B: negative cycle detection - the V-th pass still relaxes
+========================================================================
+Graph: V=3 (P,Q,R), E=4 edges, source = P.
+
+Edges:
+  P -> Q  w = 1
+  Q -> R  w = -1
+  R -> P  w = -1
+  P -> R  w = 4
+
+Cycle P->Q->R->P total weight = 1 + (-1) + (-1) = -1 < 0  ->  NEGATIVE CYCLE.
+
+pass  distances after pass                    #relaxations  
+----------------------------------------------------------
+init  P=0  Q=inf  R=inf                       -
+1     P=-1  Q=1  R=0                          3
+2     P=-2  Q=0  R=-1                         3
+det.  P=-2  Q=0  R=-1                         RELAXED!
+
+On the V-th (detection) pass an edge STILL relaxed -> has_negative_cycle = True.
+
+The distances keep diverging (more negative) every pass because you can
+loop P->Q->R->P forever, each lap costing -1. So shortest paths are
+undefined; Bellman-Ford's job is to DETECT this, not solve it.
+
+Recovered negative cycle: Q -> R -> P -> Q  (weight -1)
+[check] negative cycle detected AND recovered:  OK
+
+========================================================================
+  SECTION C: currency arbitrage - negative cycle == profit
+========================================================================
+An exchange rate r(i,j) = 'units of j per 1 unit of i'. A trade loop is
+profitable iff the PRODUCT of rates around the loop > 1.
+
+Reduction: weight(i,j) = -log(r(i,j)). Then the weight around a loop is
+  sum -log(r) = -log(product of rates).
+So:  weight_sum < 0  <=>  -log(product) < 0  <=>  product > 1  <=>  ARBITRAGE.
+A profitable trade loop is EXACTLY a negative cycle in the -log graph.
+
+Exchange rate table (rate[i][j] = units of j per 1 i):
+
+        USD     EUR     GBP     
+  ------------------------------
+  USD   1.00    0.90    0.75    
+  EUR   1.11    1.00    0.89    
+  GBP   1.33    1.12    1.00    
+
+Sanity: every DIRECT round-trip (2-cycle) must be <= 1 or a single pair is
+already an arbitrage. Here:
+  USD->EUR->USD: 0.9 * 1.11 = 0.9990  (ok)
+  USD->GBP->USD: 0.75 * 1.33 = 0.9975  (ok)
+  EUR->GBP->EUR: 0.89 * 1.12 = 0.9968  (ok)
+
+Edge weights w(i,j) = -ln(rate(i,j)):
+
+  edge          rate    -ln(rate)   
+  ----------------------------------
+  USD -> EUR   0.9     +0.105361   
+  EUR -> USD   1.11    -0.104360   
+  USD -> GBP   0.75    +0.287682   
+  GBP -> USD   1.33    -0.285179   
+  EUR -> GBP   0.89    +0.116534   
+  GBP -> EUR   1.12    -0.113329   
+
+pass  distances after pass (USD,EUR,GBP)          #relax  
+----------------------------------------------------------
+init  USD=0  EUR=inf  GBP=inf                     -
+1     USD=0  EUR=0.105361  GBP=0.221894           3
+2     USD=-0.063285  EUR=0.105361  GBP=0.221894   1
+det.  USD=-0.063285  EUR=0.105361  GBP=0.221894   RELAXED!
+
+has_negative_cycle = True  ->  an arbitrage loop exists.
+
+Recovered arbitrage loop: USD -> EUR -> GBP -> USD
+  loop weight sum = -0.063285  (< 0, as expected)
+  rate product    = exp(-weight) = 1.06533  (> 1, profit!)
+
+Concrete trade, starting with $1000 USD:
+  start: 1000.00 USD
+  USD -> EUR @ 0.9: 900.00 EUR
+  EUR -> GBP @ 0.89: 801.00 GBP
+  GBP -> USD @ 1.33: 1065.33 USD
+
+  ended with 1065.33 USD  ->  profit = +65.33 USD (+6.53%) per $1000.
+
+[check] rate product = 1.06533 > 1  <=>  negative cycle:  OK
+[check] $1000 -> 1065.33 (factor 1.06533 == 1.06533):  OK
+
+========================================================================
+  SECTION D: Bellman-Ford vs Dijkstra (non-negative graph) - GOLD CHECK
+========================================================================
+Same family of problem (single-source shortest paths), two engines. On a
+NON-NEGATIVE graph both must give identical distances - this is the gold
+check. Graph: V=5, E=7, source S, all w >= 0.
+
+Edges:
+  S -> A  w = 10
+  S -> B  w = 3
+  B -> A  w = 4
+  A -> C  w = 2
+  B -> C  w = 9
+  C -> D  w = 5
+  B -> D  w = 12
+
+  to    Bellman-Ford    Dijkstra        match   
+  --------------------------------------------
+  S     0               0               OK
+  A     7               7.0             OK
+  B     3               3.0             OK
+  C     9               9.0             OK
+  D     14              14.0            OK
+
+Complexity comparison:
+
+  | algorithm     | time          | negative weights | negative cycle |
+  |---------------|---------------|------------------|----------------|
+  | Dijkstra      | O(E log V)    | NO (silently wrong)| NO          |
+  | Bellman-Ford  | O(V*E)        | YES              | DETECTS       |
+
+Rule of thumb: if every edge is >= 0, reach for Dijkstra (faster). The
+moment a single weight can be negative, you NEED Bellman-Ford - Dijkstra
+settles a vertex the first time it is popped and never revisits, so a
+later negative edge that would have lowered it is missed.
+
+GOLD CHECK: OK - Bellman-Ford == Dijkstra == [0, 7, 3, 9, 14]
+(bellman_ford.html re-runs both in JS and re-checks these values.)
+
+========================================================================
+  SECTION E: SPFA - the queue optimization (fewer edge-checks)
+========================================================================
+Bellman-Ford re-sweeps ALL E edges every pass, even vertices whose dist
+hasn't changed (so their outgoing edges can't possibly relax). SPFA keeps
+a queue of vertices whose dist JUST dropped and only relaxes their
+outgoing edges. Same result, same worst case O(V*E), far less work in
+practice.
+
+Run both on the Section A main graph (V=5, E=8):
+
+  | engine       | edge-checks | successful relaxes | final dist          |
+  |--------------|-------------|--------------------|---------------------|
+  | Bellman-Ford | 40          | (not tracked)      | [0, 6, 4, 1, 2] |
+  | SPFA         | 11          | 7                  | [0, 6, 4, 1, 2] |
+
+SPFA examined 11 edges to reach the SAME answer Bellman-Ford gets
+after sweeping all 8 edges 5 times (40 checks) - a 3.6x reduction.
+
+Why SPFA is still O(V*E) worst case: a pathological graph can push a
+vertex onto the queue O(V) times, each time triggering E relaxations.
+But on typical and random graphs it is close to O(E).
+
+[check] SPFA dist == Bellman-Ford dist == [0, 6, 4, 1, 2]:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

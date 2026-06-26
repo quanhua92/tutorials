@@ -1,0 +1,149 @@
+kmp_string.py - reference impl. All numbers below feed KMP_STRING.md.
+KMP = skip redundant comparisons using a precomputed LPS table.
+
+========================================================================
+  SECTION A: naive matching  (the O(n*m) worst case KMP kills)
+========================================================================
+text    = 'AAAAAAAAAAAAAAA'   (n = 15)
+pattern = 'AAAAAAB'   (m = 7)
+
+Naive tries the pattern at every position i. At each i it compares
+A's that match, then fails on the final B, then shifts by ONE and
+re-compares all those same A's. That redundant re-checking is O(n*m).
+
+matches found : []
+comparisons   : 63
+upper bound   : (n-m+1)*m = (15-7+1)*7 = 63
+[check] comps <= (n-m+1)*m? True
+
+Each of the 9 starting positions does up to 7 comparisons (the A's
+match, then B fails) before shifting by one. KMP will turn these 9*7
+comparisons into a single linear pass -- see Section C.
+
+========================================================================
+  SECTION B: LPS (failure function) for 'ABABCABAB'  (the CLRS example)
+========================================================================
+pattern = 'ABABCABAB'  (length 9)
+
+For each position j we ask: what is the longest proper prefix of
+pattern[0..j] that is also a suffix of pattern[0..j]?
+
+| j | char | P[0..j]      | longest border | failure[j] |
+|---|------|--------------|----------------|------------|
+| 0 | A    | A            |                | 0          |
+| 1 | B    | AB           |                | 0          |
+| 2 | A    | ABA          | A              | 1          |
+| 3 | B    | ABAB         | AB             | 2          |
+| 4 | C    | ABABC        |                | 0          |
+| 5 | A    | ABABCA       | A              | 1          |
+| 6 | B    | ABABCAB      | AB             | 2          |
+| 7 | A    | ABABCABA     | ABA            | 3          |
+| 8 | B    | ABABCABAB    | ABAB           | 4          |
+
+LPS table = [0, 0, 1, 2, 0, 1, 2, 3, 4]
+[check] LPS == [0,0,1,2,0,1,2,3,4] (CLRS)? True
+
+Reading the table: at j=8 (last B), failure[8]=4 means the 9-char
+prefix 'ABABCABAB' has a 4-char border 'ABAB' (a proper prefix that is
+also a suffix). On a mismatch after matching up to j=8, KMP jumps j to
+failure[7]=3 -- it already KNOWS 'ABA' lines up, so it skips them.
+
+========================================================================
+  SECTION C: KMP matching  (use LPS to skip redundant comparisons)
+========================================================================
+text    = 'ABABDABACDABABCABAB'   (n = 19)
+pattern = 'ABABCABAB'   (m = 9)
+
+LPS table        : [0, 0, 1, 2, 0, 1, 2, 3, 4]
+KMP matches      : [10]
+KMP comparisons  : 23
+naive comparisons: 29
+savings          : naive 29 -> KMP 23 (21% fewer)
+[check] KMP comps <= 2*n = 38? True
+[check] KMP matches == naive matches? True
+
+Match positions visualised (pattern occurs at index 10):
+  text   : ABABDABACDABABCABAB
+  pattern:           ABABCABAB
+
+WHY KMP wins: when the matcher fails at a position, instead of
+restarting from scratch it consults the LPS table to reuse the border
+it already matched. The text pointer i never goes backwards, so the
+whole scan is O(n).
+
+========================================================================
+  SECTION D: naive O(n*m) vs KMP O(n+m)  (comparison-count head-to-head)
+========================================================================
+Run both matchers on inputs of growing size and count char comparisons.
+
+| text        | pattern     |  n |  m | naive comps | KMP comps | ratio naive/KMP |
+|-------------|-------------|----|----|-------------|-----------|------------------|
+| AAAAAAAAAA  | AAAAB       | 10 | 5  | 30          | 16        | 1.9              |
+| AAAAAAAAAA... | AAAAAAB     | 20 | 7  | 98          | 34        | 2.9              |
+| AAAAAAAAAA... | AAAAAAAAB   | 40 | 9  | 288         | 72        | 4.0              |
+| AAAAAAAAAA... | AAAAAAAAAAB | 80 | 11 | 770         | 150       | 5.1              |
+| ABABDABACD... | ABABCABAB   | 19 | 9  | 29          | 23        | 1.3              |
+| AAAAAABAAA... | AAAAAAB     | 21 | 7  | 63          | 21        | 3.0              |
+
+Read it as: naive comparisons grow like n*m (quadratic in the A-runs);
+KMP comparisons stay near 2*n (linear). On the 80-char all-A text with
+an 11-char A...B pattern, naive does ~700 comparisons while KMP does
+~160 -- a 4-5x saving that widens as the input grows.
+
+Big-O summary:
+  naive preprocessing: O(1)   search: O(n*m) worst case
+  KMP   preprocessing: O(m)   search: O(n)   worst case  ->  O(n+m) total
+
+========================================================================
+  SECTION E: applications  (grep, bioinformatics / DNA motif search)
+========================================================================
+--- (1) grep-style literal search ---
+text    = 'the cat sat on the mat that the cat liked'
+pattern = 'cat'
+KMP finds 2 occurrence(s) at index(es) [4, 32]
+
+--- (2) bioinformatics: find a DNA motif (overlapping matches) ---
+genome = 'GATATATGCATATACTT'
+motif  = 'ATAT'
+KMP finds motif at index(es) [1, 3, 9]  (3 sites, incl. overlaps)
+naive finds motif at index(es) [1, 3, 9]
+[check] KMP == naive (incl. overlaps)? True
+
+Note overlapping sites: 'ATAT' occurs at indices 1, 3, 9 (the 'ATAT'
+starting at 1 overlaps the one at 3). KMP's failure-function fallback
+is exactly what lets it catch overlaps without re-scanning.
+
+Why KMP (not regex/naive) in these domains:
+  - grep -F on a STREAM: text pointer never goes back, so KMP can
+    search data too large to hold in memory (pipes, log tails).
+  - DNA motif scanners search gigabase genomes for exact motifs; the
+    O(n+m) guarantee (vs O(n*m)) is the difference between minutes and
+    hours. Aho-Corasick generalizes KMP to many patterns at once.
+  - intrusion detection (Snort signatures) precomputes LPS-style tables
+    for thousands of literal attack signatures and streams packets.
+
+========================================================================
+  GOLD CHECK: KMP finds ALL occurrences a naive search finds (incl. overlaps)
+========================================================================
+text                   pattern     naive          KMP            match?
+------------------------------------------------------------------------
+ABABDABACDABABCABAB    ABABCABAB   [10]           [10]           OK
+AAAAAABAAAAAABAAA...   AAAAAAB     [0, 7, 14]     [0, 7, 14]     OK
+ABABABAB               ABAB        [0, 2, 4]      [0, 2, 4]      OK
+GATATATGCATATACTT      ATAT        [1, 3, 9]      [1, 3, 9]      OK
+AAAAAAAAAA             AAAA        [0, 1, 2, 3, 4, 5, 6] [0, 1, 2, 3, 4, 5, 6] OK
+XYZXYZXYZ              XYZXYZ      [0, 3]         [0, 3]         OK
+HELLO WORLD            XYZ         []             []             OK
+ABCDEFG                ABCDEFG     [0]            [0]            OK
+AAAA                   A           [0, 1, 2, 3]   [0, 1, 2, 3]   OK
+                       AB          []             []             OK
+AB                                 [0, 1, 2]      [0, 1, 2]      OK
+
+GOLD (pinned for kmp_string.html):
+  LPS('ABABCABAB')         = [0, 0, 1, 2, 0, 1, 2, 3, 4]
+  KMP('ABABDABACDABABCABAB','ABABCABAB') = [10], comps = 23
+[check] KMP == naive on all 11 cases? OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

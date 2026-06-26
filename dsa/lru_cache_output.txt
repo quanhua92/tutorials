@@ -1,0 +1,268 @@
+lru_cache.py - reference impl. All numbers below feed LRU_CACHE.md.
+python stdlib only (functools, random, collections). Deterministic.
+
+
+========================================================================
+  SECTION A: the data structure - HashMap + Doubly Linked List
+========================================================================
+An LRU cache is TWO structures pointing at each other:
+
+  (1) HashMap  map: { key -> node }       the O(1) lookup half
+  (2) DLL      head <-> MRU ... LRU <-> tail   the O(1) recency half
+
+The list uses TWO SENTINELS (dummy head + dummy tail). Because every
+real node is bracketed by non-None neighbors, the unlink/relink code
+has NO None-checks - just 4 fixed pointer writes. That is the trick
+that makes move-to-head O(1) instead of a special-cased mess.
+
+Layout (head = MRU side, tail = LRU side):
+
+   head <-> [3] <-> [2] <-> [1] <-> tail
+     ^                            ^
+     new/touched nodes            evictions cut HERE
+     go in AFTER head             (the least recently used node)
+
+Built cache(cap=3) via put(1),put(2),put(3):  state (MRU->LRU) = [3, 2, 1]
+  len(map) = 3 ;  head.next.key = 3 (MRU) ;  tail.prev.key = 1 (LRU)
+
+Cross-referencing: map[2] points at the middle node, and that node's
+.prev.key / .next.key let us walk the list in O(1) per step:
+
+  map[2] -> node(key=2);  node.prev.key=3  node.next.key=1
+
+WHY BOTH halves: HashMap alone cannot answer 'who is least recent?'
+(a dict has no order of use). DLL alone cannot answer 'is key k
+present?' in O(1) (you'd scan the list). Each half supplies the O(1)
+operation the other lacks. The node carries its own key so an
+eviction can delete the matching map entry in O(1) too.
+
+KEY FORMULAS:
+  get(k) : O(1)  =  map.get  +  (on hit) _move_to_head (6 pointer writes)
+  put(k,v): O(1) =  map[k]=n + _add_head + (if over cap) _pop_tail + del map
+  space  : O(C)  (C nodes + C dict entries + 2 sentinels)
+[check] state == [3,2,1], head.next==3 (MRU), tail.prev==1 (LRU)? OK
+[check] map[2].prev==3, map[2].next==1 (DLL neighbors wired)? OK
+
+========================================================================
+  SECTION B: get(key) - HashMap lookup + move-to-head on hit
+========================================================================
+Start: state (MRU->LRU) = [3, 2, 1]   (cap=3)
+
+get(k) does TWO things, both O(1):
+
+  STEP 1 - LOOKUP:  node = map.get(k)
+     O(1) hash-table probe. node is None  <=>  miss.
+
+  STEP 2 (hit only) - REFRESH RECENCY:  _move_to_head(node)
+     _remove(node)       : node.prev.next = node.next ;
+                            node.next.prev = node.prev   (2 writes)
+     _add_head(node)     : splice node in right after head (4 writes)
+     => 6 pointer writes total. No scan, no search. O(1).
+
+CASE 1 - HIT:  get(1)
+  before: 3 <-> 2 <-> 1   (1 is the LRU/tail node)
+  map.get(1) -> node(value=1) ; _move_to_head lifts it to MRU
+  after : 1 <-> 3 <-> 2   (1 jumped 3->2->1 to the front)
+  [check] get(1) returned 1 and state is now [1,3,2]? OK
+
+CASE 2 - MISS: get(99)
+  before: 1 <-> 3 <-> 2
+  map.get(99) -> None  =>  return -1 immediately; state UNCHANGED
+  after : 1 <-> 3 <-> 2   (a miss never mutates recency)
+  [check] get(99) returned -1 and state unchanged [1,3,2]? OK
+
+THE SUBTLE POINT: a hit is not free of side effects - it REORDERS the
+list. That reordering IS the 'recency' bookkeeping, done eagerly so the
+LRU victim is always sitting at the tail ready to evict in O(1). A miss
+does nothing: you cannot 'use' something that is not there.
+
+[check] after get(1) then get(99): state == [1,3,2]? OK
+
+========================================================================
+  SECTION C: put(key,value) - add at head; evict tail if over cap
+========================================================================
+Empty cache, cap=3. Walk the three cases of put().
+
+CASE 1 - fresh key, room available:  put(1, 'a')
+  map has no 1 -> create node, map[1]=node, _add_head. size now 1
+  state: 1   evicted: None
+  [check] no eviction, state [1]? OK
+
+Filled to capacity: put(2),put(3) -> state 3 <-> 2 <-> 1 (cap=3, size=3)
+
+CASE 2 - key present (update):  put(2, 'B')
+  map has 2 -> update value 'b'->'B', _move_to_head. size stays 3
+  state: 2 <-> 3 <-> 1   evicted: None
+  [check] value updated to 'B', 2 moved to MRU, no eviction? OK
+
+CASE 3 - fresh key, OVER capacity:  put(4, 'd')
+  before: 2 <-> 3 <-> 1   (LRU/tail = 1)
+  map has no 4 -> _add_head -> size would be 4 > cap=3
+  -> _pop_tail() cuts node 1 (the LRU); del map[1].
+  state: 4 <-> 2 <-> 3   evicted: 1
+  [check] evicted the LRU (1), state [4,2,3], 1 gone from map? OK
+
+THE EVICTION RULE IN ONE LINE: when an INSERT would exceed capacity,
+remove the node immediately before the tail sentinel (the LRU). Because
+hits and updates keep moving touched nodes to the head, the tail always
+holds the single coldest item - so picking the victim is O(1), not a
+scan. That is the whole reason the DLL exists.
+
+[check] eviction log == [1], size == cap == 3? OK
+
+========================================================================
+  SECTION D: access-sequence trace  [1,2,3,4,1,2,5,1]  cap=3
+========================================================================
+Apply the access stream [1, 2, 3, 4, 1, 2, 5, 1] to an LRU cache of capacity 3.
+Access semantics: a HIT refreshes recency (move to head); a MISS inserts
+at head and, if over capacity, evicts the tail. State shown MRU -> LRU.
+
+| step | access | result | evicted | cache state (MRU->LRU) |
+|------|--------|--------|---------|------------------------|
+| 1    | 1      | miss   | -       | [1] |
+| 2    | 2      | miss   | -       | [2, 1] |
+| 3    | 3      | miss   | -       | [3, 2, 1] |
+| 4    | 4      | miss   | 1       | [4, 3, 2] |
+| 5    | 1      | miss   | 2       | [1, 4, 3] |
+| 6    | 2      | miss   | 3       | [2, 1, 4] |
+| 7    | 5      | miss   | 4       | [5, 2, 1] |
+| 8    | 1      | HIT    | -       | [1, 5, 2] |
+
+Summary over 8 accesses:
+  hits      = 1   (step(s) [8])
+  misses    = 7
+  hit rate  = 1/8 = 0.1250  (12.5%)
+  evictions = [1, 2, 3, 4]   (order: first-evicted -> last-evicted)
+  final cache (MRU->LRU) = [1, 5, 2]
+
+Read the trace: the cache thrashes. After it fills at step 3, EVERY
+subsequent distinct key evicts the LRU. Only step 8 is a hit - by then
+key 1 (re-inserted at step 5) is still resident, so it refreshes to MRU.
+This cyclic-ish stream is LRU's known weak spot: when the working set
+(here 4 distinct keys) just exceeds capacity (3), LRU evicts the very
+key the stream is about to revisit. (See Section E: no policy beats
+random much here; Belady/OPT would, but only by knowing the future.)
+
+[check] hits=1, misses=7, evictions=[1,2,3,4], final=[1,5,2]? OK
+[check] per-step states match the pinned 8-state sequence? OK
+
+========================================================================
+  SECTION E: LRU vs FIFO vs LFU vs Random (and OPT) on three workloads
+========================================================================
+Same access() contract for every policy: hit -> refresh/record; miss ->
+insert + evict per the policy's rule. Workloads:
+
+  W1 CYCLIC   : the gold stream [1,2,3,4,1,2,5,1], cap=3. Thrashes LRU.
+  W2 UNIFORM  : 300 uniform-random draws from keys 1..8, cap=4. No locality.
+  W3 LOCALITY : 300 draws, 70% from hot set {1,2,3}, 30% from 1..8, cap=4.
+
+------------------------------------------------------------
+
+W1 CYCLIC     (n=8, cap=3):
+| policy | hits | hit rate | evictions |
+|--------|------|----------|-----------|
+| LRU    | 1    | 0.1250   | 4         |  <-- this bundle
+| FIFO   | 1    | 0.1250   | 4         |
+| LFU    | 1    | 0.1250   | 4         |
+| Random | 1    | 0.1250   | 4         |
+| OPT    | 3    | 0.3750   | 2         |  (unimplementable; the ceiling)
+  LRU hits 1 (12.5%); OPT hits 3 (37.5%); LRU is 25.0 pp below the optimum.
+  All four real policies tie on this stream: the only hit (access 1 at
+  step 8) lands for everyone, and every miss evicts once. There is no
+  locality to exploit - the working set (4 keys) just exceeds cap (3).
+
+W2 UNIFORM    (n=300, cap=4):
+| policy | hits | hit rate | evictions |
+|--------|------|----------|-----------|
+| LRU    | 142  | 0.4733   | 154       |  <-- this bundle
+| FIFO   | 146  | 0.4867   | 150       |
+| LFU    | 154  | 0.5133   | 142       |
+| Random | 145  | 0.4833   | 151       |
+| OPT    | 206  | 0.6867   | 90        |  (unimplementable; the ceiling)
+  LRU hits 142 (47.3%); OPT hits 206 (68.7%); LRU is 21.3 pp below the optimum.
+  With NO locality, recency/frequency carry ~no signal: LRU, FIFO, LFU
+  and Random all cluster near cap/universe = 4/8 = 50%. Random is
+  within a hair of LRU. OPT still edges them out because even uniform
+  streams have accidental near-future repeats it can see.
+
+W3 LOCALITY   (n=300, cap=4):
+| policy | hits | hit rate | evictions |
+|--------|------|----------|-----------|
+| LRU    | 226  | 0.7533   | 70        |  <-- this bundle
+| FIFO   | 216  | 0.7200   | 80        |
+| LFU    | 251  | 0.8367   | 45        |
+| Random | 218  | 0.7267   | 78        |
+| OPT    | 255  | 0.8500   | 41        |  (unimplementable; the ceiling)
+  LRU hits 226 (75.3%); OPT hits 255 (85.0%); LRU is 9.7 pp below the optimum.
+  Strong locality (a 3-key hot set that fits in cap=4) lets recency/
+  frequency identify the hot keys: LRU and LFU pull well ahead of FIFO
+  and Random. FIFO loses because it ignores re-access recency; Random
+  sometimes evicts a hot key by bad luck. OPT remains the ceiling.
+
+RULES OF THUMB:
+  - LRU  exploits TEMPORAL locality. Best general-purpose default.
+  - FIFO cheapest, but blind to re-access; ties LRU only on pure scans.
+  - LFU  best on a STABLE hot set; worst when the working set SHIFTS
+         (frequency counts go stale - LRU's recency adapts, LFU's doesn't).
+  - Random: ~free, robust, within a few % of LRU when locality is weak.
+  - OPT   the theoretical ceiling; needs the future, so only a benchmark.
+
+[check] W1 LRU row == ('LRU',1,4)? OK
+[check] W3 LRU(226) & LFU(251) > Random(218); LRU > FIFO(216)? OK
+
+========================================================================
+  SECTION F: LRU in the wild - functools.lru_cache and Redis
+========================================================================
+The HashMap+DLL LRU is not just a textbook exercise; it ships in the
+standard library and in the most popular cache servers.
+
+(1) Python functools.lru_cache - per-process MEMOIZATION.
+    Decorate a function and calls are cached; under the hood it is the
+    same dict + doubly-linked-list LRU (the CPython C implementation
+    keeps an ordered structure evicted least-recently-used).
+
+    calls: (2,3,4,2,5,2) with maxsize=3
+    functools.lru_cache cache_info(): hits=2 misses=4 maxsize=3 cursize=3
+    (the underlying cache evicts least-recently-used, exactly the
+     structure in Sections A-C.)
+
+    [check] hits=2, misses=4, cursize=3? OK
+
+(2) Redis  maxmemory-policy=allkeys-lru.
+    When Redis hits maxmemory, with this policy it evicts the
+    approximately-LRU key among ALL keys. (Redis uses SAMPLED LRU for
+    speed: it picks the LRU among a random sample of ~5 keys, not a
+    global DLL - a speed/accuracy trade-off. The IDEA is identical to
+    this bundle: evict the key used longest ago.)
+
+    CONFIG SET maxmemory 256mb
+    CONFIG SET maxmemory-policy allkeys-lru
+
+(3) Why approximations? A TRUE global LRU DLL update on every access
+    costs shared-state contention in a multi-threaded server. Production
+    systems (Redis sampled-LRU, Memcached, CPU pseudo-LRU) trade a small
+    hit-rate loss for large throughput/scalability gains. The HashMap+DLL
+    here is the single-threaded gold reference they approximate.
+
+========================================================================
+  GOLD VALUES (pinned for lru_cache.html)
+========================================================================
+Section D trace: access [1, 2, 3, 4, 1, 2, 5, 1], cap=3
+  per-step states (MRU->LRU): [[1], [2, 1], [3, 2, 1], [4, 3, 2], [1, 4, 3], [2, 1, 4], [5, 2, 1], [1, 5, 2]]
+  final cache               : [1, 5, 2]
+  eviction order            : [1, 2, 3, 4]
+  hits/misses               : 1/7
+  hit rate                  : 1/8 = 0.1250
+
+GOLD scalars for .html:
+  evictions      = [1, 2, 3, 4]        (== [1,2,3,4])
+  final MRU->LRU = [1, 5, 2]        (== [1,5,2])
+  hits           = 1               (== 1, at step 8)
+  misses         = 7              (== 7)
+  step states    = [[1], [2, 1], [3, 2, 1], [4, 3, 2], [1, 4, 3], [2, 1, 4], [5, 2, 1], [1, 5, 2]]
+
+[check] GOLD reproduces from LRUCache? OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

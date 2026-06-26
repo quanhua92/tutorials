@@ -1,0 +1,165 @@
+deflate.py - reference impl. All numbers below feed DEFLATE.md.
+python stdlib only (heapq, zlib). Deterministic.
+
+
+========================================================================
+  SECTION A: the two-pass pipeline  (LZ77 -> Huffman)
+========================================================================
+DEFLATE (Deutsch 1996, RFC 1951) squeezes data in two passes:
+
+  raw bytes
+     |  Pass 1: LZ77  -- kills REPETITION
+     v            (replace repeated spans with (distance,length))
+  token stream  { literals } + { back-references }
+     |  Pass 2: Huffman -- kills FREQUENCY skew
+     v            (short codes for common symbols, long for rare)
+  bit-string   (variable-length prefix-free codes + extra bits)
+
+The order is fixed: Huffman codes the SYMBOLS LZ77 emits, so LZ77
+must run first. Then a wrapper adds bookends:
+
+| format | body            | header/trailer          | RFC  |
+|--------|-----------------|-------------------------|------|
+| DEFLATE| DEFLATE stream  | (none)                  | 1951 |
+| zlib   | DEFLATE stream  | 2-byte zlib hdr + adler | 1950 |
+| gzip   | DEFLATE stream  | gzip hdr + crc32/size   | 1952 |
+
+=> gzip body == zlib body == DEFLATE stream. Only bookends differ.
+
+Lineage:
+  LZ77    Ziv-Lempel 1977  - the back-reference idea.
+  Huffman Huffman 1952    - optimal prefix-free codes.
+  DEFLATE Deutsch 1996    - LZ77 + Huffman, frozen as RFC 1951.
+
+========================================================================
+  SECTION B: pass 1 - LZ77 encode/decode (back-references)
+========================================================================
+data = 'TOBEORNOTTOBEORTOBEORNOT'   (24 bytes)
+
+Tokens (greedy longest-match; tie -> smallest distance):
+  [ 0] lit(T= 84)
+  [ 1] lit(O= 79)
+  [ 2] lit(B= 66)
+  [ 3] lit(E= 69)
+  [ 4] lit(O= 79)
+  [ 5] lit(R= 82)
+  [ 6] lit(N= 78)
+  [ 7] lit(O= 79)
+  [ 8] lit(T= 84)
+  [ 9] match(len=  6, dist=  9)
+  [10] match(len=  9, dist= 15)
+
+literals: 9   back-refs: 2   bytes covered by back-refs: 15 / 24
+[check] LZ77 roundtrip == original?  True
+
+Reading the tokens: the first 'TOBEORNOT' (9 bytes) is all literals.
+From then on, every recurrence is a back-reference pointing into the
+already-emitted output. 'TOB' at position 9 says 'go back 9, copy 3'.
+DEFLATE only emits a match when length >= 3 (shorter isn't worth it).
+
+Overlap demo (run-length via overlapping back-reference):
+  'aaaaaaaa' -> [('lit', 97), ('match', 7, 1)]
+  the match (dist=1,len=7) copies 1 byte ago, 7 times -> the output
+  grows AS it copies, so 'a' multiplies into 'aaaaaaa'. This is how
+  LZ77 expresses runs far longer than the window-less literal would.
+
+========================================================================
+  SECTION C: pass 2 - Huffman coding (entropy) + RFC code tables
+========================================================================
+Symbol frequencies (total 28): {'E': 12, 'A': 8, 'T': 5, 'X': 2, 'Z': 1}
+
+| symbol | freq | code    | bits | freq*bits |
+|--------|------|---------|------|-----------|
+| E      | 12   | 0       | 1    | 12        |
+| A      | 8    | 10      | 2    | 16        |
+| T      | 5    | 111     | 3    | 15        |
+| X      | 2    | 1101    | 4    | 8         |
+| Z      | 1    | 1100    | 4    | 4         |
+
+total Huffman bits = 55   avg bits/symbol = 1.964
+Shannon entropy lower bound = 53.977 bits (Huffman is within 0.037 bits/symbol of optimal)
+[check] codes are prefix-free?  True
+
+RFC 1951 code tables (verified against the RFC):
+  length codes 257..285: 29 entries, base 3..258, extra 0..5 bits
+  distance codes 0..29:  30 entries, base 1..24577, extra 0..13 bits
+
+  sample length_symbol() mappings:
+    length   3 -> symbol 257, 0 extra bit(s), extra_val=0
+    length   4 -> symbol 258, 0 extra bit(s), extra_val=0
+    length  10 -> symbol 264, 0 extra bit(s), extra_val=0
+    length  11 -> symbol 265, 1 extra bit(s), extra_val=0
+    length  12 -> symbol 265, 1 extra bit(s), extra_val=1
+    length 258 -> symbol 285, 0 extra bit(s), extra_val=0
+  sample distance_symbol() mappings:
+    dist       1 -> symbol 0, 0 extra bit(s), extra_val=0
+    dist       2 -> symbol 1, 0 extra bit(s), extra_val=0
+    dist       5 -> symbol 4, 1 extra bit(s), extra_val=0
+    dist       6 -> symbol 4, 1 extra bit(s), extra_val=1
+    dist   32768 -> symbol 29, 13 extra bit(s), extra_val=8191
+
+GOLD: Huffman code for 'E' (most frequent) = '0'  (pinned for deflate.html)
+
+========================================================================
+  SECTION D: full DEFLATE encode/decode + compression ratio
+========================================================================
+input: 360 bytes ('the rain in spain falls mainly on the pl'... x4)
+
+Pass 1 LZ77 : literals=27, back-refs=8
+             tokens total = 35
+Pass 2 Huff : lit/len alphabet used = 22 symbols, dist alphabet used = 4 symbols
+
+compressed bit-string length = 191 bits = 24 bytes (+2 pad bits -> next byte)
+raw size       = 360 bytes
+DEFLATE size   = 24 bytes
+ratio          = 0.067  (93.3% smaller)
+real zlib -9   = 51 bytes (reference; our pedagogical pack is in the same ballpark)
+
+[check] DEFLATE roundtrip == original (360 bytes)?  True
+[check] tiny roundtrip == original?  True
+
+First tokens -> their Huffman codes (lit/len + extra + dist + extra):
+  lit   't' -> 01010
+  lit   'h' -> 01011
+  lit   'e' -> 01100
+  lit   ' ' -> 110
+  lit   'r' -> 01101
+  lit   'a' -> 0000
+  lit   'i' -> 01110
+  lit   'n' -> 0001
+  lit   ' ' -> 110
+  match L=3 D=3: len[1110]+''  dist[100]+''
+  lit   's' -> 0010
+  lit   'p' -> 0011
+  ... (23 more tokens) then end-of-block(256)
+
+========================================================================
+  SECTION E: applications + GOLD pin for deflate.html
+========================================================================
+Where DEFLATE / its halves live in the wild:
+
+| use                       | which half          | note                |
+|---------------------------|---------------------|---------------------|
+| .gz / gzip(1)             | DEFLATE (+ gzip hdr)| RFC 1952            |
+| PNG images                | DEFLATE (zlib hdr)  | on filtered scanline|
+| HTTP gzip content-encoding| DEFLATE (+ gzip hdr)| transparent to app  |
+| ZIP / jar / odt / xlsx    | DEFLATE (per-entry) | the 'deflate' method|
+| HTTP/2 HPACK (history)    | Huffman only        | static Huffman tbls |
+| git packfile (loose)      | zlib(DEFLATE)       | one blob per object |
+| kernel zswap / zram        | DEFLATE (or LZ4)    | in-RAM compression  |
+
+The split tells the story: LZ77 alone wins on repetition, Huffman
+alone wins on skew; DEFLATE stacks them so BOTH kinds of waste die.
+
+GOLD values (pinned for deflate.html, recomputed live in JS):
+  input               = 'TOBEORNOTTOBEORTOBEORNOT'
+  LZ77 token count    = 11
+  LZ77 back-ref count = 2
+  Huffman bits        = 43
+  DEFLATE bytes       = 6
+[check] gold reproduces from deflate_encode():  OK
+[check] DEFLATE roundtrip exact?  True
+
+========================================================================
+  DONE - all sections printed
+========================================================================

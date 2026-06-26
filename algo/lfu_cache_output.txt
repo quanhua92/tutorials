@@ -1,0 +1,259 @@
+lfu_cache.py - reference impl. All numbers feed LFU_CACHE.md.
+stdlib only; deterministic; no torch/numpy.
+
+==========================================================================
+  SECTION A: how O(1) LFU moves keys between frequency buckets
+==========================================================================
+capacity = 2, sequence = A B A C A C
+
+Read each row as: on access, the key hops from bucket f to bucket f+1.
+When a bucket empties, min_freq chases the next non-empty bucket up.
+
+
+  LFU, capacity = 2
+  sequence: A B A C A C
+
+   #   op  result   evict  state after             freq buckets                      
+  -----------------------------------------------------------------------------------
+   1    A  MISS     -      {A:1}                   1:['A']                           
+   2    B  MISS     -      {A:1,B:1}               1:['A', 'B']                      
+   3    A  HIT      -      {A:2,B:1}               1:['B'] 2:['A']                   
+   4    C  MISS     B      {A:2,C:1}               1:['C'] 2:['A']                   
+   5    A  HIT      -      {A:3,C:1}               1:['C'] 3:['A']                   
+   6    C  HIT      -      {A:3,C:2}               2:['C'] 3:['A']                   
+
+  hits=3  misses=3  hit_rate=3/6 = 50.00%
+
+==========================================================================
+  SECTION B: cache pollution - the same workload, LFU vs LRU
+==========================================================================
+Workload: X is read 5x in a burst, then NEVER again. After that, the
+active working set is {A, B, C}, cycled forever. Cache capacity = 3,
+so the working set exactly fills the cache - IF X would leave.
+
+sequence: X X X X X A B C A B C A B C
+
+LFU: X's frequency-5 badge makes it permanent. A,B,C have to share the
+      remaining 2 slots, so they thrash at frequency 1 forever.
+
+
+  LFU, capacity = 3
+  sequence: X X X X X A B C A B C A B C
+
+   #   op  result   evict  state after             freq buckets                      
+  -----------------------------------------------------------------------------------
+   1    X  MISS     -      {X:1}                   1:['X']                           
+   2    X  HIT      -      {X:2}                   2:['X']                           
+   3    X  HIT      -      {X:3}                   3:['X']                           
+   4    X  HIT      -      {X:4}                   4:['X']                           
+   5    X  HIT      -      {X:5}                   5:['X']                           
+   6    A  MISS     -      {X:5,A:1}               1:['A'] 5:['X']                   
+   7    B  MISS     -      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+   8    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+   9    A  MISS     B      {X:5,C:1,A:1}           1:['C', 'A'] 5:['X']              
+  10    B  MISS     C      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+  11    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+  12    A  MISS     B      {X:5,C:1,A:1}           1:['C', 'A'] 5:['X']              
+  13    B  MISS     C      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+  14    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+
+  hits=4  misses=10  hit_rate=4/14 = 28.57%
+
+LRU: X was touched longest ago, so LRU evicts X first and hands the
+      whole cache to {A,B,C}. Self-heals; captures the working set.
+
+
+  LRU, capacity = 3
+  sequence: X X X X X A B C A B C A B C
+
+   #   op  result   evict  state after           
+  -----------------------------------------------
+   1    X  MISS     -      [X]                   
+   2    X  HIT      -      [X]                   
+   3    X  HIT      -      [X]                   
+   4    X  HIT      -      [X]                   
+   5    X  HIT      -      [X]                   
+   6    A  MISS     -      [X,A]                 
+   7    B  MISS     -      [X,A,B]               
+   8    C  MISS     X      [A,B,C]               
+   9    A  HIT      -      [B,C,A]               
+  10    B  HIT      -      [C,A,B]               
+  11    C  HIT      -      [A,B,C]               
+  12    A  HIT      -      [B,C,A]               
+  13    B  HIT      -      [C,A,B]               
+  14    C  HIT      -      [A,B,C]               
+
+  hits=10  misses=4  hit_rate=10/14 = 71.43%
+
+  THE POLLUTION, IN ONE LINE:
+    LFU final cache = ['B', 'C', 'X']   (X STILL HERE, A/B/C thrashing)   hit_rate = 28.57%
+    LRU final cache = ['A', 'B', 'C']   (the live working set)            hit_rate = 71.43%
+    LRU beats LFU by 43% here, purely because
+    LFU cannot forget a stale popular key. This is THE LFU bug.
+
+==========================================================================
+  SECTION C: when LFU wins - a stationary hot set
+==========================================================================
+Now the popular set NEVER changes: {H1, H2} are hot, {C1..C4} are cold
+one-shot scans. LFU pins the hot set; LRU lets the scan flush it.
+
+capacity = 2, sequence = H1 H2 H1 H2 H1 H2 C1 C2 C3 C4 H1 H2 H1 H2
+
+
+  LFU, capacity = 2
+  sequence: H1 H2 H1 H2 H1 H2 C1 C2 C3 C4 H1 H2 H1 H2
+
+   #   op  result   evict  state after           
+  -----------------------------------------------
+   1   H1  MISS     -      {H1:1}                
+   2   H2  MISS     -      {H1:1,H2:1}           
+   3   H1  HIT      -      {H1:2,H2:1}           
+   4   H2  HIT      -      {H1:2,H2:2}           
+   5   H1  HIT      -      {H1:3,H2:2}           
+   6   H2  HIT      -      {H1:3,H2:3}           
+   7   C1  MISS     H1     {H2:3,C1:1}           
+   8   C2  MISS     C1     {H2:3,C2:1}           
+   9   C3  MISS     C2     {H2:3,C3:1}           
+  10   C4  MISS     C3     {H2:3,C4:1}           
+  11   H1  MISS     C4     {H2:3,H1:1}           
+  12   H2  HIT      -      {H2:4,H1:1}           
+  13   H1  HIT      -      {H2:4,H1:2}           
+  14   H2  HIT      -      {H2:5,H1:2}           
+
+  hits=7  misses=7  hit_rate=7/14 = 50.00%
+
+  LRU, capacity = 2
+  sequence: H1 H2 H1 H2 H1 H2 C1 C2 C3 C4 H1 H2 H1 H2
+
+   #   op  result   evict  state after           
+  -----------------------------------------------
+   1   H1  MISS     -      [H1]                  
+   2   H2  MISS     -      [H1,H2]               
+   3   H1  HIT      -      [H2,H1]               
+   4   H2  HIT      -      [H1,H2]               
+   5   H1  HIT      -      [H2,H1]               
+   6   H2  HIT      -      [H1,H2]               
+   7   C1  MISS     H1     [H2,C1]               
+   8   C2  MISS     H2     [C1,C2]               
+   9   C3  MISS     C1     [C2,C3]               
+  10   C4  MISS     C2     [C3,C4]               
+  11   H1  MISS     C3     [C4,H1]               
+  12   H2  MISS     C4     [H1,H2]               
+  13   H1  HIT      -      [H2,H1]               
+  14   H2  HIT      -      [H1,H2]               
+
+  hits=6  misses=8  hit_rate=6/14 = 42.86%
+
+  LFU hit_rate = 50.00%   (hot set pinned at high freq, scans rejected)
+  LRU hit_rate = 42.86%   (scan of 4 cold items evicts the hot set)
+
+  Takeaway: LFU is optimal for STATIONARY popularity. Its failure
+  (Section B) is entirely about NON-stationary workloads.
+
+==========================================================================
+  SECTION D: why buckets beat a heap - O(1) vs O(log n)
+==========================================================================
+Two ways to find 'the resident key with the smallest frequency':
+
+  (1) MIN-HEAP of (freq, key):
+      - get/put touches a key -> push (freq+1, key) onto the heap.
+      - eviction pops the heap top, SKIPPING stale entries.
+      - cost: O(log n) per op, plus unbounded stale-heap growth.
+
+  (2) BUCKET LISTS (the impl above): freq -> OrderedDict(key).
+      - touch: dict move from bucket f to f+1  -> O(1).
+      - evict : pop front of bucket[min_freq]  -> O(1).
+      - min_freq chases upward; it is ALWAYS correct because the only
+        way the min bucket empties is a touch, which bumps min_freq.
+
+  => both produce the SAME eviction choices (LFU + LRU tie-break),
+     but buckets are O(1) and avoid stale-entry bookkeeping.
+
+
+  bucket-LFU, capacity = 3
+  sequence: X X X X X A B C A B C A B C
+
+   #   op  result   evict  state after           
+  -----------------------------------------------
+   1    X  MISS     -      {X:1}                 
+   2    X  HIT      -      {X:2}                 
+   3    X  HIT      -      {X:3}                 
+   4    X  HIT      -      {X:4}                 
+   5    X  HIT      -      {X:5}                 
+   6    A  MISS     -      {X:5,A:1}             
+   7    B  MISS     -      {X:5,A:1,B:1}         
+   8    C  MISS     A      {X:5,B:1,C:1}         
+   9    A  MISS     B      {X:5,C:1,A:1}         
+  10    B  MISS     C      {X:5,A:1,B:1}         
+  11    C  MISS     A      {X:5,B:1,C:1}         
+  12    A  MISS     B      {X:5,C:1,A:1}         
+  13    B  MISS     C      {X:5,A:1,B:1}         
+  14    C  MISS     A      {X:5,B:1,C:1}         
+
+  hits=4  misses=10  hit_rate=4/14 = 28.57%
+
+  [check] eviction sequence matches the heap formulation exactly:
+          both evict the LRU key among those at min_freq. OK
+
+==========================================================================
+  SECTION E: GOLD values - pinned for lfu_cache.html
+==========================================================================
+
+  LFU (gold run), capacity = 3
+  sequence: X X X X X A B C A B C A B C
+
+   #   op  result   evict  state after             freq buckets                      
+  -----------------------------------------------------------------------------------
+   1    X  MISS     -      {X:1}                   1:['X']                           
+   2    X  HIT      -      {X:2}                   2:['X']                           
+   3    X  HIT      -      {X:3}                   3:['X']                           
+   4    X  HIT      -      {X:4}                   4:['X']                           
+   5    X  HIT      -      {X:5}                   5:['X']                           
+   6    A  MISS     -      {X:5,A:1}               1:['A'] 5:['X']                   
+   7    B  MISS     -      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+   8    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+   9    A  MISS     B      {X:5,C:1,A:1}           1:['C', 'A'] 5:['X']              
+  10    B  MISS     C      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+  11    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+  12    A  MISS     B      {X:5,C:1,A:1}           1:['C', 'A'] 5:['X']              
+  13    B  MISS     C      {X:5,A:1,B:1}           1:['A', 'B'] 5:['X']              
+  14    C  MISS     A      {X:5,B:1,C:1}           1:['B', 'C'] 5:['X']              
+
+  hits=4  misses=10  hit_rate=4/14 = 28.57%
+
+  LRU (gold run), capacity = 3
+  sequence: X X X X X A B C A B C A B C
+
+   #   op  result   evict  state after           
+  -----------------------------------------------
+   1    X  MISS     -      [X]                   
+   2    X  HIT      -      [X]                   
+   3    X  HIT      -      [X]                   
+   4    X  HIT      -      [X]                   
+   5    X  HIT      -      [X]                   
+   6    A  MISS     -      [X,A]                 
+   7    B  MISS     -      [X,A,B]               
+   8    C  MISS     X      [A,B,C]               
+   9    A  HIT      -      [B,C,A]               
+  10    B  HIT      -      [C,A,B]               
+  11    C  HIT      -      [A,B,C]               
+  12    A  HIT      -      [B,C,A]               
+  13    B  HIT      -      [C,A,B]               
+  14    C  HIT      -      [A,B,C]               
+
+  hits=10  misses=4  hit_rate=10/14 = 71.43%
+
+GOLD (pinned for the .html JS recompute):
+  LFU hits              = 4
+  LFU misses            = 10
+  LFU final keys        = ['B', 'C', 'X']
+  LFU final frequencies = {'X': 5, 'B': 1, 'C': 1}
+  LFU X frequency       = 5   (the pollution badge - X never accessed after step 5)
+  LRU hits              = 10
+  LRU final keys        = ['A', 'B', 'C']   (= the live working set)
+
+[check] all GOLD asserts passed:  OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

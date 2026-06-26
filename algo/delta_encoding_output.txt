@@ -1,0 +1,150 @@
+delta_encoding.py - reference impl. All numbers below feed DELTA_ENCODING.md.
+python stdlib only. Deterministic.
+
+
+========================================================================
+  SECTION A: the algorithm - store differences, not absolutes
+========================================================================
+absolute : [100, 102, 105, 106, 110]
+delta    : [100,  +2,  +3,  +1,  +4]   <- seed, then diffs
+
+The pipeline that makes it actually compress:
+
+   values  ->  delta  ->  zigzag  ->  varint  ->  bytes
+   [..]       small     unsigned   1..10B     compact
+
+  delta   : value[i] - value[i-1]   (can be negative)
+  zigzag  : signed -> unsigned so small |n| -> small unsigned
+            0->0  -1->1  1->2  -2->3  2->4  ...
+  varint  : 7 payload bits/byte, top bit = 'more bytes follow'
+            0..127 = 1B, 128..16383 = 2B, ... (LEB128)
+
+Lineage / where it lives:
+  git packfile  - OBJ_OFS_DELTA: store diff against a base object.
+  columnar OLAP - Parquet/Druid/InfluxDB delta-encode sorted columns.
+  video codecs  - P-frames encode motion-compensated residuals.
+  protobuf      - the varint half: every int field is LEB128.
+  LevelDB/RocksDB/Bitcoin - delta-encode sorted integer keys.
+
+========================================================================
+  SECTION B: encode/decode on the canonical example
+========================================================================
+values = [100, 102, 105, 106, 110]
+
+delta_encode -> [100, 2, 3, 1, 4]
+             (seed = first value, rest are consecutive diffs)
+
+step-by-step:
+  [0]  100  <- seed (absolute)
+  [1]  102  <- 102 - 100 = +2
+  [2]  105  <- 105 - 102 = +3
+  [3]  106  <- 106 - 105 = +1
+  [4]  110  <- 110 - 106 = +4
+
+delta_decode([100, 2, 3, 1, 4]) -> [100, 102, 105, 106, 110]
+[check] roundtrip == original?  True
+
+now zigzag the signed deltas (so varint can encode them unsigned):
+  zigzag: 0->0  -1->1  1->2  -2->3  2->4 ...
+
+  deltas  = [100, 2, 3, 1, 4]
+  zigzag  = [200, 4, 6, 2, 8]
+  decoded = [100, 2, 3, 1, 4]   <- inverse matches
+[check] zigzag roundtrip?  True
+
+full pipeline delta_varint_encode([100, 102, 105, 106, 110]) ->
+  bytes   = [200, 1, 4, 6, 2, 8]   (6 bytes)
+  vs raw  = 5 ints x 4 bytes = 20 bytes
+[check] full pipeline roundtrip?  True
+
+========================================================================
+  SECTION C: compression ratio - delta + varint vs raw fixed-width
+========================================================================
+Three workloads. Watch how delta wins on SMOOTH data and dies on RANDOM data.
+
+| workload (n=64)              | raw int32 | delta+varint | ratio  | verdict            |
+|------------------------------|-----------|--------------|--------|--------------------|
+| monotonic timestamps (1s apart) |       256 |           68 | 0.266  | good               |
+| slowly-drifting sensor (small) |       256 |           65 | 0.254  | good               |
+| uniform random 32-bit        |       256 |          316 | 1.234  | WORSE than raw     |
+
+Reading the table:
+  monotonic : deltas are all +1 -> varint 1 byte each. The huge
+               absolute values (1.7 billion!) collapse to 1 byte.
+  drifting  : deltas stay small in magnitude (|-5|..|5|) -> 1 byte.
+  random    : deltas are as big as the values -> varint grows to
+               5 bytes, so it can actually LOSE to fixed int32.
+
+Zoom into monotonic (first 8 of 64):
+  values = [1700000000, 1700000001, 1700000002, 1700000003, 1700000004, 1700000005, 1700000006, 1700000007]
+  deltas = [1700000000, 1, 1, 1, 1, 1, 1, 1]   <- every delta is just +1
+  one value raw = 4 bytes ; one delta varint = 1 byte
+  => absolute magnitude is irrelevant; only the STEP size matters.
+
+========================================================================
+  SECTION D: applications - git deltas, time-series, video P-frames
+========================================================================
+1) git packfile deltas (OBJ_OFS_DELTA)
+
+   A git 'delta' object is a stream of instructions against a BASE:
+     COPY  <offset> <len>   - copy len bytes from base+offset
+     ADD   <bytes...>       - insert literal new bytes
+   The <offset> and <len> themselves are varint-delta-encoded, so a
+   nearby copy is cheap. This is how a 1-line commit to a 1 MB file
+   becomes a ~100 byte delta object in .git/objects/pack/.
+
+   demo: 1000-int blob vs same blob with one value bumped @500
+         blob        delta+varint = 1000 bytes
+         blob+1bump  delta+varint = 1002 bytes  (+2 bytes: only deltas[500],[501] grew)
+   => a localized edit touches only the 1-2 deltas around it, which
+      is exactly why git stores the delta instead of the new blob.
+
+2) time-series databases (monotonic timestamps)
+
+   Timestamps arrive in order: 1.7B, 1.7B+1, 1.7B+2, ... Storing each
+   as int64 = 8 bytes/point. Delta-encode -> all deltas are +1 ->
+   1 byte/point. That is an 8x reduction on the timestamp column
+   BEFORE any general-purpose compression. Parquet calls this
+   DELTA_ENCODING; InfluxDB/QuestDB do the same on their time index.
+
+3) video codecs - P-frames (predict + encode the residual)
+
+   A P-frame does NOT store pixels. It stores a MOTION-COMPENSATED
+   DELTA from the previous frame: 'this 16x16 block moved (dx,dy) ->
+   here are the small brightness corrections'. Most of the frame is
+   nearly identical to the last, so the residual is mostly ~0 and
+   compresses to almost nothing. This is delta encoding applied to
+   2D image blocks over time. I-frames are the 'seeds'.
+
+4) monotonic vs random - the whole game in one chart
+
+  monotonic: raw=128B  delta+varint=36B  [###########.............................] 0.28x
+  random   : raw=128B  delta+varint=156B  [################################################] 1.22x
+
+  monotonic: tiny deltas -> tiny varints -> tiny file.
+  random   : deltas as big as values -> no win. Delta encoding is a
+             BET, and the bet is 'consecutive values are close'.
+
+========================================================================
+  SECTION E: GOLD pin for delta_encoding.html
+========================================================================
+input  = [100, 102, 105, 106, 110]
+deltas = [100, 2, 3, 1, 4]
+zigzag = [200, 4, 6, 2, 8]
+varint bytes = [200, 1, 4, 6, 2, 8]   (6 bytes total)
+raw int32    = 20 bytes
+
+GOLD values (pinned, recomputed live in JS):
+  delta array        = [100, 2, 3, 1, 4]
+  zigzag array       = [200, 4, 6, 2, 8]
+  varint byte total  = 6
+  first byte (seed)  = 200   (varint of zigzag(100) = 200)
+  monotonic 64-pt    : deltas all +1 -> 68 bytes (raw int32 = 256)
+
+[check] gold reproduces from delta_*():  OK
+[check] canonical roundtrip exact?  True
+[check] monotonic roundtrip exact?  True
+
+========================================================================
+  DONE - all sections printed
+========================================================================

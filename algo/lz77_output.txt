@@ -1,0 +1,190 @@
+lz77.py - reference impl. All numbers below feed LZ77.md.
+Pure Python stdlib; deterministic.
+
+
+========================================================================
+  SECTION A: the sliding window  =  search buffer + lookahead
+========================================================================
+Two regions slide across the input together:
+
+    [ ...already encoded... | SEARCH BUFFER (dictionary, W chars) | > LOOKAHEAD (L chars) < | not yet seen ... ]
+                                              ^ matches are measured
+                                                from the start here.
+
+At each step the encoder finds the LONGEST prefix of the lookahead
+that also occurs in the search buffer, then emits
+    (distance, length, next_char)
+and slides the window forward by length + 1.
+
+Three knobs (and their classic values):
+  W_search    = dictionary size.  DEFLATE/gzip = 32768 (32 KiB),
+                                 PNG = 32768,  LZ4 = 65536.
+  L_lookahead = max match.       DEFLATE = 258,  gzip = 258.
+  MIN_MATCH   = below this, a literal is cheaper than a token.
+                                 DEFLATE = 3.
+
+Larger W -> more matches found (fewer tokens) but each distance
+needs more bits. Larger L -> longer matches but the length field
+needs more bits. Section E quantifies the tradeoff.
+
+========================================================================
+  SECTION B: encode 'TOBEORNOTTOBE' step by step  (W=16, L=16)
+========================================================================
+input  : 'TOBEORNOTTOBE'   (len=13)
+params : W_search=16, L_lookahead=16
+
+Legend: the underline marks the chosen back-reference:
+  ^ = source copy region (inside search buffer)
+  * = matched bytes (inside lookahead);  length = number of *
+
+    pos= 0  | TOBEORNOTTOBE
+          |              
+          -> literal 'T'   token = (0, 0, 'T')
+
+    pos= 1  | TOBEORNOTTOBE
+          |              
+          -> literal 'O'   token = (0, 0, 'O')
+
+    pos= 2  | TOBEORNOTTOBE
+          |              
+          -> literal 'B'   token = (0, 0, 'B')
+
+    pos= 3  | TOBEORNOTTOBE
+          |              
+          -> literal 'E'   token = (0, 0, 'E')
+
+    pos= 4  | TOBEORNOTTOBE
+          |  ^  *        
+          -> copy 1 from dist 3, then 'R'   token = (3, 1, 'R')
+
+    pos= 6  | TOBEORNOTTOBE
+          |              
+          -> literal 'N'   token = (0, 0, 'N')
+
+    pos= 7  | TOBEORNOTTOBE
+          |     ^  *     
+          -> copy 1 from dist 3, then 'T'   token = (3, 1, 'T')
+
+    pos= 9  | TOBEORNOTTOBE
+          | ^^^^     ****
+          -> copy 4 from dist 9, then <EOF>   token = (9, 4, <EOF>)
+
+Token stream:
+  (0,0,'T'), (0,0,'O'), (0,0,'B'), (0,0,'E'), (3,1,'R'), (0,0,'N'), (3,1,'T'), (9,4,EOF)
+
+13 chars -> 8 tokens (first 5 are literals).
+
+========================================================================
+  SECTION C: self-overlap - a match may be longer than its distance
+========================================================================
+input  : 'aaaaaa'   (len=6)
+params : W_search=4, L_lookahead=16
+
+Step through:
+
+    pos= 0  | aaaaaa
+          |       
+          -> token = (0, 0, 'a')
+
+    pos= 1  | aaaaaa
+          | ^*****
+          -> token = (1, 5, <EOF>)
+          NOTE length (5) > distance (1): the copy
+          reads bytes it is CURRENTLY writing. data[1:] is matched
+          against data[0:], so 'a' reproduces itself 5 times.
+
+'aaaaaa' (6 chars) -> 2 tokens: (0,0,'a'), (1,5,EOF)
+That is run-length encoding for free: the match source is only 1 char
+away, yet the copy runs 5 chars long because it feeds on its own output.
+
+========================================================================
+  SECTION D: decode + round-trip + GOLD token stream
+========================================================================
+input    : 'TOBEORNOTTOBE'
+tokens   : [(0, 0, 'T'), (0, 0, 'O'), (0, 0, 'B'), (0, 0, 'E'), (3, 1, 'R'), (0, 0, 'N'), (3, 1, 'T'), (9, 4, '')]
+decoded  : 'TOBEORNOTTOBE'
+
+[check] decode(encode(S)) == S ?  True
+
+GOLD token stream (pinned for lz77.html):
+  token[0] = (distance=0, length=0, next_char='T')
+  token[1] = (distance=0, length=0, next_char='O')
+  token[2] = (distance=0, length=0, next_char='B')
+  token[3] = (distance=0, length=0, next_char='E')
+  token[4] = (distance=3, length=1, next_char='R')
+  token[5] = (distance=0, length=0, next_char='N')
+  token[6] = (distance=3, length=1, next_char='T')
+  token[7] = (distance=9, length=4, next_char=EOF)
+
+GOLD scalars:  num_tokens=8,  num_literals=5,  total_match_len=6
+[check] gold scalars reproduce from lz77_encode():  OK
+
+========================================================================
+  SECTION E: compression ratio + the window-size tradeoff
+========================================================================
+NAIVE fixed-width token model (classic LZ77 triple, no entropy coding):
+  bits/token = dist_bits + len_bits + char_bits
+  dist_bits = W_search.bit_length()         (distance in 1..W)
+  len_bits  = (L_lookahead + 1).bit_length() (length in 0..L, incl. literal)
+  char_bits = 8
+
+longer text (len=131):
+  'the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog'
+
+Note the repeated phrase 'the quick brown fox...' starts ~45 chars apart.
+
+Window-size sweep (L=15 fixed):
+| W_search | bits/token | tokens | compressed/original | what happens             |
+|----------|------------|--------|---------------------|--------------------------|
+| 16       | 18         | 89     | 1.529               | window < 45: can't reach the repeat -> mostly literals |
+| 32       | 19         | 76     | 1.378               | still < 45: partial matches only |
+| 64       | 20         | 37     | 0.706               | just clears 45: every repeat now references the previous |
+| 256      | 22         | 37     | 0.777               | token count saturated; extra dist bits start to hurt |
+| 4096     | 26         | 37     | 0.918               | way past saturation: most bits wasted on dist field |
+
+There is a SWEET SPOT. Below it (W=16, ratio 1.53) the window is too
+short to reach the repeating phrase ~45 chars away, so the encoder
+emits mostly literals and EXPANDS the data. At W=64 the window just
+clears that distance and token count saturates at 37 (ratio 0.71).
+Beyond that the match count can't fall further, so each extra distance
+bit only bloats the output (ratio climbs back to 0.92 at W=4096).
+
+LESSON: pick W to just cover your data's repetition scale. DEFLATE fixes
+W=32768 and recovers the wasted distance bits with Huffman coding - rare
+long distances get long codes, common short ones get short codes - so a
+huge W costs little in practice. The naive fixed-width model above can't
+do that, which is exactly why pure LZ77 needs an entropy layer.
+
+WHY pure LZ77 is weak on fresh data: a literal char (8 bits) becomes a
+whole triple. On input with NO repetition, LZ77 EXPANDS the data:
+  random text (60 chars, no runs): tokens=30, ratio=1.375  (>1.0 means EXPANSION)
+That is exactly why DEFLATE layers Huffman coding on top: the literal
+chars and short distances get short codes, killing the expansion. The
+dictionary idea (LZ77) and the entropy idea (Huffman) are complementary
+- DEFLATE = LZ77 + Huffman.
+
+[check] GOLD: LONG text, W=64 (sweet spot), L=15 -> tokens=37, ratio=0.7061
+[check] ratio matches pinned value (0.706 +/- 0.02):  OK
+
+========================================================================
+  SECTION F: where LZ77 actually lives (DEFLATE family and beyond)
+========================================================================
+| codec   | spec       | W_search | L_look | MIN | used in                    |
+|---------|------------|----------|--------|-----|----------------------------|
+| DEFLATE | RFC 1951   | 32768    | 258    | 3   | gzip (.gz), zlib, HTTP gzip, PNG (IDAT) |
+| gzip    | GNU        | 32768    | 258    | 3   | wraps DEFLATE; the unix 'gzip' tool |
+| zlib    | RFC 1950   | 32768    | 258    | 3   | DEFLATE + Adler-32; in virtually every zip/png library |
+| LZ4     | Collet '11 | 65536    | 255    | 4   | very fast; favors speed over ratio |
+| Snappy  | Google '11 | 65536    | 64     | 4   | Google internal; used in Protobuf/Bigtable |
+| LZMA/LZMA2 | Pavlov '99 | 2^32+    | 273    | 2   | xz / 7-Zip; huge window, range coder instead of Huffman |
+
+Every row is a sliding-window dictionary coder at heart: search back W
+bytes, copy the longest match, emit a token. They differ in (a) how they
+encode the literal vs match flag (LZSS bit vs DEFLATE Huffman tree),
+(b) the entropy back-end (Huffman vs range/arithmetic), and (c) W/L size.
+The 1977 idea - replace repetition with a (distance, length) pointer -
+is still the backbone of general-purpose lossless compression today.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

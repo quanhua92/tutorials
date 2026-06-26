@@ -1,0 +1,194 @@
+huffman.py - reference impl. All numbers below feed HUFFMAN.md.
+pure Python stdlib, deterministic (FIFO tiebreak in the heap).
+
+
+========================================================================
+  SECTION A: the full pipeline on 'ABRACADABRA'
+========================================================================
+input = "ABRACADABRA"   (len = 11)
+
+Step 1 - frequency table:
+    A:  5  #####
+    B:  2  ##
+    R:  2  ##
+    C:  1  #
+    D:  1  #
+
+Step 2 - Huffman tree (left child = '0', right child = '1');
+        *(w) = internal node of weight w;  Sym(w) = leaf:
+
+*(11)
+├─0:A(5)
+└─1:*(6)
+   ├─0:*(2)
+   │  ├─0:C(1)
+   │  └─1:D(1)
+   └─1:*(4)
+      ├─0:B(2)
+      └─1:R(2)
+
+Step 3 - code table (walk root->leaf; left='0', right='1'):
+    A: 0       (len 1)
+    B: 110     (len 3)
+    C: 100     (len 3)
+    D: 101     (len 3)
+    R: 111     (len 3)
+
+Step 4 - prefix-free check (no codeword is a prefix of another):
+    [check] prefix-free?  True
+
+========================================================================
+  SECTION B: the merge trace  (always marry the two lightest)
+========================================================================
+input = "ABRACADABRA"
+
+Heap entries are (weight, order, node). Ties break by `order`
+(FIFO), so the tree is byte-identical every run.
+
+Initial heap (sorted by freq, then symbol):
+  [(1, 0, 'C'), (1, 1, 'D'), (2, 2, 'B'), (2, 3, 'R'), (5, 4, 'A')]
+
+  step 1: pop (1,C) & (1,D)  ->  merge into {C+D} weight 2
+           heap now: [(2, 2, 'B'), (2, 3, 'R'), (2, 5, '{C+D}'), (5, 4, 'A')]
+  step 2: pop (2,B) & (2,R)  ->  merge into {B+R} weight 4
+           heap now: [(2, 5, '{C+D}'), (4, 6, '{B+R}'), (5, 4, 'A')]
+  step 3: pop (2,{C+D}) & (4,{B+R})  ->  merge into {{C+D}+{B+R}} weight 6
+           heap now: [(5, 4, 'A'), (6, 7, '{{C+D}+{B+R}}')]
+  step 4: pop (5,A) & (6,{{C+D}+{B+R}})  ->  merge into {A+{{C+D}+{B+R}}} weight 11
+           heap now: [(11, 8, '{A+{{C+D}+{B+R}}}')]
+
+  final: {A+{{C+D}+{B+R}}} (root, weight 11)
+
+Notice the rare symbols (C, D) get merged FIRST and sink DEEP;
+the common symbol (A) waits until the very last merge, so it
+stays one step from the root -> the SHORTEST code.
+
+========================================================================
+  SECTION C: encode + decode + round-trip  (bit-exact)
+========================================================================
+input = "ABRACADABRA"
+
+encode (concatenate codewords, symbol by symbol):
+    A -> 0
+    B -> 110
+    R -> 111
+    A -> 0
+    C -> 100
+    A -> 0
+    D -> 101
+    A -> 0
+    B -> 110
+    R -> 111
+    A -> 0
+
+bit stream = 01101110100010101101110   (23 bits)
+
+decode(bits) = "ABRACADABRA"
+[check] round-trip decode(encode(x)) == x ?  True
+
+Because the code is prefix-free, the decoder walks the tree bit
+by bit and emits a symbol at every leaf — no separators needed.
+
+========================================================================
+  SECTION D: compression ratio + optimality  (H <= L < H + 1)
+========================================================================
+input = "ABRACADABRA"   (5 distinct symbols)
+
+fixed 8-bit ASCII : 11 x 8         =   88 bits
+fixed 3-bit (5sym): 11 x 3         =   33 bits  (ceil(log2 5) = 3)
+Huffman (variable): 01101110100010101101110  =   23 bits
+
+ratios:
+  Huffman / ASCII     = 23/88 = 0.261   (73.9% smaller than ASCII)
+  Huffman / fixed-3   = 23/33 = 0.697
+
+OPTIMALITY CHECK (the headline result of Huffman 1952):
+  entropy   H = -sum(p log2 p)              = 2.0404 bits/symbol
+  avg len   L = sum(p * len(code))          = 2.0909 bits/symbol
+  gap       L - H                           = +0.0505 bits/symbol
+  guarantee H <= L < H + 1                  -> 2.0404 <= 2.0909 < 3.0404
+  [check] H <= L < H+1 ?  True
+
+  Expected bits (L * n) = 2.0909 * 11 = 23.00  ==  actual 23?  True
+
+  Huffman is within 0.05 bit/symbol of the entropy floor.
+  To beat it you must code BLOCKS of symbols (arithmetic coding)
+
+========================================================================
+  SECTION E: data skew matters  (flat vs skewed alphabets)
+========================================================================
+Huffman only beats fixed-length coding when frequencies are SKEWED.
+On a UNIFORM alphabet, Huffman cannot help — every codeword is the
+same length, and L == log2(|alphabet|) == H.
+
+| case               | input                  | |A| | H     | L     | L-H   | vs 8-bit ASCII |
+|--------------------|------------------------|-----|-------|-------|-------|----------------|
+| uniform 4 symbols  | ABCDABCDABCDABCD       | 4   | 2.000 | 2.000 | +0.000 | 0.250 (75.0% saved) |
+| skewed (A-heavy)   | AAAAAAAABCD            | 4   | 1.278 | 1.455 | +0.177 | 0.182 (81.8% saved) |
+| very skewed        | AAAAAAAAAAB            | 2   | 0.439 | 1.000 | +0.561 | 0.125 (87.5% saved) |
+| ABRACADABRA        | ABRACADABRA            | 5   | 2.040 | 2.091 | +0.051 | 0.261 (73.9% saved) |
+
+Read it as: the more SKEWED the frequencies, the bigger the win.
+Uniform data -> Huffman == fixed-length (no gain). That is why
+DEFLATE runs LZ77 first: LZ77 turns repetition into symbol skew,
+which Huffman can then exploit.
+
+========================================================================
+  SECTION F: when to use Huffman  (and the alternatives)
+========================================================================
+Huffman is the workhorse of the 'second stage' in almost every
+lossless codec. It is fast, optimal for single-symbol coding, and
+cheap to ship alongside the data.
+
+| codec      | used in               | role of Huffman                       |
+|------------|-----------------------|---------------------------------------|
+| DEFLATE    | gzip (.gz), zlib, PNG | LZ77 (repetition) + Huffman (skew). The default stack. |
+| JPEG       | lossy image           | RLE-of-zeros stage, then Huffman on the (run,len) symbols. |
+| MP3 / AAC  | lossy audio           | Huffman the quantized spectral coefficients. |
+| BZIP2      | block-sorting compressor | uses Huffman as one of the final stages after BWT + MTF. |
+| Barcodes/PKZIP | general lossless      | DEFLATE again — Huffman is the entropy coder. |
+
+ALTERNATIVES (when Huffman is not enough):
+  - Arithmetic / range coding: codes BLOCKS of symbols, beats the
+    'H+1' floor. Used in JPEG2000, modern video codecs. Slower.
+  - Asymmetric Numeral Systems (rANS): arithmetic-coding speed
+    at Huffman-like cost. Used in zstd, Facebook's lizard.
+  - Adaptive Huffman: updates the tree as it reads the stream.
+    One pass, no separate code table; used in some modem specs.
+
+RULE OF THUMB: reach for Huffman when you want OPTIMAL
+single-symbol coding at high speed. Reach for arithmetic/rANS when
+you can afford more CPU to squeeze the last few percent.
+
+========================================================================
+  SECTION G: GOLD values for huffman.html  (rebuild in JS, compare)
+========================================================================
+gold input = "ABRACADABRA"
+
+gold frequency table:
+    A: 5
+    B: 2
+    R: 2
+    C: 1
+    D: 1
+
+gold code table:
+    A: 0
+    B: 110
+    C: 100
+    D: 101
+    R: 111
+
+gold bit stream = 01101110100010101101110   (23 bits)
+gold decode(bits) = "ABRACADABRA"
+
+[check] gold round-trip ?  True
+[check] gold entropy H = 2.0404, avg len L = 2.0909, gap = 0.0505
+
+The .html rebuilds this tree in JS (same tiebreak: freq then sym,
+FIFO merges) and verifies the code table + bit stream + L match the
+.py exactly.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

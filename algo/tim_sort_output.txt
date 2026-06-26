@@ -1,0 +1,124 @@
+tim_sort.py - reference impl. All numbers below feed TIM_SORT.md.
+python stdlib only (no torch/numpy).
+
+
+========================================================================
+  SECTION A: minrun - the [32,64] dial that balances the merge tree
+========================================================================
+MIN_MERGE = 64. For n < 64, timsort is just one
+binary-insertion-sort over the whole array (no runs, no merges).
+
+compute_minrun(n): shift n right until < 64, OR in any dropped low
+bit. Result always in [32, 64].
+
+| n        | minrun | num runs ~ n/minrun | nearest pow2 |
+|----------|--------|---------------------|--------------|
+| 64       | 32     | 2                   | 2            |
+| 100      | 50     | 2                   | 2            |
+| 128      | 32     | 4                   | 4            |
+| 1000     | 63     | 16                  | 16           |
+| 1024     | 32     | 32                  | 32           |
+| 10000    | 40     | 250                 | 128          |
+| 1000000  | 62     | 16130               | 8192         |
+
+Read it: minrun keeps num-runs at or just above a power of two, so the
+merge tree is BALANCED (shallow). That is what bounds depth at O(log n)
+and total work at O(n log n). The [32,64] window balances 'insertion
+sort is still cheap' vs 'enough runs to balance'. Java's TimSort uses
+MIN_MERGE=32 -> minrun in [16,32]; same algorithm, different constant.
+
+[check] minrun in [32,64] for all tested n >= 64? True
+
+========================================================================
+  SECTION B: run detection - grab every ascending/descending streak
+========================================================================
+input = [ 5,  4,  3,  2,  8,  9,  1,  0,  7,  6]
+
+Runs found (a run is the longest ascending OR strictly-descending slice):
+  run 0: [0:4] = [ 5,  4,  3,  2]  (descending -> REVERSED)  => [ 2,  3,  4,  5]
+  run 1: [4:6] = [ 8,  9]  (ascending)  => [ 8,  9]
+  run 2: [6:8] = [ 1,  0]  (descending -> REVERSED)  => [ 0,  1]
+  run 3: [8:10] = [ 7,  6]  (descending -> REVERSED)  => [ 6,  7]
+
+WHY strict '>' on the descending side: equal elements must keep input
+order. If a descending run used >=, two equal elements would swap on
+reversal and stability is LOST. '>' keeps equals in original order.
+
+already-sorted input [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9] -> ONE run of length 10: True
+[check] sorted input -> single run (best case O(n))? True
+
+========================================================================
+  SECTION C: binary insertion sort - pad short runs up to minrun
+========================================================================
+A natural run shorter than minrun is too small to be worth merging.
+Timsort EXTENDS it to minrun by inserting the next few elements with
+BINARY insertion sort (binary search for the slot -> O(k log k) for k
+new elements, cheap constants, STABLE because we use leftmost slot).
+
+slice      : [ 2,  5,  9,  7,  1,  8,  3,  6]   (natural run [2,5,9] at start)
+after ext. : [ 1,  2,  3,  5,  6,  7,  8,  9]   (run extended to cover the slice)
+[check] extended slice == sorted()? True
+
+========================================================================
+  SECTION D: run detection + merge invariant + galloping
+========================================================================
+(1) BEST CASE - 'real-world' mostly-sorted input (seed=7, n=32):
+    [  4,   7,   6,   7,   7,   8,   9,  11,  11,  12,  15,  19,  28,  27,  30,  41,  46,  50,  53,  54,  55,  64,  68,  70,  72,  73,  74,  74,  74,  80,  80,  83]
+    -> 1 natural run(s), ~0 merge(s). cost ~ O(n). sorted()? True
+
+(2) MERGE + GALLOP - constructed input (n=64, minrun=32):
+    run A = [60..91] (left, all >= 60)
+    run B = [ 1..32] (right, all <  60)  <- B will win the merge in a run
+
+natural runs detected = 2:
+  run 0: start=0   natural=32  -> len=32  (ascending)
+  run 1: start=32  natural=32  -> len=32  (ascending)
+
+Merge stack evolution (snapshot after each push/merge):
+  step 0: (0,32)
+  step 1: (0,32), (32,32)
+  step 2: (0,64)
+
+GALLOPING fired 1 time(s) (MIN_GALLOP=7). When B won
+>= 7 in a row, the merge switched to exponential+binary search and
+grabbed a whole cluster (all of B) in one shot, not 32 one-by-ones.
+
+result == sorted()? True
+[check] timsort == sorted() on constructed input? True
+
+========================================================================
+  SECTION E: complexity, comparison, and GOLD for tim_sort.html
+========================================================================
+BEST  O(n)       : input is one long run -> detected, no merges.
+WORST O(n log n) : random input -> balanced merge tree (invariant).
+AVG   O(n log n) : real-world sits between, often closer to O(n).
+
+| algorithm  | best        | worst        | space    | stable? | best for               |
+|------------|-------------|--------------|----------|---------|------------------------|
+| timsort    | O(n)        | O(n log n)   | O(n)     | YES     | Python/Java/Rust stable |
+| mergesort  | O(n log n)  | O(n log n)   | O(n)     | YES     | guaranteed, simple     |
+| quicksort  | O(n log n)  | O(n^2)       | O(log n) | NO      | fast avg, in-place     |
+| heapsort   | O(n log n)  | O(n log n)   | O(1)     | NO      | in-place, worst-case ok |
+
+The one-line pitch: timsort is mergesort that doesn't throw away the
+order you already had. Best case O(n), stable, and great constants.
+
+GOLD - seeded input (seed=42, n=64, max=999):
+  input[:8]  = [ 654,  114,   25,  759,  281,  250,  228,  142]
+  input[-8:] = [ 867,  352,  618,  270,  826,   44,  747,  470]
+
+  timsort result == sorted()? True
+  minrun        = 32
+  num runs      = 2
+  num merges    = 3
+
+GOLD compact scalars (for tim_sort.html):
+  minrun     = 32
+  num_runs   = 2
+  sorted[0]  = 6
+  sorted[-1] = 980
+[check] gold scalars reproduce from input: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

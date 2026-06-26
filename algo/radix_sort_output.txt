@@ -1,0 +1,162 @@
+radix_sort.py - reference impl. All numbers below feed RADIX_SORT.md.
+python stdlib only (no torch/numpy).
+
+
+========================================================================
+  SECTION A: counting sort - the stable subroutine (and why stability is non-negotiable)
+========================================================================
+radix (base) = 10 buckets, digits 0..9
+
+Counting sort on a single digit, place=1 (units):
+
+  input   : [40, 21, 11, 30, 22]
+  digits  : [0, 1, 1, 0, 2]
+  output  : [40, 30, 21, 11, 22]
+  (two 0-units then two 1-units then 2; within a digit, INPUT order kept -> stable)
+
+WHY STABILITY IS THE WHOLE GAME:
+  Suppose we sorted the units digit UNSTABLY. After the units pass:
+    [40, 30, 21, 11, 22]   <- some tie order (say 30 before 40)
+  The tens pass would then carry that scrambled tie order up. After
+  radix finishes, ties could be in ANY order - but worse, a higher
+  digit pass can DEMOTE a correctly-placed lower digit. Stability
+  guarantees: 'a later pass only reorders when its digit differs.'
+
+[check] counting sort stable on duplicate-unit pairs? True
+
+========================================================================
+  SECTION B: LSD digit-pass trace - watch the buckets fill, 3 passes
+========================================================================
+input = [170, 45, 75, 90, 802, 24, 2, 66]   (max = 802, so d = 3 passes)
+
+--- PASS 1: sort by the units digit (place=1) ---
+  digit of each element:
+     170 -> digit 0
+      45 -> digit 5
+      75 -> digit 5
+      90 -> digit 0
+     802 -> digit 2
+      24 -> digit 4
+       2 -> digit 2
+      66 -> digit 6
+  bucket distribution (non-empty buckets only):
+    bucket[0] = [170, 90]
+    bucket[2] = [802, 2]
+    bucket[4] = [24]
+    bucket[5] = [45, 75]
+    bucket[6] = [66]
+  array after this pass: [170, 90, 802, 2, 24, 45, 75, 66]
+
+--- PASS 2: sort by the tens digit (place=10) ---
+  digit of each element:
+     170 -> digit 7
+      90 -> digit 9
+     802 -> digit 0
+       2 -> digit 0
+      24 -> digit 2
+      45 -> digit 4
+      75 -> digit 7
+      66 -> digit 6
+  bucket distribution (non-empty buckets only):
+    bucket[0] = [802, 2]
+    bucket[2] = [24]
+    bucket[4] = [45]
+    bucket[6] = [66]
+    bucket[7] = [170, 75]
+    bucket[9] = [90]
+  array after this pass: [802, 2, 24, 45, 66, 170, 75, 90]
+
+--- PASS 3: sort by the hundreds digit (place=100) ---
+  digit of each element:
+     802 -> digit 8
+       2 -> digit 0
+      24 -> digit 0
+      45 -> digit 0
+      66 -> digit 0
+     170 -> digit 1
+      75 -> digit 0
+      90 -> digit 0
+  bucket distribution (non-empty buckets only):
+    bucket[0] = [2, 24, 45, 66, 75, 90]
+    bucket[1] = [170]
+    bucket[8] = [802]
+  array after this pass: [2, 24, 45, 66, 75, 90, 170, 802]
+
+RESULT after 3 passes: [2, 24, 45, 66, 75, 90, 170, 802]
+sorted() reference      : [2, 24, 45, 66, 75, 90, 170, 802]
+[check] matches Python sorted()? True
+
+========================================================================
+  SECTION C: complexity - O(d * (n + radix)) and the n-log-n barrier
+========================================================================
+Per counting pass:  O(n) to count + O(radix) prefix sums + O(n) to deal = O(n + radix).
+Number of passes d = floor(log_radix(max)) + 1.
+
+TOTAL:  T(n) = d * (n + radix)
+
+  When radix is constant (10) and small vs n:  T = O(d * n).
+  d is a property of the DATA, not of n. For 32-bit ints in base
+  2^16, d = 2. So radix sort of 1M 32-bit ints = 2 counting passes.
+  A comparison sort of the same = ~20M comparisons. Radix does LESS.
+
+  n = 1,000,000:  comparison-sort lower bound ~ n*log2(n) = 19,931,569 comparisons
+  radix sort base 10    : d = 10 passes -> 10,000,000 digit-ops  (0.50x the comparison bound)
+  radix sort base 256   : d = 4 passes -> 4,000,000 digit-ops  (0.20x the comparison bound)
+  radix sort base 65536 : d = 2 passes -> 2,000,000 digit-ops  (0.10x the comparison bound)
+
+  Note base 2^16 (d=2) does ~8% of the work of the comparison
+  lower bound. THAT is why radix wins for fixed-width integer keys.
+
+SPACE: O(n + radix) extra per pass (count array + output buffer).
+  This is the trade-off vs in-place heapsort: radix is NOT in-place.
+STABILITY: YES (inherited from counting sort).
+NOT a comparison sort, so Omega(n log n) lower bound DOES NOT APPLY.
+
+========================================================================
+  SECTION D: radix sort vs the comparison sorts
+========================================================================
+| algorithm    | best         | worst        | space      | stable?        | best for            |
+|--------------|--------------|--------------|------------|----------------|---------------------|
+| radix sort   | O(d*(n+b))   | O(d*(n+b))   | O(n+b)     | YES (stable)   | int/str keys        |
+| counting sort | O(n+k)       | O(n+k)       | O(n+k)     | YES (stable)   | small int range k   |
+| quicksort    | O(n log n)   | O(n^2)       | O(log n)   | NO  (in-place) | general, comparison |
+| mergesort    | O(n log n)   | O(n log n)   | O(n)       | YES (stable)   | general, stable     |
+| heapsort     | O(n log n)   | O(n log n)   | O(1)       | NO  (in-place) | general, guaranteed |
+
+When to pick radix: fixed-width integer/string keys, n large, and you
+can afford the O(n) extra memory. When keys are arbitrary comparable
+objects (no digit decomposition) or memory is tight -> quicksort/heap.
+PITFALL: radix needs non-negative ints here. For signed/floats you map
+them to unsigned first (flip sign bit for floats) - see CLRS 8.3 notes.
+
+========================================================================
+  SECTION E: GOLD - pinned output for radix_sort.html
+========================================================================
+seeded input (seed=42, n=12, max=9999):
+  [1824, 409, 4506, 4012, 3657, 2286, 1679, 8935, 1424, 9674, 6912, 520]
+
+radix result : [409, 520, 1424, 1679, 1824, 2286, 3657, 4012, 4506, 6912, 8935, 9674]
+sorted() ref : [409, 520, 1424, 1679, 1824, 2286, 3657, 4012, 4506, 6912, 8935, 9674]
+[check] radix == sorted()? True
+
+number of digit passes d = 4 (max=9674, 4 digits)
+
+GOLD pass-1 (units, place=1) bucket distribution:
+  bucket[0] = [520]
+  bucket[2] = [4012, 6912]
+  bucket[4] = [1824, 1424, 9674]
+  bucket[5] = [8935]
+  bucket[6] = [4506, 2286]
+  bucket[7] = [3657]
+  bucket[9] = [409, 1679]
+GOLD pass-1 array after: [520, 4012, 6912, 1824, 1424, 9674, 8935, 4506, 2286, 3657, 409, 1679]
+
+GOLD compact scalars (for radix_sort.html):
+  sorted[0]            = 409
+  sorted[-1]           = 9674
+  pass1 bucket[0] size = 1
+[check] gold scalars reproduce from input: OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,131 @@
+rle.py - reference impl. All numbers below feed RLE.md.
+pure Python stdlib, deterministic (no randomness).
+
+MAX_RUN = 255  (count byte holds 0..255)
+
+
+========================================================================
+  SECTION A: encode + decode  (the tiny worked example)
+========================================================================
+input           = "AAAAABBBCC"   (len = 10)
+
+encode step-by-step (emit a token whenever the symbol changes):
+  scan A A A A A -> run of 5 A's -> emit (5, 'A')
+  scan B B B     -> run of 3 B's -> emit (3, 'B')
+  scan C C       -> run of 2 C's -> emit (2, 'C')
+
+tokens (wire)   = [(5, 'A'), (3, 'B'), (2, 'C')]
+display form    = "5A3B2C"   <- the textbook '5A3B2C'
+
+decode(tokens)  = "AAAAABBBCC"
+[check] round-trip decode(encode(x)) == x ?  True
+[check] ratio = bits_out/bits_in = 48/80 = 0.600   (3 tokens x 16 bits = 48; 10 chars x 8 bits = 80)
+        -> saved 40.0% of the space (48 bits vs 80 bits)
+
+========================================================================
+  SECTION B: the 255-byte cap  (long runs split into chunks)
+========================================================================
+A run longer than 255 cannot fit in one count byte, so it splits:
+
+input  = "A" * 300   (len = 300)
+
+tokens = [(255, 'A'), (45, 'A')]
+
+The single run of 300 became TWO tokens: (255,'A') + (45,'A').
+Each count still fits in one byte (<=255). The decoder concatenates
+the runs, so decode(encode(x)) == x still holds.
+
+[check] decode(encode(300 A's)) == 300 A's ?  True
+[check] encode('A'*255) -> one token?  True
+[check] encode('A'*256) -> [(255,'A'),(1,'A')]?  True
+
+The MAX_RUN cap is the only subtlety in RLE. Everything else is
+just counting.
+
+========================================================================
+  SECTION C: compression ratio across data patterns
+========================================================================
+Same algorithm, very different outcomes depending on the data.
+
+| pattern           | input (shown)              | runs | bits_in | bits_out | ratio  | verdict     |
+|-------------------|----------------------------|------|---------|----------|--------|-------------|
+| perfect run       | AAAAAAAAAAAAAAAAAAA...     | 1    | 320     | 16       | 0.050  | COMPRESSED  |
+| run-heavy (fax)   | ......................     | 3    | 320     | 48       | 0.150  | COMPRESSED  |
+| runs of 2         | AABBCCDDEEFFGGHH           | 8    | 128     | 128      | 1.000  | breakeven   |
+| natural text      | the quick brown fox        | 19   | 152     | 304      | 2.000  | EXPANDED    |
+| alternating       | ABABABABABABABABABAB       | 20   | 160     | 320      | 2.000  | EXPANDED    |
+
+Read it as: RLE wins ONLY when the average run length > 2.
+  - average run = len(input) / len(tokens)
+  - ratio = 2 / average_run      (since 1 token = 2 bytes, 1 symbol = 1 byte)
+  - so breakeven is average_run == 2 ; below that, RLE EXPANDS.
+
+  perfect run      : avg_run = 40.00  ->  2/avg_run = 0.050  ==  ratio 0.050
+  run-heavy (fax)  : avg_run = 13.33  ->  2/avg_run = 0.150  ==  ratio 0.150
+  runs of 2        : avg_run =  2.00  ->  2/avg_run = 1.000  ==  ratio 1.000
+  natural text     : avg_run =  1.00  ->  2/avg_run = 2.000  ==  ratio 2.000
+  alternating      : avg_run =  1.00  ->  2/avg_run = 2.000  ==  ratio 2.000
+
+[check] ratio == 2 / average_run for every pattern:  OK
+
+========================================================================
+  SECTION D: the failure mode — alternating data DOUBLES in size
+========================================================================
+input  = "AB" * 20   (len = 40)
+tokens = 40 runs of length 1 -> 40 x (1, sym) = 80 bytes on the wire
+
+bits_in  = 40 chars x 8  = 320 bits
+bits_out = 40 tokens x 16 = 640 bits
+ratio    = 2.000   <- the 'compressed' file is 2.0x BIGGER
+
+WHY: every symbol flip forces a new token, and a length-1 token
+(1, 'A') costs 2 bytes to represent 1 byte. There is no run to
+exploit, so the (count, symbol) overhead is pure loss.
+
+This is exactly why RLE is NEVER used on its own for general data.
+DEFLATE (gzip, PNG) runs LZ77 first to turn nearby repeats into
+long runs, THEN Huffman-codes the result. 🔗 See HUFFMAN.md.
+
+[check] ratio > 1 for alternating data?  True  (2.000 > 1)
+
+========================================================================
+  SECTION E: when to use RLE  (and when NOT to)
+========================================================================
+RLE is a SPECIALIST: brilliant on data with long runs, useless
+otherwise. Real systems use it exactly where runs are guaranteed.
+
+| format           | payload            | why runs exist           | note                                |
+|------------------|--------------------|--------------------------|-------------------------------------|
+| Fax (T.4/T.6)    | monochrome scan    | long white runs          | 1 token per scanline of white -> ~100x |
+| BMP BI_RLE8/4    | paletted image     | flat color regions       | good on icons/logos, lossy-cap optional |
+| PCX              | paletted image     | scanline runs            | split at count=63 (6-bit count)     |
+| JPEG (AC)        | quantized DCT coeffs | trailing zeros           | ZRL = 16 zeros; end-of-block = all rest zero |
+| DEFLATE          | LZ77 + Huffman     | LZ77 turns nearby repeats | into literal/distance runs; RLE is implicit, not standalone |
+| Text (.txt)      | natural language   | almost no runs           | DO NOT USE — expands ~2x            |
+| Random bytes     | encrypted/incompressible | no runs by design        | DO NOT USE — expands ~2x            |
+
+RULE OF THUMB: apply RLE only when you can GUARANTEE the average
+run length is well above 2. For everything else, reach for Huffman
+(symbol-frequency skew) or LZW/LZ77 (repetition).
+
+========================================================================
+  SECTION F: GOLD values for rle.html  (the classic Wikipedia example)
+========================================================================
+gold input = "WWWWWWWWWWWWBWWWWWWWWWWWWBBBWWWWWWWWWWWWWWWWWWWWWWWWBWWWWWWWWWWWWWW"   (len = 67)
+
+gold tokens = [(12, 'W'), (1, 'B'), (12, 'W'), (3, 'B'), (24, 'W'), (1, 'B'), (14, 'W')]
+
+gold display = "12W1B12W3B24W1B14W"
+
+[check] gold round-trip decode(encode(x)) == x ?  True
+[check] gold ratio = 0.2090  (7 tokens x 16 bits / 67 chars x 8 bits)
+
+The .html re-encodes this exact string in JS and verifies the
+token list + ratio match the .py. The display form is:
+  "12W1B12W3B24W1B14W"
+
+GOLD (tiny, for the step animation): "AAAAABBBCC" -> [(5, 'A'), (3, 'B'), (2, 'C')]
+
+========================================================================
+  DONE - all sections printed
+========================================================================

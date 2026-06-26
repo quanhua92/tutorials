@@ -1,0 +1,158 @@
+lzw.py - reference impl. All numbers below feed LZW.md.
+Pure Python stdlib; deterministic.
+
+
+========================================================================
+  SECTION A: build the dictionary on the fly; never send it
+========================================================================
+Both sides start with a dictionary of single characters. The encoder
+reads left to right, extending the current run w while w is known;
+
+    while (w + c) in dictionary:  w = w + c
+    the moment (w + c) is NOT in the dictionary:
+        emit code(w)            # the longest known prefix
+        dictionary[w + c] = new # coin a fresh abbreviation
+        w = c                   # restart
+
+The decoder replays the SAME additions: after reading code(w) it can
+compute the SAME new entry the encoder coined. So the dictionary is
+NEVER in the bitstream - it is reconstructed in lockstep.
+
+INVARIANT: after the k-th emitted code, encoder and decoder have both
+added k-1 entries (the encoder adds one per code, except the last).
+The decoder lags one entry behind - harmless, except in Section C.
+
+CODE WIDTH: codes are fixed-width but the width GROWS. It starts at
+just enough bits for the seed alphabet and widens by 1 each time the
+dictionary fills a power of two, capped at 12 bits (= 4096 codes).
+That cap is why GIF emits a CLEAR code to reset, and why Unix
+`compress` stops adapting once full.
+
+========================================================================
+  SECTION B: encode 'ABABABCABABAB' step by step
+========================================================================
+input  : 'ABABABCABABAB'   (len=13)
+seed dictionary: {'A': 1, 'B': 2, 'C': 3}   (next free code = 4)
+
+Trace (w = current run, c = next char read):
+
+    read 'A': w+c='A'    in dict -> extend w='A'
+    read 'B': w+c='AB'   NEW -> emit code('A')=1, add dict['AB']=4, reset w='B'
+    read 'A': w+c='BA'   NEW -> emit code('B')=2, add dict['BA']=5, reset w='A'
+    read 'B': w+c='AB'   in dict -> extend w='AB'
+    read 'A': w+c='ABA'  NEW -> emit code('AB')=4, add dict['ABA']=6, reset w='A'
+    read 'B': w+c='AB'   in dict -> extend w='AB'
+    read 'C': w+c='ABC'  NEW -> emit code('AB')=4, add dict['ABC']=7, reset w='C'
+    read 'A': w+c='CA'   NEW -> emit code('C')=3, add dict['CA']=8, reset w='A'
+    read 'B': w+c='AB'   in dict -> extend w='AB'
+    read 'A': w+c='ABA'  in dict -> extend w='ABA'
+    read 'B': w+c='ABAB' NEW -> emit code('ABA')=6, add dict['ABAB']=9, reset w='B'
+    read 'A': w+c='BA'   in dict -> extend w='BA'
+    read 'B': w+c='BAB'  NEW -> emit code('BA')=5, add dict['BAB']=10, reset w='B'
+    EOF : flush trailing w='B' -> emit code('B')=2 (no new entry)
+
+Emitted codes: [1, 2, 4, 4, 3, 6, 5, 2]
+Dictionary grew 7 entries (3 seed -> 10 total).
+
+13 chars -> 8 codes.
+
+========================================================================
+  SECTION C: the decoder special case - a code for a brand-new entry
+========================================================================
+input  : 'AAAA'   seed dict: {'A': 1}  (next free = 2)
+encoder emits: [1, 2, 1]
+
+Why it happens: the encoder can emit a code for an entry it coins on
+the VERY same step, i.e. a code the decoder has not built yet. Decode:
+
+    code 1: known -> 'A'.   out=['A']
+    code 2: NOT in dict yet -> special case entry=w+w[0]='A'+'A'='AA'.  add dict[2]='AA'.  out=['A', 'AA']
+    code 1: known -> 'A'.  add dict[3]='AAA'.  out=['A', 'AA', 'A']
+
+Decoded: 'AAAA'  (matches input: True)
+The special case is CORRECT because the only way the encoder could
+emit a not-yet-decoded code is when that code = w+w[0]: the new entry
+always begins with the current run's first character. This is the one
+subtle corner of LZW - get it wrong and decode silently corrupts.
+
+========================================================================
+  SECTION D: decode + round-trip + GOLD code stream
+========================================================================
+input    : 'ABABABCABABAB'
+codes    : [1, 2, 4, 4, 3, 6, 5, 2]
+decoded  : 'ABABABCABABAB'
+
+[check] decode(encode(S)) == S ?  True
+
+GOLD code stream (pinned for lzw.html): [1, 2, 4, 4, 3, 6, 5, 2]
+GOLD dictionary growth on this input:
+    code 4 = 'AB'
+    code 5 = 'BA'
+    code 6 = 'ABA'
+    code 7 = 'ABC'
+    code 8 = 'CA'
+    code 9 = 'ABAB'
+    code 10 = 'BAB'
+
+GOLD scalars:  num_codes=8,  dict_entries_added=7
+[check] gold code stream reproduces from lzw_encode():  OK
+
+========================================================================
+  SECTION E: compression ratio + variable-width code growth
+========================================================================
+Two code-width models are used in practice:
+
+  (1) FIXED 12-bit: every code costs 12 bits. Simple; the historical
+      ceiling of Unix `compress` and the GIF maximum code size.
+  (2) VARIABLE width: codes start narrow (just enough for the seed
+      alphabet) and WIDEN by 1 bit at each 2^k boundary up to 12.
+      GIF and `compress` both do this; it saves bits early on.
+
+  ratio = total_code_bits / (num_chars * 8)
+
+longer text (len=131):
+  'the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog the quick brown fox jumps over the lazy dog'
+
+| input                      | chars | codes | final | fixed-12 | variable |
+|                            |       |       | width | ratio    | ratio    |
+|----------------------------|-------|-------|-------|----------|----------|
+| TEACH 'ABABABCABABAB'      | 13    | 8     | 4     | 0.923    | 0.269    |
+| 'AAAA' (degenerate run)    | 4     | 3     | 3     | 1.125    | 0.219    |
+| LONG (repeated phrase)     | 131   | 84    | 7     | 0.962    | 0.523    |
+
+Variable width always beats (or ties) fixed-12-bit, often dramatically:
+on TEACH it is 0.27 vs 0.92, because the early codes ride at 2-3 bits
+instead of 12. Fixed-12-bit can even EXPAND short data (AAAA: 1.125),
+since 12 bits per code is wasteful when few codes are emitted. On the
+longer repetitive prose, variable width reaches ~0.52 while fixed-12
+barely breaks even (0.96). The degenerate run 'AAAA' crushes to 0.22
+variable because each repetition collapses into a single code. Lesson:
+the adaptive width is not a minor optimization - it is where LZW's
+compression actually comes from.
+
+[check] GOLD: LONG text -> codes=84, final_width=7, fixed12_ratio=0.962, variable_ratio=0.523
+[check] ratio matches pinned values:  OK
+
+========================================================================
+  SECTION F: where LZW actually lives (and why it faded)
+========================================================================
+| format        | spec             | code width        | used for                       |
+|---------------|------------------|-------------------|--------------------------------|
+| GIF           | CompuServe 1987  | variable 3..12-bit | indexed-color images; the format that made LZW famous |
+| TIFF (LZW)    | Aldus 1986       | variable 2..12-bit | option tag 5: LZW on TIFF image/tile data |
+| Unix compress | Spencer 1984     | adaptive 9..12-bit | .Z files; the classic 'compress' utility |
+| PDF           | Adobe 1993       | 12-bit (LZWDecode) | early PDF stream filter (mostly replaced by FlateDecode) |
+| V.42bis       | ITU-T 1988       | on-line, max 12-bit | hardware LZW inside dial-up modems (in real time) |
+
+LZW's heyday was the late 1980s / early 1990s. It lost ground to
+DEFLATE (LZ77 + Huffman) because (a) LZW cannot beat Huffman on the
+literal/symbol probabilities - DEFLATE's entropy stage is strictly
+additive, and (b) the 12-bit dictionary cap limits how far back LZW
+can reach (4096 entries) versus DEFLATE's 32 KiB window. GIF still
+mandates LZW for patent-historical reasons, but PNG (DEFLATE) has
+largely replaced it. The 1984 lockstep trick, however, remains a
+beautiful idea: a dictionary reconstructed from nothing but the data.
+
+========================================================================
+  DONE - all sections printed
+========================================================================

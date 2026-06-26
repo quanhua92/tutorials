@@ -1,0 +1,155 @@
+write_policies.py - reference impl. All numbers feed WRITE_POLICIES.md.
+stdlib only; deterministic; no torch/numpy.
+Latency model: T_CACHE=1, T_BACK=10.
+
+==========================================================================
+  SECTION A: the two-axis write-policy space
+==========================================================================
+Every cache write answers TWO independent questions:
+
+  Q1 (write-hit path) : through | back | around
+  Q2 (write-miss path): write-allocate | no-write-allocate
+
+  +-----------+------------------+---------------------+
+  | hit \ miss| write-allocate   | no-write-allocate   |
+  +-----------+------------------+---------------------+
+  | THROUGH   | simple, safe,    | strict write-around |
+  |           | slow writes      | write path          |
+  +-----------+------------------+---------------------+
+  | BACK      | CPU L1/L2: FAST, | some DB buffer      |
+  |           | coalesced, risky | pools               |
+  +-----------+------------------+---------------------+
+  | AROUND    | (n/a - around bypasses on every write)       |
+  +-----------+-----------------------------------------+
+
+  Reads are NOT a choice: always allocate on a read miss.
+
+==========================================================================
+  SECTION B: coalescing - write-back turns 3 writes into 1 dirty block
+==========================================================================
+Look at the first three ops: W0, W0, W0 (write address 0 three times).
+
+  write-BACK    : the 3x W0 hit the SAME cache line, set dirty once.
+    backing writes caused by W0,W0,W0 = 0  (deferred until eviction/flush)
+    -> the three writes cost 3 * T_CACHE = 3, NOT 3 * (T_CACHE + T_BACK) = 33.
+
+  write-THROUGH : each W0 writes the backing store immediately.
+    backing writes caused by W0,W0,W0 = 3
+    -> cost 3 * (T_CACHE + T_BACK) = 33, 11x the write-back cost.
+
+  THIS is why CPU caches and DB buffer pools use write-back: writes
+  to a hot line are coalesced into one eventual writeback. The price
+  is the dirty bit - a crash before the writeback loses those writes
+  (mitigated by WAL / journaling / fsync - see Section D).
+
+  --- full step traces (write-back vs write-through) ---
+
+  write-back + write-allocate, capacity = 4
+  workload: W0 W0 W0 R1 W1 R1 W2 R2 W3 W3 R0 W4 W5 W6 W7 R0
+
+   #  op  result      note            cache ( *=dirty )     
+  --------------------------------------------------------------
+   1  W0  miss        wb+alloc(dirty)  {0*}                  
+   2  W0  hit         wb(dirty)       {0*}                  
+   3  W0  hit         wb(dirty)       {0*}                  
+   4  R1  miss(load)  -               {0*,1}                
+   5  W1  hit         wb(dirty)       {0*,1*}               
+   6  R1  hit         -               {0*,1*}               
+   7  W2  miss        wb+alloc(dirty)  {0*,1*,2*}            
+   8  R2  hit         -               {0*,1*,2*}            
+   9  W3  miss        wb+alloc(dirty)  {0*,1*,2*,3*}         
+  10  W3  hit         wb(dirty)       {0*,1*,2*,3*}         
+  11  R0  hit         -               {1*,2*,3*,0*}         
+  12  W4  miss        wb+alloc(dirty)  {2*,3*,0*,4*}         
+  13  W5  miss        wb+alloc(dirty)  {3*,0*,4*,5*}         
+  14  W6  miss        wb+alloc(dirty)  {0*,4*,5*,6*}         
+  15  W7  miss        wb+alloc(dirty)  {4*,5*,6*,7*}         
+  16  R0  miss(load)  -               {5*,6*,7*,0}          
+
+  write-through + write-allocate, capacity = 4
+  workload: W0 W0 W0 R1 W1 R1 W2 R2 W3 W3 R0 W4 W5 W6 W7 R0
+
+   #  op  result      note            cache ( *=dirty )     
+  --------------------------------------------------------------
+   1  W0  miss        wt+alloc        {0}                   
+   2  W0  hit         wt              {0}                   
+   3  W0  hit         wt              {0}                   
+   4  R1  miss(load)  -               {0,1}                 
+   5  W1  hit         wt              {0,1}                 
+   6  R1  hit         -               {0,1}                 
+   7  W2  miss        wt+alloc        {0,1,2}               
+   8  R2  hit         -               {0,1,2}               
+   9  W3  miss        wt+alloc        {0,1,2,3}             
+  10  W3  hit         wt              {0,1,2,3}             
+  11  R0  hit         -               {1,2,3,0}             
+  12  W4  miss        wt+alloc        {2,3,0,4}             
+  13  W5  miss        wt+alloc        {3,0,4,5}             
+  14  W6  miss        wt+alloc        {0,4,5,6}             
+  15  W7  miss        wt+alloc        {4,5,6,7}             
+  16  R0  miss(load)  -               {5,6,7,0}             
+
+==========================================================================
+  SECTION C: all five policies on the same workload
+==========================================================================
+capacity = 4, workload = W0 W0 W0 R1 W1 R1 W2 R2 W3 W3 R0 W4 W5 W6 W7 R0
+
+  policy                                  latency  bk_reads  bk_writes  dirty  writebacks
+  ---------------------------------------------------------------------------------------
+  write-through + write-allocate              216         9         11      0           0
+  write-through + no-write-allocate           146         3         11      0           0
+  write-back    + write-allocate              156         9          5      3           5
+  write-back    + no-write-allocate           136         3         10      1           0
+  write-around                                155         4         11      0           0
+
+  Read it as the three-way trade-off:
+    write-BACK    : latency 156, 5 backing writes, 3 dirty line(s) at risk.
+    write-THROUGH : latency 216 (highest), 11 backing writes, 0 dirty (always consistent).
+    write-AROUND  : latency 155, 11 backing writes, 0 dirty, 1 invalidation(s).
+                    The invalidation at W1 is the ONLY reason the
+                    later R1 does not serve a STALE cached value.
+
+==========================================================================
+  SECTION D: consistency vs latency - the durability question
+==========================================================================
+After the workload, is the backing store guaranteed to hold every
+write? Only if there are NO dirty lines, OR a flush has run.
+
+  write-through + write-allocate         dirty_before_flush=0  flushed=0  consistent_before_flush=YES
+  write-through + no-write-allocate      dirty_before_flush=0  flushed=0  consistent_before_flush=YES
+  write-back    + write-allocate         dirty_before_flush=3  flushed=3  consistent_before_flush=NO (crash loses data)
+  write-back    + no-write-allocate      dirty_before_flush=1  flushed=1  consistent_before_flush=NO (crash loses data)
+  write-around                           dirty_before_flush=0  flushed=0  consistent_before_flush=YES
+
+  write-through / write-around : the backing store is ALWAYS the
+    source of truth. A crash at any instant loses NOTHING. Cost:
+    every write pays T_BACK, and there is no coalescing.
+
+  write-back : the backing store is STALE for every dirty line. A
+    crash before flush/writeback loses those writes. Mitigations:
+    - WAL (write-ahead log) / journaling: durably log the intent
+      first, so a crash can REPLAY unfinished writebacks.
+    - fsync / explicit flush at commit boundaries (forces writeback).
+    - battery-backed NVRAM: the 'dirty' window survives a power cut.
+    This is the entire reason databases and filesystems have journals.
+
+==========================================================================
+  SECTION E: GOLD values - pinned for write_policies.html
+==========================================================================
+workload = W0 W0 W0 R1 W1 R1 W2 R2 W3 W3 R0 W4 W5 W6 W7 R0, capacity = 4, T_CACHE=1, T_BACK=10
+
+  write-through + write-allocate         latency=216  bk_reads=9   bk_writes=11  writebacks=0   inval=0   dirty=0
+  write-through + no-write-allocate      latency=146  bk_reads=3   bk_writes=11  writebacks=0   inval=0   dirty=0
+  write-back    + write-allocate         latency=156  bk_reads=9   bk_writes=5   writebacks=5   inval=0   dirty=3
+  write-back    + no-write-allocate      latency=136  bk_reads=3   bk_writes=10  writebacks=0   inval=0   dirty=1
+  write-around                           latency=155  bk_reads=4   bk_writes=11  writebacks=0   inval=1   dirty=0
+
+GOLD (pinned, the .html re-derives these from the same model):
+  write-back    + allocate : latency = 156, backing_writes = 5, dirty_before_flush = 3
+  write-through + allocate : latency = 216, backing_writes = 11
+  write-around             : latency = 155, invalidations = 1
+
+[check] all GOLD asserts passed:  OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

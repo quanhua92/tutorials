@@ -1,0 +1,158 @@
+arc_cache.py - reference impl. All numbers feed ARC_CACHE.md.
+stdlib only; deterministic; no torch/numpy.
+Implements Megiddo & Modha 2003 (FAST '03).
+
+==========================================================================
+  SECTION A: the four lists and the four cases, step by step
+==========================================================================
+capacity = 3. Watch T1/T2 fill on cold misses, then a Case-II ghost
+hit nudge p upward once a key returns from B1.
+
+
+  ARC (mechanism), c = 3
+  sequence: A B A C D A
+
+   #   op  res   case                              evict       state
+  ------------------------------------------------------------------------------------------------------------
+   1    A  MISS  IV (cold miss)                    -           T1[A] T2[] B1[] B2[] p=0
+   2    B  MISS  IV (cold miss)                    -           T1[A,B] T2[] B1[] B2[] p=0
+   3    A  HIT   I  (hit in T1/T2)                 -           T1[B] T2[A] B1[] B2[] p=0
+   4    C  MISS  IV (cold miss)                    -           T1[B,C] T2[A] B1[] B2[] p=0
+   5    D  MISS  IV (cold miss)                    T1->B1:B    T1[C,D] T2[A] B1[B] B2[] p=0
+   6    A  HIT   I  (hit in T1/T2)                 -           T1[C,D] T2[A] B1[B] B2[] p=0
+
+  hits=2  misses=4  hit_rate=2/6 = 33.33%
+  final p = 0  (started at 0; frequency-favored)
+
+==========================================================================
+  SECTION B: self-tuning - watch p move with the workload
+==========================================================================
+capacity = 4. Three phases:
+
+  Phase 1 (steps 1-6): A,B,C,D enter T1; re-asking A,B promotes them
+    to T2 (frequency side). Now BOTH halves are populated - this is
+    the precondition for ghosts, because REPLACE only demotes to a
+    ghost list when there is a rival real list to evict from.
+
+  Phase 2 (steps 7-10): a cold scan E,F,G,H. Each cold miss calls
+    REPLACE, which demotes the LRU of T1 into B1 (a ghost). Ghosts
+    now exist as 'eviction memory'.
+
+  Phase 3 (steps 11-13): re-ask for E,F -> they are in B1 = Case-II
+    ghost hits -> p GROWS (ARC votes 'recency half too small'). Then
+    re-ask for A -> it is in B2 = Case-III ghost hit -> p SHRINKS.
+
+
+  ARC (adaptation), c = 4
+  sequence: A B C D A B E F G H E F A
+
+   #   op  res   case                              evict       state
+  ------------------------------------------------------------------------------------------------------------
+   1    A  MISS  IV (cold miss)                    -           T1[A] T2[] B1[] B2[] p=0
+   2    B  MISS  IV (cold miss)                    -           T1[A,B] T2[] B1[] B2[] p=0
+   3    C  MISS  IV (cold miss)                    -           T1[A,B,C] T2[] B1[] B2[] p=0
+   4    D  MISS  IV (cold miss)                    -           T1[A,B,C,D] T2[] B1[] B2[] p=0
+   5    A  HIT   I  (hit in T1/T2)                 -           T1[B,C,D] T2[A] B1[] B2[] p=0
+   6    B  HIT   I  (hit in T1/T2)                 -           T1[C,D] T2[A,B] B1[] B2[] p=0
+   7    E  MISS  IV (cold miss)                    T1->B1:C    T1[D,E] T2[A,B] B1[C] B2[] p=0
+   8    F  MISS  IV (cold miss)                    T1->B1:D    T1[E,F] T2[A,B] B1[C,D] B2[] p=0
+   9    G  MISS  IV (cold miss)                    T1->B1:E    T1[F,G] T2[A,B] B1[D,E] B2[] p=0
+  10    H  MISS  IV (cold miss)                    T1->B1:F    T1[G,H] T2[A,B] B1[E,F] B2[] p=0
+  11    E  MISS  II (B1 ghost hit, p+=1 -> 1)      T1->B1:G    T1[H] T2[A,B,E] B1[F,G] B2[] p=1
+  12    F  MISS  II (B1 ghost hit, p+=1 -> 2)      T2->B2:A    T1[H] T2[B,E,F] B1[G] B2[A] p=2
+  13    A  MISS  III (B2 ghost hit, p-=1 -> 1)     T1->B1:H    T1[] T2[B,E,F,A] B1[G,H] B2[] p=1
+
+  hits=2  misses=11  hit_rate=2/13 = 15.38%
+  final p = 1  (started at 0; frequency-favored)
+
+  p trajectory (start + per step): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1]
+  p went 0 -> 1 -> 2 -> 1. The two Case-II hits grew it; the Case-III
+  hit shrank it. THAT is ARC self-tuning from live ghost feedback -
+  no fixed LRU or LFU can do this.
+
+==========================================================================
+  SECTION C: robustness - two workloads that break opposite policies
+==========================================================================
+Workload 1 (NON-stationary, breaks LFU): stale squatter X read 5x then
+  never again; live working set {A,B,C} cycled. c=3. LRU self-heals by
+  evicting stale X; LFU pins X forever (pollution, see LFU_CACHE.md).
+
+Workload 2 (stationary hot set, breaks LRU): {H1,H2} hot, then a one-shot
+  scan of 4 cold items, then back to hot set. c=2. LFU pins the hot set;
+  LRU lets the scan flush it.
+
+  workload                                        ARC      LRU      LFU  ARC p
+  ----------------------------------------------------------------------------
+  1: non-stationary (LFU-pollution), c=3       57.1%    71.4%    28.6%      2
+  2: stationary hot set + scan, c=2            50.0%    42.9%    50.0%      0
+
+  Read it row by row:
+    WL1: LRU 71% >> LFU 29%.   ARC 57% (p->2).
+    WL2: LFU 50% >  LRU 43%.   ARC 50% (p->0).
+
+  Average over both: ARC 53.6%  vs  LRU 57.1%  vs  LFU 39.3%.
+  Worst-case over both: ARC 50%, LRU 43%, LFU 29%.
+
+  THE POINT: LRU and LFU each have a workload where they collapse
+  (LFU->29% on WL1, LRU->43% on WL2). ARC, with NO knowledge of which
+  workload it is on, stays competitive on BOTH because p adapts: it
+  leaned recency-favored on WL1 and frequency-favored on WL2. That
+  worst-case robustness - not winning every single trace - is what
+  made IBM adopt ARC for Z-series storage.
+
+==========================================================================
+  SECTION D: invariants hold across a long random-ish run
+==========================================================================
+  ran 20 ops at c=5; final p=1
+  |T1|+|T2| = 5 <= 5   OK
+  |T1|+|B1| = 3 <= 5   OK
+  |T2|+|B2| = 4 <= 5   OK
+  0 <= p = 1 <= 5   OK
+  no key appears in two lists   OK
+
+[check] all invariants hold:  OK
+
+==========================================================================
+  SECTION E: GOLD values - pinned for arc_cache.html
+==========================================================================
+
+  ARC (gold run), c = 4
+  sequence: A B C D A B E F G H E F A
+
+   #   op  res   case                              evict       state
+  ------------------------------------------------------------------------------------------------------------
+   1    A  MISS  IV (cold miss)                    -           T1[A] T2[] B1[] B2[] p=0
+   2    B  MISS  IV (cold miss)                    -           T1[A,B] T2[] B1[] B2[] p=0
+   3    C  MISS  IV (cold miss)                    -           T1[A,B,C] T2[] B1[] B2[] p=0
+   4    D  MISS  IV (cold miss)                    -           T1[A,B,C,D] T2[] B1[] B2[] p=0
+   5    A  HIT   I  (hit in T1/T2)                 -           T1[B,C,D] T2[A] B1[] B2[] p=0
+   6    B  HIT   I  (hit in T1/T2)                 -           T1[C,D] T2[A,B] B1[] B2[] p=0
+   7    E  MISS  IV (cold miss)                    T1->B1:C    T1[D,E] T2[A,B] B1[C] B2[] p=0
+   8    F  MISS  IV (cold miss)                    T1->B1:D    T1[E,F] T2[A,B] B1[C,D] B2[] p=0
+   9    G  MISS  IV (cold miss)                    T1->B1:E    T1[F,G] T2[A,B] B1[D,E] B2[] p=0
+  10    H  MISS  IV (cold miss)                    T1->B1:F    T1[G,H] T2[A,B] B1[E,F] B2[] p=0
+  11    E  MISS  II (B1 ghost hit, p+=1 -> 1)      T1->B1:G    T1[H] T2[A,B,E] B1[F,G] B2[] p=1
+  12    F  MISS  II (B1 ghost hit, p+=1 -> 2)      T2->B2:A    T1[H] T2[B,E,F] B1[G] B2[A] p=2
+  13    A  MISS  III (B2 ghost hit, p-=1 -> 1)     T1->B1:H    T1[] T2[B,E,F,A] B1[G,H] B2[] p=1
+
+  hits=2  misses=11  hit_rate=2/13 = 15.38%
+  final p = 1  (started at 0; frequency-favored)
+
+GOLD (pinned for the .html JS recompute):
+  capacity              = 4
+  sequence              = ['A', 'B', 'C', 'D', 'A', 'B', 'E', 'F', 'G', 'H', 'E', 'F', 'A']
+  final p               = 1
+  p-trajectory (per step, incl. start 0) = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1]
+  case sequence         = ['IV', 'IV', 'IV', 'IV', 'I', 'I', 'IV', 'IV', 'IV', 'IV', 'II', 'II', 'III']
+  hit sequence (1=hit)  = [0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0]
+  hits / total          = 2 / 13
+  final T1              = []
+  final T2              = ['B', 'E', 'F', 'A']
+  final B1              = ['G', 'H']
+  final B2              = []
+
+[check] all GOLD asserts passed:  OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

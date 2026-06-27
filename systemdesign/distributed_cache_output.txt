@@ -1,0 +1,193 @@
+distributed_cache.py - reference simulation.
+stdlib only; deterministic; no random seed.
+Feeds DISTRIBUTED_CACHE.md and distributed_cache.html.
+
+==========================================================================
+  SECTION A: Consistent Hashing - minimal movement on add/remove
+==========================================================================
+
+  3 nodes x 150 vnodes, 10000 keys
+
+  node            keys    share
+  ------------------------------
+  node-A          3471    34.7%
+  node-B          3107    31.1%
+  node-C          3422    34.2%
+
+  ADD node-D  (3 -> 4 nodes):
+    consistent hashing: 2409 keys moved (24.09%)
+    ideal (1/N new):    2500 keys (25.00%)
+
+  REMOVE node-B  (4 -> 3 nodes):
+    consistent hashing: 2151 keys moved (21.51%)
+    ideal (node-B's share ~ 1/4): 2500 keys
+
+  SAME SCENARIO with hash modulo N (naive):
+    modulo 3->4: 7525 keys moved (75.25%)
+    modulo moves 3.1x MORE keys than consistent hashing.
+
+  WHY: modulo relocates keys on EVERY node when N changes, because
+  hash%3 and hash%4 agree for only ~1/4 of keys. Consistent hashing
+  only reassigns the arc between the new node and its predecessor.
+
+[check] consistent hashing moves O(K/N): OK
+
+==========================================================================
+  SECTION B: LRU Cache - HashMap + doubly-linked list, O(1)
+==========================================================================
+
+  capacity = 3
+  sequence: A B C A D B E
+
+  op   result evicted  cache (MRU -> LRU)            
+  ----------------------------------------------------
+  A    MISS   -        A                             
+  B    MISS   -        B A                           
+  C    MISS   -        C B A                         
+  A    HIT    -        A C B                         
+  D    MISS   B        D A C                         
+  B    MISS   C        B D A                         
+  E    MISS   A        E B D                         
+
+  final (MRU -> LRU): E B D
+
+  O(1) proof:
+    get = HashMap lookup + unlink (2 ptr writes) + push_front (4 ptr writes)
+    put = HashMap insert + push_front + at most 1 tail unlink
+
+[check] LRU evicts least-recently-used when full: OK
+
+==========================================================================
+  SECTION C: Eviction simulation - hit rate climbs with capacity
+==========================================================================
+
+  1000 keys, 5000 accesses (80/20 skew: top-200 keys get 80% of traffic)
+  working set = 200 hot keys
+
+    capacity    hits  misses  hit rate  evictions
+  -------------------------------------------------
+          10      20    4980      0.4%       4970
+          50     100    4900      2.0%       4850
+         100     196    4804      3.9%       4704
+         150     296    4704      5.9%       4554
+         200    4040     960     80.8%        760
+         500    4680     320     93.6%          0
+        1000    4680     320     93.6%          0
+
+  Key insight: hit rate is flat until capacity approaches the working
+  set (~200), then jumps sharply. Cache sizing = fitting the WORKING SET,
+  not all keys. Going from 200 -> 1000 capacity gains almost nothing.
+
+[check] hit rate climbs as cache fits the working set: OK
+
+==========================================================================
+  SECTION D: Write strategies - cache-aside / write-through / write-behind
+==========================================================================
+
+  On a WRITE to key K:
+
+    cache-aside    DB.put(K)                      cache NOT updated
+                   read miss -> DB.get(K) -> cache.put(K)
+                   + simple, cache stays small      - stale until TTL/invalidation
+
+    write-through  cache.put(K) THEN DB.put(K)     cache always fresh
+                   + strong consistency             - 2x write latency
+
+    write-behind   cache.put(K); async DB.put(K)   DB lags behind
+                   + fastest writes                 - data loss risk on crash
+
+  Workload: 10000 ops (1000 writes, 9000 reads), cache-aside miss rate 20%
+
+  strategy          DB writes   DB reads  cache writes  cache reads
+  -----------------------------------------------------------------
+  cache-aside            1000       1800          1800         9000
+  write-through          1000          0          1000         9000
+  write-behind           1000          0          1000         9000
+
+  cache-aside pays 1800 DB READS (on misses); write-through/write-behind
+  pay 0 DB reads but 1000 extra cache WRITES per write. Write-behind
+  defers DB writes (async), so a crash between cache.put and DB.put loses data.
+
+[check] strategy tradeoffs quantified: OK
+
+==========================================================================
+  SECTION E: Cache stampede + probabilistic early expiration
+==========================================================================
+
+  200 concurrent readers, TTL=100s, soft TTL=90s
+  DB fetch latency = 5s, arrivals in [90, 105]
+
+  NAIVE (no protection):          66 DB fetches
+                                  (herd: all readers within 5s of first miss pile up)
+  PROBABILISTIC EARLY EXPIRATION: 2 DB fetches
+                                  (early refreshers warm the cache
+                                   before the herd arrives)
+  reduction:                      97.0%
+
+  Formula:  P(refresh at time t) = (t - soft) / (TTL - soft)
+  for t in [soft, TTL]. Early arrivers refresh with low probability;
+  late arrivers (close to TTL) refresh with high probability. The net
+  effect: the refresh is spread across the soft window instead of
+  stampeding at the exact expiry instant, so the herd sees HITS.
+
+  Deployed at scale by Instagram (2014) and Facebook Memcache (single-flight).
+
+[check] PEE reduces stampede DB load: OK
+
+==========================================================================
+  SECTION F: Scale - hit rate, latency, memory, throughput
+==========================================================================
+
+  1. HIT RATE -> EFFECTIVE READ LATENCY
+     cache hit ~= 0.25 ms,  cache miss ~= 0.25 + 5.0 ms
+
+       hit rate    eff latency   speedup vs raw DB
+     ----------------------------------------------
+          50.0%       2.750 ms                1.8x
+          80.0%       1.250 ms                4.0x
+          90.0%       0.750 ms                6.7x
+          95.0%       0.500 ms               10.0x
+          99.0%       0.300 ms               16.7x
+          99.9%       0.255 ms               19.6x
+
+  2. MEMORY SIZING
+     100,000,000 keys x 1024 B x RF=3 = 0.31 TB raw
+     + 15% hash-table + LRU metadata -> 0.35 TB
+     @ 64 GB/node:  6 nodes
+     @ 256 GB/node: 2 nodes
+
+  3. THROUGHPUT
+     target: 1,000,000 reads/s + 100,000 writes/s  (10:1 R:W)
+     per-node: ~100,000 ops/s (Redis-like, single-threaded core)
+     nodes for throughput: 10
+     provision MAX(memory=2, throughput=10) = 10 nodes
+
+  NOTE: this cluster is THROUGHPUT-BOUND, not memory-bound. The data
+  fits in 2 fat nodes, but 1,000,000 reads/s demands 10 nodes.
+
+[check] scale math consistent: OK
+
+==========================================================================
+  SECTION G: GOLD values - pinned for distributed_cache.html
+==========================================================================
+
+  LRU gold (capacity=3):
+    sequence:       ['A', 'B', 'C', 'A', 'D', 'B', 'E']
+    hit sequence:   [0, 0, 0, 1, 0, 0, 0]
+    evict sequence: ['-', '-', '-', '-', 'B', 'C', 'A']
+    final order:    ['E', 'B', 'D']
+
+  Consistent hashing gold:
+    keys moved on +node-D (3->4): 2409 (24.09%)
+
+  Stampede gold:
+    naive DB fetches: 66
+    PEE DB fetches:   2
+
+  all GOLD asserts passed
+
+[check] GOLD values pinned for .html JS recompute: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

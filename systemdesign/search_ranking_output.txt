@@ -1,0 +1,234 @@
+# search_ranking.py - Search ranking system design simulation
+# Pure Python stdlib only. Numbers below feed SEARCH_RANKING.md
+# and search_ranking.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Inverted index (postings, df, document lengths)
+==========================================================================
+The inverted index maps each TERM to its POSTING LIST: the docs whose
+body contains it and the term frequency. Retrieval = walk a few posting
+lists and merge -- O(matches), NOT O(corpus). This is why BM25 over
+100M docs finishes in <50ms: it never scans a doc that lacks the term.
+
+Corpus (6 docs, body tokenized; title kept aside as a ranker feature):
+  d1  (Machine Learning Intro)   len= 5  "machine learning model training algorithm"
+  d2  (Neural Network Learning)  len= 4  "machine learning neural network"
+  d3  (Deep Network Training)    len= 5  "deep learning neural network training"
+  d4  (Database Indexing)        len= 4  "database query optimization index"
+  d5  (Query Tuning)             len= 5  "database index query performance tuning"
+  d6  (Search Ranking)           len= 4  "web search ranking learning"
+
+avgdl = 4.5000 tokens
+
+Posting lists (term -> doc:tf), df in brackets:
+  algorithm     df=1  [d1:1]
+  database      df=2  [d4:1, d5:1]
+  deep          df=1  [d3:1]
+  index         df=2  [d4:1, d5:1]
+  learning      df=4  [d1:1, d2:1, d3:1, d6:1]
+  machine       df=2  [d1:1, d2:1]
+  model         df=1  [d1:1]
+  network       df=2  [d2:1, d3:1]
+  neural        df=2  [d2:1, d3:1]
+  optimization  df=1  [d4:1]
+  performance   df=1  [d5:1]
+  query         df=2  [d4:1, d5:1]
+  ranking       df=1  [d6:1]
+  search        df=1  [d6:1]
+  training      df=2  [d1:1, d3:1]
+  tuning        df=1  [d5:1]
+  web           df=1  [d6:1]
+
+Multi-term query 'machine learning' -> merge posting lists:
+  machine postings  = {d1, d2}
+  learning postings = {d1, d2, d3, d6}
+  intersection (AND)= {d1, d2}   -- exact-match candidates
+  union (OR)        = {d1, d2, d3, d6}   -- scored, zeros dropped
+
+[check] avgdl=4.5, df(machine)=2, df(learning)=4, AND={d1,d2}? OK
+
+==========================================================================
+  SECTION 2: TF-IDF (vector-space baseline -- the tie problem)
+==========================================================================
+TF-IDF = tf * log(N/df). A term common to every doc gets idf 0 (useless);
+a rare term gets a high idf. Score = sum over query terms of tf*idf.
+NO document-length normalization -> two docs with the same term
+frequencies score IDENTICALLY, regardless of total length. That tie is
+the problem BM25 fixes.
+
+Query: 'machine learning'
+  idf(machine)  = log(6/2) = 1.0986
+  idf(learning) = log(6/4) = 0.4055
+
+  doc        tfidf   terms matched
+  d1        1.5041   {machine, learning}
+  d2        1.5041   {machine, learning}
+  d3        0.4055   {learning}
+  d6        0.4055   {learning}
+
+  TIE: d1=1.5041 == d2=1.5041  (both tf=1 for machine & learning).
+  TIE: d3=0.4055 == d6=0.4055  (both match only 'learning', tf=1).
+  TF-IDF cannot tell the verbose d1 from the terse d2, nor the on-topic
+  d3 from the off-topic 'search' doc d6. Enter BM25.
+
+[check] d1==d2~1.5041 (tie), d3==d6~0.4055 (tie), top=d1? OK
+
+==========================================================================
+  SECTION 3: BM25 (k1 saturation + b length normalization)
+==========================================================================
+BM25 fixes TF-IDF's ties with two knobs:
+  k1=1.2  term-frequency SATURATION: extra occurrences of a term add
+           diminishing score (tf*(k1+1)/(tf+k1...)). Caps keyword stuffing.
+  b =0.75 document-length NORMALIZATION: long docs are penalized because
+           a match there is less specific (b*dl/avgdl in the denominator).
+
+  idf_bm25(machine)  = log(1+(6-2+0.5)/(2+0.5)) = 1.0296
+  idf_bm25(learning) = log(1+(6-4+0.5)/(4+0.5)) = 0.4418
+
+Query: 'machine learning'   (same query that TIED under TF-IDF)
+  doc      len     bm25    tfidf   note
+  d2         4   1.5415   1.5041   shortest ML doc (4 tok) -> WINS the d1/d2 tie
+  d1         5   1.4075   1.5041   verbose (5 tok) -> demoted below shorter d2
+  d6         4   0.4629   0.4055   'learning' only; short -> beats on-topic d3 (!)
+  d3         5   0.4226   0.4055   on-topic but longer -> demoted below d6
+
+  BM25 BREAKS both TF-IDF ties:
+    d2=1.5415 > d1=1.4075  (d2 is shorter -> length norm favors it)
+    d6=0.4629 > d3=0.4226  (d6 shorter, but d3 is MORE relevant -- a BM25
+    blind spot: pure lexical length-norm promotes the wrong doc here).
+  That blind spot is exactly what learning-to-rank corrects (Section 5).
+
+[check] bm25 d2>d1 (~1.54>1.41), d6>d3, order=d2,d1,d6,d3? OK
+
+==========================================================================
+  SECTION 4: Query expansion (dictionary + pseudo-relevance feedback)
+==========================================================================
+A literal query misses semantically related docs. Two expansion tactics:
+  (a) DICTIONARY: 'learning' -> [deep, neural, training] (a curated or
+      learned synonym map; SPLADE learns this from data).
+  (b) PRF (Rocchio): take BM25 top-k docs, pull their top idf-weighted
+      terms. The corpus itself suggests what to add.
+
+Query: 'machine learning'
+  dictionary expansion -> +['model', 'algorithm', 'deep', 'neural', 'training']
+  PRF (top-2 docs d2,d1) term weights:
+    algorithm    2.5219
+    model        2.5219
+    network      1.6935
+    neural       1.6935
+    training     1.5463
+  -> expanded query: 'machine learning model algorithm deep neural training'
+
+Ranking BEFORE vs AFTER expansion:
+  before     d2(1.54), d1(1.41), d6(0.46), d3(0.42)
+  after      d1(5.34), d3(3.87), d2(2.62), d6(0.46)
+
+  d3 ('deep learning neural network training') was rank 4 (score 0.4226);
+  after expansion it jumps to rank 2 (score 3.8658) -- the added terms
+  'deep/neural/training' match d3 exactly. Expansion bridges the lexical
+  gap between 'machine learning' and the deep-network cluster.
+
+[check] expanded adds deep/neural/training, d3 rank 4->2? OK
+
+==========================================================================
+  SECTION 5: Learning-to-rank (feature model + NDCG vs BM25)
+==========================================================================
+BM25 only sees text. A ranker must also weigh behavioral and business
+signals. We score each candidate as a WEIGHTED SUM of features, then
+compare its NDCG@4 against BM25 on the same human judgments.
+
+  f_bm25 = normalized BM25      f_click = normalized clicks
+  f_ctr  = historical CTR       f_fresh = freshness [0,1]
+  f_exact= title exact-match {0,1}
+  default weights = bm25=0.35, click=0.30, ctr=0.15, fresh=0.10, exact=0.10
+
+Feature matrix (candidates from BM25 retrieval):
+  doc     f_bm25  f_click   f_ctr f_fresh  exact  grade
+  d2      1.0000   0.9167    0.28    0.70      1      4
+  d1      0.8802   1.0000    0.32    0.95      1      4
+  d6      0.0360   0.0000    0.04    0.85      0      1
+  d3      0.0000   0.6458    0.22    0.40      0      3
+
+LTR scores (default weights):
+  d1    0.8511
+  d2    0.8370
+  d3    0.2668
+  d6    0.1036
+
+  ranking BM25 : d2 > d1 > d6 > d3
+  ranking LTR  : d1 > d2 > d3 > d6
+  NDCG@4 BM25  = 0.9854
+  NDCG@4 LTR   = 1.0000   <- LTR wins
+
+  WHY LTR wins: BM25 put d6 (off-topic 'search' doc, grade 1) above d3
+  (on-topic 'neural network training', grade 3) purely because d6 is
+  shorter. LTR's click/freshness features rank d3 above d6, matching
+  human judgment -> NDCG jumps from 0.9854 to 1.0000 (perfect ordering).
+
+[check] LTR order=d1,d2,d3,d6 and NDCG@4=1.0 (> BM25)? OK
+
+==========================================================================
+  SECTION 6: Scale estimation
+==========================================================================
+Assumptions:
+  document corpus         = 100,000,000
+  avg tokens / doc        = 500
+  embedding dimension     = 768
+  peak query QPS          = 10,000 /s
+
+Index RAM:
+  raw text                = 300.00 GB   (100M docs x 500 tokens x 6 B)
+  inverted index (30%)    = 90.00 GB   (delta+varint compressed postings)
+  embeddings raw float32  = 307.20 GB   (training only, never served)
+  embeddings PQ (32 B)    = 3.20 GB   (served; FAISS IVF+PQ)
+
+Throughput:
+  queries / day           = 864,000,000   (read-heavy)
+  read : write ratio      = ~100 : 1   (search >> indexing)
+
+Latency budget (p99 < 150ms):
+  query understanding     <   5 ms
+  BM25 retrieval          <  25 ms   (inverted index, 100M docs)
+  ANN retrieval (dense)   <  30 ms   (FAISS/HNSW, parallel)
+  light ranker (GBDT)     <  15 ms   (1000 -> 100 candidates)
+  cross-encoder (GPU)     <  50 ms   (top-50 re-rank, 1ms each)
+  business re-rank        <   5 ms
+  total                   < 130 ms   (20ms slack for network)
+
+[check] inverted=90GB, emb raw=307.2GB, emb PQ=3.2GB? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for search_ranking.html)
+==========================================================================
+  avgdl                    = 4.5
+  df_machine               = 2
+  df_learning              = 4
+  idf_machine              = 1.0986
+  idf_learning             = 0.4055
+  tfidf_d1                 = 1.5041
+  tfidf_d2                 = 1.5041
+  tfidf_d3                 = 0.4055
+  tfidf_d6                 = 0.4055
+  bm25_d1                  = 1.4075
+  bm25_d2                  = 1.5415
+  bm25_d3                  = 0.4226
+  bm25_d6                  = 0.4629
+  bm25_order               = d2,d1,d6,d3
+  expanded_terms           = machine,learning,model,algorithm,deep,neural,training
+  expansion_d3_rank        = 2
+  expansion_d3_score       = 3.8658
+  ltr_order                = d1,d2,d3,d6
+  ltr_d1                   = 0.8511
+  ltr_d3                   = 0.2668
+  ltr_d6                   = 0.1036
+  ndcg_bm25_at4            = 0.9854
+  ndcg_ltr_at4             = 1.0
+  scale_inverted_gb        = 90.0
+  scale_emb_raw_gb         = 307.2
+  scale_emb_pq_gb          = 3.2
+
+[check] GOLD reproduces from index + TF-IDF + BM25 + expansion + LTR? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

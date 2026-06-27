@@ -1,0 +1,194 @@
+
+========================================================================
+ NEWS AGGREGATOR - reference simulation
+========================================================================
+Source of truth for NEWS_AGGREGATOR.md and news_aggregator.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - RSS/Atom polling (fetch -> parse -> extract)
+========================================================================
+Periodically GET each feed, parse the XML items, extract fields. Use
+conditional GET (If-None-Match ETag): if the stored ETag matches, the
+server replies 304 Not Modified (~0.5 KB) and we SKIP parsing.
+
+  GET feed_tech     stored ETag=etag-2024-10
+      -> HTTP 200  (250.0 KB)
+      parsed: OpenAI launches GPT-5
+               url=https://wired.com/story/openai-gpt5
+      parsed: Custom silicon for AI
+               url=https://wired.com/story/ai-custom-silicon
+  GET feed_blog     stored ETag=etag-2024-10
+      -> HTTP 304  (0.5 KB)  [unchanged: skip parse]
+
+  Bandwidth: naive full-fetch = 500 KB, conditional GET = 250.5 KB  (saved 249.5 KB, 50%)
+  Extracted 2 article(s) from 1 changed feed(s).
+
+  >>> Conditional GET skips unchanged feeds (304), so the polling
+      cost is dominated by feeds that ACTUALLY changed - a big win
+      when most feeds are quiet most of the time.
+
+========================================================================
+ Section B - Deduplication (URL canonicalization + SimHash)
+========================================================================
+Layer 1: URL canonicalization - mirror URLs collapse to one string.
+
+  https://WWW.Wired.com/story/gpt5?ref=rss&ut=1    -> https://wired.com/story/gpt5?ref=rss&ut=1
+  https://wired.com/story/gpt5/?ut=1&ref=rss#top   -> https://wired.com/story/gpt5?ref=rss&ut=1
+  https://wired.com/story/gpt5?ref=rss&ut=1        -> https://wired.com/story/gpt5?ref=rss&ut=1
+  http://wired.com:80/story/gpt5/?ref=rss&ut=1     -> https://wired.com/story/gpt5?ref=rss&ut=1
+
+  4 variant URLs -> 1 canonical URL(s)  (dedup rate 75%)
+
+Layer 2: SimHash (near-duplicate fingerprint, 64-bit).
+
+  DUP_THRESHOLD = 3 bits (over 64) => near-duplicate
+  body_exact fingerprint = 0x063549190461d056
+  body_near  fingerprint = 0x06374b190461d256
+  body_diff  fingerprint = 0x4ed9b81fc548d460
+
+  hamming(exact, exact_copy) =  0  -> duplicate? YES
+  hamming(exact, near_rewrite) =  3  -> duplicate? YES  (lightly rewritten copy, same story)
+  hamming(exact, different_story) = 25  -> duplicate? no  (different vocabulary)
+
+  >>> SimHash catches REWRITES that exact hashing misses: 2 changed
+      words barely move the fingerprint (small hamming), while a
+      totally different story flips ~half the bits.
+
+Layer 3: LSH banding (scale dedup from O(n^2) to ~O(n)).
+
+  Split 64-bit fp into 4 bands x 16 bits. Two articles
+  are a CANDIDATE PAIR only if they share >=1 band (LSH property).
+
+  bands shared (exact vs near_rewrite) = 1/4  -> candidate pair? YES
+  bands shared (exact vs different_story) = 0/4  -> candidate pair? no
+
+  >>> Banding means we only run full hamming on items sharing a
+      bucket - O(n) candidate pairs instead of O(n^2) all-pairs.
+
+========================================================================
+ Section C - Ranking (recency + authority + relevance)
+========================================================================
+score = 0.45*recency + 0.25*authority + 0.3*relevance   (weights sum to 1.00)
+HALF_LIFE = 6h. decay(age) = 0.5**(age/6).
+
+  Decay curve sample (recency multiplier vs article age):
+    age= 0h  decay=1.0000
+    age= 3h  decay=0.7071
+    age= 6h  decay=0.5000   <- half-life (0.5)
+    age=12h  decay=0.2500
+    age=24h  decay=0.0625
+
+  Source authority table:
+    Reuters    authority=0.95
+    Bloomberg  authority=0.90
+    Wired      authority=0.70
+    TechBlog   authority=0.50
+    BlogSpot   authority=0.30
+
+  Reader: tech enthusiast  (interests: ai, openai, llm heavy; fed/rates low)
+
+  Per-article signal breakdown:
+    art  source     auth  age   recency  relevance   score
+    ------------------------------------------------------------
+    a1   Reuters    0.95   1.0h  0.8909   0.5667     0.8084
+    a2   TechBlog   0.50   2.0h  0.7937   0.7667     0.7122
+    a3   Bloomberg  0.90   5.0h  0.5612   0.1000     0.5076
+    a4   BlogSpot   0.30   0.5h  0.9439   0.5000     0.6497
+    a5   Reuters    0.95  10.0h  0.3150   0.1000     0.4092
+    a6   Wired      0.70   3.0h  0.7071   0.7000     0.7032
+
+  Ranked order (score desc): a1, a2, a6, a4, a3, a5
+  >>> a4 (fresh blog, 0.5h) beats a3 (Reuters fed story, 5h) for the
+      tech reader: recency + relevance overcome a4's low authority.
+  >>> a6 (Wired, openai+chips) ranks #3: relevant topics + decent age.
+
+========================================================================
+ Section D - Adaptive crawl scheduling (poll interval optimization)
+========================================================================
+Poll each feed at an interval INVERSELY proportional to its update
+rate, with min/max clamps. Poll ~2x the update rate to stay fresh.
+
+  raw_interval = (1440 / updates_per_day) * 0.5,  clamped to [15, 1440] min
+
+  feed               updates/day  interval  polls/day  % 304
+  ----------------------------------------------------------
+  wire (Reuters)              48       15m         96    50%
+  tech (Wired)                 6      120m         12    50%
+  blog (personal)              1      720m          2    50%
+
+  Naive 'poll all every 15 min'     : 288 polls/day
+  Adaptive (by update rate)         : 110 polls/day
+  Reduction                         : 62%
+
+  Bandwidth (3 feeds, 250 KB full / 0.5 KB 304):
+    naive full-fetch         = 72.0 MB/day
+    adaptive + conditional   = 13.8 MB/day  (saved 81%)
+
+  Adaptive convergence (exponential rush-in / back-off):
+    rule: new content -> interval/=2 (min 15); none -> interval*=2 (max 1440)
+    trace A: fast wire (always new) from 60m:
+      30m, 15m, 15m, 15m, 15m  -> converges to 15m
+    trace B: dead blog (never new) from 60m:
+      120m, 240m, 480m, 960m, 1440m  -> converges to 1440m
+
+  >>> Adaptive scheduling makes polling proportional to how much a
+      feed actually changes - fresh where it matters, quiet elsewhere.
+
+========================================================================
+ Section E - Personalised feed generation (same pool, two readers)
+========================================================================
+Merge candidates, dedup (already done), score against the reader's
+interest profile, sort desc, return top-K. Same pool ranks differently
+per reader because the RELEVANCE term differs.
+
+  Reader A = tech enthusiast  (ai, openai, llm heavy)
+    top-3: a1(0.808), a2(0.712), a6(0.703)
+  Reader B = finance analyst  (fed, rates, economy heavy)
+    top-3: a3(0.728), a1(0.658), a5(0.619)
+
+  >>> Identical candidate pool, different top-3: a3/a5 (fed stories)
+      surface for the finance reader but sink for the tech reader.
+      Personalization is a READ-TIME re-scoring of the shared index.
+
+========================================================================
+ Section F - Scale estimation (Google News class)
+========================================================================
+  RSS / Atom sources             : 100,000
+  Avg new articles/source/day    : 50
+  Articles ingested/day          : 5,000,000
+  Avg article size               : 50 KB
+  Article storage/day            : 238 GB
+  Article storage/year           : 85.0 TB
+
+  Dedup index (SimHash, 8 B/article):
+    per day                      : 38.1 MB
+    per year                     : 13.6 GB  (tiny)
+
+  Ingest bandwidth (bodies, avg) : 0.02 Gbps avg  (~0.12 peak)
+  Polling (avg interval 120m, 60% 304):
+    polls/day                    : 1,200,000
+    poll bandwidth/day           : 115 GB
+
+  >>> The article store (~85 TB/yr) dominates; the SimHash dedup index
+      is negligible (~14 GB/yr). Polling bandwidth is bounded by
+      adaptive scheduling + conditional GET.
+
+========================================================================
+ Section G - [check] assertions
+========================================================================
+[check] canonicalization: 4 variants -> 1 canonical URL ... OK
+[check] fnv1a: deterministic, distinct for distinct input ... OK
+[check] simhash: hamming(exact, exact_copy) = 0 ... OK
+[check] simhash: near-rewrite hamming=3 <= 3 => duplicate ... OK
+[check] simhash: different_story hamming=25 >= 20 => not duplicate ... OK
+[check] LSH: near_rewrite shares 1/4 bands (>=1 candidate) ... OK
+[check] ranking: tech order = a1,a2,a6,a4,a3,a5 ... OK
+[check] decay: decay(6h) = 0.5 == 0.5 (half-life) ... OK
+[check] scheduling: daily blog interval=720m, polls/day=2 ... OK
+[check] scheduling: wire (48/day) interval=15m (MIN clamp) ... OK
+[check] personalization: tech top1=a1, finance top1=a3 ... OK
+[check] scale: 5,000,000 articles/day, ~85.0 TB/year ... OK
+[check] scheduling: conditional GET saves 81% bandwidth vs naive ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

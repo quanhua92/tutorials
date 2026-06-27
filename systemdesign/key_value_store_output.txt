@@ -1,0 +1,198 @@
+key_value_store.py - LSM-tree KV store simulation. Feeds KEY_VALUE_STORE.md + key_value_store.html.
+stdlib only; deterministic; no torch/numpy.
+Models WAL + memtable + SSTable + bloom filter + compaction (size-tiered & leveled).
+
+==========================================================================
+  SECTION A: write path  WAL -> memtable -> immutable SSTable
+==========================================================================
+  memtable limit = 4. Every PUT/DEL is fsync'd to the WAL FIRST,
+  then appended to the in-memory memtable. When the memtable hits
+  the limit we sort it and write it to disk as an immutable SSTable
+  (a flush). The memtable is then empty and ready for more writes.
+
+   #  op                      event           state
+  ------------------------------------------------------------------------------------------------
+   1  PUT user:1=alice        wal+mem         memtable{user:1:alice}
+   2  PUT user:2=bob          wal+mem         memtable{user:1:alice,user:2:bob}
+   3  PUT user:3=carol        wal+mem         memtable{user:1:alice,user:2:bob,user:3:carol}
+   4  PUT user:4=dave         FLUSH+newSST    memtable{-}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave]]
+   5  PUT user:1=ALICE        wal+mem         memtable{user:1:ALICE}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave]]
+   6  DEL user:2              wal+mem         memtable{user:1:ALICE,user:2:del}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave]]
+   7  PUT user:5=eve          wal+mem         memtable{user:1:ALICE,user:2:del,user:5:eve}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave]]
+   8  PUT user:6=frank        FLUSH+newSST    memtable{-}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave], L0[user:1:ALICE,user:2:del,user:5:eve,user:6:frank]]
+   9  PUT user:7=grace        wal+mem         memtable{user:7:grace}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave], L0[user:1:ALICE,user:2:del,user:5:eve,user:6:frank]]
+  10  PUT user:8=heidi        wal+mem         memtable{user:7:grace,user:8:heidi}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave], L0[user:1:ALICE,user:2:del,user:5:eve,user:6:frank]]
+
+  writes=10  flushes=2  L0 SSTables=2  WAL records=10  fsyncs=10
+
+  --- WAL replay simulation (crash, lose memtable, replay log) ---
+  We DROP the memtable (simulate a crash), then replay the WAL. The
+  replayed memtable contains the LATEST value per key (ALICE wins
+  over alice; user:2 is a tombstone). Notice: replay does NOT rebuild
+  SSTables - those are durable on disk already. It only rebuilds the
+  in-memory state that had not been flushed yet.
+
+  replayed memtable (latest-wins across all 10 WAL records):  {user:1=ALICE, user:2:del, user:3=carol, user:4=dave, user:5=eve, user:6=frank, user:7=grace, user:8=heidi}
+
+[check] WAL replay correctness  OK
+
+==========================================================================
+  SECTION B: read path  memtable -> L0 -> L1 -> ...  + bloom filter
+==========================================================================
+  State before reads:
+    memtable{user:7:grace,user:8:heidi}  L0=[L0[user:1:alice,user:2:bob,user:3:carol,user:4:dave], L0[user:1:ALICE,user:2:del,user:5:eve,user:6:frank]]
+
+  Each GET walks: memtable (1 lookup) -> every L0 SSTable newest-first
+  -> every L1 SSTable. At each SSTable we first check the key range,
+  then the Bloom filter; only if both pass do we pay a disk read.
+
+   #  GET         expected  got       status                notes
+  ------------------------------------------------------------------------------------------------
+   1  GET user:1      ALICE     ALICE     sst_hit               disk_reads+1 bloom_skip+0  OK
+   2  GET user:2      -         -         sst_tombstone         disk_reads+1 bloom_skip+0  OK
+   3  GET user:3      carol     carol     sst_hit               disk_reads+1 bloom_skip+1  OK
+   4  GET user:4      dave      dave      sst_hit               disk_reads+1 bloom_skip+1  OK
+   5  GET user:7      grace     grace     memtable_hit          disk_reads+0 bloom_skip+0  OK
+   6  GET user:9      -         -         miss                  disk_reads+0 bloom_skip+0  OK
+
+  totals: reads=6  disk_reads=4  bloom_skips=2  SSTables present=2
+
+  READ AMPLIFICATION in this trace: the worst-case GET would touch 2 SSTables. Bloom filters + range guards turned that into 4 actual disk reads across 6 GETs.
+
+[check] read path correctness  OK
+
+==========================================================================
+  SECTION C: compaction  size-tiered (write-heavy) vs leveled (read-heavy)
+==========================================================================
+  Workload: 3 batches of 8 PUTs (24 keys) + an update to k00 + a DEL of k01.
+  memtable limit = 4, STCS threshold T = 4.
+
+  SIZE-TIERED:
+    memtable{k00:vFRESH,k01:del}  L0=[L0[k00:v0_0,k01:v0_1,k02:v0_2,k03:v0_3,k04:v0_4,k05:v0_5,k06:v0_6,k07:v0_7,k08:v1_0,k09:v1_1,k10:v1_2,k11:v1_3,k12:v1_4,k13:v1_5,k14:v1_6,k15:v1_7], L0[k16:v2_0,k17:v2_1,k18:v2_2,k19:v2_3], L0[k20:v2_4,k21:v2_5,k22:v2_6,k23:v2_7]]
+    SSTables in L0 = 3  compactions = 1  flushes = 6
+    live keys (after merge resolves updates/deletes): 24
+    -- STCS keeps WRITE amplification low (each byte rewritten only
+       T=4 times across its life) but reads may
+       have to scan every L0 SSTable.
+
+  LEVELED:
+    memtable{k00:vFRESH,k01:del}  L0=[L0[k16:v2_0,k17:v2_1,k18:v2_2,k19:v2_3], L0[k20:v2_4,k21:v2_5,k22:v2_6,k23:v2_7]]  L1=[L1[k00:v0_0,k01:v0_1,k02:v0_2,k03:v0_3,k04:v0_4,k05:v0_5,k06:v0_6,k07:v0_7,k08:v1_0,k09:v1_1,k10:v1_2,k11:v1_3,k12:v1_4,k13:v1_5,k14:v1_6,k15:v1_7]]
+    SSTables in L0 = 2  L1 = 1  compactions = 1  flushes = 6
+    live keys: 24
+    -- LCS keeps READ + SPACE amplification low (at most ONE SSTable
+       per level holds a key) but writes are amplified at every
+       level merge.
+
+  both strategies return identical answers for all 24 live keys  OK
+[check] compaction correctness (latest-wins + tombstones honored)  OK
+
+==========================================================================
+  SECTION D: consistency  read repair / hinted handoff / anti-entropy
+==========================================================================
+  Replication factor RF=3, write quorum W=2, read quorum R=2.
+  W + R = 4 > RF = 3  =>  quorum intersection guarantees a
+  read sees the latest committed write (no 'lost update' on a single key).
+
+  D.1  READ REPAIR
+  Three replicas have drifted (one missed a write). A quorum read sees
+  two values; the coordinator writes the newest back to the stale replica.
+
+    quorum read returned (v3, seq=3); repaired 1 stale replica(s).
+    [check] read repair  OK
+
+  D.2  HINTED HANDOFF
+  Replica C is down. The coordinator writes to A and B (quorum met) and
+  stores a HINT for C. When C rejoins, the coordinator replays the hint.
+
+    write ('PUT', 'x', ('vx', 1)) -> A:['x'] B:['x'] C:[]  (quorum W=2 met). 1 hint(s) buffered.
+    C rejoined; coordinator replayed hint -> C now has ['x'].
+    [check] hinted handoff  OK
+
+  D.3  ANTI-ENTROPY (Merkle tree)
+  Each replica builds a Merkle tree over its key range. Replicas compare
+  root hashes; if different, they descend to the differing leaf range
+  and stream-repair only THAT range (cheap, bounded work).
+
+    replica A root = 9b6b14cd
+    replica B root = 939c63b5   (differ -> dig deeper)
+    differing leaves: ['k2']  -> stream-repair just those keys
+    after repair, both roots = 9b6b14cd  (match)
+    [check] anti-entropy  OK
+
+[check] all consistency mechanisms  OK
+
+==========================================================================
+  SECTION E: scale + amplification math (write-heavy workload, RF=3)
+==========================================================================
+  WORKLOAD
+    writes/s         = 500,000
+    reads/s          = 1,000,000     (read:write = 2:1)
+    key+value        = 100+1024 = 1124 bytes/op
+    total keys       = 10,000,000,000
+    replication RF   = 3
+
+  STORAGE (raw, one copy + after RF)
+    logical       = 10.2 TB
+    x RF=3      = 30.7 TB
+
+  NETWORK (user payload only)
+    write BW = 4,496 Mbps = 4.50 Gbps
+    read  BW = 8,992 Mbps = 8.99 Gbps
+
+  AMPLIFICATION  (T = size ratio / tier threshold, L = #levels)
+    metric                   size-tiered       leveled
+    --------------------------------------------------
+    write amp (disk/user)              4x           30x
+    read amp (SSTables/GET)            16             4
+    space amp (disk/live)              4x          1.1x
+
+  WHAT THAT MEANS FOR DISK BANDWIDTH
+    user writes       = 4,496 Mbps
+    STCS disk writes  = 17,984 Mbps  (4x)
+    LCS  disk writes  = 134,880 Mbps  (30x)
+    --> STCS writes ~8x less to disk than LCS,
+        but reads pay up to 16/4 = 4x more SSTable lookups per GET.
+
+  RULE OF THUMB
+    * Write-heavy  -> size-tiered  (Cassandra default, RocksDB on logs)
+    * Read-heavy   -> leveled      (RocksDB/LevelDB default)
+    * Time-series  -> time-window  (drop whole expired SSTables, no rewrite)
+
+[check] amplification math (T=10, L=4, T_st=4)  OK
+
+==========================================================================
+  SECTION F: GOLD values - pinned for key_value_store.html
+==========================================================================
+GOLD workload (size-tiered, memtable_limit=4, T=4):
+  writes                = 18
+  flushes               = 4
+  compactions           = 1
+  L0 SSTables after run = 1
+  memtable keys         = ['k01', 'k02']
+  memtable['k01']       = 'FRESH'
+  memtable['k02']       = ('TOMBSTONE',)
+  merged SST size       = 16
+  merged SST keys       = ['k01', 'k02', 'k03', 'k04', 'k05', 'k06', 'k07', 'k08', 'k09', 'k10', 'k11', 'k12', 'k13', 'k14', 'k15', 'k16']
+  GET k01 -> 'FRESH' (memtable_hit)
+  GET k02 -> None (memtable_tombstone)
+  GET k08 -> 'v8' (sst_hit)
+  GET k99 -> None (miss)
+
+[check] all GOLD asserts passed  OK
+
+GOLD amplification (for the calculator in key_value_store.html):
+  T (fanout)            = 10
+  L (levels)            = 4
+  T_st (STCS threshold) = 4
+  write_amp_leveled     = T*(L-1) = 30
+  write_amp_stcs        = T_st    = 4
+  read_amp_leveled      = L       = 4
+  read_amp_stcs         = T_st*L  = 16
+  space_amp_leveled     = 1+1/T   = 1.1
+  space_amp_stcs        = T_st    = 4
+
+[check] GOLD amplification values  OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

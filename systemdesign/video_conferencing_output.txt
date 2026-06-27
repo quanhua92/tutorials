@@ -1,0 +1,268 @@
+# video_conferencing.py - Video conferencing system design simulation
+# Pure Python stdlib only. Numbers below feed VIDEO_CONFERENCING.md
+# and video_conferencing.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Media topology - P2P vs MCU vs SFU
+==========================================================================
+Three ways to route media between N participants. BASE stream = 1.50 Mbps
+(no simulcast yet - isolating the raw topology effect.)
+
+A. P2P (mesh)    every peer sends to every other peer
+   upload/participant   = (n-1) x 1.50 Mbps   <- grows with room size
+B. MCU (mixer)   server decodes all, composites, re-encodes per peer
+   upload/participant   = 1.50 Mbps (one stream up, one composite down)
+   server CPU           = O(n) decode + O(n) encode   (+100-200ms latency)
+C. SFU (router)  server forwards raw RTP packets, no decode/encode
+   upload/participant   = 1.50 Mbps (one stream up to SFU)
+   server egress        = n x (n-1) x 1.50 Mbps (forwards to all)
+   added latency        = 2-10ms (header read only)
+
+  n          P2P upload/peer            MCU upload/peer            SFU upload/peer           
+             (n-1)x1.5                  1.5 (constant)             1.5 (constant)            
+  2 ppl      1.50 Mbps                  1.50 Mbps                  1.50 Mbps                 
+  4 ppl      4.50 Mbps                  1.50 Mbps                  1.50 Mbps                 
+  5 ppl      6.00 Mbps                  1.50 Mbps                  1.50 Mbps                   <- DEAD (>5 upload)
+  10 ppl     13.50 Mbps                 1.50 Mbps                  1.50 Mbps                   <- DEAD (>5 upload)
+  50 ppl     73.50 Mbps                 1.50 Mbps                  1.50 Mbps                   <- DEAD (>5 upload)
+  100 ppl    148.50 Mbps                1.50 Mbps                  1.50 Mbps                   <- DEAD (>5 upload)
+
+=> P2P exceeds 5 Mbps home upload at n=5. P2P is dead above ~4 people.
+=> MCU keeps client bandwidth flat but the server does a full decode+encode
+   per participant (CPU-bound, 100-200ms latency) - legacy Cisco/Polycom.
+=> SFU keeps client upload flat; the SERVER absorbs the egress fan-out.
+   SFU does NOT reduce total bandwidth - it RELOCATES it from clients (who
+   can't afford it) to the datacenter (which can). Combined with simulcast
+   (Section 2) the server can also FORWARD LESS -> real reduction.
+
+At n=10: P2P total = 135.00 Mbps across clients; SFU client upload = 15.00 Mbps but SFU
+egress = 135.00 Mbps - same bytes, borne by the server.
+
+[check] P2P upload/peer == (n-1)*1.50? OK
+[check] P2P dies above n=4 (>5 Mbps upload)? OK
+[check] MCU + SFU client upload constant at 1.50? OK
+
+==========================================================================
+  SECTION 2: Simulcast - 3 layers, adaptive forwarding
+==========================================================================
+Sender encodes 3 layers of the SAME source simultaneously.
+
+  layer    resolution   bitrate       
+  high     720p          1.50 Mbps
+  medium   360p          0.50 Mbps
+  low      180p          0.15 Mbps
+  TOTAL                 2.15 Mbps     
+
+=> sender uploads ALL three = 2.15 Mbps regardless of who's watching.
+=> the SFU picks ONE layer per receiver based on that receiver's bandwidth.
+
+Receiver bandwidth trace (Mbps): [2.0, 1.7, 0.9, 0.4, 0.3, 0.1, 0.2, 0.6, 1.0, 1.6, 2.2, 1.5]
+SFU forwards the highest layer that fits:
+
+  interval   avail Mbps   layer forwarded  action
+  t=0        2.00         high             initial layer
+  t=1        1.70         high             
+  t=2        0.90         medium           RTCP PLI -> IDR keyframe
+  t=3        0.40         low              RTCP PLI -> IDR keyframe
+  t=4        0.30         low              
+  t=5        0.10         audio-only       RTCP PLI -> IDR keyframe
+  t=6        0.20         low              RTCP PLI -> IDR keyframe
+  t=7        0.60         medium           RTCP PLI -> IDR keyframe
+  t=8        1.00         medium           
+  t=9        1.60         high             RTCP PLI -> IDR keyframe
+  t=10       2.20         high             
+  t=11       1.50         high             
+
+=> 6 layer switches; each fires an RTCP PLI so the sender emits an IDR
+   keyframe for the new layer (decode can't resume on P-frames alone).
+
+50-person room, 1 active + 4 recent + 45 gallery tiles:
+  forward HIGH to all      = 75.00 Mbps
+  simulcast-mixed          = 10.25 Mbps  (7.3x less egress)
+
+[check] simulcast total upload == 2.15 Mbps? OK
+[check] layer switch fires a PLI keyframe request? OK
+[check] select_layer(0.1 Mbps) -> audio-only (below low)? OK
+
+==========================================================================
+  SECTION 3: WebRTC signaling handshake (SDP + ICE)
+==========================================================================
+Media flows over UDP/SRTP, but SETUP needs the reliable signaling plane
+(WebSocket/TCP) to exchange an SDP offer/answer and ICE candidates.
+
+  step                       actor    action
+  1. createOffer             caller   build SDP offer: m=audio, m=video, codecs (VP8/Opus), ICE options
+  2. setLocalDescription     caller   caller adopts offer, begins ICE candidate gathering (trickle)
+  3. signaling relay         WS       caller -> Signaling Server -> callee: SDP OFFER over WebSocket
+  4. setRemoteDescription    callee   callee receives + stores the offer
+  5. createAnswer            callee   callee builds SDP answer (intersect codecs, pick DTLS fingerprint)
+  6. signaling relay         WS       callee -> Signaling Server -> caller: SDP ANSWER
+  7. ICE gathering           both     host / srflx(STUN) / relay(TURN) candidates trickled over WS
+  8. ICE connectivity        both     STUN binding checks between candidate pairs -> pick best pair
+  9. DTLS handshake          both     over the chosen pair -> derive SRTP master keys
+  10. SRTP media             both     RTP/RTCP flows over UDP, encrypted; audio + video + simulcast
+  11. RTCP feedback          both     TWCC arrival reports, PLI keyframe req, audio-level (active spkr)
+
+Excerpt of an SDP offer (3 video payload types = simulcast):
+    v=0
+    o=- 4581 2 IN IP4 0.0.0.0
+    s=-
+    t=0 0
+    m=audio 9 UDP/TLS/RTP/SAVPF 111
+    a=rtpmap:111 opus/48000/2
+    m=video 9 UDP/TLS/RTP/SAVPF 96 97 98
+    a=rtpmap:96 VP8/90000
+    a=fmtp:96 max-fr=30
+    a=rtpmap:97 VP8/90000
+    a=fmtp:97 max-fr=15
+    a=rtpmap:98 VP8/90000
+    a=fmtp:98 max-fr=7
+    a=simulcast:send hi;mid;low
+    a=ice-ufrag:4f8a
+    a=ice-pwd:9k3l...
+    a=fingerprint:sha-256 AB:CD...
+    a=end-of-candidates
+
+ICE candidate outcomes at scale (10M concurrent):
+  candidate type         share          concurrent users
+  host (LAN IP)            3%           300,000
+  srflx (STUN)            82%           8,200,000
+  relay (TURN)            15%           1,500,000
+
+=> Trickle ICE runs gathering + checks IN PARALLEL (candidates drip in over
+   the WS as they're found) -> setup drops from 2-5s to 500ms-1s.
+
+[check] ICE shares sum to 100%? OK
+[check] STUN resolves the majority (~80-85%)? OK
+[check] handshake ends with DTLS then SRTP media? OK
+
+==========================================================================
+  SECTION 4: NAT traversal - STUN/TURN relay cost
+==========================================================================
+STUN just discovers the public IP (cheap). TURN RELAYS every media packet
+through the server - both directions - so it is bandwidth-expensive.
+
+Relayed participants ( TURN x 15% ) = 1,500,000
+Per-relay bandwidth  = upload 2.15 Mbps + download 2.40 Mbps = 4.55 Mbps
+  (TURN carries BOTH directions - it terminates the media on the relay.)
+
+Aggregate TURN relay bandwidth:
+  1,500,000 x 4.55 Mbps = 6,825,000 Mbps = 6.83 Tbps
+  relay cost @ $0.0225/Mbps/hr = $153,000 /hr
+  ~= $110,160,000 /month at sustained peak
+
+=> TURN is the single largest line item. Corporate VPN/all-hands can push
+   relay rates to 40-50% -> cost scales LINEARLY with the relay fraction.
+=> Mitigation: deploy COTURN in 20+ regions near users; over-provision 3-4x.
+
+[check] relayed participants == 1,500,000? OK
+[check] per-relay == 4.55 Mbps (2.15 up + 2.4 down)? OK
+[check] relay bandwidth rounds to 6.8 Tbps? OK
+[check] relay cost == $153,000/hr? OK
+
+==========================================================================
+  SECTION 5: Active speaker gallery - download stays flat
+==========================================================================
+SFU detects active speakers from RTCP audio-level reports and forwards
+high-res to the talker, low-res to the rest. The RECEIVER downloads a
+FIXED gallery regardless of total room size.
+
+Gallery a single receiver downloads:
+  1 x high (720p, 1.50 Mbps) = 1.50 Mbps
+  6 x low  (180p, 0.15 Mbps) = 0.90 Mbps
+  TOTAL download           2.40 Mbps
+
+  room size      download/peer      server egress          P2P upload/peer
+  2 ppl          2.40 Mbps          4.80 Mbps              1.50 Mbps
+  10 ppl         2.40 Mbps          24.00 Mbps             13.50 Mbps
+  100 ppl        2.40 Mbps          240.00 Mbps            148.50 Mbps
+  1000 ppl       2.40 Mbps          2400.00 Mbps           1.5 Gbps (impossible)
+
+=> Download is CONSTANT (2.40 Mbps) whether the room has 2 or 1000 people.
+=> This is WHY SFU + simulcast scales to 1000-person webinars: the server
+   forwards ~7 streams per receiver, never composites. CPU ~= packet
+   forwarding, not proportional to participant count.
+
+[check] gallery download == 2.40 Mbps (1 high + 6 low)? OK
+[check] download identical at n=2 and n=1000? OK
+
+==========================================================================
+  SECTION 6: Room scaling - 2-party to 1000-person webinar
+==========================================================================
+Per-room ingress/egress and how many rooms one SFU node can hold.
+
+  room size    ingress        egress         SFU egress       nodes/room @4Gbps
+  2 ppl        4.30 Mbps      4.80 Mbps      4.80 Mbps        0.001
+  4 ppl        8.60 Mbps      9.60 Mbps      9.60 Mbps        0.002
+  10 ppl       21.50 Mbps     24.00 Mbps     24.00 Mbps       0.006
+  50 ppl       107.50 Mbps    120.00 Mbps    120.00 Mbps      0.030
+  100 ppl      215.00 Mbps    240.00 Mbps    240.00 Mbps      0.060
+  1000 ppl     2.15 Gbps      2.40 Gbps      2.40 Gbps        0.600
+
+Per-SFU-node room capacity (4 Gbps budget):
+  4-person meeting  (egress 9.60 Mbps/room) -> 416 rooms/node
+  1000-person webinar (egress 2.4 Gbps/room) -> 1.7 rooms/node
+
+=> Small meetings: ~400+ rooms per node. A 1000-person webinar nearly
+   saturates a whole node by itself - big rooms are scheduled onto dedicated
+   nodes and often use CASCADED SFUs across regions.
+
+[check] 4-person room egress == 9.6 Mbps? OK
+[check] 1000-person webinar egress == 2.4 Gbps? OK
+[check] a 4-person meeting fits ~416 rooms/node? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  daily participants        = 300,000,000
+  peak concurrent           = 10,000,000
+  simulcast upload/peer     = 2.15 Mbps
+  gallery download/peer     = 2.40 Mbps
+  TURN relay fraction       = 15%
+  SFU node throughput       = 4.0 Gbps (10% headroom)
+
+Peak media bandwidth:
+  ingress  (10,000,000 x 2.15 Mbps) = 21.50 Tbps
+  egress   (10,000,000 x 2.40 Mbps) = 24.00 Tbps
+
+SFU fleet:
+  theoretical (4 Gbps/node) = 6000 nodes
+  provisioned (x0.90 headroom) = 5400 nodes
+
+TURN relay (cross-check Section 4):
+  relay users   = 1,500,000  (15%)
+  relay bw      = 6.83 Tbps
+  relay cost    = $153,000 /hr
+
+Recording (5% of concurrent participants, RTP tap -> Kafka -> S3):
+  recorded participants = 500,000
+  recording ingress     = 1.20 Tbps
+  (decoupled from live media path; never blocks the call)
+
+[check] peak ingress == 21.5 Tbps? OK
+[check] peak egress == 24.0 Tbps? OK
+[check] SFU nodes provisioned == 5400? OK
+[check] TURN cost == $153,000/hr? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for video_conferencing.html)
+==========================================================================
+  daily_participants             = 300000000
+  peak_concurrent                = 10000000
+  simulcast_upload_mbps          = 2.15
+  gallery_download_mbps          = 2.4
+  peak_ingress_tbps              = 21.5
+  peak_egress_tbps               = 24.0
+  stun_resolve_pct               = 82
+  turn_relay_pct                 = 15
+  relay_tbps                     = 6.8
+  turn_cost_usd_hr               = 153000
+  sfu_nodes_provisioned          = 5400
+  p2p_dead_above_participants    = 4
+
+[check] GOLD reproduces from topology + simulcast + scale constants? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

@@ -1,0 +1,199 @@
+# chat_system.py - Chat system design simulation
+# Pure Python stdlib only. Numbers below feed CHAT_SYSTEM.md
+# and chat_system.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Message fan-out - write-based vs read-based
+==========================================================================
+One message, N recipients. Two ways to make it land in N inboxes.
+
+A. Fan-out-on-WRITE  (push to every inbox at send time)
+   write cost = O(N) per message  (one inbox row per recipient)
+   read  cost = O(1) per inbox view (pre-populated, just paginate)
+
+B. Fan-out-on-READ   (store once per conversation, pull on view)
+   write cost = O(1) per message  (single canonical row)
+   read  cost = O(N) scan to build an inbox
+
+Write amplification (rows written per message):
+  group size       on-WRITE       on-READ       
+  2 members        2 rows         1 row         
+  8 members        8 rows         1 row         
+  50 members       50 rows        1 row         
+  200 members      200 rows       1 row         
+  1000 members     1000 rows      1 row         
+
+Simulated 100,000 messages (80% 1:1, 15% grp-8, 5% grp-200):
+  fan-out-on-WRITE = 1,294,610 rows  (avg 12.95 rows/msg)
+  fan-out-on-READ  = 100,000 rows  (avg 1.00 row/msg)
+  => on-WRITE pays 12.95x more writes to make reads O(1).
+
+Winner: HYBRID. Store the message BODY once per conversation (Cassandra,
+partition by conversation_id) AND fan-out a tiny inbox-POINTER row
+(conversation_id, last_seq) per recipient. Cheap writes, O(1) inbox reads.
+
+[check] pure 1:1 write amplification == 2.0? OK
+[check] read-based writes 1 row/msg for ALL traffic? OK
+
+==========================================================================
+  SECTION 2: Per-conversation sequence ordering
+==========================================================================
+Each conversation owns a monotonically increasing sequence counter.
+Global Snowflake id => cross-conversation order + uniqueness;
+per-conversation seq => causal order WITHIN one chat.
+
+Conversation log (seq is the order clients must render):
+  seq=1  id=512389598412828672  [alice] hey
+  seq=2  id=512389598412828673  [bob] yo
+  seq=3  id=512389598412828674  [alice] you there?
+  seq=4  id=512389598412828675  [bob] yeah, what's up
+  seq=5  id=512389598412828676  [alice] lunch?
+
+Client receives messages in delivery order [3, 1, 2, 5, 4] (network reorder):
+  rendered seq order: [1, 2, 3, 4, 5]
+  => despite reorder, client buffer restores causal order 1,2,3,4,5.
+
+[check] rendered order strictly 1..N? OK
+[check] every seq is unique within the conversation? OK
+
+==========================================================================
+  SECTION 3: Delivery status state machine (sent -> delivered -> read)
+==========================================================================
+Each message has a delivery status that only advances forward.
+
+Allowed forward transitions:
+  sending     -> sent
+  sent        -> delivered
+  delivered   -> read
+  read        -> (terminal)
+
+Happy-path flow for one message:
+  sending     -> sent         [OK]
+  sent        -> delivered    [OK]
+  delivered   -> read         [OK]
+
+Illegal transition read -> delivered: REJECTED (stays 'read')
+Skip-forward     sent -> read:      ACCEPTED (now 'read')
+
+[check] read is terminal (no outgoing)? OK
+[check] backwards read->delivered rejected? OK
+[check] forward skip sent->read accepted? OK
+
+==========================================================================
+  SECTION 4: Presence tracking (heartbeat TTL)
+==========================================================================
+Clients send a heartbeat every HEARTBEAT sec; Redis key has TTL = 2*HEARTBEAT.
+Miss two heartbeats -> key expires -> user marked offline.
+
+HEARTBEAT=10s, TTL=20s. alice stops after t=20; bob stops after t=0.
+  t=10s  alice=online   bob=online  
+  t=20s  alice=online   bob=online  
+  t=25s  alice=online   bob=offline    <bob expired>
+  t=35s  alice=online   bob=offline    <bob expired>
+  t=45s  alice=offline  bob=offline    <bob expired>
+
+=> bob last seen at t=0, expires at t=20 (>TTL). idle grace = 2 heartbeats.
+
+[check] bob offline after TTL expiry? OK
+[check] TTL == 2 * HEARTBEAT? OK
+
+==========================================================================
+  SECTION 5: WebSocket connection lifecycle
+==========================================================================
+States: CONNECTING -> CONNECTED -> ACTIVE(heartbeat) -> DISCONNECTED
+        -> RECONNECTING -> CONNECTED (with catch-up from last_seq).
+
+  event                          state            side-effect
+  client opens WS                CONNECTING       
+  server accepts + auth          CONNECTED        subscribe last_seq=42
+  heartbeat (ping/pong)          ACTIVE           reset idle timer
+  push message seq=43            ACTIVE           client ACKs seq=43
+  network drops (RST)            DISCONNECTED     last_acked=43
+  client backoff retry           RECONNECTING     exponential 1s,2s,4s...
+  server resumes session         CONNECTED        catch-up seq 44..47
+  server graceful drain          DRAINING         100% -> GoAway, rebalance
+  client closes                  CLOSED           
+
+   1s disconnect -> ~0.00 msgs/user queued for catch-up
+   5s disconnect -> ~0.00 msgs/user queued for catch-up
+  30s disconnect -> ~0.01 msgs/user queued for catch-up
+  60s disconnect -> ~0.03 msgs/user queued for catch-up
+
+=> catch-up uses the persisted last_seq pointer, NOT a TCP keepalive.
+   The conversation store (Section 1 hybrid) is the source of truth.
+
+[check] CONNECTED appears (resume + initial)? OK
+[check] lifecycle is acyclic until reconnect? OK
+
+==========================================================================
+  SECTION 6: Group chat fan-out scaling
+==========================================================================
+Write cost scales LINEARLY with group size for fan-out-on-write.
+
+Assume 20% of 2,000,000,000 msg/day go to groups; rest are 1:1.
+
+  group size     rows/msg     deliveries/sec   WS pushes/sec   
+  2 members      2            20               20              
+  10 members     10           100              100             
+  50 members     50           500              500             
+  100 members    100          1000             1000            
+  500 members    500          5000             5000            
+  1000 members   1000         10000            10000           
+
+Hot-group write amplification (1 msg/s into the group):
+    10-member group: 1 msg/s ->   10 inbox writes/s
+   100-member group: 1 msg/s ->  100 inbox writes/s
+  1000-member group: 1 msg/s -> 1000 inbox writes/s
+  => a single 1000-member group burns 1000x the writes of a 1:1 chat.
+  WhatsApp caps groups at ~1024; Telegram supergroups shard fan-out.
+
+[check] rows/msg == group size for on-WRITE? OK
+[check] 1000-member fan-out == 1000x 1:1? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  DAU                     = 50,000,000
+  messages / user / day   = 40
+  bytes / message         = 1024  (body + metadata)
+  peak multiplier         = 5x avg
+
+Message volume:
+  messages / day          = 2,000,000,000  (2.0 B)
+  avg message QPS         =  23148.1 /s
+  peak message QPS (5x)   =   115741 /s
+
+Storage (message body only, fan-out-on-READ / hybrid):
+  storage / day           = 2.05 TB
+  storage / year          = 747.52 TB
+
+Bandwidth (payload only):
+  avg bandwidth           = 23.70 MB/s
+  peak bandwidth (5x)     = 118.52 MB/s
+
+WebSocket connections:
+  concurrent (10% of DAU) = 5,000,000
+  @ ~20KB RAM/conn        = 102.40 GB RAM for WS gateways
+
+[check] avg QPS == 23148.1? OK
+[check] storage/year == 747.52 TB? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for chat_system.html)
+==========================================================================
+  total_msgs_day               = 2000000000
+  avg_qps                      = 23148.1
+  peak_qps_5x                  = 115741
+  storage_per_year_tb          = 747.52
+  write_amp_1to1               = 2
+  write_amp_group_100          = 100
+  hybrid_pointer_rows_avg      = 3.2
+  concurrent_ws_connections    = 5000000
+  heartbeat_ttl_seconds        = 20
+
+[check] GOLD reproduces from scale constants + fan-out formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

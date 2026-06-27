@@ -1,0 +1,180 @@
+
+========================================================================
+ NEWS FEED - reference simulation (fan-out + ranking + scale)
+========================================================================
+Source of truth for NEWS_FEED.md and news_feed.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - Fan-out-on-write (PUSH)
+========================================================================
+At publish time the post_id is APPENDED to every follower's feed
+box. Reading your feed is just reading your box. The cost model:
+  write cost  = number of followers (one feed-list append each)
+  read  cost  = 1 (read your own feed box)
+
+  normal author posts (500 followers):
+    write_ops = 500    read_ops = 1
+  V reads feed (just opens own box):
+    read_ops  = 1
+
+  >>> Push trades EXPENSIVE WRITES for FREE READS. Excellent when
+      the workload is read-heavy (feeds are ~100:1 read:write).
+  >>> The trap: what happens when the author has 1,000,000
+      followers? See Section C.
+
+========================================================================
+ Section B - Fan-out-on-read (PULL)
+========================================================================
+At publish time the post is stored ONCE in the author's slot.
+At read time the system fetches recent posts from EVERY followee,
+merges and ranks. The cost model:
+  write cost  = 1 (store the post once)
+  read  cost  = number of followees you follow (fetch each)
+
+  any author posts (store once):
+    write_ops = 1
+  V reads feed (fetch from 500 followees + 5 celebrities):
+    read_ops  = 505   (=500+5)
+
+  >>> Pull trades FREE WRITES for EXPENSIVE READS. A celebrity
+      post costs the SAME to publish as a normal post (1 write).
+  >>> The trap: every feed scroll fires 505 fetches. Need a fan-in cache or the read path
+      becomes a scatter-gather storm across the graph service.
+
+========================================================================
+ Section C - The celebrity problem (push breaks)
+========================================================================
+A celebrity has 1,000,000 followers. Under PUSH, one
+celebrity post = one feed-list append PER follower:
+
+  1 celebrity post -> 1,000,000 feed-list writes
+
+  Extrapolate: 1,000 celebrities x 5 posts/day each =
+    5,000,000,000 feed-list writes/day from celebrities
+
+  vs normal authors: 100,000,000 posts/day x 500 avg followers =
+    50,000,000,000 feed-list writes/day from everyone
+
+  >>> 1,000 celebrities (0.0010% of users) generate 9.1% of ALL push writes. This is the celebrity
+      hotspot: one viral account can saturate the fan-out queue and
+      DELAY normal users' posts from reaching their feeds.
+  >>> Fix: hybrid (Section D) - celebrities do NOT get pushed.
+
+========================================================================
+ Section D - Hybrid (push normal, pull celebrities)
+========================================================================
+Rule: if author's follower count >= CELEB_THRESHOLD, PULL (store
+once, mark in a celebrity list). Otherwise PUSH (to all followers).
+CELEB_THRESHOLD = 1,000,000 followers.
+
+  normal author posts (500 followers -> PUSH):
+    write_ops = 500  (pushed to each follower)
+  celebrity posts (1M followers -> PULL):
+    write_ops = 1  (one write to celeb list)
+  V reads feed (own pushed box + pull each celebrity followed):
+    read_ops  = 6   (= 1 box + 5 celeb pulls)
+
+  Push writes saved per celebrity post:
+    1,000,000 - 1 = 999,999 writes AVOIDED
+
+  >>> Read cost rises by a tiny constant (one fetch per celebrity
+      you follow, ~5), while write cost for
+      celebrities collapses from 1M to 1. The hybrid keeps push's
+      fast read for the 99.99% normal case and pays a small read tax
+      only for the celebrity tail.
+
+========================================================================
+ Section E - Ranking signals (EdgeRank = affinity x weight x decay)
+========================================================================
+HALF_LIFE = 12h. decay(age) = 0.5 ** (age/12).
+Type weights: video=2.0, photo=1.5, link=1.0, status=0.5
+
+  Decay curve sample (score multiplier vs post age):
+    age= 0h  decay=1.0000
+    age= 6h  decay=0.7071
+    age=12h  decay=0.5000   <- half-life (0.5)
+    age=24h  decay=0.2500
+    age=48h  decay=0.0625
+
+  Affinity map for viewer V:
+    affinity(V, best_friend) = 0.9
+    affinity(V, casual) = 0.4
+    affinity(V, rival) = 0.3
+    affinity(V, celeb) = 0.2
+
+  Per-post signal breakdown for V's candidate pool:
+    post  author        type   age   affinity weight  decay   score
+    ------------------------------------------------------------------
+    p1   best_friend  photo    2h   0.90      1.5    0.8909  1.2027
+    p2   casual       video    6h   0.40      2.0    0.7071  0.5657
+    p3   best_friend  status  20h   0.90      0.5    0.3150  0.1417
+    p4   celeb        video    1h   0.20      2.0    0.9439  0.3775
+    p5   rival        link     3h   0.30      1.0    0.8409  0.2523
+    p6   best_friend  video   30h   0.90      2.0    0.1768  0.3182
+
+  >>> Note p4 (celebrity video, 50,000 likes): its affinity is 0.2
+      so even with weight=2.0 it scores LOWER than p1, your best
+      friend's 2h-old photo. In basic EdgeRank, engagement VOLUME
+      is not a multiplier - personal affinity dominates. (Real
+      systems add popularity + ML features on top of this base.)
+
+========================================================================
+ Section F - Ranked timeline generation (top-K with cursor)
+========================================================================
+Generate V's feed: take candidate pool, score each, sort desc,
+return top-K. Pagination uses a CURSOR (last post's id+score),
+never OFFSET - the feed is a moving target (new posts arrive).
+
+  Chronological order (by age asc):
+    p4, p1, p5, p2, p3, p6
+  Ranked order (by EdgeRank desc), top 4:
+    full ranked: p1, p2, p4, p6, p5, p3
+    #1 p1  best_friend  photo  score=1.2027  (aff=0.90 w=1.5 d=0.8909)
+    #2 p2  casual       video  score=0.5657  (aff=0.40 w=2.0 d=0.7071)
+    #3 p4  celeb        video  score=0.3775  (aff=0.20 w=2.0 d=0.9439)
+    #4 p6  best_friend  video  score=0.3182  (aff=0.90 w=2.0 d=0.1768)
+
+  >>> Ranking REORDERS the feed: chronological p4(1h) drops to #3
+      behind p1 and p2 because V's affinity to those authors is
+      higher. Cursor = (p6, score=0.3182) resumes page 2 from
+      there without OFFSET drift.
+
+========================================================================
+ Section G - Scale estimation (Facebook-class)
+========================================================================
+  users (total)              : 1,000,000,000
+  DAU                        : 200,000,000
+  new posts/day              : 100,000,000
+  avg followers per post     : 500 (fan-out factor)
+  read : write ratio         : 100:1
+
+  PUSH feed-list writes/day  : 50,000,000,000
+  PUSH writes/sec (avg)      : 578,704
+  feed fetches/day (~100x writes) : 10,000,000,000
+  feed fetches/sec (avg)     : 115,741
+
+  post storage/year (~1KB)   : 34.0 TB
+  feed-list hot set (7-day TTL, 16B/entry): 5,215 GB in Redis
+
+  Celebrity hotspot (hybrid removes this from push):
+    1,000 celebrities x 5/day x 2,000,000 followers = 10,000,000,000 writes/day
+    that is 20.0% of ALL push writes
+
+========================================================================
+ Section H - [check] assertions
+========================================================================
+[check] decay: decay(12h) = 0.5 == 0.5 (half-life) ... OK
+[check] decay: decay(24h) = 0.25 == 0.25 ... OK
+[check] decay: decay(0h) = 1.0 == 1.0 ... OK
+[check] push: normal write=500, celeb write=1,000,000, read=1 ... OK
+[check] pull: write=1, read=505 ... OK
+[check] celebrity: one celeb post = 1,000,000 push writes ... OK
+[check] hybrid: celeb write=1, read=6 (1 box + 5 pulls) ... OK
+[check] hybrid: saves 999,999 writes per celeb post ... OK
+[check] ranking: order = p1,p2,p4,p6,p5,p3 ... OK
+[check] affinity: p1 score 1.2027 > p4 score 0.3775 (friends beat celebrities) ... OK
+[check] scale: push writes/day = 50,000,000,000, storage/year ~ 34.0 TB ... OK
+[check] cursor: top-4 = p1,p2,p4,p6 ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

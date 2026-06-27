@@ -1,0 +1,160 @@
+# pastebin.py - Pastebin system design simulation
+# Pure Python stdlib only. Numbers below feed PASTEBIN.md
+# and pastebin.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Content-addressed storage (SHA-256 -> key -> URL)
+==========================================================================
+Paste body -> SHA-256 -> 64-char hex = the object storage key.
+  digest bits = 256,  hex chars = 64
+  base62 of a 256-bit hash = 43 chars (62^43 ~= 2^256)
+
+Sample pastes -> content keys:
+  content (<=30)                 | SHA-256 object key (64 hex) | URL slug (11 b62)
+  print('hello world')           | 939338e3b6ab652043d93dff9c1e8eaa69a0a969a4a0de50870a6cbad7f3c117 | yZFeDe0w8YK
+  print('hello world')           | 939338e3b6ab652043d93dff9c1e8eaa69a0a969a4a0de50870a6cbad7f3c117 | yZFeDe0w8YK
+  def add(a, b):\n    return a + | ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772 | I86sAuQjANn
+  SELECT * FROM users WHERE id = | eca12c081df0b78e50e568a8cca97d36f2fed9ec240e1fb4e71a3d86e63ce4c4 | U6X97EaDIKv
+
+=> the two identical 'print(hello world)' pastes map to the SAME object
+   key and the SAME URL slug. That is automatic, free dedup: identical
+   content is never stored twice.
+
+Short-slug length vs keyspace (collision risk lives on the URL only):
+   8 chars ->  218,340,105,584,896 keyspace, first slug clash ~ 18519391 pastes
+  10 chars -> 839,299,365,868,340,224 keyspace, first slug clash ~ 1148202230 pastes
+  11 chars -> 52,036,560,683,837,093,888 keyspace, first slug clash ~ 9040953400 pastes
+  12 chars -> 3,226,266,762,397,899,821,056 keyspace, first slug clash ~ 71188538260 pastes
+
+  GOTCHA: the slug is a TRUNCATION of the hash. Two different pastes can
+  collide on the slug but NEVER on the full 256-bit object key. So the
+  object is always keyed by the full hash; on a slug clash we append a
+  salt and rehash the slug. No content is ever overwritten.
+
+[check] identical content -> identical key, 1-char change -> different key? OK
+[check] slug is 11 chars of base62? OK
+
+==========================================================================
+  SECTION 2: Text dedup via hashing
+==========================================================================
+Simulation: 100,000 create-events (80% fresh + 20% reposts of 500 viral snippets).
+  create events         = 100,000
+  repost events         = 19,937  (error logs, configs, leaked keys)
+  unique bodies stored  = 82,563
+  duplicate events      = 17,437   (17.44% dedup)
+  hottest body reposted = 19 times (a viral config snippet)
+
+Storage impact (avg 10.00 KB / paste):
+  raw, no dedup   = 1.00 GB / day
+  after dedup     = 825.63 MB / day   (saved 174.37 MB, 17.44%)
+
+5-year effect (no TTL reclaim):
+  raw 5yr     = 1.82 TB
+  deduped 5yr = 1.51 TB   (saved 318.23 GB)
+
+  => content addressing turns reposts into a single stored object.
+     The object key (full hash) is written once; later creates just add
+     a metadata row pointing at the same key.
+
+[check] dedup actually reduces both stored objects and bytes? OK
+
+==========================================================================
+  SECTION 3: Expiration TTL cleanup
+==========================================================================
+TTL bucket distribution (100,000 pastes/day):
+  bucket      pastes/day  reclaimable
+  10 min           5,000          yes
+  1 hour          15,000          yes
+  1 day           30,000          yes
+  1 week          25,000          yes
+  1 month         15,000          yes
+  never           10,000           no
+
+Two-phase deletion:
+  SOFT delete  : read path checks expires_at -> 404 if expired.
+                  Instant; zero storage work; expired paste simply vanishes.
+  HARD reclaim : async nightly job deletes the object after a 24h grace
+                  window. S3 lifecycle policies handle the cold tier natively.
+
+Reclaimable per day (will be physically deleted) = 90,000 pastes
+Never-expire accumulation = 10,000 pastes/day -> 3.65 M/year -> 36.50 GB/year
+
+  GOTCHA: content-addressing makes HARD reclaim reference-counted. Several
+  metadata rows may point at one object key (dedup). The reclaim job must
+  delete the object only when the LAST referencing row expires, or storage
+  leaks OR live pastes 404. Keep a refcount per content key.
+
+[check] TTL fractions sum to 1.0 and mix reclaimable + never? OK
+
+==========================================================================
+  SECTION 4: Access control (public / unlisted / private)
+==========================================================================
+Tier distribution (100,000 pastes/day):
+  tier        share   pastes/day      CDN cache
+  public        60%       60,000            yes
+  unlisted      30%       30,000            yes
+  private       10%       10,000      NO (auth)
+
+Read-path authorization:
+  public   : anyone; indexed; full CDN caching with 24h+ TTL.
+  unlisted : anyone WITH the URL; NOT indexed; CDN still caches (the URL is
+              the secret, so unguessable slugs are mandatory).
+  private  : owner only (bearer token / session); bypass the CDN, hit the
+              service, optional at-rest encryption. Never publicly cacheable.
+
+Private = 10% of content but only ~2% of reads; those reads bypass CDN:
+  total read QPS        = 1157.4 /s
+  private (backend-only)= 23.1 /s  (always hits the service, never edge)
+
+  GOTCHA: caching private pastes on a shared public CDN is a leak. Tag the
+  cache key with the tier; private reads use a per-user cache namespace or
+  skip the CDN entirely and go service -> Redis (per-token key).
+
+[check] access tier shares sum to 1.0? OK
+
+==========================================================================
+  SECTION 5: Scale estimation
+==========================================================================
+Assumptions:
+  new pastes/day   = 100,000
+  reads/day        = 100,000,000
+  read:write ratio = 1000 : 1
+  avg paste size   = 10.00 KB
+
+QPS:
+  write QPS avg    = 1.16 /s   (peak ~116 /s, 100x)
+  read  QPS avg    = 1157.4 /s   (peak ~11574 /s, 10x)
+
+Storage (raw, no dedup, no reclaim):
+  /day  = 1.00 GB
+  /5yr  = 1.82 TB
+  (~2 TB quoted ceiling; dedup + TTL reclaim lower the real footprint.)
+
+CDN effect (95% hit on public/unlisted reads):
+  CDN serves  = 1100 /s
+  backend hit = 58 /s
+
+Bandwidth:
+  read egress (payload) = 11.57 MB /s avg
+
+[check] read:write == 1000:1 and raw storage/day == 1.00 GB? OK
+
+==========================================================================
+  SECTION 6: GOLD values (pinned for pastebin.html)
+==========================================================================
+  sha256_probe_hex64     = 939338e3b6ab652043d93dff9c1e8eaa69a0a969a4a0de50870a6cbad7f3c117
+  sha256_probe_hex16     = 939338e3b6ab6520
+  sha256_slug_11         = yZFeDe0w8YK
+  sha256_full_b62_len    = 43
+  write_qps_avg          = 1.2
+  read_qps_avg           = 1157.4
+  storage_per_day_b      = 1000000000
+  storage_5yr_b          = 1825000000000
+  read_write_ratio       = 1000
+  avg_paste_size_b       = 10000
+
+[check] GOLD reproduces from SHA-256 + scale formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

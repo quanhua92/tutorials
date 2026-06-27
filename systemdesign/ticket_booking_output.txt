@@ -1,0 +1,241 @@
+# ticket_booking.py - Ticket booking system design simulation
+# Pure Python stdlib only. Numbers below feed TICKET_BOOKING.md
+# and ticket_booking.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Seat + hold state machine
+==========================================================================
+Three seat states. TTL drives HELD -> AVAILABLE; confirm drives HELD -> SOLD.
+
+Allowed transitions:
+  AVAILABLE  -> HELD
+  HELD       -> SOLD, AVAILABLE
+  SOLD       -> (terminal)
+
+Happy-path A1 (price $80, TTL 480s):
+  hold(Alice,t=100,480) -> status=HELD       held_by=Alice expires_at=580
+  confirm(Alice,t=200)  -> status=SOLD       (within hold window)
+
+Hold-expiry A2 (held by Bob at t=0, TTL 480s):
+  release_expired(t=500) -> released=True prev_holder=Bob status=AVAILABLE
+  (a seat held but never paid returns to the pool -> no overbooking)
+
+Reclaim A3 (Carol's hold expired, Dave grabs it at t=500):
+  hold(Dave,t=500)      -> ok=True reason=reclaimed status=HELD held_by=Dave
+
+Late confirm A4 (Eve held at t=0, confirms at t=600 after expiry):
+  confirm(Eve,t=600)    -> ok=False status=HELD (hold window expired)
+
+[check] SOLD is terminal (no transition out)? OK
+[check] hold expiry returns seat to AVAILABLE? OK
+[check] expired hold is reclaimable by another user? OK
+[check] confirm after hold expiry is rejected? OK
+
+==========================================================================
+  SECTION 2: Seat selection with hold-and-release (TTL locking)
+==========================================================================
+Alice picks 3 seats; they are HELD atomically with a shared TTL.
+If she does not pay within the window, the sweeper releases them.
+
+Alice selects ['A1', 'A2', 'A3'] at t=0, TTL=480s:
+  hold A1  -> OK    status=HELD       expires_at=480
+  hold A2  -> OK    status=HELD       expires_at=480
+  hold A3  -> OK    status=HELD       expires_at=480
+
+Sweeper runs every 30s:
+  sweep t=100  released=0  seats[A1:HELD, A2:HELD, A3:HELD, A4:AVAILABLE]
+  sweep t=300  released=0  seats[A1:HELD, A2:HELD, A3:HELD, A4:AVAILABLE]
+  sweep t=490  released=3  seats[A1:AVAILABLE, A2:AVAILABLE, A3:AVAILABLE, A4:AVAILABLE]
+  sweep t=520  released=0  seats[A1:AVAILABLE, A2:AVAILABLE, A3:AVAILABLE, A4:AVAILABLE]
+
+=> At t=480 the hold window elapses; the t=520 sweep frees A1/A2/A3.
+=> Worst-case overdue = sweeper interval = 30s (a seat may show HELD
+   up to 30s past expiry before the next sweep reclaims it).
+
+[check] all 3 seats released by t=520 sweep? OK
+[check] A4 (never held) stays AVAILABLE through all sweeps? OK
+
+==========================================================================
+  SECTION 3: Concurrent booking conflict resolution
+==========================================================================
+Two users race to hold seat S1 (currently AVAILABLE, v0).
+Network/replication lag makes their reads interleave with writes.
+
+A. NAIVE READ-MODIFY-WRITE (read, then write, no atomicity)
+   Alice read (AVAILABLE,v0) -> write HELD by Alice (v0->v1)
+   Bob   read (AVAILABLE,v0) -> write HELD by Bob   (stale v0 overwrites Alice)
+   final: held_by=Bob  <- BOTH users think they hold S1 -> DOUBLE BOOK
+
+B. SELECT FOR UPDATE (pessimistic row lock, blocks the loser)
+   Alice locks S1 -> read AVAILABLE -> write HELD by Alice -> commit
+   Bob   blocks on lock, then reads (HELD,v1) -> REJECT
+   final: held_by=Alice  <- single owner, correct
+   cost: Bob BLOCKED waiting for Alice's txn -> convoy at 100K req/sec
+
+C. REDIS LUA ATOMIC (check-and-set in one single-threaded script)
+   Alice -> ACCEPT (Lua: AVAILABLE->HELD by Alice, EX 480s)
+   Bob -> REJECT (Lua: status=HELD held_by=Alice)
+   final: held_by=Alice  <- single owner, no lock wait, loser picks another seat
+
+=> Naive read-modify-write DOUBLE-BOOKS (both users believe they own S1).
+=> SELECT FOR UPDATE is correct but BLOCKS the loser (convoy at flash sale).
+=> Redis Lua CAS is atomic + non-blocking: winner takes the seat, the loser
+   gets an instant 'already held' and picks another seat -> scales to 100K req/sec.
+
+[check] naive double-books (both Alice and Bob win)? OK
+[check] pessimistic rejects Bob (sees HELD after Alice commits)? OK
+[check] Redis Lua gives exactly one winner (Alice, first arrival)? OK
+
+==========================================================================
+  SECTION 4: Idempotency keys for payment
+==========================================================================
+Client generates a UUID per intent; server stores (user, key) -> response
+for 24h. Retries with the SAME key return the cached response with NO side effect.
+
+Intent: Alice pays $200 for seats [A1,A2], idempotency_key='abc-123'.
+Network flakes -> client RETRIES the same request 3 more times.
+
+  user   key       context                        status     mode      charged?
+  Alice  abc-123   first attempt                  CAPTURED   FIRST     $200
+  Alice  abc-123   retry 1 (network timeout)      CAPTURED   REPLAY    $200
+  Alice  abc-123   retry 2 (connection reset)     CAPTURED   REPLAY    $200
+  Alice  abc-123   retry 3 (user double-click)    CAPTURED   REPLAY    $200
+
+=> 4 HTTP requests, card charged exactly ONCE (count=1).
+=> All 4 responses identical (booking_id BKG-7421, $200, CAPTURED).
+=> Without the key: each retry creates a new booking + new charge = 4 charges.
+
+[check] card charged exactly once across 4 attempts (count==1)? OK
+[check] replay returns identical cached response (BKG-7421, $200)? OK
+[check] replay does NOT re-invoke the op (mode==REPLAY)? OK
+
+==========================================================================
+  SECTION 5: Payment flow state machine
+==========================================================================
+Six states. AUTHORIZED reserves funds; CAPTURED moves them; VOIDED releases
+the reservation when a hold expires (so the user is never charged for an
+unconfirmed seat).
+
+States: PENDING, AUTHORIZED, CAPTURED, REFUNDED, VOIDED, FAILED
+
+A. Happy path: hold -> authorize -> capture
+  PENDING -> AUTHORIZED -> CAPTURED
+  amount=$200 final=CAPTURED (funds moved to merchant)
+
+B. Hold expiry: authorize then VOID (user never confirmed in time)
+  PENDING -> AUTHORIZED -> VOIDED
+  amount=$200 final=VOIDED (authorization released, user NOT charged)
+
+C. Card decline: PENDING -> FAILED (hold released, user may retry)
+  PENDING -> FAILED
+  amount=$200 final=FAILED (no funds reserved, seats freed immediately)
+
+D. Post-purchase refund: CAPTURED -> REFUNDED (e.g. event cancelled)
+  PENDING -> AUTHORIZED -> CAPTURED -> REFUNDED
+  amount=$200 final=REFUNDED (funds returned to cardholder)
+
+E. Illegal transitions are rejected (guards):
+  capture from PENDING     -> REJECTED
+  refund from AUTHORIZED   -> REJECTED
+  authorize when AUTHORIZED-> REJECTED
+
+[check] happy path ends CAPTURED? OK
+[check] hold expiry ends VOIDED (no charge)? OK
+[check] decline ends FAILED? OK
+[check] all 6 states reachable, illegal transitions blocked? OK
+
+==========================================================================
+  SECTION 6: High-demand event surge handling
+==========================================================================
+A flash sale: 100,000 concurrent users hit one 50000-seat venue. Peak = 100,000 req/sec.
+
+A. Virtual waiting room (the winner)
+  queue=100,000 users, admit 1000/5s = 200 users/sec into seat selection
+  each user holds ~4 seats -> 800 seats locked/sec
+  sellout time = 50000 / 800 = 62.5 sec
+  users not admitted stay on a CDN-cached 'you are #N in line' page;
+  backend sees a STEADY 200 req/sec, never the raw 100,000 spike.
+
+B. Request throttling (simple, poor UX)
+  accept R req/sec, reject the rest with HTTP 429 + Retry-After.
+  at 100,000 req/sec peak, ~99% are rejected -> users spam retry, worse UX.
+
+C. Lottery / pre-sale (eliminates the spike entirely)
+  users register interest ahead of time; 12500 winners drawn at random get a
+  private booking window. No flash sale, no queue, fair by construction.
+
+=> Waiting room absorbs the spike into a controlled admit rate.
+=> Combine with: CDN-cached seat map, pre-auth card on file (reject
+   non-serious buyers before they reach inventory), and bot detection.
+
+[check] admit rate == 200 users/sec (1000/5)? OK
+[check] sellout == 62.5 sec (50000/800)? OK
+[check] backend absorbs 200 req/sec, not 100000? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  seats / venue (flash event)     = 50,000
+  peak requests / sec (on-sale)   = 100,000
+  concurrent users (flash)        = 100,000
+  hold window                     = 480 sec (8 min)
+  hold expiry rate                = 30%
+  avg seats / booking             = 4
+  bytes / booking record          = 256
+  bytes / hold record             = 128
+  bookings / year                 = 100,000,000
+  events / year                   = 1,000,000
+
+Volume:
+  bookings / day                  = 273,972
+  avg bookings / sec              = 3.2 /s
+  peak requests / sec (flash)     = 100,000 /s
+  hold attempts / year (bookings/(1-expiry)) = 142,857,142
+
+Storage (bookings + holds tables):
+  bookings storage / year         = 25.60 GB
+  holds storage / year            = 18.29 GB
+  total storage / year            = 43.89 GB
+
+Flash-sale throughput (virtual waiting room):
+  admit rate                      = 200 users/sec
+  seats locked / sec              = 800
+  venue sellout time              = 62.5 sec
+
+Real-time seat map (WebSocket push of availability):
+  concurrent users (flash)        = 100,000
+  WebSocket gateways              = 20
+  connections / gateway           = 5,000
+  sweeper cadence / max overdue   = 30s / 30s
+
+[check] bookings storage/year == 25.60 GB? OK
+[check] total storage/year == 43.89 GB? OK
+[check] avg bookings/sec == 3.2? OK
+[check] connections/gateway == 5000 (100000/20)? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for ticket_booking.html)
+==========================================================================
+  seats_per_venue                = 50000
+  peak_requests_per_sec          = 100000
+  concurrent_users_flash         = 100000
+  hold_window_seconds            = 480
+  hold_expiry_rate_pct           = 30
+  bookings_per_year              = 100000000
+  avg_bookings_per_sec           = 3.2
+  storage_bookings_year_gb       = 25.6
+  storage_total_year_gb          = 43.89
+  waiting_room_admit_rate        = 200
+  sellout_time_seconds           = 62.5
+  connections_per_gateway        = 5000
+  naive_double_book_count        = 1
+  redis_lua_winner               = Alice
+  idempotency_charge_count       = 1
+  payment_states_count           = 6
+
+[check] GOLD reproduces from scale constants + booking formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

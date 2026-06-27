@@ -1,0 +1,205 @@
+# coding_platform.py - Coding Platform (LeetCode) system design simulation
+# Pure Python stdlib only. Numbers below feed CODING_PLATFORM.md
+# and coding_platform.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Submission queue (language-partitioned, priority lanes)
+==========================================================================
+Kafka topic judge-queue is PARTITIONED BY LANGUAGE so workers only load
+the relevant runtime image. Each partition has two consumer groups:
+  judge-contest-{lang}  (priority 0, pre-scaled before contests)
+  judge-normal-{lang}   (priority 1, HPA on consumer lag)
+Source code lives in S3 (~100KB max); the Kafka message carries only
+metadata (~1KB): submission_id, problem_id, lang, s3_key, lane.
+
+Submit sequence (6 submissions, mixed languages + lanes):
+  S1   python   practice
+  S2   cpp      practice
+  S3   python   contest 
+  S4   java     practice
+  S5   cpp      contest 
+  S6   python   contest 
+
+Per-partition pull order (contest first, then practice, FIFO within):
+  python  -> S3, S6, S1
+  cpp     -> S5, S2
+  java    -> S4
+
+Contest S3/S6 jump the practice S1 in the python partition even though
+S1 was submitted first. Workers are specialized: a python worker never
+loads the cpp toolchain.
+
+[check] contest-lane priority + language partitioning correct? OK
+
+==========================================================================
+  SECTION 2: Sandbox execution (gVisor vs Firecracker + cgroup limits)
+==========================================================================
+Docker alone shares the host kernel; kernel exploits escape containers.
+Defense in depth: sandbox runtime + cgroup limits + seccomp-BPF +
+network namespace (no routes -> ENETUNREACH) + isolated worker nodes.
+
+Sandbox runtime comparison:
+  runtime                       startup cpu overhead  isolation
+  gVisor                          10ms        20.0%  user-space kernel (Sentry), ~200 syscalls intercepted
+  Firecracker                    125ms         1.5%  KVM microVM, separate kernel per execution
+  Firecracker (pre-warmed)        10ms         1.5%  pool of ready VMs amortizes the 125ms cold start
+
+Decision: gVisor for practice (fast startup matters); pre-warmed
+Firecracker for contests (strongest isolation + amortized 10ms startup).
+
+cgroup resource limits (mandatory even with a sandbox runtime):
+  memory.max        = 262144 KB (256 MB)   breach -> OOM kill -> MLE
+  cpu.max           = 2000 ms (2.0 s)     breach -> TLE
+  pids.max          = 1                fork bomb -> killed -> RE
+  wall-clock watch  = 4000 ms           external; catches sleep-evasion -> TLE
+  network namespace = no egress       any socket -> ENETUNREACH
+
+Per-test-case verdict decision (first match wins):
+  compile fails                -> COMPILE_ERROR      (CE)
+  cpu_ms > 2000                -> TIME_LIMIT_EXCEEDED (TLE)
+  mem_kb > 262144              -> MEMORY_LIMIT_EXCEEDED (MLE)
+  fork bomb / crash            -> RUNTIME_ERROR      (RE)
+  output mismatch              -> WRONG_ANSWER       (WA)
+  all checks pass              -> ACCEPTED           (AC)
+
+[check] startup/limit constants match design spec? OK
+
+==========================================================================
+  SECTION 3: Test case runner (compile -> run -> compare -> verdict)
+==========================================================================
+Problem 'Two Sum': read 'a b', print a+b. 5 test cases (hidden).
+Limits: cpu.max=2000ms, memory.max=256MB, wall-watch=4000ms.
+
+Verdict precedence: CE > TLE > MLE > RE > WA > AC (first match wins).
+
+program        verdict    test   cpu_ms   peak_kb  note
+  correct      ACCEPTED      1       50     50000  compiled
+  off_by_one   WRONG_ANSWER     1       50     50000  compiled
+  slow         TIME_LIMIT_EXCEEDED     1     3000     50000  compiled
+  hungry       MEMORY_LIMIT_EXCEEDED     1       50    300000  compiled
+  crash        RUNTIME_ERROR     1        0         0  compiled
+  broken       COMPILE_ERROR     0        0         0  syntax error -> no execution
+
+The 'correct' program passes all 5 tests -> AC. Every other program
+stops on its first failing test: off_by_one fails test 1 (WA), slow
+blows the CPU budget (TLE), hungry exceeds memory.max (MLE), crash
+segfaults (RE), broken never compiles (CE).
+
+[check] all six verdicts produced correctly? OK
+
+==========================================================================
+  SECTION 4: Compilation cache (source-hash keyed)
+==========================================================================
+Compiled languages (C++/Java/Go/Rust) pay 0.8-3s per compile. Users
+resubmit near-identical code dozens of times; caching the artifact by
+sha256(lang + source) skips the recompile entirely on a hit.
+
+Compile times by language:
+  rust     3000 ms
+  cpp      2000 ms
+  java     1500 ms
+  go        800 ms
+  python      0 ms
+
+Demo: submit the SAME C++ program twice (contest re-submit pattern).
+  submit #1  hit=False compile=2000ms  key=0e6400610785999d
+  submit #2  hit=True  compile=   0ms  key=0e6400610785999d
+  time saved by cache = 2000 ms
+
+  python    hit=False compile=   0ms  (interpreted -> ~0ms)
+
+[check] first submit misses, second hits, key stable, saved=2000ms? OK
+
+==========================================================================
+  SECTION 5: Leaderboard (ICPC ranking, 5-min penalty, sorted set)
+==========================================================================
+Rank by (solved DESC, penalty ASC). Penalty = sum over ACCEPTED problems
+of (accept_minute*60 + wrong_count_on_that_problem * 300).
+Wrong submissions on a problem that is NEVER accepted incur NO penalty
+(dave's P1 WA@10 is free because dave never solved P1).
+
+Composite score = solved * 1e9 - penalty  (packs two sort keys into
+one float so ZREVRANGE returns solved-DESC then penalty-ASC in one op):
+
+  user    solved   penalty     zset_score  wrong detail
+  alice        3    1800s     2999998200  P1:0, P2:0, P3:0
+  carol        3    4500s     2999995500  P1:0, P2:0, P3:0
+  bob          2    3300s     1999996700  P1:1, P2:0
+  dave         1    2400s      999997600  P2:0
+  eve          1    3000s      999997000  P2:0
+
+Top 3: alice, carol, bob
+Tie-break demo: alice & carol both solved 3, but alice's penalty
+(1800s) < carol's (4500s) -> alice ranks #1.
+
+[check] top3, penalties, solved counts match ICPC rules? OK
+
+==========================================================================
+  SECTION 6: Scale estimation
+==========================================================================
+Assumptions:
+  submissions / day            = 2,000,000
+  metadata / submission        = 5000 B (code in S3, ~100KB max)
+  test cases / problem (avg)   = 100
+  practice peak                = 200 /s
+  contest peak                 = 2000 /s  (30-60 min burst)
+  wall-clock / submission      = 3.0 s  (compile + tests in sandbox)
+
+Throughput:
+  practice peak QPS            = 200 /s
+  contest peak QPS             = 2000 /s  (10x practice)
+  sandbox executions / day     = 200,000,000  (subs * 100 tests)
+
+Storage (Postgres metadata + S3 source):
+  metadata / day               = 10.00 GB
+  metadata / year              = 3.65 TB
+
+Sandbox fleet sizing (contest peak):
+  concurrent sandboxes needed  = 6000  (peak_qps * wall_per_sub)
+  -> K8s pre-scales worker pods 30 min before contest (node provisioning
+     takes 2-5 min; reactive HPA cannot meet the burst).
+
+[check] 3.65TB/year metadata, 200M sandbox execs/day, 6000-slot fleet? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for coding_platform.html)
+==========================================================================
+  queue_n_submissions          = 6
+  queue_python_pull            = S3,S6,S1
+  queue_cpp_pull               = S5,S2
+  queue_java_pull              = S4
+  sandbox_gvisor_ms            = 10
+  sandbox_firecracker_ms       = 125
+  sandbox_prewarmed_ms         = 10
+  sandbox_mem_max_mb           = 256
+  sandbox_cpu_max_ms           = 2000
+  verdict_precedence           = COMPILE_ERROR,TIME_LIMIT_EXCEEDED,MEMORY_LIMIT_EXCEEDED,RUNTIME_ERROR,WRONG_ANSWER,ACCEPTED
+  test_n_cases                 = 5
+  verdict_correct              = ACCEPTED
+  verdict_off_by_one           = WRONG_ANSWER
+  verdict_slow                 = TIME_LIMIT_EXCEEDED
+  verdict_hungry               = MEMORY_LIMIT_EXCEEDED
+  verdict_crash                = RUNTIME_ERROR
+  verdict_broken               = COMPILE_ERROR
+  compile_cache_saved_ms       = 2000
+  compile_cache_hit            = true
+  lb_n_users                   = 5
+  lb_n_problems                = 3
+  lb_top3                      = alice,carol,bob
+  lb_alice_solved              = 3
+  lb_alice_penalty_sec         = 1800
+  lb_alice_score               = 2999998200
+  lb_bob_solved                = 2
+  lb_bob_penalty_sec           = 3300
+  lb_bob_score                 = 1999996700
+  submissions_per_day          = 2000000
+  storage_per_year_tb          = 3.65
+  practice_peak_qps            = 200
+  contest_peak_qps             = 2000
+  sandbox_exec_per_day         = 200000000
+
+[check] GOLD reproduces from queue + sandbox + runner + cache + lb? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

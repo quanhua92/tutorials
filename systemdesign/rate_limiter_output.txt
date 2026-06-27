@@ -1,0 +1,203 @@
+
+========================================================================
+ RATE LIMITER - reference simulation (4 algorithms + distributed)
+========================================================================
+Source of truth for RATE_LIMITER.md and rate_limiter.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - Token Bucket (capacity=20, refill_rate=10 tok/s)
+========================================================================
+Each request consumes 1 token. Tokens refill continuously at 10/s.
+Bucket starts FULL (20 tokens) so the first burst passes.
+
+Phase 1: 25 instant requests against a fresh bucket (capacity=20).
+  allowed in burst: 20 of 25  (first 20 pass, last 5 DENIED)
+  tokens after burst: 0.02
+
+Phase 2: idle 1.0s, then 3 more requests (refill_rate=10 -> +10 tokens).
+  t=1.000  allowed=True  tokens=9.00
+  t=1.001  allowed=True  tokens=8.01
+  t=1.002  allowed=True  tokens=7.02
+
+Phase 3: idle 10.0s -> bucket refills to capacity=20 again.
+  t=11.000  allowed=True  tokens=19.00  (capped at 20)
+
+========================================================================
+ Section B - Sliding Window Counter (limit=10, window=1s)
+========================================================================
+Keeps cur_count + prev_count. Weighted = cur + prev*(1-elapsed/win).
+Smooths the boundary burst with only TWO counters per key.
+
+Phase 1: send 12 requests at t=0.00..0.11 (limit=10 in this window).
+  t=0.00  cur=1 prev=0 weighted=0.00  allowed=True
+  t=0.09  cur=10 prev=0 weighted=9.00  allowed=True
+  t=0.10  cur=10 prev=0 weighted=10.00  allowed=False
+  t=0.11  cur=10 prev=0 weighted=10.00  allowed=False
+
+Phase 2: send 5 requests at t=1.05..1.25 (new window; prev carries weight).
+  t=1.05  cur=1 prev=10 weighted=9.60  allowed=True
+  t=1.10  cur=1 prev=10 weighted=10.10  allowed=False
+  t=1.15  cur=2 prev=10 weighted=9.60  allowed=True
+  t=1.20  cur=2 prev=10 weighted=10.10  allowed=False
+  t=1.25  cur=3 prev=10 weighted=9.60  allowed=True
+
+========================================================================
+ Section C - Fixed Window Counter (limit=10, window=1s)
+========================================================================
+One integer per (user, window_id). INCR + EXPIRE in Redis.
+Suffers the BOUNDARY BURST: 2x rate can slip through at the seam.
+
+BOUNDARY EXPLOIT: 10 reqs at t=0.90-0.99 + 10 reqs at t=1.00-1.09.
+That is 20 reqs in 0.2s under a 10/sec limit. Watch the counter:
+
+  window 0 (t=0.90-0.99): 10 of 10 allowed  (wid=0)
+  window 1 (t=1.00-1.09): 10 of 10 allowed  (wid=1, counter RESET)
+  TOTAL: 20 reqs in 0.2s under a 10/s limit  <-- OVERSHOT
+
+  The counter resets at t=1.0 because window_id flips from 0 to 1,
+  so the second burst is a 'fresh' window. Sliding window catches this.
+
+========================================================================
+ Section D - Leaky Bucket (capacity=20, leak_rate=10 req/s)
+========================================================================
+Requests queue; queue drains at constant rate. Full queue -> drop.
+Output is ALWAYS <= leak_rate, regardless of input burst.
+
+Phase 1: 25 instant requests against capacity=20 queue.
+  allowed: 20 of 25  (first 20 queue, last 5 DROPPED)
+  queue length after burst: 20
+
+Phase 2: idle 2.0s -> queue fully drains (leak_rate=10, 2s = 20 drained).
+  t=2.000  allowed=True  queue_len=1  (queue empty again)
+
+Phase 3: steady 1 req every 0.2s (5 req/s input < 10/s leak -> all pass).
+  t=2.10  allowed=True  queue_len=1
+  t=2.30  allowed=True  queue_len=1
+  t=2.50  allowed=True  queue_len=1
+  t=2.70  allowed=True  queue_len=1
+  t=2.90  allowed=True  queue_len=1
+
+========================================================================
+ Section E - Side-by-side on the SAME request stream
+========================================================================
+Stream: 15-burst at t=0..0.14; 1 req/s for t=1..9; 15 reqs straddling t=60.
+All four limiters configured for ~10 req/s sustained, burst=20.
+
+  t(s)    TOKEN    SLIDING    FIXED    LEAKY
+    0.00    ok       ok        ok       ok 
+    0.01    ok       ok        ok       ok 
+    0.02    ok       ok        ok       ok 
+    0.03    ok       ok        ok       ok 
+    0.04    ok       ok        ok       ok 
+    0.05    ok       ok        ok       ok 
+    0.06    ok       ok        ok       ok 
+    0.07    ok       ok        ok       ok 
+    0.08    ok       ok        ok       ok 
+    0.09    ok       ok        ok       ok 
+    0.10    ok      deny      deny      ok 
+    0.11    ok      deny      deny      ok 
+    0.12    ok      deny      deny      ok 
+    0.13    ok      deny      deny      ok 
+    0.14    ok      deny      deny      ok 
+   ...      ...      ...       ...      ...
+   59.30    ok       ok        ok       ok 
+   59.35    ok       ok        ok       ok 
+   59.40    ok       ok        ok       ok 
+   59.45    ok       ok        ok       ok 
+   59.50    ok       ok        ok       ok 
+   59.55    ok       ok        ok       ok 
+   59.60    ok       ok        ok       ok 
+   59.65    ok       ok        ok       ok 
+   60.00    ok       ok        ok       ok 
+   60.05    ok       ok        ok       ok 
+   60.10    ok       ok        ok       ok 
+   60.15    ok       ok        ok       ok 
+   60.20    ok      deny       ok       ok 
+   60.25    ok       ok        ok       ok 
+   60.30    ok      deny       ok       ok 
+
+  TOTALS (allowed / denied) across the whole stream (39 reqs):
+    TOKEN   :  39 allowed,   0 denied
+    SLIDING :  31 allowed,   8 denied
+    FIXED   :  34 allowed,   5 denied
+    LEAKY   :  39 allowed,   0 denied
+
+  >>> FIXED WINDOW allows the most because the t~60 straddle exploits
+      the boundary: 15 reqs in 0.3s pass as two separate windows.
+  >>> SLIDING WINDOW counter catches the straddle via prev-window weight.
+  >>> TOKEN/LEAKY deplete their 20-token/queue buffer on the burst and
+      then enforce the strict 10/s sustained rate.
+
+========================================================================
+ Section F - Distributed rate limiting (Redis + Lua)
+========================================================================
+The naive 'GET-then-INCR' is RACY. Two clients can both read 99, both
+write 100, and both pass under a limit of 100. The fix is ATOMICITY.
+
+  Scenario: 100 concurrent requests, limit=50, naive vs atomic.
+
+    naive  (GET then INCR, full race)  : allowed = 100  (OVERSHOT by 50; final counter = 100)
+    atomic (Lua check-and-incr)       : allowed = 50  (exact limit)
+
+  Canonical Redis Lua script (token bucket, atomic):
+  ----------------------------------------------------------------
+  -- KEYS[1] = bucket key   ARGV = {capacity, refill_rate, now, cost}
+  local b     = redis.call('HMGET', KEYS[1], 'tokens', 'last')
+  local tokens= tonumber(b[1]) or tonumber(ARGV[1])
+  local last  = tonumber(b[2]) or tonumber(ARGV[3])
+  local delta = math.max(0, tonumber(ARGV[3]) - last)
+  tokens      = math.min(tonumber(ARGV[1]), tokens + delta*ARGV[2])
+  local allowed = 0
+  if tokens >= tonumber(ARGV[4]) then
+    tokens = tokens - tonumber(ARGV[4]); allowed = 1
+  end
+  redis.call('HMSET', KEYS[1], 'tokens', tokens, 'last', ARGV[3])
+  redis.call('EXPIRE', KEYS[1], 60)  -- auto-cleanup after 1 min
+  return {allowed, tokens}
+  ----------------------------------------------------------------
+
+  Fail-open vs fail-closed decision matrix:
+    public API  -> fail-open   (Redis down => let traffic through, log)
+    billing     -> fail-closed (Redis down => reject, don't overcharge)
+    login       -> fail-closed (Redis down => block, security first)
+    streaming   -> fail-open   (degrade quality rather than cut user off)
+
+========================================================================
+ Section G - Scale estimation (QPS tiers + memory per key)
+========================================================================
+  Tier         Peak QPS    Architecture
+  ----------------------------------------------------------------
+  startup           1,000    single Redis primary, in-process fallback
+  mid-market       50,000    3-node Redis cluster, hash-sharded by key
+  large           500,000    Redis cluster + local token bucket per pod
+  hyperscale    5,000,000    edge rate limit (CDN) + tiered backends
+
+  Memory per active key (1-min window):
+    fixed window     : ~52 B   (key + int counter + TTL metadata)
+    sliding window   : ~64 B   (two counters + window_id)
+    token bucket     : ~72 B   (tokens (float) + last_refill (float))
+    sliding log      : 8 B * N (one timestamp per request in window)
+
+  Worked example: 10,000,000 users, 100,000 peak QPS, 5-min active window.
+    active_keys       = 10,000,000 * 10%        = 1,000,000
+    memory (fixed)    = 1,000,000 * 52 B    = 50 MB
+    memory (sliding log @ 100 req/key) = 763 MB
+    bandwidth @ 1KB/req @ peak          = 97.7 MB/s
+    Redis shards needed (single shard ~100,000 INCR/s) = 1
+
+========================================================================
+ Section H - [check] assertions
+========================================================================
+[check] token bucket: first request from full bucket  -> ALLOW  ... OK
+[check] token bucket: capacity=5, 10 instant reqs   -> 5 allowed ... OK
+[check] token bucket: drained, wait 1s, refill_rate=10 -> tokens~9.0 ... OK
+[check] sliding window: clean window, limit=5       -> 5 allowed ... OK
+[check] fixed window: full window DENY, boundary reset ALLOW ... OK
+[check] leaky bucket: capacity=3, 10 reqs in 0.9s  -> 3 allowed ... OK
+[check] distributed: naive=100 (overshoot), atomic=50 (exact) ... OK
+[check] scale: 1M keys * 52B = 49.6 MB           ... OK
+[check] comparison: token bucket processed all 39 reqs  ... OK
+[check] fixed window: boundary exploit 20/20 pass    ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

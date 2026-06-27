@@ -1,0 +1,211 @@
+
+========================================================================
+ SEARCH AUTOCOMPLETE - reference simulation (trie + ranking + sharding + pipeline)
+========================================================================
+Source of truth for SEARCH_AUTOCOMPLETE.md and search_autocomplete.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - Trie data structure (prefix matching + top-K/node)
+========================================================================
+Each trie node is a PREFIX. Walking 'a'->'p' lands on the node for
+'ap', which caches the top-K completions starting with 'ap'. A
+lookup is O(L) - just walk L characters and read the list. We NEVER
+scan the subtree, because the work was done once at insert time.
+
+  inserted 35 terms. top-K cached at every prefix node.
+
+  Trie path for the prefix 'ap' (a -> p), cached top-K at 'ap':
+    app              freq=12000
+    apple            freq=10000
+    app store        freq=9000
+    application      freq=8000
+    api              freq=7000
+
+  ASCII trie, 'ap' subtree (top-K=2 shown per node for brevity):
+    root
+      |- a
+      |    |- p   <-- prefix 'ap' : [app, apple]  (top-2 cached)
+      |         |- p   <-- 'app'  : [app, apple]
+      |         |    |- l   <-- 'appl' : [apple]
+      |         |         |- e   <-- 'apple' : [apple]
+      |         |- i   <-- 'api'  : [api]
+      |         (every node on the path also caches 'app'/'apple'
+      |          because they pass through on insert)
+
+  >>> The lookup cost is the PREFIX LENGTH, not the corpus size.
+      The MEMORY cost is top-K stored at every node - see Section G.
+  >>> Notice 'api' is reachable via a->p->i even though it shares
+      only 'ap' with 'apple'. The trie shares prefixes for free.
+
+========================================================================
+ Section B - Typeahead ranking: frequency then recency decay
+========================================================================
+HALF_LIFE = 24h. base = freq * decay(age), decay(age) = 0.5 ** (age/24).
+
+  Decay curve sample (multiplier vs term age):
+    age= 0h  decay=1.0000
+    age= 6h  decay=0.8409
+    age=12h  decay=0.7071
+    age=24h  decay=0.5000   <- half-life (0.5)
+    age=48h  decay=0.2500
+
+  Prefix 'ap', top-5 by RAW FREQUENCY (layer 1, batch trie):
+    #1 app              freq=12000
+    #2 apple            freq=10000
+    #3 app store        freq=9000
+    #4 application      freq=8000
+    #5 api              freq=7000
+
+  Prefix 'ap', top-5 by RECENCY-DECAYED score (layer 2):
+    #1 app              base= 11658.4  (freq=12000 x decay(1h)=0.9715)
+    #2 apple            base=  9438.7  (freq=10000 x decay(2h)=0.9439)
+    #3 app store        base=  8253.0  (freq=9000 x decay(3h)=0.9170)
+    #4 application      base=  6924.3  (freq=8000 x decay(5h)=0.8655)
+    #5 api              base=  6607.1  (freq=7000 x decay(2h)=0.9439)
+
+  >>> Recency barely moves the hot top-4 (they are all fresh) but
+      drops stale terms down the list. An old but once-popular term
+      (age 30h+) sees its score nearly halve every day it sits idle.
+  >>> A batch-rebuilt trie stores freq. Adding decay is a cheap
+      per-node rescore, but the trie must be rebuilt to re-rank.
+
+========================================================================
+ Section C - Trending overlay (real-time recent counter)
+========================================================================
+TREND_W = 2. final = base + 2 * recent_1h, where recent_1h is the LIVE count from the last hour (Kafka).
+
+  Prefix 'w', top-5 by BASE ONLY (what the batch trie returns):
+    #1 word               base=  2828.4
+    #2 weather            base=  2000.0
+    #3 world of warcraft  base=  1681.8
+    #4 world cup          base=   500.0
+
+  Prefix 'w', top-5 WITH trending overlay (real-time):
+    #1 world cup          final=  10500.0  (base=  500.0 + 2x5000)
+    #2 word               final=   2948.4  (base= 2828.4 + 2x60)
+    #3 weather            final=   2040.0  (base= 2000.0 + 2x20)
+    #4 world of warcraft  final=   1761.8  (base= 1681.8 + 2x40)
+
+  >>> 'world cup': base 500 (freq=500) but recent_1h=5000 -> final 10500.
+  >>> 'weather': base 2000 (freq=8000) but recent_1h=20 -> final 2040.
+  >>> The spike OVERTAKES the historically huge but now-quiet term.
+      The batch trie (rebuilt every few minutes) cannot do this; only
+      the real-time overlay fed by Kafka closes the freshness gap.
+
+========================================================================
+ Section D - Personalization (global score + user history)
+========================================================================
+final = 1*global + 200*user_count, where global = trending_score from Section C.
+
+  Power user's search history (personal counts):
+    api          user_count=50
+    apartment    user_count=20
+    app          user_count=2
+
+  Prefix 'ap', top-5 GLOBAL vs top-5 PERSONALIZED:
+    #   global                        personalized
+    ------------------------------------------------------------
+    1   app               11958.4   api               16827.1  <-- reordered
+    2   apple              9678.7   app               12358.4  <-- reordered
+    3   app store          8433.0   apple              9678.7  <-- reordered
+    4   application        7064.3   app store          8433.0  <-- reordered
+    5   api                6827.1   apartment          7234.8  <-- reordered
+
+  >>> 'api' is GLOBAL #5 but this developer's #1 (user_count=50).
+  >>> Personalization reorders the WHOLE list per user. The global
+      trie gives the crowd's answer; the personalization layer bends
+      it toward the individual. Done at the service tier, post-shard.
+
+========================================================================
+ Section E - Prefix sharding (split the trie by first character)
+========================================================================
+One trie cannot serve global QPS. Split by the FIRST CHARACTER into
+4 range shards. A request routes deterministically:
+  'apple' -> shard 0 (a-f), 'google' -> shard 1 (g-m), etc.
+
+  Shard load from the corpus (terms + total historical freq):
+    shard  range   terms   sum(freq)   example terms
+    ------------------------------------------------------------
+      0    a-f       10      74,500   app, apple, app store
+      1    g-m        8      52,500   google, gmail, google maps
+      2    n-s        7      46,400   netflix, news, nba
+      3    t-z       10      49,900   youtube, twitter, translate
+
+  Skew check (share of total frequency per shard):
+    shard 0 (a-f):  33.4%  ################
+    shard 1 (g-m):  23.5%  ###########
+    shard 2 (n-s):  20.8%  ##########
+    shard 3 (t-z):  22.3%  ###########
+
+  >>> Range sharding is simple to reason about and routes in O(1),
+      but load follows LETTER POPULARITY, not letter COUNT. Real
+      English queries overload 'a','s','c' and starve 'q','x','z'.
+  >>> Fix when skew bites: split hot ranges (e.g. 'a' -> 'a','ap',
+      'ap...') or move to consistent hashing on the prefix itself.
+
+========================================================================
+ Section F - Data collection pipeline (batch rebuild + real-time)
+========================================================================
+Every keystroke is a READ; updates are rare (~10000:1 read:write).
+The write path turns raw query logs into a fresh trie:
+
+  BATCH path (offline, every few minutes):
+    query logs -> aggregator (count per term) -> rebuild trie ->
+    snapshot -> ship to trie servers
+      batch interval = 5 min   -> freshness lag <= 5 min
+      pros: exact counts, full re-rank, simple. cons: stale between runs.
+
+  REAL-TIME overlay (online, continuous):
+    executed searches -> Kafka -> sliding-window recent counter ->
+    small hot map (term -> last-1h count) merged at query time
+      pros: spikes land in seconds. cons: lossy, approximate, RAM-hot.
+
+  >>> HYBRID is the answer: batch trie for the stable base (99% of
+      terms), real-time overlay for the hot tail (the trending 1%).
+      Freshness lag collapses from minutes to seconds WITHOUT making
+      the whole trie mutable (which would wreck read concurrency).
+
+========================================================================
+ Section G - Scale estimation (Google-class autocomplete)
+========================================================================
+  DAU                         : 500,000,000
+  autocomplete QPS (peak)     : 100,000
+  read : write ratio          : 10,000:1
+  unique terms (corpus)       : 10,000,000
+  avg term length             : 8 chars
+  top-K cached per node       : 10
+
+  autocomplete requests/day   : 40,000,000,000  (DAU x 10 x 8)
+  autocomplete requests/sec   : 462,963 (avg)
+
+  trie nodes (raw 80,000,000 chars / 1.6 sharing): 50,000,000
+  memory/node (children + top-10): 256 B
+  total trie memory            : 11.9 GB
+  per shard (4 shards)  : 3.0 GB (fits comfortably in RAM)
+
+  response size (top-5)        : ~200 B
+  peak bandwidth               : 160.0 Mbps (trivial)
+
+  >>> The entire index lives in RAM across a handful of boxes. The
+      bottleneck is QPS and skew, NOT storage. top-K per node is the
+      memory driver; FST compression (Lucene) or storing top-K only
+      at high-traffic prefix depths cuts it further.
+
+========================================================================
+ Section H - [check] assertions
+========================================================================
+[check] decay: decay(24h) = 0.5 == 0.5 (half-life) ... OK
+[check] decay: decay(0h) = 1.0 == 1.0 ... OK
+[check] trie: 'ap' top-5 = app,apple,app store,application,api ... OK
+[check] trie: 'ap' lookup = 2 char-hops (O(L)) ... OK
+[check] recency: 'ap' top-5 = app,apple,app store,application,api ... OK
+[check] trending: 'world cup' base #4 -> trending #1 ... OK
+[check] trending: world cup 10500 > weather 2040 ... OK
+[check] personalization: 'api' global #5 -> personalized #1 ... OK
+[check] sharding: apple->0, google->1, netflix->2, youtube->3 ... OK
+[check] sharding: all 35 terms routed to a valid shard ... OK
+[check] scale: requests/day = 40,000,000,000, nodes = 50,000,000, mem ~ 11.9 GB ... OK
+[check] top-K: 'ap' node holds 7 <= 10 ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

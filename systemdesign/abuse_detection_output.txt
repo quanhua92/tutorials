@@ -1,0 +1,232 @@
+# abuse_detection.py - Abuse detection system design simulation
+# Pure Python stdlib only. Numbers below feed ABUSE_DETECTION.md
+# and abuse_detection.html (gold-checked).
+# Model: risk = 0.30*vel + 0.25*pat + 0.20*(1-rep) + 0.25*tox
+#       then hard-rule overrides + progressive escalation.
+
+========================================================================
+  SECTION 1: Velocity scoring (rate-based, multi-window blend)
+========================================================================
+Each window saturates at its request limit; the per-window ratio is
+capped at 1.0 then blended with window weights (1m=0.5, 10m=0.3, 1h=0.2).
+  vel = 0.5*min(1,c/10) + 0.3*min(1,c/80) + 0.2*min(1,c/500)
+Bursts (1-min window) dominate -> the strongest single abuse signal.
+
+  account        1m     10m      1h      vel
+  alice           2      15      80   0.188
+  bob             8      72     200   0.750
+  carol          12      90     300   0.920
+  frank          10     110     400   0.960
+  spambot        45     300    1200   1.000
+  dave            5      40     150   0.460
+  eve             4      35     110   0.375
+
+[check] alice vel~0.188, carol vel~0.920, spambot vel~1.000? OK
+
+========================================================================
+  SECTION 2: Pattern detection (weighted regex catalog)
+========================================================================
+Six signature categories, each contributing its weight ONCE if matched.
+Sum capped at 1.0. Deterministic rules catch known spam shapes that
+a learned model has never been trained on.
+
+  category    regex                                  w  ic
+  url         http[s]?://\S+                      0.30  yes
+  free_money  free\s+money                        0.40  yes
+  spam_kw     \b(buy|cheap|casino|viagra|loan|crypto)\b  0.35  yes
+  repeat      (.)\1{4,}                           0.20  no
+  allcaps     ^[^a-z]*$                           0.15  no
+  dollar      \$\s?\d                             0.10  no
+
+  account   message                                       score  hits
+  alice     hey everyone, great stream today!             0.000  -
+  bob       BUY NOW!!! limited crypto deals               0.350  spam_kw
+  carol     FREE MONEY!!!!! claim yours http://x.io       0.900  url,free_money,repeat
+  frank     buy cheap now, you absolute moron trash       0.350  spam_kw
+  spambot   WIN FREE MONEY!!! http://s.cam buy now cheap  1.000  url,free_money,spam_kw
+  dave      you are an idiot and scum                     0.000  -
+  eve       check out my new crypto blog                  0.350  spam_kw
+
+[check] alice 0.0, bob 0.35, carol 0.90, spambot 1.0? OK
+
+========================================================================
+  SECTION 3: Content moderation / toxicity (severity lexicon)
+========================================================================
+A severity-weighted toxic lexicon. Each matched term adds its severity;
+sum capped at 1.0. Whole-word, case-insensitive. In production this is a
+transformer toxicity classifier; the lexicon is the deterministic stand-in.
+
+  lexicon (severity):
+  die(0.6), hate(0.5), idiot(0.6), kill(0.7), loser(0.4), moron(0.5), scum(0.7), stupid(0.4), trash(0.3)
+
+  account   message                                         tox  hits
+  alice     hey everyone, great stream today!             0.000  -
+  bob       BUY NOW!!! limited crypto deals               0.000  -
+  carol     FREE MONEY!!!!! claim yours http://x.io       0.000  -
+  frank     buy cheap now, you absolute moron trash       0.800  moron,trash
+  spambot   WIN FREE MONEY!!! http://s.cam buy now cheap  0.000  -
+  dave      you are an idiot and scum                     1.000  idiot,scum
+  eve       check out my new crypto blog                  0.000  -
+
+[check] dave tox~1.0 (idiot+scum), alice tox~0.0? OK
+
+========================================================================
+  SECTION 4: Reputation scoring (trust from age + history)
+========================================================================
+A trust score in [0,1] blending four factors (higher = more trusted):
+  trust = 0.35*min(1,age/365) + 0.25*engagement
+        + 0.20*verified + 0.20*(0.8**violations)
+history term DECAYS 20% per prior violation. Reputation risk = 1 - trust.
+
+  account     age  viol   ver   engage    trust     risk
+  alice       400     0     Y     0.80   0.950   0.050
+  bob          30     1     N     0.40   0.289   0.711
+  carol         5     0     N     0.10   0.230   0.770
+  frank         2     0     N     0.05   0.214   0.786
+  spambot       1     3     N     0.05   0.116   0.884
+  dave        220     0     Y     0.65   0.773   0.227
+  eve         100     0     N     0.50   0.421   0.579
+
+[check] alice trust~0.950, dave~0.773, spambot~0.116? OK
+
+========================================================================
+  SECTION 5: Risk fusion + action escalation (full pipeline)
+========================================================================
+Fusion (weights sum to 1.0):
+  risk = 0.30*vel + 0.25*pat + 0.20*(1-trust) + 0.25*tox
+Then two HARD RULES override the score (need BOTH conditions):
+  vel>=0.95 AND pat>=0.80 -> BAN   (coordinated spam)
+  tox>=0.95               -> BAN   (severe toxicity)
+Score-only tiers: <0.30 ALLOW, <0.50 WARN, <0.70 THROTTLE,
+                  <0.85 CHALLENGE, else BAN.
+
+  account     vel   pat   rep   tox   risk  action    basis    
+  alice      0.19  0.00  0.95  0.00  0.066  ALLOW     score    
+  bob        0.75  0.35  0.29  0.00  0.455  WARN      score    
+  carol      0.92  0.90  0.23  0.00  0.655  THROTTLE  score    
+  frank      0.96  0.35  0.21  0.80  0.733  CHALLENGE score    
+  spambot    1.00  1.00  0.12  0.00  0.727  BAN       hard-rule
+  dave       0.46  0.00  0.77  1.00  0.433  BAN       hard-rule
+  eve        0.38  0.35  0.42  0.00  0.316  WARN      score    
+
+  >>> alice: trusted + slow + clean -> ALLOW.
+  >>> bob:   chatty established user, crypto spam word -> WARN.
+  >>> carol: brand-new, bursty, url+freemoney+repeats -> THROTTLE
+      (vel 0.92 < 0.95, so the hard rule does NOT fire).
+  >>> frank: high velocity (0.96) BUT low pattern (0.35) -> CHALLENGE.
+      Same risk tier as spambot (~0.73) but NO hard rule: velocity
+      alone is never a ban, you need velocity AND pattern together.
+  >>> spambot: vel 1.0 + pat 1.0 -> BAN via hard-rule (coordinated).
+  >>> dave:  trusted but posts severe toxicity -> BAN via hard-rule
+      (reputation cannot buy your way past toxicity).
+
+[check] pipeline emits ALLOW/WARN/THROTTLE/CHALLENGE/BAN/BAN? OK
+
+========================================================================
+  SECTION 6: Progressive escalation (same actor, repeated offenses)
+========================================================================
+Per-actor offense counter bumps the response one tier per prior offense.
+ eve posts the SAME borderline crypto-spam message four times.
+ Base score-tier for eve's message is WARN (risk ~0.316); each repeat
+ escalates: WARN -> THROTTLE -> CHALLENGE -> BAN.
+
+  offense  base_tier   ->  final_action
+    1       WARN        ->  WARN     
+    2       WARN        ->  THROTTLE 
+    3       WARN        ->  CHALLENGE
+    4       WARN        ->  BAN      
+
+  This is the 'warn before you ban' product discipline: a single
+  borderline message is not a ban, but a PATTERN of them is. The
+  offense counter resets after a clean cooldown window.
+
+[check] eve escalates WARN->THROTTLE->CHALLENGE->BAN? OK
+
+========================================================================
+  SECTION 7: Scale estimation
+========================================================================
+Assumptions:
+  daily logins (login path)     = 100,000,000
+  peak velocity-check QPS       = 100,000 /s
+  entities checked / login      = 4 (ip, device, user, asn)
+  windows / entity              = 4 (1m, 10m, 1h, 24h)
+  -> pipelined Redis lookups/login = 16 (one roundtrip)
+  active velocity entities      = 10,000,000 (hot subset)
+  embedding dim / cached vector = 128 (GNN, 24h TTL)
+
+Throughput & storage:
+  peak pipelined ops/s          = 100,000 (1 pipeline/login)
+  velocity memory (sorted sets) = 2.00 GB (10,000,000 keys * 200 B)
+  hot embedding cache (Redis)   = 5.12 GB (10,000,000 accts * 128 * 4 B)
+  ingress bandwidth @ peak      = 204.8 MB/s (100,000 req/s * 2048 B)
+
+Sync path latency budget (p99 < 20 ms):
+  edge filter (TLS/JA3 + ASN blocklist)       1 ms
+  velocity engine (pipelined Redis)           3 ms
+  device intelligence (fingerprint)           2 ms
+  risk scorer (GBM, ~50 features)             8 ms
+  network + queueing slack                    6 ms
+  TOTAL                                      20 ms
+  Anything slower must move to the ASYNC path (graph / GNN / ring
+  detection): results cached back into Redis, consumed next request.
+
+[check] velocity=2.0GB, emb=5.12GB, bw=204.8MB/s, sync=20ms, 16 lookups? OK
+
+========================================================================
+  SECTION 8: GOLD values (pinned for abuse_detection.html)
+========================================================================
+  vel_alice                = 0.188
+  pat_alice                = 0.0
+  tox_alice                = 0.0
+  rep_alice                = 0.95
+  risk_alice               = 0.066
+  action_alice             = ALLOW
+  vel_bob                  = 0.75
+  pat_bob                  = 0.35
+  tox_bob                  = 0.0
+  rep_bob                  = 0.289
+  risk_bob                 = 0.455
+  action_bob               = WARN
+  vel_carol                = 0.92
+  pat_carol                = 0.9
+  tox_carol                = 0.0
+  rep_carol                = 0.23
+  risk_carol               = 0.655
+  action_carol             = THROTTLE
+  vel_frank                = 0.96
+  pat_frank                = 0.35
+  tox_frank                = 0.8
+  rep_frank                = 0.214
+  risk_frank               = 0.733
+  action_frank             = CHALLENGE
+  vel_spambot              = 1.0
+  pat_spambot              = 1.0
+  tox_spambot              = 0.0
+  rep_spambot              = 0.116
+  risk_spambot             = 0.727
+  action_spambot           = BAN
+  vel_dave                 = 0.46
+  pat_dave                 = 0.0
+  tox_dave                 = 1.0
+  rep_dave                 = 0.773
+  risk_dave                = 0.433
+  action_dave              = BAN
+  vel_eve                  = 0.375
+  pat_eve                  = 0.35
+  tox_eve                  = 0.0
+  rep_eve                  = 0.421
+  risk_eve                 = 0.316
+  action_eve               = WARN
+  fusion_weights           = 0.30,0.25,0.20,0.25
+  tier_thresholds          = 0.30,0.50,0.70,0.85
+  eve_escalation           = WARN,THROTTLE,CHALLENGE,BAN
+  scale_velocity_gb        = 2.0
+  scale_embedding_gb       = 5.12
+  scale_bandwidth_mbs      = 204.8
+  scale_sync_ms            = 20
+
+[check] GOLD reproduces from velocity+pattern+toxicity+reputation? OK
+
+========================================================================
+  ALL SECTIONS COMPLETE
+========================================================================

@@ -1,0 +1,169 @@
+# url_shortener.py - URL Shortener system design simulation
+# Pure Python stdlib only. Numbers below feed URL_SHORTENER.md
+# and url_shortener.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Base62 encoding / decoding
+==========================================================================
+Alphabet (62 chars): 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
+  0-9 = values 0-9,  a-z = 10-35,  A-Z = 36-61
+
+Short-key capacity by length:
+  5 chars ->          916,132,832 keys  (0.92 B)
+  6 chars ->       56,800,235,584 keys  (56.80 B)
+  7 chars ->    3,521,614,606,208 keys  (3521.61 B)
+  8 chars ->  218,340,105,584,896 keys  (218340.11 B)
+
+Round-trip worked examples (id <-> base62):
+                0 -> 0          ->               0   [OK]
+                1 -> 1          ->               1   [OK]
+               61 -> Z          ->              61   [OK]
+               62 -> 10         ->              62   [OK]
+               63 -> 11         ->              63   [OK]
+            12345 -> 3d7        ->           12345   [OK]
+        100000000 -> 6LAze      ->       100000000   [OK]
+            68999 -> hWT        ->           68999   [OK]
+
+Headline capacity vs 36.5B new URLs/year:
+  6-char keys 56,800,235,584 hold 1.6 years of growth
+  7-char keys 3,521,614,606,208 hold 96.5 years of growth
+
+[check] base62_encode(12345) == '3d7'? OK
+[check] base62_decode('3d7') == 12345? OK
+[check] round-trip holds for all examples? OK
+
+==========================================================================
+  SECTION 2: Key generation strategies
+==========================================================================
+Three ways to mint a unique short key per long URL.
+
+A. Auto-increment counter + base62 encode
+   ids 1,000,001..1,000,005 -> keys ['4c93', '4c94', '4c95', '4c96', '4c97']
+   + ordered, zero collisions, shortest key (6 chars)
+   - single point of coordination (DB sequence), guessable URL count
+
+B. Snowflake distributed ID (Twitter 64-bit) + base62
+   layout: 1 sign | 41 ts-ms | 10 machine | 12 seq
+   machine_id=23, 5 consecutive seq -> keys (note length):
+     seq=0 -> BQKudzksBG  (10 chars)
+     seq=1 -> BQKudzksBH  (10 chars)
+     seq=2 -> BQKudzksBI  (10 chars)
+     seq=3 -> BQKudzksBJ  (10 chars)
+     seq=4 -> BQKudzksBK  (10 chars)
+   + no SPOF, k-sorted, ~4M ids/sec/machine (12 bits/ms)
+   - keys longer (~9 chars), clock-drift / NTP handling needed
+
+C. MD5(long_url) truncated to 6 base62 chars + collision check
+   https://www.example.com/very/long/path?utm=xyz   -> BGgbti
+   https://news.ycombinator.com/item?id=99999       -> ozffQX
+   https://github.com/quanhua92/tutorials           -> vPIm0L
+   + no coordination, deterministic, stateless
+   - collisions INEVITABLE (see Section 3), must check + rehash
+
+[check] every strategy yields a non-empty base62 key? OK
+
+==========================================================================
+  SECTION 3: Collision detection (hash-based keys)
+==========================================================================
+6-char base62 keyspace M = 56,800,235,584
+
+Birthday-paradox collision probability P(n keys):
+  n =       1000   P(collision) = 0.00001
+  n =      10000   P(collision) = 0.00088
+  n =     100000   P(collision) = 0.08426
+  n =     286000   P(collision) = 0.51326
+  n =    1000000   P(collision) = 0.99985
+  expected FIRST collision at n ~ 298700 URLs
+
+Actual simulation: truncate MD5(url) to 6 base62 chars, 500k URLs:
+  FIRST collision at URL #364496: key '22wqCV'
+  generated 500,000 keys -> 2 collisions (0.000%)
+
+  => 6-char hash keys COLLIDE at scale. Two fixes:
+     (1) bump to 7 chars (keyspace x62), OR
+     (2) check DB; on collision append a salt and rehash.
+
+[check] collisions actually occur for 6-char hash keys? OK
+
+==========================================================================
+  SECTION 4: Scale estimation
+==========================================================================
+Assumptions:
+  new URLs / day        = 100,000,000
+  redirects / day       = 1,000,000,000
+  read : write ratio    = 10 : 1
+  bytes / URL record    = 500  (long_url + metadata)
+
+Average QPS:
+  writes (shorten)  =   1157.4 /s
+  reads  (redirect) =  11574.1 /s
+
+Peak QPS (10x avg, viral spike):
+  writes peak =      11574 /s
+  reads  peak =     115741 /s
+
+Annual growth:
+  new URLs / year   = 36,500,000,000  (36.5 B)
+  storage / year    = 18.25 TB
+  storage / 5 years = 91.25 TB
+
+Bandwidth (avg, payload only):
+  write bandwidth = 578.70 KB/s
+  read  bandwidth = 5.79 MB/s
+
+Cache effect (Redis, 92% hit rate on redirects):
+  cache serves  = 10648.1 /s
+  DB still hit   = 925.9 /s  (the misses)
+
+[check] read:write == 10:1? OK
+[check] storage/year == 18.25 TB? OK
+
+==========================================================================
+  SECTION 5: Redirect analytics pipeline
+==========================================================================
+Flow on every GET /{key}:
+  client -> redirect service -> 302 + long URL (synchronous, <50ms)
+                 |
+                 +-> fire async click event -> Kafka (non-blocking)
+                        Kafka -> stream processor -> analytics DB
+
+Why async?  A redirect must stay <50ms p99. Geo-lookup, dedup and
+aggregation are slow and loss-tolerable; never block the redirect path.
+
+Simulated 100,000 clicks across 1000 keys (Zipf / power-law traffic):
+  top  1% of keys (10 keys) carry 39.3% of clicks
+  top 10% of keys (100 keys) carry 69.4% of clicks
+  => cache hot keys aggressively; cold keys may hit DB unpenalised.
+
+  Clicks by country (uniform for demo):
+    JP:  16,822 (16.8%) #################################
+    US:  16,746 (16.7%) #################################
+    DE:  16,697 (16.7%) #################################
+    VN:  16,639 (16.6%) #################################
+    BR:  16,633 (16.6%) #################################
+    IN:  16,463 (16.5%) ################################
+
+[check] all clicks attributed to a country? OK
+
+==========================================================================
+  SECTION 6: GOLD values (pinned for url_shortener.html)
+==========================================================================
+  base62_encode_0          = 0
+  base62_encode_61         = Z
+  base62_encode_62         = 10
+  base62_encode_12345      = 3d7
+  base62_encode_100m       = 6LAze
+  base62_decode_3d7        = 12345
+  base62_decode_6LAze      = 100000000
+  key6_capacity            = 56800235584
+  key7_capacity            = 3521614606208
+  write_qps_avg            = 1157.4
+  read_qps_avg             = 11574.1
+  storage_per_year_tb      = 18.25
+  read_write_ratio         = 10
+
+[check] GOLD reproduces from base62 + scale formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

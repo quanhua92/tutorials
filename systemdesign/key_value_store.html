@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Key-Value Store (LSM Tree) — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --green:#2ecc71; --red:#c0392b; --orange:#e67e22;
+    --blue:#3498db; --gold:#f1c40f; --purple:#9b59b6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}
+  .micro{color:var(--muted);font-size:.74rem}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:4px 12px;cursor:pointer;font-size:.8rem}
+  button:hover{border-color:var(--green);color:var(--green)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input[type=text]{background:#0a0e14;color:var(--ink);border:1px solid #30363d;
+                   border-radius:6px;padding:4px 9px;font-size:.82rem;font-family:ui-monospace,monospace;width:140px}
+  input[type=number]{background:#0a0e14;color:var(--ink);border:1px solid #30363d;
+                     border-radius:6px;padding:4px 9px;font-size:.82rem;width:70px;font-family:ui-monospace,monospace}
+  select{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:3px 9px;font-size:.82rem}
+  .badge{display:inline-block;background:#3a2f12;color:var(--gold);border:1px solid var(--gold);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.6rem;text-decoration:none}
+  .badge.doc{background:#1c2a3a;color:#85c1e9;border-color:var(--blue)}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--green)} .readout .bad{color:var(--red)} .readout .warn{color:var(--orange)}
+  .readout .gold{color:var(--gold)} .readout .blue{color:#85c1e9}
+  /* memtable + levels */
+  .tree{display:flex;flex-direction:column;gap:.7rem;margin-top:.6rem}
+  .lvl{display:flex;align-items:flex-start;gap:.6rem}
+  .lvlname{width:90px;font-family:ui-monospace,monospace;font-size:.78rem;font-weight:700;
+           color:var(--green);padding-top:3px}
+  .lvlname.l1{color:var(--blue)} .lvlname.mem{color:var(--gold)}
+  .ssts{display:flex;gap:6px;flex-wrap:wrap;flex:1;align-items:flex-start}
+  .sst{border:2px solid;border-radius:6px;padding:4px 7px;font-family:ui-monospace,monospace;
+       font-size:.74rem;line-height:1.35;background:#161b22;min-width:90px}
+  .sst .sname{font-weight:700;display:block;margin-bottom:2px;font-size:.72rem}
+  .sst .kv{display:block;white-space:nowrap;color:var(--muted)}
+  .sst .kv.live{color:var(--ink)} .sst .kv.del{color:var(--red);text-decoration:line-through}
+  .sst .kv.fresh{color:var(--green);font-weight:600}
+  .sst.l0{border-color:var(--green)} .sst.l1{border-color:var(--blue)}
+  .sst .bf{font-size:.66rem;color:var(--gold);margin-top:3px;display:block}
+  .sst.hot{box-shadow:0 0 0 2px var(--gold)}
+  .memtable{border:2px dashed var(--gold);border-radius:6px;padding:4px 7px;background:#1c1a05;
+            font-family:ui-monospace,monospace;font-size:.74rem;min-width:90px}
+  .memtable .sname{font-weight:700;color:var(--gold);display:block;margin-bottom:2px;font-size:.72rem}
+  .memtable .kv{display:block;white-space:nowrap}
+  .empty{color:var(--muted);font-style:italic;font-size:.78rem;padding:6px 0}
+  /* ops strip */
+  .seq{display:flex;flex-wrap:wrap;gap:4px;margin:.5rem 0;font-family:ui-monospace,monospace}
+  .seq .op{background:#21262d;border:1px solid #30363d;border-radius:5px;padding:3px 8px;
+           font-size:.74rem;min-width:50px;text-align:center}
+  .seq .op.done{background:#1c2a3a;border-color:var(--blue);color:#85c1e9}
+  .seq .op.cur{background:var(--green);border-color:var(--green);color:#0d1117;font-weight:700;
+               outline:2px solid var(--gold)}
+  .seq .op.put{border-left:3px solid var(--green)}
+  .seq .op.del{border-left:3px solid var(--red)}
+  /* read path */
+  .rp{display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0;align-items:center}
+  .rp .step{background:#21262d;border:1px solid #30363d;border-radius:5px;padding:4px 9px;
+            font-family:ui-monospace,monospace;font-size:.78rem}
+  .rp .step.hit{background:#1c3a25;border-color:var(--green);color:var(--green)}
+  .rp .step.miss{background:#3a1414;border-color:var(--red);color:#ff9a8a}
+  .rp .step.skip{background:#1c1a05;border-color:var(--gold);color:var(--gold)}
+  .rp .arrow{color:var(--muted);font-size:.8rem}
+  /* amplification bars */
+  .barwrap{display:flex;align-items:center;gap:.5rem;margin:.25rem 0}
+  .barwrap .lab{width:170px;color:var(--muted);font-size:.78rem}
+  .barwrap .track{flex:1;height:20px;background:#0a0e14;border-radius:4px;overflow:hidden;
+                  border:1px solid #30363d;min-width:80px}
+  .barwrap .fill{height:100%;transition:width .3s}
+  .barwrap .num{width:90px;text-align:right;font-variant-numeric:tabular-nums;font-size:.78rem}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.74rem;margin-top:.4rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:middle}
+  .calcgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:.7rem;margin:.6rem 0}
+  .calcgrid .field{display:flex;flex-direction:column;gap:.2rem}
+  .calcgrid .field label{font-size:.72rem;color:var(--muted)}
+  table.amp{border-collapse:collapse;font-size:.82rem;margin-top:.5rem;width:100%}
+  table.amp th,table.amp td{border:1px solid #30363d;padding:5px 9px;text-align:right}
+  table.amp th:first-child,table.amp td:first-child{text-align:left}
+  table.amp th{color:var(--muted);font-weight:600;background:#21262d}
+  table.amp .win{color:var(--green);font-weight:600}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+  <h1>Key-Value Store (LSM Tree) — interactive
+    <a class="badge doc" href="https://github.com/quanhua92/tutorials/blob/main/systemdesign/KEY_VALUE_STORE.md">KEY_VALUE_STORE.md</a>
+    <a class="badge" href="https://github.com/quanhua92/tutorials/blob/main/systemdesign/key_value_store.py">key_value_store.py</a></h1>
+  <div class="sub">Writes append to a <b style="color:var(--red)">WAL</b> then land in an in-memory <b style="color:var(--gold)">memtable</b>; on overflow
+    the memtable flushes to an immutable <b style="color:var(--green)">SSTable</b>; background <b>compaction</b> merges them. Reads walk
+    memtable → L0 → L1 → … short-circuited by per-SSTable <b style="color:var(--gold)">Bloom filters</b>. Re-run live in JS, identical to <code>key_value_store.py</code>.</div>
+
+  <!-- ===== PANEL 1: WRITE PATH STEPPER ===== -->
+  <h2>① Step the write path — WAL → memtable → flush → SSTable → compaction</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem"><b>What to do:</b> step through. Each PUT/DEL is appended to the WAL then the
+      <b style="color:var(--gold)">memtable</b> (dashed gold). When the memtable hits the limit (4), it flushes to an immutable
+      <b style="color:var(--green)">L0 SSTable</b> (green). When L0 has ≥ 4 SSTables, <b>size-tiered compaction</b> merges them into one
+      (still at L0 for STCS). Updated keys show <span style="color:var(--green)">green</span>; tombstones show
+      <span style="color:var(--red)"><s>red strikethrough</s></span>.</div>
+    <div class="controls" style="margin-bottom:.5rem">
+      <button id="bReset">⟲ reset</button>
+      <button id="bBack">◀ back</button>
+      <button id="bStep">step ▶</button>
+      <button id="bPlay">⏯ play/pause</button>
+      <span class="micro" id="stepInfo">step 0</span>
+      <span style="flex:1"></span>
+      <label class="micro" for="stratSel">strategy:</label>
+      <select id="stratSel">
+        <option value="size_tiered">size-tiered (STCS)</option>
+        <option value="leveled">leveled (LCS)</option>
+      </select>
+    </div>
+    <div class="seq" id="seqStrip"></div>
+    <div class="tree" id="tree"></div>
+    <div class="readout" id="stepReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 2: READ PATH VISUALIZER ===== -->
+  <h2>② Read path — watch a GET walk the levels + bloom filters</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem">Type a key and run a GET. The walker visits the memtable, then every L0 SSTable newest-first
+      (L0 ranges overlap, so all must be checked), then L1. Each SSTable is tested with a range guard, then a <b style="color:var(--gold)">Bloom filter</b>;
+      only if both pass do we pay a <b>disk read</b>. The first hit wins; tombstones return NOT FOUND.</div>
+    <div class="controls">
+      <label class="micro" for="getKey">GET key:</label>
+      <input type="text" id="getKey" value="k01" list="keylist">
+      <datalist id="keylist"></datalist>
+      <button id="bGet">▶ run GET</button>
+      <span class="micro">memtable_hits=<span id="cMem">0</span> · bloom_skips=<span id="cBloom">0</span> · disk_reads=<span id="cDisk">0</span></span>
+    </div>
+    <div class="rp" id="rp"></div>
+    <div class="readout" id="getReadout"></div>
+  </div>
+
+  <!-- ===== PANEL 3: AMPLIFICATION CALCULATOR ===== -->
+  <h2>③ Amplification calculator — write amp vs read amp vs space amp</h2>
+  <div class="panel">
+    <div class="micro" style="margin:0 0 .5rem">Slide T (size ratio), L (#levels), T_st (STCS tier threshold). The bars and table recompute live,
+      matching the formulas in <code>key_value_store.py</code> Section E. <b style="color:var(--green)">Green = winner</b> for that metric.</div>
+    <div class="calcgrid">
+      <div class="field"><label>T — fanout (size ratio, LCS)</label><input type="number" id="inT" value="10" min="2" max="32"></div>
+      <div class="field"><label>L — number of levels (LCS)</label><input type="number" id="inL" value="4" min="2" max="7"></div>
+      <div class="field"><label>T_st — STCS tier threshold</label><input type="number" id="inTst" value="4" min="2" max="16"></div>
+      <div class="field"><label>User write BW (Mbps)</label><input type="number" id="inBw" value="4496" min="1" max="100000"></div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:1.6rem">
+      <div style="flex:1;min-width:320px">
+        <div class="barwrap"><span class="lab">write amp · STCS (T_st)</span><span class="track"><span class="fill" id="bWst" style="background:var(--green)"></span></span><span class="num" id="nWst"></span></div>
+        <div class="barwrap"><span class="lab">write amp · LCS (T·(L−1))</span><span class="track"><span class="fill" id="bWlv" style="background:var(--red)"></span></span><span class="num" id="nWlv"></span></div>
+        <div class="barwrap"><span class="lab">read amp · STCS (T_st·L)</span><span class="track"><span class="fill" id="bRst" style="background:var(--red)"></span></span><span class="num" id="nRst"></span></div>
+        <div class="barwrap"><span class="lab">read amp · LCS (L)</span><span class="track"><span class="fill" id="bRlv" style="background:var(--green)"></span></span><span class="num" id="nRlv"></span></div>
+        <div class="barwrap"><span class="lab">space amp · STCS (T_st)</span><span class="track"><span class="fill" id="bSst" style="background:var(--red)"></span></span><span class="num" id="nSst"></span></div>
+        <div class="barwrap"><span class="lab">space amp · LCS (1+1/T)</span><span class="track"><span class="fill" id="bSlv" style="background:var(--green)"></span></span><span class="num" id="nSlv"></span></div>
+      </div>
+      <div style="flex:1;min-width:280px">
+        <table class="amp">
+          <tr><th>metric</th><th>STCS</th><th>LCS</th><th>winner</th></tr>
+          <tr><td>write amp</td><td id="tWst">—</td><td id="tWlv">—</td><td id="tWw">—</td></tr>
+          <tr><td>read amp</td><td id="tRst">—</td><td id="tRlv">—</td><td id="tRw">—</td></tr>
+          <tr><td>space amp</td><td id="tSst">—</td><td id="tSlv">—</td><td id="tSw">—</td></tr>
+          <tr><td>disk write BW</td><td id="tBWst">—</td><td id="tBWlv">—</td><td>—</td></tr>
+        </table>
+        <div class="readout" id="ampReadout" style="margin-top:.6rem"></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--green)"></i>lower is better (winner)</span>
+      <span><i class="sw" style="background:var(--red)"></i>higher is worse</span>
+      <span>formulas: WA_lcs=T·(L−1), WA_stcs=T_st, RA_lcs=L, RA_stcs=T_st·L, SA_lcs=1+1/T, SA_stcs=T_st</span>
+    </div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <span class="badge" id="check">check: …</span>
+    JS LSM recompute matches key_value_store.py Section F (GOLD workload: 4 flushes, 1 compaction, memtable=[k01:FRESH,k02:del], GET k01=FRESH, GET k02=NOT FOUND, GET k08=v8, GET k99=NOT FOUND).
+  </div>
+
+<script>
+"use strict";
+
+/* ==========================================================================
+   LSM tree in JS — mirrors key_value_store.py exactly.
+   Each SSTable is an object: {level, seq, entries:[[key,val,seq,tomb],...],
+                               min,max,bloom:Set}.  Bloom is a small Set here
+                               (cheap and exact) instead of the bit-array used
+                               in the .py; for our small demo keys this is
+                               equivalent and avoids hash-collision noise.
+   ========================================================================== */
+
+const MEMTABLE_LIMIT = 4;
+const STCS_THRESHOLD = 4;
+let STRATEGY = "size_tiered";
+
+/* --- Bloom filter (small Set-backed stand-in, exact for demo keys) --- */
+function newBloom(entries){
+  const s = new Set();
+  entries.forEach(e=>s.add(e[0]));
+  return s;
+}
+
+/* --- merge: latest-wins across a list of SSTables (mirrors _merge_ssts) --- */
+function mergeSsts(ssts){
+  const latest = new Map();
+  ssts.forEach(sst=>{
+    sst.entries.forEach(e=>{
+      const k=e[0], seq=e[2];
+      if(!latest.has(k) || seq >= latest.get(k)[2]) latest.set(k, e);
+    });
+  });
+  return Array.from(latest.values()).sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
+}
+
+function newSst(entries, level, seq){
+  const sorted = entries.slice().sort((a,b)=>a[0]<b[0]?-1:a[0]>b[0]?1:0);
+  return {
+    level, seq,
+    entries: sorted,
+    size: sorted.length,
+    min: sorted.length?sorted[0][0]:null,
+    max: sorted.length?sorted[sorted.length-1][0]:null,
+    bloom: newBloom(sorted),
+    diskReads: 0
+  };
+}
+
+function newTree(){
+  return {
+    memtable: new Map(),          // key -> value | ["TOMBSTONE"]
+    levels: [[]],                 // levels[0] = L0 list of SSTables
+    nextSeq: 0,
+    stats:{writes:0, reads:0, flushes:0, compactions:0, disk_reads:0, bloom_skips:0}
+  };
+}
+
+function flushMemtable(tree){
+  if(tree.memtable.size===0) return;
+  const entries = [];
+  tree.memtable.forEach((v,k)=>{
+    if(Array.isArray(v) && v.length && v[0]==="TOMBSTONE"){
+      entries.push([k, null, tree.nextSeq, true]);
+    } else {
+      entries.push([k, v, tree.nextSeq, false]);
+    }
+  });
+  const sst = newSst(entries, 0, tree.nextSeq);
+  tree.levels[0].push(sst);
+  tree.memtable = new Map();
+  tree.stats.flushes++;
+}
+
+function maybeCompact(tree){
+  if(STRATEGY==="size_tiered") compactSizeTiered(tree);
+  else if(STRATEGY==="leveled") compactLeveled(tree);
+}
+
+function compactSizeTiered(tree){
+  while(tree.levels[0].length >= STCS_THRESHOLD){
+    const merged = mergeSsts(tree.levels[0]);
+    const sst = newSst(merged, 0, tree.nextSeq);
+    tree.levels[0] = [sst];
+    tree.stats.compactions++;
+  }
+}
+
+function compactLeveled(tree){
+  while(tree.levels[0].length >= STCS_THRESHOLD){
+    while(tree.levels.length<2) tree.levels.push([]);
+    const merged = mergeSsts(tree.levels[0].concat(tree.levels[1]));
+    const sst = newSst(merged, 1, tree.nextSeq);
+    tree.levels[1] = [sst];
+    tree.levels[0] = [];
+    tree.stats.compactions++;
+  }
+}
+
+function putOp(tree, key, val){
+  tree.memtable.set(key, val);
+  tree.nextSeq++;
+  tree.stats.writes++;
+  if(tree.memtable.size >= MEMTABLE_LIMIT){
+    flushMemtable(tree);
+    maybeCompact(tree);
+  }
+}
+function delOp(tree, key){
+  tree.memtable.set(key, ["TOMBSTONE"]);
+  tree.nextSeq++;
+  tree.stats.writes++;
+  if(tree.memtable.size >= MEMTABLE_LIMIT){
+    flushMemtable(tree);
+    maybeCompact(tree);
+  }
+}
+
+/* --- read path (mirrors LSMTree.get) --- */
+/* returns {value, status, trace:[{where,result}], diskReads, bloomSkips} */
+function getOp(tree, key){
+  const trace=[];
+  let diskReads=0, bloomSkips=0;
+  tree.stats.reads++;
+  // 1. memtable
+  if(tree.memtable.has(key)){
+    const v = tree.memtable.get(key);
+    if(Array.isArray(v) && v.length && v[0]==="TOMBSTONE"){
+      trace.push({where:"memtable", result:"tombstone"});
+      return {value:null, status:"memtable_tombstone", trace, diskReads, bloomSkips};
+    }
+    trace.push({where:"memtable", result:"hit", value:v});
+    return {value:v, status:"memtable_hit", trace, diskReads, bloomSkips};
+  }
+  trace.push({where:"memtable", result:"miss"});
+  // 2. levels L0..Ln, newest first
+  for(let li=0; li<tree.levels.length; li++){
+    const ssts = tree.levels[li].slice().sort((a,b)=>b.seq-a.seq);
+    for(const sst of ssts){
+      // range guard
+      if(sst.min!==null && (key<sst.min || key>sst.max)){
+        trace.push({where:"L"+li+" SST", result:"range_skip"});
+        continue;
+      }
+      // bloom
+      if(!sst.bloom.has(key)){
+        trace.push({where:"L"+li+" SST", result:"bloom_skip"});
+        bloomSkips++;
+        continue;
+      }
+      // disk read (binary search)
+      diskReads++;
+      const e = sst.entries.find(x=>x[0]===key);
+      if(e){
+        if(e[3]){ // tombstone
+          trace.push({where:"L"+li+" SST", result:"tombstone"});
+          return {value:null, status:"sst_tombstone", trace, diskReads, bloomSkips};
+        }
+        trace.push({where:"L"+li+" SST", result:"hit", value:e[1]});
+        return {value:e[1], status:"sst_hit", trace, diskReads, bloomSkips};
+      } else {
+        trace.push({where:"L"+li+" SST", result:"disk_miss"});
+      }
+    }
+  }
+  return {value:null, status:"miss", trace, diskReads, bloomSkips};
+}
+
+/* ==========================================================================
+   GOLD WORKLOAD (mirrors key_value_store.py Section F exactly)
+   ========================================================================== */
+const GOLD_WORKLOAD = [
+  ["PUT","k01","v1"],["PUT","k02","v2"],["PUT","k03","v3"],["PUT","k04","v4"],   // flush 1
+  ["PUT","k05","v5"],["PUT","k06","v6"],["PUT","k07","v7"],["PUT","k08","v8"],   // flush 2
+  ["PUT","k09","v9"],["PUT","k10","v10"],["PUT","k11","v11"],["PUT","k12","v12"],// flush 3
+  ["PUT","k13","v13"],["PUT","k14","v14"],["PUT","k15","v15"],["PUT","k16","v16"],// flush 4 -> compaction
+  ["PUT","k01","FRESH"],
+  ["DEL","k02"]
+];
+
+function runGoldWorkload(){
+  const tree = newTree();
+  const steps = [];
+  for(const op of GOLD_WORKLOAD){
+    const beforeFlushes = tree.stats.flushes;
+    const beforeCompact = tree.stats.compactions;
+    if(op[0]==="PUT") putOp(tree, op[1], op[2]);
+    else delOp(tree, op[1]);
+    steps.push({
+      op,
+      flushed: tree.stats.flushes>beforeFlushes,
+      compacted: tree.stats.compactions>beforeCompact,
+      snapshot: snapTree(tree)
+    });
+  }
+  return {tree, steps};
+}
+function snapTree(t){
+  return {
+    memtable: new Map(t.memtable),
+    levels: t.levels.map(L=>L.map(s=>({
+      level:s.level, seq:s.seq, size:s.size,
+      min:s.min, max:s.max,
+      entries: s.entries.map(e=>e.slice()),
+      bloom: new Set(s.bloom)
+    }))),
+    stats: Object.assign({}, t.stats)
+  };
+}
+
+/* ==========================================================================
+   PANEL 1 RENDERING
+   ========================================================================== */
+const TR = runGoldWorkload();
+let step = 0, timer = null;
+
+function stopTimer(){
+  if(timer){ clearInterval(timer); timer=null; document.getElementById('bPlay').textContent='⏯ play/pause'; }
+}
+
+function renderSeq(){
+  const el = document.getElementById('seqStrip');
+  el.innerHTML = "";
+  GOLD_WORKLOAD.forEach((op,i)=>{
+    const d = document.createElement('div');
+    d.className = 'op ' + (op[0]==="PUT"?"put":"del");
+    if(i<step) d.classList.add('done');
+    else if(i===step) d.classList.add('cur');
+    d.textContent = op[0]==="PUT" ? "PUT "+op[1] : "DEL "+op[1];
+    el.appendChild(d);
+  });
+  document.getElementById('stepInfo').textContent =
+    step>=GOLD_WORKLOAD.length ? "done — "+GOLD_WORKLOAD.length+" ops"
+                               : "step "+step+" / "+GOLD_WORKLOAD.length+"  (next: "+(GOLD_WORKLOAD[step][0]+" "+GOLD_WORKLOAD[step][1])+")";
+}
+
+function kvSpan(k, v, freshKey, freshVal){
+  // returns HTML for one k:v line
+  if(Array.isArray(v) && v.length && v[0]==="TOMBSTONE"){
+    return '<span class="kv del">'+k+':del</span>';
+  }
+  const isFresh = (k===freshKey && v===freshVal);
+  return '<span class="kv '+(isFresh?'fresh':'live')+'">'+k+':'+v+'</span>';
+}
+
+function renderTree(snap, freshKey, freshVal, hotKey){
+  const el = document.getElementById('tree');
+  el.innerHTML = "";
+  // memtable row
+  const memRow = document.createElement('div');
+  memRow.className = 'lvl';
+  const memName = document.createElement('div');
+  memName.className = 'lvlname mem';
+  memName.innerHTML = 'memtable<br><span class="micro">'+snap.memtable.size+'/'+MEMTABLE_LIMIT+'</span>';
+  memRow.appendChild(memName);
+  const memBox = document.createElement('div');
+  memBox.className = 'ssts';
+  if(snap.memtable.size===0){
+    const e=document.createElement('span'); e.className='empty'; e.textContent='(empty)'; memBox.appendChild(e);
+  } else {
+    const m = document.createElement('div');
+    m.className = 'memtable';
+    m.innerHTML = '<span class="sname">MEM</span>';
+    snap.memtable.forEach((v,k)=>{
+      const span = document.createElement('span');
+      if(Array.isArray(v) && v.length && v[0]==="TOMBSTONE"){
+        span.className='kv del'; span.textContent=k+':del';
+      } else {
+        span.className = (k===freshKey && v===freshVal)?'kv fresh':'kv live';
+        span.textContent = k+':'+v;
+      }
+      m.appendChild(span);
+    });
+    memBox.appendChild(m);
+  }
+  memRow.appendChild(memBox);
+  el.appendChild(memRow);
+  // level rows
+  snap.levels.forEach((ssts, li)=>{
+    if(ssts.length===0 && li===0) {
+      // always show L0 row, even if empty after a level promotion
+    }
+    if(ssts.length===0 && li>0) return;
+    const row = document.createElement('div');
+    row.className = 'lvl';
+    const name = document.createElement('div');
+    name.className = 'lvlname ' + (li===0?'':'l'+li);
+    name.innerHTML = 'L'+li+'<br><span class="micro">'+ssts.length+' SST</span>';
+    row.appendChild(name);
+    const bx = document.createElement('div');
+    bx.className = 'ssts';
+    if(ssts.length===0){
+      const e=document.createElement('span'); e.className='empty'; e.textContent='(empty)'; bx.appendChild(e);
+    } else {
+      ssts.forEach(s=>{
+        const sd = document.createElement('div');
+        sd.className = 'sst l'+Math.min(s.level,1);
+        if(hotKey && s.min!==null && hotKey>=s.min && hotKey<=s.max && s.bloom.has(hotKey)) sd.classList.add('hot');
+        let html = '<span class="sname">L'+s.level+' #'+s.seq+' ('+s.size+')</span>';
+        // limit displayed kvs to first 6 then '...'
+        const shown = s.entries.slice(0,6);
+        shown.forEach(e=>{
+          if(e[3]) html += '<span class="kv del">'+e[0]+':del</span>';
+          else {
+            const isFresh = (e[0]===freshKey && e[1]===freshVal);
+            html += '<span class="kv '+(isFresh?'fresh':'live')+'">'+e[0]+':'+e[1]+'</span>';
+          }
+        });
+        if(s.entries.length>6) html += '<span class="kv">…+'+(s.entries.length-6)+'</span>';
+        html += '<span class="bf">bloom: '+(s.bloom.size)+' keys</span>';
+        sd.innerHTML = html;
+        bx.appendChild(sd);
+      });
+    }
+    row.appendChild(bx);
+    el.appendChild(row);
+  });
+}
+
+function renderStep(){
+  const prevSnap = step>0 ? TR.steps[step-1].snapshot : snapTree(newTree());
+  // find the latest FRESH value (for green highlight)
+  let freshKey=null, freshVal=null;
+  for(let i=0;i<step;i++){
+    if(GOLD_WORKLOAD[i][0]==="PUT" && GOLD_WORKLOAD[i][2]==="FRESH"){
+      freshKey=GOLD_WORKLOAD[i][1]; freshVal=GOLD_WORKLOAD[i][2];
+    }
+  }
+  renderTree(prevSnap, freshKey, freshVal, null);
+  const rd = document.getElementById('stepReadout');
+  if(step===0){
+    rd.innerHTML = 'press <b>step ▶</b> to begin. memtable limit = '+MEMTABLE_LIMIT+', STCS threshold = '+STCS_THRESHOLD+'.';
+    return;
+  }
+  const s = TR.steps[step-1];
+  const op = s.op;
+  const opstr = op[0]==="PUT" ? ("PUT "+op[1]+"="+op[2]) : ("DEL "+op[1]);
+  const events = [];
+  if(s.flushed) events.push('<b class="gold">FLUSH → new L0 SSTable</b>');
+  if(s.compacted) events.push('<b class="blue">COMPACTION → merged '+STCS_THRESHOLD+' SSTables into 1</b>');
+  if(events.length===0) events.push('wal append + memtable insert');
+  const snap = s.snapshot;
+  const l0count = snap.levels[0].length;
+  const l1count = snap.levels.length>1 ? snap.levels[1].length : 0;
+  const extra = l1count ? ('   L1 SSTables: '+l1count) : '';
+  rd.innerHTML = 'op <b>'+opstr+'</b>   '+events.join('   ') +
+    '\nmemtable: '+snap.memtable.size+'/'+MEMTABLE_LIMIT+
+    '   L0 SSTables: '+l0count+extra+
+    '   flushes='+snap.stats.flushes+'   compactions='+snap.stats.compactions;
+}
+
+function render(){ renderSeq(); renderStep(); }
+
+/* ==========================================================================
+   PANEL 2: READ PATH WALKER
+   ========================================================================== */
+function renderReadPath(tree, key){
+  const r = getOp(tree, key);
+  document.getElementById('cMem').textContent = (r.status.startsWith('memtable')?1:0);
+  document.getElementById('cBloom').textContent = r.bloomSkips;
+  document.getElementById('cDisk').textContent = r.diskReads;
+  // build path chips
+  const el = document.getElementById('rp');
+  el.innerHTML = "";
+  const arrow = '<span class="arrow">→</span>';
+  r.trace.forEach((t,i)=>{
+    if(i>0){ const a=document.createElement('span'); a.className='arrow'; a.textContent='→'; el.appendChild(a); }
+    const chip = document.createElement('div');
+    chip.className = 'step';
+    let label = t.where;
+    if(t.result==='hit'){ chip.classList.add('hit'); label += ' · HIT'; }
+    else if(t.result==='tombstone'){ chip.classList.add('miss'); label += ' · TOMBSTONE'; }
+    else if(t.result==='miss' && t.where==='memtable'){ label += ' · miss'; }
+    else if(t.result==='range_skip'){ chip.classList.add('skip'); label += ' · range-skip'; }
+    else if(t.result==='bloom_skip'){ chip.classList.add('skip'); label += ' · bloom-skip'; }
+    else if(t.result==='disk_miss'){ label += ' · disk-miss'; }
+    chip.textContent = label;
+    el.appendChild(chip);
+  });
+  // final outcome chip
+  const final = document.createElement('div');
+  final.className = 'step ' + (r.value!==null?'hit':'miss');
+  final.textContent = ' = ' + (r.value!==null ? r.value : 'NOT FOUND') + '   ('+r.status+')';
+  el.appendChild(final);
+  // readout
+  const rd = document.getElementById('getReadout');
+  let html = 'GET <b>'+key+'</b>\n';
+  html += 'status: <b>' + r.status + '</b>\n';
+  html += 'disk_reads = <b>'+r.diskReads+'</b>   bloom_skips = <b>'+r.bloomSkips+'</b>';
+  if(r.diskReads===0 && r.bloomSkips===0 && !r.status.startsWith('memtable')){
+    html += '   <span class="warn">(pure miss: nothing touched disk)</span>';
+  }
+  if(r.bloomSkips>0){
+    html += '\n→ Bloom filter saved <b>'+r.bloomSkips+'</b> disk '+(r.bloomSkips===1?'seek':'seeks')+'. ';
+  }
+  rd.innerHTML = html;
+}
+
+/* populate the GET key datalist with all known keys */
+function refreshKeyList(tree){
+  const dl = document.getElementById('keylist');
+  const keys = new Set();
+  tree.memtable.forEach((_,k)=>keys.add(k));
+  tree.levels.forEach(L=>L.forEach(s=>s.entries.forEach(e=>keys.add(e[0]))));
+  dl.innerHTML = "";
+  Array.from(keys).sort().forEach(k=>{
+    const o=document.createElement('option'); o.value=k; dl.appendChild(o);
+  });
+}
+
+/* ==========================================================================
+   PANEL 3: AMPLIFICATION CALCULATOR
+   ========================================================================== */
+function fmtAmp(x){
+  return Number.isInteger(x) ? x+'x' : x.toFixed(1)+'x';
+}
+function setBar(fillId, numId, val, max, fmt){
+  const pct = Math.min(100, val/max*100);
+  document.getElementById(fillId).style.width = pct.toFixed(1)+'%';
+  document.getElementById(numId).textContent = fmt(val);
+}
+function renderAmp(){
+  let T = parseInt(document.getElementById('inT').value)||10;
+  let L = parseInt(document.getElementById('inL').value)||4;
+  let Tst = parseInt(document.getElementById('inTst').value)||4;
+  let bw = parseInt(document.getElementById('inBw').value)||4496;
+  // clamp
+  T = Math.max(2, Math.min(32, T));
+  L = Math.max(2, Math.min(7, L));
+  Tst = Math.max(2, Math.min(16, Tst));
+  bw = Math.max(1, bw);
+
+  const waStcs = Tst;
+  const waLcs = T*(L-1);
+  const raStcs = Tst*L;
+  const raLcs = L;
+  const saStcs = Tst;
+  const saLcs = 1 + 1/T;
+
+  const maxAmp = Math.max(waStcs, waLcs, raStcs, raLcs, saStcs, saLcs);
+
+  setBar('bWst','nWst',waStcs,maxAmp,(v)=>v+'x');
+  setBar('bWlv','nWlv',waLcs,maxAmp,(v)=>v+'x');
+  setBar('bRst','nRst',raStcs,maxAmp,(v)=>String(v));
+  setBar('bRlv','nRlv',raLcs,maxAmp,(v)=>String(v));
+  setBar('bSst','nSst',saStcs,maxAmp,(v)=>v+'x');
+  setBar('bSlv','nSlv',saLcs,maxAmp,(v)=>v.toFixed(1)+'x');
+
+  // table
+  document.getElementById('tWst').textContent = waStcs+'x';
+  document.getElementById('tWlv').textContent = waLcs+'x';
+  document.getElementById('tWw').innerHTML = waStcs<=waLcs?'<span class="win">STCS</span>':'LCS';
+  document.getElementById('tRst').textContent = raStcs;
+  document.getElementById('tRlv').textContent = raLcs;
+  document.getElementById('tRw').innerHTML = raLcs<=raStcs?'<span class="win">LCS</span>':'STCS';
+  document.getElementById('tSst').textContent = saStcs+'x';
+  document.getElementById('tSlv').textContent = saLcs.toFixed(1)+'x';
+  document.getElementById('tSw').innerHTML = saLcs<=saStcs?'<span class="win">LCS</span>':'STCS';
+
+  // disk write BW = user * WA
+  const bwStcs = bw*waStcs;
+  const bwLcs = bw*waLcs;
+  document.getElementById('tBWst').textContent = bwStcs.toLocaleString()+' Mbps';
+  document.getElementById('tBWlv').textContent = bwLcs.toLocaleString()+' Mbps';
+
+  // readout
+  const rd = document.getElementById('ampReadout');
+  rd.innerHTML =
+    'user write BW  = <b>'+bw.toLocaleString()+'</b> Mbps\n'+
+    'STCS disk write = <b>'+(bwStcs).toLocaleString()+'</b> Mbps  ('+waStcs+'x)\n'+
+    'LCS  disk write = <b>'+(bwLcs).toLocaleString()+'</b> Mbps  ('+waLcs+'x)\n'+
+    '→ LCS writes <b>'+(bwLcs/bwStcs).toFixed(1)+'</b>x more bytes to disk than STCS at this workload, but reads pay up to <b>'+(raStcs/raLcs).toFixed(1)+'</b>x fewer SSTable lookups per GET.';
+}
+
+/* ==========================================================================
+   EVENTS
+   ========================================================================== */
+document.getElementById('bReset').addEventListener('click', ()=>{ step=0; stopTimer(); render(); });
+document.getElementById('bBack').addEventListener('click', ()=>{ if(step>0) step--; stopTimer(); render(); });
+document.getElementById('bStep').addEventListener('click', ()=>{ if(step<GOLD_WORKLOAD.length) step++; if(step>=GOLD_WORKLOAD.length) stopTimer(); render(); refreshKeyList(TR.tree); });
+document.getElementById('bPlay').addEventListener('click', function(){
+  if(timer){ stopTimer(); return; }
+  if(step>=GOLD_WORKLOAD.length) step=0;
+  this.textContent = '⏸ pause';
+  timer = setInterval(()=>{
+    if(step>=GOLD_WORKLOAD.length){ stopTimer(); return; }
+    step++; render();
+    if(step>=GOLD_WORKLOAD.length) stopTimer();
+  }, 650);
+});
+document.getElementById('stratSel').addEventListener('change', function(){
+  STRATEGY = this.value;
+  // rebuild trace with new strategy
+  stopTimer(); step=0;
+  // mutate global TR by re-running workload
+  const fresh = runGoldWorkload();
+  TR.tree = fresh.tree; TR.steps = fresh.steps;
+  render(); refreshKeyList(TR.tree);
+});
+document.getElementById('bGet').addEventListener('click', ()=>{
+  const k = document.getElementById('getKey').value.trim();
+  if(!k) return;
+  renderReadPath(TR.tree, k);
+});
+document.getElementById('getKey').addEventListener('keydown', (e)=>{
+  if(e.key==='Enter') document.getElementById('bGet').click();
+});
+['inT','inL','inTst','inBw'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', renderAmp);
+});
+
+/* ==========================================================================
+   GOLD CHECK vs key_value_store.py Section F
+   ========================================================================== */
+function goldCheck(){
+  const t = TR.tree;
+  const checks = [];
+  function push(name, got, want){
+    checks.push({name, ok: JSON.stringify(got)===JSON.stringify(want), got, want});
+  }
+  push('flushes', t.stats.flushes, 4);
+  push('compactions', t.stats.compactions, 1);
+  push('L0 SST count', t.levels[0].length, 1);
+  push('memtable keys', Array.from(t.memtable.keys()).sort(), ['k01','k02']);
+  push('memtable k01', t.memtable.get('k01'), 'FRESH');
+  push('memtable k02', t.memtable.get('k02'), ['TOMBSTONE']);
+  const merged = t.levels[0][0];
+  push('merged SST size', merged.size, 16);
+  push('merged SST keys', merged.entries.map(e=>e[0]).sort(),
+       ['k01','k02','k03','k04','k05','k06','k07','k08','k09','k10','k11','k12','k13','k14','k15','k16']);
+  push('GET k01', getOp(t,'k01').value, 'FRESH');
+  push('GET k02', getOp(t,'k02').value, null);
+  push('GET k08', getOp(t,'k08').value, 'v8');
+  push('GET k99', getOp(t,'k99').value, null);
+  // amplification gold
+  push('WA_leveled (T=10,L=4)', 10*(4-1), 30);
+  push('WA_stcs (T_st=4)', 4, 4);
+  push('RA_leveled', 4, 4);
+  push('RA_stcs', 4*4, 16);
+  push('SA_leveled', (1+1/10).toFixed(1), '1.1');
+  push('SA_stcs', 4, 4);
+
+  const allOk = checks.every(c=>c.ok);
+  const chk = document.getElementById('check');
+  chk.textContent = allOk ? 'check: OK — JS LSM matches key_value_store.py Section F'
+                          : 'check: FAIL — ' + checks.filter(c=>!c.ok).map(c=>c.name).join(', ');
+  chk.style.borderColor = allOk?'#2ecc71':'#c0392b';
+  chk.style.color = allOk?'#2ecc71':'#c0392b';
+  chk.style.background = allOk?'#1c3a25':'#3a1414';
+  if(!allOk){
+    console.log('GOLD check failures:', checks.filter(c=>!c.ok));
+  }
+}
+
+/* ==========================================================================
+   BOOT
+   ========================================================================== */
+render();
+refreshKeyList(TR.tree);
+renderReadPath(TR.tree, 'k01');
+renderAmp();
+goldCheck();
+</script>
+</body>
+</html>

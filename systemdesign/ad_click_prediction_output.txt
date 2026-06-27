@@ -1,0 +1,256 @@
+# ad_click_prediction.py - Ad click prediction (pCTR) system design
+# Pure Python stdlib only. Numbers below feed AD_CLICK_PREDICTION.md
+# and ad_click_prediction.html (gold-checked).
+
+==========================================================================
+  SECTION 1: CTR estimation with Beta-Binomial smoothing
+==========================================================================
+Raw CTR = clicks / impressions is a MAXIMUM-LIKELIHOOD estimate. On
+small samples it is wildly noisy (3 impressions -> 0% or 33% or 67%).
+Beta(alpha,beta) smoothing treats each ad's CTR as a draw from a prior
+distribution and reports the POSTERIOR MEAN:
+  smoothed = (clicks + alpha) / (impressions + alpha + beta)
+Prior Beta(1,19) -> mean 0.0500, equivalent to 20 pseudo-impressions, 1 pseudo-click.
+
+  ad      impressions    clicks      raw CTR     smoothed   shrink
+  ad_A           1000        50        5.00%        5.00%    +0.0%
+  ad_B            100         6        6.00%        5.83%    -2.8%
+  ad_C             10         2       20.00%       10.00%   -50.0%
+  ad_D           5000       250        5.00%        5.00%    +0.0%
+  ad_E              3         1       33.33%        8.70%   -73.9%
+
+  NOTE: ad_E (3 impressions) raw 33.3% -> smoothed 8.70%: yanked back
+  toward the 5% prior. ad_A/ad_D (1000+ impressions) barely move.
+  This is EXACTLY the cold-start / low-data problem: you cannot rank ads
+  by raw CTR; the prior prevents noisy winners from dominating the auction.
+
+  Also known as Laplace smoothing (add-alpha), or 'add-1' when alpha=1.
+
+COEC (click-over-expected-click): realized clicks / expected clicks.
+  COEC ~ 1.0 -> model is calibrated. COEC > 1 -> model UNDER-predicts.
+  Using the 5.00% prior as the expected rate:
+  network COEC = 309 / (6113 * 0.05) = 1.011
+
+[check] smoothed ad_A=5.00%, ad_C=10.00%, ad_E~8.70%, COEC~1.011? OK
+
+==========================================================================
+  SECTION 2: Feature engineering pipeline
+==========================================================================
+Production pCTR models ingest 20-50 categorical + 10-30 numerical
+features. Three canonical transforms turn raw signals into a model-ready
+vector:
+
+(a) CATEGORICAL -> ONE-HOT (drop one level as the baseline).
+    category={food,fashion,tech}; baseline=food -> [is_tech, is_fashion].
+    device={desktop,mobile}; baseline=desktop -> [is_mobile].
+    placement={feed,search}; baseline=feed -> [is_search].
+    feature vector         -> ['bias', 'is_tech', 'is_fashion', 'is_mobile', 'is_search']
+    food    desktop  feed    -> [1.0, 0.0, 0.0, 0.0, 0.0]
+    food    desktop  search  -> [1.0, 0.0, 0.0, 0.0, 1.0]
+    food    mobile   feed    -> [1.0, 0.0, 0.0, 1.0, 0.0]
+    food    mobile   search  -> [1.0, 0.0, 0.0, 1.0, 1.0]
+    fashion desktop  feed    -> [1.0, 0.0, 1.0, 0.0, 0.0]
+    fashion desktop  search  -> [1.0, 0.0, 1.0, 0.0, 1.0]
+    fashion mobile   feed    -> [1.0, 0.0, 1.0, 1.0, 0.0]
+    fashion mobile   search  -> [1.0, 0.0, 1.0, 1.0, 1.0]
+    tech    desktop  feed    -> [1.0, 1.0, 0.0, 0.0, 0.0]
+    tech    desktop  search  -> [1.0, 1.0, 0.0, 0.0, 1.0]
+    tech    mobile   feed    -> [1.0, 1.0, 0.0, 1.0, 0.0]
+    tech    mobile   search  -> [1.0, 1.0, 0.0, 1.0, 1.0]
+
+(b) NUMERICAL -> BUCKETING (binning). Reduces noise + captures non-
+    linearity without splines. hour_of_day -> 4 buckets:
+    [ 0,  6) -> night     
+    [ 6, 12) -> morning   
+    [12, 18) -> afternoon 
+    [18, 24) -> evening   
+    hour= 3 -> bucket=night
+    hour= 9 -> bucket=morning
+    hour=14 -> bucket=afternoon
+    hour=21 -> bucket=evening
+
+(c) HASH TRICK for HIGH-CARDINALITY categoricals. user_id has 100M+
+    unique values -> can't one-hot. Hash into a fixed-size table and use
+    the slot as the embedding index. Collisions cost <0.1% AUC at scale.
+    FNV-1a(user_id) mod 8 -> slot:
+    user_1     -> hash 1758944914 -> slot 2
+    user_2     -> hash 1742167295 -> slot 7
+    user_3     -> hash 1725389676 -> slot 4
+    user_42    -> hash 1023577329 -> slot 1
+    user_99    -> hash 3055390441 -> slot 1
+    user_123   -> hash  330169129 -> slot 1
+    slots used = 4 / 8; collisions on slots: [1]
+
+[check] one-hot tech+mobile+search=[1,1,0,1,1], hour14=afternoon, user_1->slot2? OK
+
+==========================================================================
+  SECTION 3: Logistic regression for CTR prediction
+==========================================================================
+Logistic regression models log(p/(1-p)) as a LINEAR function of features.
+  pCTR = sigmoid(w0 + w_tech*is_tech + ... + w_search*is_search)
+Trained by full-batch gradient descent on log-loss (cross-entropy):
+  grad_j = sum_i (p_i - y_i) * x_ij ;  w -= lr * grad / n
+  lr=0.50, epochs=4000, weights init=0 (fully deterministic).
+
+Dataset: 72 impressions, 25 clicks (CTR 34.7%). Baseline = food+desktop+feed.
+
+Learned weights (logits):
+  bias        -2.1282
+  is_tech     +0.6992
+  is_fashion  -1.3589
+  is_mobile   +0.5228
+  is_search   +2.3354
+
+  Feature importance (by |weight|): is_search (+2.3354), bias (-2.1282), is_fashion (-1.3589), is_tech (+0.6992), is_mobile (+0.5228)
+
+Predicted pCTR per feature combination (every cell):
+  category  device    place         pCTR
+  food      desktop   feed         10.6%
+  food      desktop   search       55.2%
+  food      mobile    feed         16.7%
+  food      mobile    search       67.5%
+  fashion   desktop   feed          3.0%
+  fashion   desktop   search       24.0%
+  fashion   mobile    feed          4.9%
+  fashion   mobile    search       34.8%
+  tech      desktop   feed         19.3%
+  tech      desktop   search       71.2%
+  tech      mobile    feed         28.8%
+  tech      mobile    search       80.7%
+
+Fit: log-loss = 0.4848, train accuracy = 76.4% (threshold 0.5).
+
+CALIBRATION check (reliability). Mean predicted pCTR vs actual CTR:
+  mean predicted pCTR = 0.3472   actual CTR = 0.3472   gap = +0.0000
+  Logistic regression is ~calibrated on its training distribution. In
+  production, drift breaks this -> add a post-hoc layer: Platt scaling
+  (logistic on the logit) or isotonic regression (piecewise monotonic map),
+  recomputed daily per (vertical x placement x cohort). Target: COEC ~ 1.0.
+
+[check] search>tech>bias, fashion<0, ~calibrated? OK
+
+==========================================================================
+  SECTION 4: Online vs batch learning (concept drift)
+==========================================================================
+BATCH: retrain on the full impression log every 1-6h. Simple, strong
+baseline, but STALE between retrains -> slow to react to drift.
+ONLINE: update weights per impression via SGD. Catches drift in seconds
+but is noisier and needs regularization. Production = both: batch for
+stability + online for freshness.
+
+Scenario: after ship, users get SEARCH AD FATIGUE -> search CTR drops.
+Drift stream = 8 new impressions (search 0/4 clicks, feed 2/4 clicks).
+
+  step  event                         is_search  w_search  batch_w_search
+  ----  ----------------------------  ---------  --------  --------------
+  init  (batch model shipped)             --      +2.3354       +2.3354
+     2  tech            mobile  click=0     1         +1.9094       +2.3354
+     4  tech            desktop click=0     1         +1.6926       +2.3354
+     6  fashion         mobile  click=0     0         +1.6926       +2.3354
+     8  food            desktop click=0     0         +1.6926       +2.3354
+
+  -> batch model's w_search frozen at +2.3354 (stale).
+     online model's w_search falls +2.3354 -> +1.6926 as it absorbs 4 search
+     misses. The online model down-ranks search ads; the batch one keeps
+     over-paying. This is the freshness gap online learning closes.
+
+Held-out on drift stream (8 impressions):
+  batch  : log-loss 1.0388, accuracy 25.0%
+  online : log-loss 0.7990, accuracy 37.5%  <- lower loss, adapted
+
+[check] online w_search < batch w_search, online log-loss lower? OK
+
+==========================================================================
+  SECTION 5: A/B test for model comparison
+==========================================================================
+To ship the online model we A/B test it against the batch baseline:
+split live traffic 50/50, run for a fixed window, then ask 'is the CTR
+lift real or noise?' via a two-proportion z-test:
+  z = (p_winner - p_baseline) / sqrt( p_pool(1-p_pool) (1/n1 + 1/n2) )
+  p-value = 2 * (1 - Phi(|z|)). Ship if p < 0.05 AND the lift is
+  practically meaningful (guard against p-hacking on huge samples).
+
+  Model A (batch) : 10,000 impressions, 450 clicks -> CTR 4.50%
+  Model B (online): 10,000 impressions, 540 clicks -> CTR 5.40%
+
+  pooled rate      = 0.0495
+  standard error   = 0.003068
+  z-statistic      = 2.9339
+  p-value (2-side) = 0.00335
+  absolute lift    = +0.0090  (20.00% relative)
+
+  verdict: SIGNIFICANT (p<0.05) -> ship Model B
+
+  GOTCHA: at billions of impressions/day EVERYTHING is statistically
+  significant. Gate on EFFECT SIZE + business metrics (revenue, retention),
+  not just p. Also run an A/A test first to sanity-check the pipeline.
+
+[check] z~2.93, p<0.01, +20% relative lift -> significant? OK
+
+==========================================================================
+  SECTION 6: Scale estimation
+==========================================================================
+Assumptions:
+  impressions / day          = 2,000,000,000
+  network CTR                = 5%
+  ads shown / request        = 5
+  candidates scored / request= 10,000 (before auction)
+  categorical features       = 50 (avg vocab 10,000,000)
+  embedding dimension        = 128
+
+Throughput:
+  page-load requests /s      = 4,629 /s
+  candidate ad scores /s     = 46,296,296 /s  (requests x candidates)
+  clicks logged /day         = 100,000,000
+
+Storage (impression log ~100 B/row):
+  impressions /day           = 2,000,000,000  -> 200.00 GB /day
+  impressions /year          = 730,000,000,000  -> 73.00 TB /year
+  DLRM embedding tables      = 256.00 GB  (50 cats x 10,000,000 vocab x 128-dim x 4B)
+    -> sharded across GPU/parameter servers; 10-100x smaller w/ PQ.
+
+Latency budget (p99 < 50ms end-to-end):
+  feature fetch (online)     < 8 ms
+  candidate retrieval        < 7 ms
+  ranker (DLRM/GBDT)         < 20 ms
+  calibration + auction      < 5 ms
+  network + queueing         < 10 ms
+  total                      < 50 ms
+
+[check] 2B imp/day, ~4630 req/s, ~46M scores/s, emb table=256GB? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for ad_click_prediction.html)
+==========================================================================
+  smooth_ad_A_1k50           = 0.05
+  smooth_ad_C_10_2           = 0.1
+  smooth_ad_E_3_1            = 0.087
+  network_coec               = 1.011
+  onehot_tech_mobile_srch    = 11011
+  bucket_hour14              = afternoon
+  hash_slot_user1            = 2
+  lr_w_bias                  = -2.1282
+  lr_w_is_tech               = 0.6992
+  lr_w_is_fashion            = -1.3589
+  lr_w_is_mobile             = 0.5228
+  lr_w_is_search             = 2.3354
+  lr_pctr_food_search        = 0.5516
+  lr_pctr_food_feed          = 0.1064
+  lr_pctr_tech_mobile_srch   = 0.8068
+  lr_train_logloss           = 0.4848
+  online_w_search_batch      = 2.3354
+  online_w_search_after      = 1.6926
+  online_logloss_drift       = 0.799
+  batch_logloss_drift        = 1.0388
+  ab_z_stat                  = 2.9339
+  ab_p_value                 = 0.00335
+  ab_lift_rel_pct            = 20.0
+  scale_req_qps              = 4629.63
+  scale_score_qps            = 46296296.0
+  scale_emb_table_gb         = 256.0
+
+[check] GOLD reproduces from smoothing + logreg + online + z-test? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

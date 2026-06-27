@@ -1,0 +1,201 @@
+# online_auction.py - Online auction system design simulation
+# Pure Python stdlib only. Numbers below feed ONLINE_AUCTION.md
+# and online_auction.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Auction state machine
+==========================================================================
+Six states. Transitions only advance forward; guards block illegal moves.
+
+Allowed transitions:
+  UPCOMING   -> ACTIVE, CANCELLED
+  ACTIVE     -> CLOSING, CANCELLED
+  CLOSING    -> CLOSED, NO_SALE
+  CLOSED     -> (terminal)
+  CANCELLED  -> (terminal)
+  NO_SALE    -> (terminal)
+
+Happy-path A1 (start $100, reserve $150, end t=300):
+  activate(t=0)    -> status=ACTIVE   
+  2 bids accepted  -> status=ACTIVE    price=$180 winner=Bob
+  end_time reached -> status=CLOSING  
+  finalize()       -> status=CLOSED    (reserve $150 met by Bob's $180)
+
+Reserve-unmet A2 (reserve $250, top bid $150):
+  finalize()       -> status=NO_SALE   (top bid < reserve -> NO_SALE)
+
+Cancel A3 with NO bids:  OK (status=CANCELLED)
+Cancel A4 WITH bids:     REJECTED (status stays ACTIVE)
+
+[check] CLOSED is terminal? OK
+[check] reserve unmet -> NO_SALE, reserve met -> CLOSED? OK
+[check] cancel rejected once a bid exists? OK
+
+==========================================================================
+  SECTION 2: Real-time bid processing (increment + highest bid + reserve)
+==========================================================================
+Auction: start $100, min_increment $5, reserve $200 (hidden from bidders).
+
+  bidder amount  t    result  reason
+  Alice  $102    10   REJECT  below min_increment ($100+$5=$105)
+  Alice  $105    11   ACCEPT  OK: clears min_increment
+  Bob    $108    20   REJECT  below current($105)+$5=$110
+  Bob    $150    21   ACCEPT  OK: clears increment
+  Carol  $145    30   REJECT  below current winner's $150
+
+After 5 attempts: bid_count=2, current_price=$150, winner=Bob
+Reserve status: NOT MET (reserve $200 is never shown to bidders)
+
+[check] min first bid = start + increment = $105? OK
+[check] current_price tracks the highest ACCEPTED bid ($150)? OK
+[check] reserve stays hidden (stored, not exposed in bid API)? OK
+
+==========================================================================
+  SECTION 3: Concurrent bid conflict resolution
+==========================================================================
+Three bids land 'simultaneously' on a hot auction (current $100, Alice).
+Network/replication lag makes them arrive in ARRIVAL order, not amount order.
+
+Concurrent batch (arrival order):
+  Bob $130 (arrival 1)
+  Dave $125 (arrival 2)
+  Carol $110 (arrival 3)
+
+A. LAST-WRITE-WINS  (naive overwrite on every write)
+   winner=Carol @ $110  <- Carol's LOWER $110 overwrote Bob's $130
+   seller LOSES $20 vs what Bob offered
+
+B. HIGHEST-BID-WINS (compare amounts, take the max)
+   winner=Bob @ $130  <- correct amount, but no serial order for
+   increment/proxy/causality rules; ties are ambiguous
+
+C. KAFKA PER-AUCTION PARTITION (serialized, single processor/auction)
+   each bid must clear current+$5; processed strictly in arrival order:
+     Bob $130 ACCEPTED
+   winner=Bob @ $130 (Carol/Dave rejected: did not clear running price)
+
+=> LWW can UNDERPRICE the auction and lose the seller real money.
+=> HBW fixes the price but skips increment/proxy/causality rules.
+=> Kafka partition = one processor per auction, sequential, enforces ALL rules;
+   system-wide throughput scales by adding partitions (~1K for 1M auctions).
+
+[check] LWW winner is the LAST arrival (Carol $110), not highest? OK
+[check] serialized winner is the highest VALID bid (Bob $130)? OK
+[check] LWW revenue loss vs Bob = $20? OK
+
+==========================================================================
+  SECTION 4: Anti-sniping extension window + proxy bidding
+==========================================================================
+A. Anti-sniping extension (popcorn bidding)
+  end_time=300  extension_window=30s  hard_cap=orig+max=900
+  bid @t=100 (200s before end): end_time=300 (no extension)
+  bid @t=295 (5s before end, in 30s window): end_time=330 (+30s)
+  bid @t=320 (10s before new end): end_time=360 (+60s total)
+  end_time never exceeds hard_cap=900 -> no infinite auction
+
+[check] first extension = +30s? OK
+[check] end_time bounded by original_end + max_extension? OK
+
+B. Proxy bidding (two-bidder race, Vickrey-ish)
+  start $100, min_increment $5
+  Alice sets proxy_max $200; Bob sets proxy_max $150
+  resolve -> winner=Alice, final_price=$155
+  (one increment over Bob's max $150+$5=$155, capped at Alice's $200)
+  watchers see ONLY the final price $155, never intermediate proxy ticks
+
+[check] proxy winner is the higher-max bidder (Alice)? OK
+[check] proxy price = second_max + increment = $155? OK
+
+==========================================================================
+  SECTION 5: Auction close logic (winner + reserve check)
+==========================================================================
+Case 1: reserve MET
+  top bid $250 >= reserve $200 -> status=CLOSED, winner=Alice
+Case 2: reserve NOT MET
+  top bid $180 <  reserve $300 -> status=NO_SALE (seller keeps item)
+Case 3: NO BIDS
+  no bids at all       -> status=NO_SALE
+
+[check] reserve met -> CLOSED with winner? OK
+[check] reserve unmet -> NO_SALE? OK
+[check] no bids -> NO_SALE? OK
+
+==========================================================================
+  SECTION 6: Eventual consistency (CLOSING drain window)
+==========================================================================
+Bid path: client -> ingestion -> Kafka partition -> processor -> DB -> broadcast.
+Broadcast to watchers is EVENTUALLY consistent (may lag <1s).
+CLOSING drains bids already in the partition so none are silently dropped.
+
+t=100: end_time reached -> status=CLOSING (partition still holds in-flight bids)
+  draining in-flight queue (each was enqueued BEFORE end_time):
+    Bob $130 -> DRAINED (queued @t=99.8)
+    Carol $145 -> DRAINED (queued @t=99.9)
+    Dave $200 -> REJECTED (arrived AFTER close, status not ACTIVE)
+  drain complete -> status=NO_SALE, winner=Carol @ $145
+
+=> CLOSING gives a 2-5s grace window. Bids in the partition before end_time
+   are honored; bids after the close return AUCTION_CLOSED.
+   Use SERVER timestamps only -- never trust client bid_timestamp for anti-snipe.
+
+[check] in-flight bids drained (Bob & Carol honored)? OK
+[check] late bid rejected (arrived after close)? OK
+[check] final winner is the highest DRAINED bid ($145)? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  active auctions (concurrent)   = 1,000,000
+  avg bids / auction             = 50
+  bytes / bid                    = 200
+  avg auction duration           = 7 days
+  peak bids / sec (system-wide)  = 10,000
+  viral auction (single)         = 100 bids/sec
+  concurrent watchers            = 50,000
+
+Bid volume:
+  auctions closing / day         = 142,857
+  bids / day                     = 7,142,857
+  avg bids / sec                 = 82.7 /s
+  peak bids / sec (system)       = 10,000 /s
+  viral single auction           = 100 bids/sec on ONE auction
+  peak avg per auction           = 0.0100 bids/sec/auction
+
+Storage (bids table, append-only):
+  storage / cycle (1M auctions)  = 10.00 GB
+  storage / day                  = 1.43 GB
+  storage / year                 = 521.43 GB
+
+Kafka (partition key = auction_id, one processor / partition):
+  partitions needed              = 1,000  (1M auctions / ~1K per partition)
+
+WebSocket broadcast (per-auction local connection map):
+  concurrent watchers            = 50,000
+  gateway servers                = 10
+  connections / gateway          = 5,000
+
+[check] storage per cycle == 10.0 GB? OK
+[check] kafka partitions == 1000? OK
+[check] watchers / gateway == 5000? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for online_auction.html)
+==========================================================================
+  active_auctions                = 1000000
+  peak_bids_per_sec              = 10000
+  avg_bids_per_sec               = 82.7
+  storage_per_cycle_gb           = 10.0
+  kafka_partitions               = 1000
+  watchers_per_gateway           = 5000
+  viral_auction_bids_per_sec     = 100
+  min_bid_threshold_dollars      = 105
+  lww_revenue_loss_dollars       = 20
+  proxy_resolved_price           = 155
+  anti_snipe_extension_seconds   = 30
+
+[check] GOLD reproduces from scale constants + auction formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

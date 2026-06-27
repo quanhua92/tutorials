@@ -1,0 +1,186 @@
+# gaming_leaderboard.py - Gaming leaderboard system design simulation
+# Pure Python stdlib only. Numbers below feed GAMING_LEADERBOARD.md
+# and gaming_leaderboard.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Sorted set (skip list + hash table)
+==========================================================================
+Redis ZSET is a DUAL structure: a skip list (sorted by score) for
+ordered ops + a hash table (member -> score) for O(1) lookups.
+  ops: ZADD O(log N), ZREVRANGE O(log N + K), ZREVRANK O(log N)
+  mem : ~100 bytes per entry (member + score + skip-list pointers)
+  ties: equal scores are broken by member ascending (ZREVRANGE reverses)
+
+Demo ZADD sequence (5 players, two ties at 9500 and 8700):
+  ZADD leaderboard  9500 alice   -> stored=OK
+  ZADD leaderboard  8700 bob   -> stored=OK
+  ZADD leaderboard  9500 carol   -> stored=OK
+  ZADD leaderboard  3000 dave   -> stored=OK
+  ZADD leaderboard  8700 eve   -> stored=OK
+
+Internal ascending view (= skip-list order):
+  dave:3000, bob:8700, eve:8700, alice:9500, carol:9500
+
+ZREVRANGE leaderboard 0 2 WITHSCORES (top 3):
+  #1  carol 9500
+  #2  alice 9500
+  #3  eve   8700
+  NOTE: carol ranks above alice on the 9500 tie because ZREVRANGE
+  reverses the lexicographic order (carol > alice), matching Redis.
+
+ZREVRANK (0 = best):
+  alice -> reverse rank 1  (score 9500)
+  bob   -> reverse rank 3  (score 8700)
+  carol -> reverse rank 0  (score 9500)
+  dave  -> reverse rank 4  (score 3000)
+  eve   -> reverse rank 2  (score 8700)
+
+[check] top-3 order + tie-break + ranks match Redis semantics? OK
+
+==========================================================================
+  SECTION 2: Top-K, rank, percentile, neighbors
+==========================================================================
+Top-K with pagination (K=2 per page):
+  page 0 (ZREVRANGE 0 1): carol:9500, alice:9500
+  page 1 (ZREVRANGE 2 3): eve:8700, bob:8700
+  page 2 (ZREVRANGE 4 5): dave:3000
+
+Rank + percentile + neighbors for 'bob':
+  ZREVRANK bob         = 3
+  top percent         = 80.0%   ((rank+1)/total*100; lower = better)
+  ZREVRANGE rank-1 rank+1 (around-me): eve:8700, bob:8700, dave:3000
+  (around-me is O(log N + K): one skip-list seek + K steps)
+
+Rank + percentile for 'dave' (the bottom):
+  ZREVRANK dave = 4, top percent = 100.0%
+
+[check] bob top 80%%, dave top 100%%, around-me correct? OK
+
+==========================================================================
+  SECTION 3: Segmentation + sharding + cross-shard top-K
+==========================================================================
+A single global ZSET breaks at ~100M+ players: 10 GB+ RAM on one node,
+single-threaded writes, slow failover. The default pattern is
+SEGMENTED leaderboards -- one ZSET per region/mode/season -- because
+almost every query is within one segment.
+
+Segment keys: leaderboard:{region}:{mode}:{season}
+  e.g. leaderboard:na:solo:2024Q4
+
+For a very large segment we hash-shard it across N nodes. A global
+top-K then queries every shard for its top-K and merges: O(N * log K).
+  shards (N)        = 100
+  players / shard   = 100,000   (=10,000,000 total)
+
+Cross-shard merge demo (8 shards x K=100 -> global top-K):
+  global #1 = p0_0 (100000)
+  global #2 = p0_1 (99999)
+  global #100= p1_24 (99926)  (last in merged top-K)
+  merge cost = N*K items through a size-K heap = O(N*K log K)
+
+GOTCHA: a hierarchical global top-1000 ZSET, recomputed from segments,
+removes the per-query merge for the hot top-K (cached, 1s TTL). Below
+rank 1000 you fall back to the segment query.
+
+[check] shard-0 player-0 is global #1 and total == 10M? OK
+
+==========================================================================
+  SECTION 4: Tier-based ranking (platinum / gold / silver / bronze)
+==========================================================================
+Deterministic 10000-player sim: score(i) = (i * 2654435761) % 100000
+  (Knuth multiplicative hash; deterministic, reproducible in JS.)
+
+Tier distribution:
+  tier           players     share  min score
+  platinum           997     10.0%      90000
+  gold             1,501     15.0%      75000
+  silver           2,502     25.0%      50000
+  bronze           5,000     50.0%          0
+
+Tier buckets are themselves segmented ZSETs (leaderboard:na:solo:gold),
+so a player only competes within their tier -- bronze #1 and platinum
+#1 are both 'first place'. Promotions between tiers run nightly.
+
+[check] tiers partition all 10000 players and platinum is non-empty? OK
+
+==========================================================================
+  SECTION 5: GT modifier + tournament sliding window
+==========================================================================
+Monotone-best via ZADD ... GT (Redis 6.2+): a new score only replaces
+the old one if it is GREATER. This kills replay / regression attacks
+(a buggy submitter sending 0 cannot lower a real score).
+
+  alice = 9500. Attempt ZADD ... GT 8000 (regression):
+    applied = False  -> alice still 9500
+  Attempt ZADD ... GT 9800 (improvement):
+    applied = True  -> alice now 9800
+
+Tournament sliding window (last 7 days):
+  individual game results live in a Kafka/Redis Stream; a periodic
+  recompaction job sums events inside the window into a snapshot ZSET.
+
+  window days 1..7, 7 in-window events across 4 players
+  windowed ZSET (top-K, descending):
+    #1  dave  3000
+    #2  carol 2900
+    #3  alice 2300
+    #4  bob   1700
+  alice's day-9 score is EXCLUDED (outside window). dave (day 2) is in.
+
+Recompaction cadence vs window size:
+  last 1 hour  -> recompute every 1 min  
+  last 1 day   -> recompute every 10 min 
+  last 7 days  -> recompute every nightly
+
+[check] GT rejected the regression, accepted the improvement, and the window excludes day 9? OK
+
+==========================================================================
+  SECTION 6: Scale estimation
+==========================================================================
+Assumptions:
+  monthly active players    = 10,000,000
+  games / player / day      = 5
+  score updates / day       = 50,000,000
+  leaderboard views / day   = 100,000,000
+  daily read:write ratio    = 2 : 1
+
+QPS:
+  write QPS avg             = 578.7 /s
+  write QPS peak (weekend)  = 100,000 /s   (tournament burst, ~173x avg)
+  read  QPS avg             = 1157.4 /s
+  read  QPS peak (finals)   = 100,000 /s   (live top-K polling)
+
+Redis ZSET RAM (one segment, ~100 B / entry):
+  10M-player leaderboard    = 1.00 GB   (single-node ceiling ~ here)
+  per regional shard (100,000 ply)= 10.00 MB   (100 shards -> fits one shard)
+
+Postgres score-history storage (~100 B / event row):
+  events / year             = 18,250,000,000   (18.25 B)
+  storage / year            = 1.82 TB   (archive old seasons to S3 Parquet)
+
+[check] daily read:write == 2:1 and 10M players -> 1.00 GB RAM? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for gaming_leaderboard.html)
+==========================================================================
+  demo_n_players         = 5
+  demo_top3_members      = carol,alice,eve
+  demo_top3_scores       = 9500,9500,8700
+  demo_alice_revrank     = 1
+  demo_dave_top_pct      = 100.0
+  tier_sim_n             = 10000
+  tier_platinum_count    = 997
+  tier_platinum_pct      = 10.0
+  players_total          = 10000000
+  write_qps_avg          = 578.7
+  read_qps_avg           = 1157.4
+  read_qps_peak          = 100000
+  ram_per_lb_gb          = 1.0
+  events_per_year_b      = 18.25
+  n_shards               = 100
+
+[check] GOLD reproduces from SortedSet + tier/scale formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

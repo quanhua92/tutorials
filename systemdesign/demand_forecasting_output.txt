@@ -1,0 +1,279 @@
+# demand_forecasting.py - Demand forecasting system simulation
+# Pure Python stdlib only. Numbers below feed DEMAND_FORECASTING.md
+# and demand_forecasting.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Synthetic demand series (trend + weekly seasonal + residual)
+==========================================================================
+We build a DETERMINISTIC daily-demand series so every downstream number
+reproduces in JS. The data-generating process is additive:
+  y(t) = Trend(t) + Seasonal(t) + Residual(t)
+  Trend(t)     = 100 + 2 * t   (linear, +2/day)
+  Seasonal(t)  = weekly profile indexed by day-of-week (sums to 0)
+  Residual(t)  = fixed noise array (no RNG -> py == JS bit-for-bit)
+
+  true weekly seasonal profile (Mon..Sun):
+    Mon  -10.0
+    Tue   +0.0
+    Wed   +5.0
+    Thu   +0.0
+    Fri  +15.0
+    Sat  +30.0
+    Sun  -40.0
+  sum(seasonal) = 0.0  (additive -> must sum to 0)
+
+  first 14 days (2 weeks):
+    t    dow     trend   season   resid        y
+    0    Mon     100.0    -10.0       2     92.0
+    1    Tue     102.0      0.0      -3     99.0
+    2    Wed     104.0      5.0       4    113.0
+    3    Thu     106.0      0.0       0    106.0
+    4    Fri     108.0     15.0      -1    122.0
+    5    Sat     110.0     30.0       5    145.0
+    6    Sun     112.0    -40.0      -4     68.0
+    7    Mon     114.0    -10.0       1    105.0
+    8    Tue     116.0      0.0       3    119.0
+    9    Wed     118.0      5.0      -2    121.0
+    10   Thu     120.0      0.0       4    124.0
+    11   Fri     122.0     15.0      -5    132.0
+    12   Sat     124.0     30.0       6    160.0
+    13   Sun     126.0    -40.0      -1     85.0
+
+  key points: y[0]=92.0 (Mon open), y[5]=145.0 (Sat peak wk0), y[6]=68.0 (Sun trough), y[55]=174.0 (last Sun)
+
+[check] y[0]=92, y[5]=145, y[6]=68, y[55]=174, seasonal sums to 0? OK
+
+==========================================================================
+  SECTION 2: Time-series decomposition (trend + seasonality + residual)
+==========================================================================
+Classical additive decomposition recovers the three components from y:
+  1. Trend(t)      = centered moving average CMA(7) -- smooths out the
+                     seasonal cycle (one full week averages to 0).
+  2. Seasonal(p)   = mean(y - trend) for each day-of-week p, then
+                     re-centered so the 7 indices sum to 0.
+  3. Residual(t)   = y(t) - trend(t) - seasonal(t 7).
+
+  recovered seasonal indices vs TRUE (should match closely):
+    dow       est     true
+    Mon     -9.69   -10.00
+    Tue      0.51     0.00
+    Wed      5.37     5.00
+    Thu     -0.50     0.00
+    Fri     14.00    15.00
+    Sat     31.88    30.00
+    Sun    -41.57   -40.00
+    sum(est) = 0.0000
+
+  decomposition at sample points (t in valid CMA range [3, 52]):
+    t    dow         y    trend     seas    resid    check
+    3    Thu     106.0   106.43    -0.50     0.07   106.00
+    5    Sat     145.0   111.14    31.88     1.98   145.00
+    6    Sun      68.0   112.29   -41.57    -2.72    68.00
+    10   Thu     124.0   120.86    -0.50     3.64   124.00
+    20   Sun     102.0   140.86   -41.57     2.71   102.00
+    30   Wed     161.0   160.14     5.37    -4.51   161.00
+    40   Sat     209.0   180.43    31.88    -3.31   209.00
+    50   Tue     196.0   200.43     0.51    -4.94   196.00
+    52   Thu     203.0   205.00    -0.50    -1.50   203.00
+  'check' = trend + seas + resid; equals y exactly (residual absorbs diff).
+
+  max |est - true| seasonal = 1.879  (CMA smoothing + residual averaging)
+
+[check] seasonal sums to 0, est within 2.5 of true, residual reconciles? OK
+
+==========================================================================
+  SECTION 3: Moving average smoothing
+==========================================================================
+A moving average is the simplest smoother / short-horizon forecaster:
+  SMA(n)[t] = mean(y[t-n+1 .. t])   (trailing, asymmetric -> LAGS)
+  CMA(n)[t] = mean(y[t-n/2 .. t+n/2]) (centered -> no lag, but cannot
+              forecast forward; used to extract trend in decomposition).
+
+  Larger n => smoother but more lag. SMA(7) = one full week, so it
+  cancels weekly seasonality and tracks the trend.
+
+    t           y     SMA(7)    SMA(14)
+    6        68.0     106.43          -
+    7       105.0     108.29          -
+    13       85.0     120.86     113.64
+    14      116.0     122.43     115.36
+    20      102.0     134.43     127.64
+    27      111.0     149.00     141.71
+    34      126.0     162.29     155.64
+    41      145.0     176.43     169.36
+    48      153.0     189.71     183.07
+    55      174.0     205.00     197.36
+
+  SMA(7)[6] = mean(y[0..6]) = 106.4286  -- the first full-week average.
+  Because SMA(7) averages exactly one week, the seasonal swing cancels
+  and the result tracks the trend -- but it LAGS (a trailing window
+  reports the level of ~3.5 days ago, not today).
+
+[check] SMA(7)[6]=mean(y0..6), SMA(7)[55]=mean(y49..55)? OK
+
+==========================================================================
+  SECTION 4: Seasonal index computation (deseasonalization)
+==========================================================================
+The seasonal index quantifies the typical swing of each season slot.
+Two equivalent normalizations:
+  Additive (this system): index_p = mean(detrended at slot p), sum=0
+                           deseasonalized y* = y - index_{dow}
+  Multiplicative (ratio) : ratio_p = y / CMA, index_p = mean(ratio_p),
+                           product=1; y* = y / index_{dow}
+
+Deseasonalizing strips the repeating weekly shape so a trend model sees
+a clean signal -- the core of SARIMA / Prophet / Holt-Winters pipelines.
+
+  dow     index    raw range     deseason       index*
+    Mon     -9.69  [  92.0, 190.0]  [ 101.7, 199.7]     -9.69
+    Tue     +0.51  [  99.0, 196.0]  [  98.5, 195.5]     +0.51
+    Wed     +5.37  [ 113.0, 212.0]  [ 107.6, 206.6]     +5.37
+    Thu     -0.50  [ 106.0, 203.0]  [ 106.5, 203.5]     -0.50
+    Fri    +14.00  [ 122.0, 224.0]  [ 108.0, 210.0]    +14.00
+    Sat    +31.88  [ 145.0, 236.0]  [ 113.1, 204.1]    +31.88
+    Sun    -41.57  [  68.0, 174.0]  [ 109.6, 215.6]    -41.57
+  sum(index) = 0.0000
+
+  Before deseasonalizing, Sun (p=6) raw swings [68.0, 174.0]; after
+  removing the Sun index (-41.57) the deseasonalized Sun tracks the trend.
+
+  seasonal-adjusted forecast for next week (trend_hat=212 + index):
+    next Mon : 202.3
+    next Tue : 212.5
+    next Wed : 217.4
+    next Thu : 211.5
+    next Fri : 226.0
+    next Sat : 243.9
+    next Sun : 170.4
+
+[check] indices sum to 0, Sat~+30, Sun~-40 recovered? OK
+
+==========================================================================
+  SECTION 5: Exponential smoothing forecast (Holt's linear)
+==========================================================================
+Holt's linear method extends simple exp smoothing with an explicit
+trend term -- a lightweight, online-update forecaster (~microseconds):
+  level(t)  = a*y(t) + (1-a)*(level(t-1) + trend(t-1))
+  trend(t)  = b*(level(t)-level(t-1)) + (1-b)*trend(t-1)
+  forecast h steps ahead = level(T) + h*trend(T)
+  alpha=0.50 (level weight), beta=0.30 (trend weight)
+  train on t=[0,49) (7 weeks), forecast the held-out last week (h=7).
+
+  end-of-train state: level=187.0035, trend=-2.6398
+
+  held-out week: actual vs Holt forecast
+    t    dow    actual    holt_fc      err
+    49   Mon     190.0     184.36     5.64
+    50   Tue     196.0     181.72    14.28
+    51   Wed     212.0     179.08    32.92
+    52   Thu     203.0     176.44    26.56
+    53   Fri     224.0     173.80    50.20
+    54   Sat     236.0     171.16    64.84
+    55   Sun     174.0     168.52     5.48
+
+  NOTE: the train window ENDS on a Sunday trough (t=48), so Holt's
+  trend estimate went NEGATIVE (-2.64) -- it mistakes the weekly dip
+  for a downtrend and forecasts a DECLINING line, under-shooting the
+  whole rising week. Holt knows NOTHING about seasonality. Beating it
+  needs a seasonal method (Holt-Winters / SARIMA / Prophet) -- Section 6.
+
+[check] fitted[1]=y[1], end level~187.0, trend~-2.64, fc[0]=L+B? OK
+
+==========================================================================
+  SECTION 6: Forecast accuracy metrics (MAE, RMSE, MAPE, WMAPE)
+==========================================================================
+How good is a forecast? Four complementary metrics on the held-out week:
+  MAE   = mean(|y - yhat|)                 (interpretable, same units)
+  RMSE  = sqrt(mean((y-yhat)^2))           (penalizes large errors)
+  MAPE  = mean(|y-yhat|/|y|) * 100         (%%, but EXPLODES at y~0)
+  WMAPE = sum(|y-yhat|) / sum(|y|) * 100   (volume-weighted, robust to 0)
+
+  WMAPE is the production metric for demand: a 3 AM zone with demand 0.1
+  vs forecast 0.2 is 50%% MAPE -- meaningless -- but contributes almost
+  nothing to WMAPE. WMAPE mirrors business impact (total missed units).
+
+    method                    MAE     RMSE    MAPE%   WMAPE%
+    Holt linear             28.56    35.41    13.13    13.93
+    seasonal naive (t-7)    15.29    16.01     7.55     7.46
+    random walk (last)      52.00    55.51    24.69    25.37
+
+  The seasonal NAIVE baseline ("tomorrow ~= last week's same day")
+  often BEATS an unseasonal model like Holt -- a strong sanity floor.
+  Any real model (Prophet/SARIMA/GNN) must clear it before shipping.
+
+[check] Holt WMAPE in (0,40), RMSE>=MAE, seasonal-naive beats RW? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  zones / major city        = 5,000   (H3 res-8 ~0.74 km^2)
+  cities                    = 50
+  forecast buckets / day     = 288   (5-min interval)
+  ride requests / city / day = 1,000,000
+  bytes / zone / day         = 10,000   (demand time-series)
+
+Throughput:
+  zones globally             = 250,000
+  predictions / day          = 72,000,000   (~72M)
+  ride requests / day        = 50,000,000
+
+Storage:
+  demand time-series / day   = 2.50 GB
+  demand time-series / year  = 912.50 GB   (~900 GB, archive S3/Parquet)
+
+Latency budget (full-city forecast refresh every 5 min):
+  feature fetch (Feast)      < 500 ms
+  GNN batched inference      < 3000 ms   (5K zones / GPU batch)
+  ensemble + quantile heads   < 500 ms
+  write forecasts to Redis    < 500 ms
+  total refresh               < 5000 ms   (5-min cycle)
+
+[check] 250K zones, 72M preds/day, ~912.5 GB/year storage? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for demand_forecasting.html)
+==========================================================================
+  series_len               = 56
+  period                   = 7
+  y0                       = 92.0
+  y5                       = 145.0
+  y6                       = 68.0
+  y55                      = 174.0
+  seasonal_true_sum        = 0.0
+  cma_at_10                = 120.8571
+  cma_at_30                = 160.1429
+  cma_at_52                = 205.0
+  seas_est_mon             = -9.6928
+  seas_est_tue             = 0.5113
+  seas_est_wed             = 5.3684
+  seas_est_thu             = -0.4964
+  seas_est_fri             = 14.0011
+  seas_est_sat             = 31.8786
+  seas_est_sun             = -41.5703
+  seas_est_sum             = 0.0
+  resid_at_10              = 3.6392
+  sma7_at_6                = 106.4286
+  sma7_at_55               = 205.0
+  holt_alpha               = 0.5
+  holt_beta                = 0.3
+  holt_level_end           = 187.0035
+  holt_trend_end           = -2.6398
+  holt_fc_h1               = 184.3637
+  holt_fc_h2               = 181.7238
+  holt_fc_h7               = 168.5247
+  holt_mae                 = 28.5558
+  holt_rmse                = 35.4108
+  holt_mape                = 13.1266
+  holt_wmape               = 13.9297
+  seasnaive_wmape          = 7.4564
+  rw_wmape                 = 25.3659
+  scale_zones              = 250000
+  scale_preds_day          = 72000000
+  scale_storage_year_gb    = 912.5
+
+[check] GOLD reproduces from series + decomposition + Holt + metrics? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

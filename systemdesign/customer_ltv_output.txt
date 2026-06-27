@@ -1,0 +1,252 @@
+# customer_ltv.py - Customer Lifetime Value system design simulation
+# Pure Python stdlib only. Numbers below feed CUSTOMER_LTV.md
+# and customer_ltv.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Cohort retention curves (Weibull survival)
+==========================================================================
+Each cohort's retention is a SURVIVAL CURVE: the fraction still active at
+day t. We use the Weibull S(t) = exp(-(t/lam)^k) -- the standard survival
+model (same family as Cox PH / BG-NBD dropout). k<1 = hazard decreasing
+(customers who stay get stickier); a higher lam = slower decay.
+
+  cohort         lam      k     arpu     gm       size
+  premium      200.0   0.60     40.0   0.75     50,000
+  standard      60.0   0.70     20.0   0.65    200,000
+  trial         20.0   0.80      8.0   0.50    750,000
+
+  retention S(t) at D1 / D7 / D30 / D90:
+  cohort          D1       D7      D30      D90
+  premium     0.9592   0.8748   0.7259   0.5383
+  standard    0.9447   0.8007   0.5403   0.2650
+  trial       0.9130   0.6494   0.2508   0.0358
+
+  Closed-form Weibull mean tenure E[T]=lam*Gamma(1+1/k) vs discrete
+  120-month survival sum (theory vs the number we actually use):
+  premium   closed-form   10.03 mo   discrete    9.45 mo
+  standard  closed-form    2.53 mo   discrete    2.12 mo
+  trial     closed-form    0.76 mo   discrete    0.40 mo
+
+  The curve is what makes CLV work: retention at day t is the probability
+  the customer is still paying in month t -- the weight on each future cash
+  flow. A flatter curve (premium) -> a longer, richer cash-flow stream.
+
+[check] retention monotonic D1>D7>D30>D90 and premium>standard>trial at D90? OK
+
+==========================================================================
+  SECTION 2: Churn prediction (logistic regression)
+==========================================================================
+CHURN SCORING != RETENTION prediction. Churn scoring is a RELATIVE RANK
+(who is most at risk -> save campaign); retention is a CALIBRATED P(active
+in T days). Here we train a logistic churn scorer on engineered features
+-- pure stdlib batch gradient descent. Production uses a GBDT.
+  z = b + sum(w_j * x_j);  P(churn) = sigmoid(z)
+
+  normalization divisor per feature (x_j = raw / MAX, capped 1.0):
+    tenure    div =   36.0
+    freq      div =    8.0
+    recency   div =  180.0
+    tickets   div =    5.0
+    products  div =    5.0
+    premium   div =    1.0
+  train set: 6 active, 6 churned  (lr=0.50, epochs=2000)
+
+  learned weights (per normalized feature):
+    tenure    -10.6162
+    freq       -4.5104
+    recency    +7.1535
+    tickets    +3.4628
+    products   -1.8434
+    premium    -1.3462
+    (bias)     +1.3496
+  Signs match intuition: tenure/freq/products/premium negative (retentive),
+  recency/tickets positive (churny).
+
+  scores on training set (should separate the two classes):
+    c#     tenure  label P(churn)
+    c1         24      0   0.0000
+    c2         18      0   0.0054
+    c3         30      0   0.0000
+    c4         12      0   0.1816
+    c5         36      0   0.0000
+    c6         20      0   0.0017
+    c7          2      1   0.9865
+    c8          4      1   0.9963
+    c9          3      1   0.9656
+    c10         8      1   0.9926
+    c11         6      1   0.9801
+    c12         1      1   0.8815
+
+[check] active cust P<0.15 (0.0000) and churner P>0.85 (0.9926)? OK
+
+==========================================================================
+  SECTION 3: CLV -- historical / aggregate (undiscounted)
+==========================================================================
+The textbook CLV: average revenue per period x gross margin x expected
+customer lifespan. Expected lifespan = area under the survival curve,
+E[lifespan] = sum_{m>=1} S(30m) months. This is an UNDISCOUNTED cohort
+average -- the back-of-envelope number, fine for segmentation, NOT for
+bidding (no time-value of money, no horizon cap).
+
+  cohort        arpu     gm  E[life] mo      hist CLV
+  premium       40.0   0.75        9.45       $283.48
+  standard      20.0   0.65        2.12        $27.50
+  trial          8.0   0.50        0.40         $1.62
+
+[check] historical CLV premium>standard>trial? OK
+
+==========================================================================
+  SECTION 4: CLV -- predictive discounted NPV
+==========================================================================
+The PRODUCTION number: present value of future cash flows, weighted by
+per-period survival and discounted. This is what feeds acquisition bidding
+and credit decisions -- a dollar in month 24 is worth less than a dollar
+today, and only if the customer is still active.
+  CLV = sum_{m=1}^{H} ARPU x gm x S(30m) / (1+r)^m
+  annual 10% -> monthly r = 0.007974, horizon H = 36 months
+
+  cohort      historical   predictive        gap
+  premium        $283.48      $217.18      23.4%
+  standard        $27.50       $26.47       3.7%
+  trial            $1.62        $1.60       1.3%
+
+  Predictive < historical because (a) horizon caps at 36 mo and (b)
+  discounting shrinks far-future cash flows. The gap widens for sticky
+  cohorts (premium) whose value lives further out in time.
+
+[check] predictive<historical all cohorts, premium>standard>trial? OK
+
+==========================================================================
+  SECTION 5: Discount-rate / NPV sensitivity
+==========================================================================
+How much is future money worth TODAY? At r=0 the NPV equals the undiscounted
+sum. At r=20% a dollar in 36 months is worth 1/(1.20)^3 = $0.58. CLV is
+highly sensitive to r for sticky cohorts -- the discount rate is a LEVER,
+not a constant: overestimating it undervalues loyal customers and underbids.
+
+  standard cohort CLV vs annual discount rate (H=36 mo):
+      rate          CLV
+        0%       $27.45
+        5%       $26.94
+       10%       $26.47
+       15%       $26.04
+       20%       $25.64
+       30%       $24.92
+
+  At r=0% the 36-mo NPV = $27.45; the 120-mo E[lifespan] CLV = $27.50.
+  The gap is the value beyond month 36 that the horizon truncates -- the
+  reason a 36-mo CLV underestimates a 5-year CLV for loyal cohorts.
+
+[check] CLV falls as discount rate rises, r=0 finite-horizon < E[lifespan]? OK
+
+==========================================================================
+  SECTION 6: Customer segmentation by LTV tier
+==========================================================================
+Score every customer's predictive CLV, then split into tiers by LTV:CAC
+ratio -- the unit of account for acquisition bidding. Whales (LTV:CAC>=3)
+are worth bidding aggressively on; dolphins (>=1) are profitable to defend;
+minnows (<1) lose money to acquire. Tying tiers to CAC (not raw percentile)
+avoids atomic-block straddling and maps straight to bid decisions.
+
+  archetype            count   per-cust   LTV:CAC        tier
+  premium_whale        2,000    $325.78     13.03       Whale
+  premium_core        18,000    $217.18      8.69       Whale
+  premium_minnow      30,000    $130.31      5.21       Whale
+  standard_high       20,000     $37.06      1.48     Dolphin
+  standard_core      100,000     $26.47      1.06     Dolphin
+  standard_minnow     80,000     $13.24      0.53      Minnow
+  trial_high          50,000      $2.39      0.10      Minnow
+  trial_core         200,000      $1.44      0.06      Minnow
+  trial_minnow       250,000      $0.64      0.03      Minnow
+  trial_churnfast    250,000      $0.32      0.01      Minnow
+
+  tier      customers    %cust    total LTV     %LTV     avg CLV    LTV:CAC
+  Whale        50,000     5.0%  $8470160.20    62.4%     $169.40      6.78
+  Dolphin     120,000    12.0%  $3388681.24    25.0%      $28.24      1.13
+  Minnow      830,000    83.0%  $1704963.11    12.6%       $2.05      0.08
+  TOTAL     1,000,000   100.0% $13563804.56   100.0%
+
+  Whales are 5.0% of customers but hold 62.4% of total LTV -> a 12.5x
+  concentration. Bid up to 3x CAC on whales, defend dolphins, and do NOT
+  spend acquiring minnows (LTV:CAC < 1 -- every dollar acquired is lost).
+
+[check] avg CLV whale>dolphin>minnow, whale LTV:CAC>=3, minnow<1, concentrated? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  active customers             = 50,000,000
+  features / customer          = 40 (RFM + velocity aggregates)
+  score values / customer      = 6 (clv, p10/p50/p90, churn, retention)
+  nightly batch window         = 4 h
+  realtime cancel-flow QPS     = 1,000 /s (<200ms)
+
+Throughput:
+  nightly refresh              = 50,000,000 customers / 4h = 3,472/s
+  realtime lookups (CRM/ads)   = 1,000 /s, cache-aided (Redis)
+
+Storage:
+  feature store (Redis)        = 16.00 GB  (50,000,000 x 40 feats x 8 B)
+  current scores (Postgres)    = 2.40 GB  (50,000,000 x 6 vals x 8 B)
+  90-day score history         = 216.00 GB  (archive to S3 Parquet)
+
+Latency budget:
+  realtime CLV/churn lookup    < 5 ms   (Redis feature + cached score)
+  realtime GBDT rescore        < 150 ms  (in-session cancel-flow offer)
+  total (cancel-flow)          < 200 ms budget
+  nightly batch retrain+score  ~4 h (Spark, full 50M)
+
+[check] 50M cust, feature store=16GB, 90d history=216GB, nightly ~3472/s? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for customer_ltv.html)
+==========================================================================
+  ret_premium_d1             = 0.9592
+  ret_premium_d7             = 0.8748
+  ret_premium_d30            = 0.7259
+  ret_premium_d90            = 0.5383
+  ret_standard_d1            = 0.9447
+  ret_standard_d30           = 0.5403
+  ret_standard_d90           = 0.265
+  ret_trial_d1               = 0.913
+  ret_trial_d30              = 0.2508
+  ret_trial_d90              = 0.0358
+  churn_lr                   = 0.5
+  churn_epochs               = 2000
+  churn_w0_tenure            = -10.6162
+  churn_w2_recency           = 7.1535
+  churn_w3_tickets           = 3.4628
+  churn_bias                 = 1.3496
+  churn_p_active             = 0.0
+  churn_p_churn              = 0.9926
+  hist_clv_premium           = 283.48
+  hist_clv_standard          = 27.5
+  hist_clv_trial             = 1.62
+  pred_clv_premium           = 217.18
+  pred_clv_standard          = 26.47
+  pred_clv_trial             = 1.6
+  annual_discount            = 0.1
+  r_monthly                  = 0.007974
+  clv_horizon                = 36
+  cac                        = 25.0
+  disc_standard_r0           = 27.45
+  disc_standard_r10          = 26.47
+  disc_standard_r20          = 25.64
+  disc_standard_r30          = 24.92
+  seg_total_customers        = 1000000
+  seg_total_ltv              = 13563804.56
+  seg_whale_count            = 50000
+  seg_whale_avg_clv          = 169.4
+  seg_whale_ltvcac           = 6.78
+  seg_whale_ltv_share        = 0.6245
+  seg_whale_threshold        = 75.0
+  seg_dolphin_threshold      = 25.0
+  scale_feat_store_gb        = 16.0
+  scale_score_history_gb     = 216.0
+
+[check] GOLD reproduces from retention + churn LR + CLV + discount + segmentation? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

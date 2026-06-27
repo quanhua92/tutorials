@@ -1,0 +1,252 @@
+# rag_system.py - Retrieval-Augmented Generation system design simulation
+# Pure Python stdlib only. Numbers below feed RAG_SYSTEM.md
+# and rag_system.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Chunking strategies (fixed-size, sentence-aware, semantic)
+==========================================================================
+Chunking decides what the retriever can EVER return: a fact split across
+two chunks is retrievable only as fragments; a chunk that merges two
+topics dilutes both. Three strategies on the SAME demo document:
+
+  DEMO_DOC = "Embedding models encode text into dense vectors. Dense vectors and models encode semantic meaning. The semantic model encodes vectors into embeddings. Qdrant and Weaviate are production vector databases. HNSW is the default graph index for approximate search. The index retrieves candidate passages in milliseconds."
+
+  6 sentences:
+    s1: "Embedding models encode text into dense vectors."
+    s2: "Dense vectors and models encode semantic meaning."
+    s3: "The semantic model encodes vectors into embeddings."
+    s4: "Qdrant and Weaviate are production vector databases."
+    s5: "HNSW is the default graph index for approximate search."
+    s6: "The index retrieves candidate passages in milliseconds."
+
+  fixed-size (window=8, overlap=2) -> 7 chunks:
+    c0 (8 tok): embedding models encode text into dense vectors dense
+    c1 (8 tok): vectors dense vectors and models encode semantic meaning
+    c2 (8 tok): semantic meaning the semantic model encodes vectors into
+    c3 (8 tok): vectors into embeddings qdrant and weaviate are production
+    c4 (8 tok): are production vector databases hnsw is the default
+    c5 (8 tok): the default graph index for approximate search the
+    c6 (8 tok): search the index retrieves candidate passages in milliseconds
+
+  sentence-aware (budget=8 tok) -> 6 chunks:
+    c0 (7 tok): embedding models encode text into dense vectors
+    c1 (7 tok): dense vectors and models encode semantic meaning
+    c2 (7 tok): the semantic model encodes vectors into embeddings
+    c3 (7 tok): qdrant and weaviate are production vector databases
+    c4 (9 tok): hnsw is the default graph index for approximate search
+    c5 (7 tok): the index retrieves candidate passages in milliseconds
+
+  semantic (split on sim drop) -> 4 chunks:
+    c0 (21 tok): embedding models encode text into dense vectors dense vectors and models encode semantic meaning the semantic model encodes vectors into embeddings
+    c1 (7 tok): qdrant and weaviate are production vector databases
+    c2 (9 tok): hnsw is the default graph index for approximate search
+    c3 (7 tok): the index retrieves candidate passages in milliseconds
+
+  fixed-size       chunks=7  lens=[8, 8, 8, 8, 8, 8, 8]  avg=8.00
+  sentence-aware   chunks=6  lens=[7, 7, 7, 7, 9, 7]  avg=7.33
+  semantic         chunks=4  lens=[21, 7, 9, 7]  avg=11.00
+
+  fixed-size can SPLIT a sentence (chunk boundaries ignore grammar);
+  sentence-aware never splits a sentence but may exceed the budget;
+  semantic finds the TOPIC BOUNDARY (embeddings vs systems) and groups
+  sentences by meaning. Production default = sentence-aware; semantic is
+  ~10% better recall on heterogeneous corpora at 2-3x indexing cost.
+
+[check] fixed=7 lens [8,8,8,8,8,8,8], aware=6 lens [7,7,7,7,9,7], semantic=4 lens [21,7,9,7]? OK
+
+==========================================================================
+  SECTION 2: TF-IDF embedding (bi-encoder proxy)
+==========================================================================
+A bi-encoder maps text -> dense vector. We proxy it with TF-IDF so the
+whole pipeline runs in stdlib. Embedding = a sparse vector of
+tf * idf for every vocabulary term, where idf = log(N/df) rewards terms
+that appear in FEW chunks (discriminative) and zeroes terms in every
+chunk (stop-word-like). Retrieval math is unchanged: vectors + cosine.
+
+Corpus chunked with sentence-aware (Section 1 default): 16 chunks.
+Vocabulary size = 91 unique terms.
+
+Document frequency + idf for query-relevant terms:
+  term              df      idf
+  search             1   2.7726
+  vector             2   2.0794
+  retrieval          2   2.0794
+  similarity         4   1.3863
+
+Per-chunk embedding magnitude (L2 norm of the TF-IDF vector):
+  chunk         ||v||  top terms (tf*idf)
+  c0           6.4837  store=2.773, fast=2.773, search=2.773
+  c1           6.3401  encodes=2.773, high=2.773, model=2.079
+  c2           6.1608  ranks=2.773, candidate=2.773, by=2.773
+  c3           7.1700  qdrant=2.773, weaviate=2.773, are=2.773
+  c4           6.1477  smaller=2.773, before=2.773, splits=2.079
+  c5           7.3683  fixed=2.773, size=2.773, slides=2.773
+  c6           7.6561  sentence=4.159, aware=2.773, snaps=2.773
+  c7           5.6737  where=2.773, drops=2.773, semantic=2.079
+  c8           5.3913  encode=2.773, models=2.079, text=2.079
+  c9           6.0361  bge=2.773, produces=2.773, 1024=2.773
+  c10          5.6312  e5=2.773, support=2.773, multilingual=2.773
+  c11          5.8610  capture=2.773, meaning=2.773, semantic=2.079
+  c12          7.6561  uses=2.773, score=2.773, query=2.773
+  c13          8.5410  the=2.773, is=2.773, accurate=2.773
+  c14          7.9637  two=2.773, stage=2.773, funnel=2.773
+  c15          8.1131  improves=2.773, precision=2.773, at=2.773
+
+Query embedding: 'vector retrieval similarity search'
+  query tf*idf = {search=2.7726, vector=2.0794, retrieval=2.0794, similarity=1.3863}
+  ||q|| = 4.2728  (only 4 of 4 query terms are in vocab)
+
+[check] vocab>0, all chunk norms>0, 'vector' in vocab? OK
+
+==========================================================================
+  SECTION 3: Vector retrieval (cosine similarity, top-K)
+==========================================================================
+Embed the query, score every chunk by COSINE SIMILARITY (angle between
+the two normalized vectors), take the top-K. Cosine is scale-invariant
+-- a chunk with small tf magnitude but a matching term angle still scores
+well. That is also its weakness: it rewards 'one strong shared term' over
+'covers the whole query', which is what the cross-encoder fixes next.
+
+Query: 'vector retrieval similarity search'
+
+  rank     cosine  chunk
+  1        0.5029  c0: vector databases store dense embeddings for fast  <- top-1
+  2        0.2373  c2: retrieval ranks candidate passages by cosine similarity  <- top-2
+  3        0.1797  c10: e5 models support multilingual retrieval  <- top-3
+  4        0.1411  c3: qdrant and weaviate are popular production vector  <- top-4
+  5        0.0793  c7: semantic chunking splits where sentence similarity drops  <- top-5
+  6        0.0767  c11: dense embeddings capture semantic meaning for cosine
+  7        0.0000  c1: the embedding model encodes text into high
+  8        0.0000  c4: chunking splits a document into smaller passages
+  9        0.0000  c5: fixed size chunking slides a token window
+  10       0.0000  c6: sentence aware chunking snaps window boundaries to
+  11       0.0000  c8: embedding models encode text into dense vectors
+  12       0.0000  c9: the bge model produces 1024 dimensional embeddings
+  13       0.0000  c12: reranking uses a cross encoder to score
+  14       0.0000  c13: the cross encoder is accurate but too
+  15       0.0000  c14: a two stage funnel retrieves candidates then
+  16       0.0000  c15: reranking improves precision at the top of
+
+  top-5 cosine order: c0,c2,c10,c3,c7
+  best chunk = c0 (cosine 0.5029)
+  Note: several chunks share 'vector' or 'similarity' -> cosine returns
+  a PARTIAL-match ordering. The cross-encoder will promote chunks that
+  cover MORE of the query (vector + retrieval + similarity).
+
+[check] best cosine > 0, top-5 returned? OK
+
+==========================================================================
+  SECTION 4: Cross-encoder reranking (re-score the top-K jointly)
+==========================================================================
+A cross-encoder reads [query, chunk] TOGETHER and outputs a relevance
+score. Too slow for the full corpus (~100 docs/GPU-batch), so we only
+run it on the top-K the retriever returned. We simulate its score with
+IDF-WEIGHTED QUERY COVERAGE = sum(idf[t] for t in query AND chunk) /
+sum(idf[t] for t in query). Coverage rewards chunks that touch MORE
+distinct query terms -- a different signal than cosine magnitude.
+
+Query: 'vector retrieval similarity search'  (terms: retrieval, search, similarity, vector)
+
+  rank        cov    cosine  chunk
+  1        0.7500    0.5029  c0: {search,similarity,vector}
+  2        0.4167    0.2373  c2: {retrieval,similarity}
+  3        0.2500    0.1411  c3: {vector}
+  4        0.2500    0.1797  c10: {retrieval}
+  5        0.1667    0.0793  c7: {similarity}
+
+  cosine order : c0,c2,c10,c3,c7
+  rerank  order: c0,c2,c3,c10,c7
+  -> cross-encoder REORDERED the top-K (coverage != magnitude).
+  The chunk covering the MOST query terms (vector + retrieval +
+  similarity) is promoted to #1 even if its cosine was not the highest.
+
+[check] rerank preserved top-K size? OK
+
+==========================================================================
+  SECTION 5: Citation extraction (source tracing + relevance gate)
+==========================================================================
+Each reranked chunk becomes a CITATION: (doc_id, title, chunk_index,
+span_text, score). The relevance gate DROPS chunks below threshold --
+the RAG abstention mechanism ('I don't know' instead of hallucinating).
+
+Relevance gate threshold = 0.5  (drop chunks below this coverage).
+
+  rank  doc    title                   score  span
+  1     doc1   (Vector Databases)     0.7500  "vector databases store dense embeddings..."
+
+  Top citation: doc1, chunk #0 (score 0.7500). The generated answer is
+               grounded in this span; the LLM is constrained to cite it.
+  Relevance gate DROPPED 4 chunk(s) below 0.5 -> not cited.
+  Faithfulness: every claim in the answer must trace to a cited span,
+  checked by an NLI entailment model (DeBERTa) in production.
+
+[check] at least 1 citation above threshold? OK
+
+==========================================================================
+  SECTION 6: Scale estimation
+==========================================================================
+Assumptions:
+  document corpus        = 10,000,000 docs
+  avg tokens / doc       = 500
+  chunk size             = 256 tokens, 50 overlap (step 206)
+  chunks / doc           = ceil((500-256)/206)+1 = 3
+  embedding dim          = 1024 (BGE-large-en-v1.5)
+  peak query QPS         = 1,000 /s
+
+Total chunks indexed     = 30,000,000
+
+Storage:
+  raw text               = 30.00 GB
+  embeddings (float32)   = 122.88 GB   (chunks x 1024 dim x 4 B)
+  embeddings (PQ 64 B)   = 1.92 GB   (served; 64x compression)
+
+Latency budget (p95 < 1500ms chat):
+  query embedding        <  30 ms   (bi-encoder, GPU)
+  dense retrieval (HNSW) <  15 ms   (parallel with BM25)
+  BM25 retrieval         <  10 ms   (sparse, parallel)
+  RRF fusion             <   2 ms
+  cross-encoder rerank   <  80 ms   (top-100 -> top-10)
+  LLM first token (TTFT) < 400 ms
+  LLM streaming          < 900 ms
+  total p95              <1430 ms   (~70ms slack)
+
+Reranker GPU sizing: 1,000 QPS / 12 QPS-per-A10 = 84 x A10 GPUs (BGE-reranker)
+
+[check] chunks/doc=3, total=30M, emb raw=122.88GB, emb PQ=1.92GB, 84 GPUs? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for rag_system.html)
+==========================================================================
+  vocab_size               = 91
+  df_vector                = 2
+  df_similarity            = 4
+  df_retrieval             = 2
+  idf_vector               = 2.0794
+  idf_similarity           = 1.3863
+  idf_retrieval            = 2.0794
+  query_norm               = 4.2728
+  n_chunks                 = 16
+  chunking_fixed_n         = 7
+  chunking_aware_n         = 6
+  chunking_semantic_n      = 4
+  chunking_fixed_lens      = 8,8,8,8,8,8,8
+  chunking_aware_lens      = 7,7,7,7,9,7
+  chunking_semantic_lens   = 21,7,9,7
+  retrieval_cos_order      = c0,c2,c10,c3,c7
+  retrieval_best_idx       = 0
+  retrieval_best_cos       = 0.5029
+  rerank_order             = c0,c2,c3,c10,c7
+  rerank_best_idx          = 0
+  rerank_best_score        = 0.75
+  citation_count           = 1
+  citation_top_score       = 0.75
+  scale_chunks             = 30000000
+  scale_emb_raw_gb         = 122.88
+  scale_emb_pq_gb          = 1.92
+  scale_rerank_gpus        = 84
+
+[check] GOLD reproduces from chunking + embedding + retrieval + reranking + citations? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

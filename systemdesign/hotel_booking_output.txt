@@ -1,0 +1,218 @@
+# hotel_booking.py - Hotel booking system design simulation
+# Pure Python stdlib only. Numbers below feed HOTEL_BOOKING.md
+# and hotel_booking.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Inventory data model (per-night rows vs booking-overlap)
+==========================================================================
+Two ways to answer 'how many King rooms free for nights 5..8?'
+
+Per-night model: 200 King rooms, 5% overbooking -> max_bookable=210
+  availability(5..8) = MIN(available) over 3 nights = 210  (O(nights))
+
+Booking-overlap model: scan ALL overlapping bookings to count free rooms.
+  cost = O(booking_history) -> grows forever as bookings accumulate.
+  at 10K past bookings the same query scans 10000 rows vs 3 per-night rows
+
+System-wide (per-night model):
+  rows per hotel  (3 room-types x 365 days) = 1,095
+  (room_type,date) pairs / day             = 84,000,000
+  inventory rows (365-day window)          = 30,660,000,000
+
+[check] per-night availability = MIN over nights (constant 3 here)? OK
+[check] per-night cost stays at nights-count even with 10K history? OK
+
+==========================================================================
+  SECTION 2: Date-range availability + search (location, price filters)
+==========================================================================
+Catalog: 3 hotels, 5 room types. Availability window = days 1..30.
+  NOTE: H1/KING night 6 dropped to 12 free (the MIN of nights 5..8).
+
+Query: {'city': 'New York', 'check_in': 5, 'check_out': 8, 'guests': 2, 'max_price': 300}
+
+  hotel        room      nights  min_free  price  
+  Grand Plaza  KING      3       12        $250    
+  Grand Plaza  DOUBLE    3       157       $180    
+
+Price filter $100 (below all NY rooms): 0 results (false NEGATIVE = revenue loss)
+  -> search may return STALE approximate availability from Elasticsearch;
+     the final availability check always reads authoritative DB MIN.
+
+[check] H1/KING nights 5..8 MIN = 12 (night 6 is the binding constraint)? OK
+[check] NY search under $300 returns 2 room types? OK
+
+==========================================================================
+  SECTION 3: Booking lifecycle (HELD -> CONFIRMED -> CANCELLED)
+==========================================================================
+H2/SUITE: 10 rooms, no overbooking. TTL=600s. Idempotency enforced.
+
+hold(HOLD-1, HK-1)           -> HELD       (room soft-reserved in Redis)
+hold(HOLD-2, HK-1) [DUP KEY] -> DUPLICATE  (same hold key -> no double hold)
+confirm(HOLD-1, B-100, CK-1) -> CONFIRMED  (3 rows decremented atomically)
+  available(5..8) now = 9 (was 10, -1/night x 3 nights)
+confirm(HOLD-1, CK-1) [DUP]  -> DUPLICATE  (same confirm key -> no double charge)
+cancel(B-100)                -> CANCELLED  (inventory restored: +1/night x 3)
+  available(5..8) now = 10 (restored to 10)
+
+[check] duplicate hold key short-circuits the hold? OK
+[check] confirm decremented all 3 nights (available 10 -> 9)? OK
+[check] duplicate confirm key prevents double charge? OK
+[check] cancel restored all 3 nights (available -> 10)? OK
+
+==========================================================================
+  SECTION 4: Concurrency - last-room problem (3 strategies)
+==========================================================================
+10000 users hit the LAST remaining room on the same night simultaneously.
+
+A. PESSIMISTIC (SELECT FOR UPDATE)
+   each of 10000 users holds the row lock ~10s during checkout
+   serialized total = 10,000 x 10s = 100,000 sec (27.8 hours)
+   connection pool (100) EXHAUSTED -> most users time out / 5xx
+   winners = 1, but at catastrophic tail latency and pool exhaustion
+
+B. OPTIMISTIC CAS (version retry)
+   10000 first attempts; 1 wins, 9999 losers retry up to 3 times
+   total DB ops = 10000 + 29997 = 39,997 (retry storm)
+   winners = 1, losers get instant failure + backoff
+
+C. REDIS DECRBY + DB CAS (production standard)
+   atomic DECRBY on hold:{hotel}:{rt}:{date} in memory
+   Redis ops = 10,000 (each ~us); result >= 0 = winner, < 0 = sold out
+   only the 1 winner reaches the DB -> DB ops = 1
+   winners = 1, zero retries, zero lock contention
+
+=> Pessimistic convoys and exhausts pools on the last-room spike.
+=> Optimistic CAS works but every loser hammers the DB (retry storm).
+=> Redis DECRBY gates the DB: 10K in-memory ops resolve in <100ms;
+   the single winner does the ACID fan-out. This is the Booking.com pattern.
+
+[check] pessimistic total serial = 100,000s (pool exhausted)? OK
+[check] optimistic total DB ops = 39,997 (1 + 9999x3 retries)? OK
+[check] Redis gates DB to exactly 1 op, 1 winner? OK
+
+==========================================================================
+  SECTION 5: Overbooking buffer (max_bookable + no-show alert)
+==========================================================================
+max_bookable = total_rooms + floor(total_rooms x pct), capped at 10%
+
+  total  req %    max_bookable  note
+  200    5        210           
+  100    10       110           
+  100    5        105           
+  50     0        50            
+  200    15       220           CAPPED to 10%
+
+No-show alert (leisure no-show rate = 3%, alert if z < -3):
+  z = (total_rooms - mean_shows) / std_shows   [binomial shows]
+  total    booked   mean_shows   z        verdict
+  100      105      101.8        -1.1     OK (buffer absorbs)
+  100      110      106.7        -3.7     ALERT (walk risk)
+
+[check] 200 rooms @ 5%% -> max_bookable = 210? OK
+[check] 100 rooms @ 10%% -> max_bookable = 110? OK
+[check] 100 rooms @ 5%% -> max_bookable = 105? OK
+[check] overbook@110%% alerts (z<-3), overbook@5%% ok (z>=-3)? OK
+
+==========================================================================
+  SECTION 6: Fan-out write atomicity (N nights = N row updates)
+==========================================================================
+A 3-night booking must update exactly N inventory rows atomically.
+Partial update (rowsAffected < nights) -> rollback all, never persist.
+
+Happy path (check_in=5, check_out=8):
+  touched 3/3 nights -> atomic=True ; available 210 -> 209
+
+Partial-failure path (night 7 oversold mid-fan-out):
+  touched 2/3 nights -> atomic=False ; ROLLBACK -> nights 5,6 back to 210,210
+
+[check] happy path atomic, all 3 nights decremented (210 -> 209)? OK
+[check] partial fan-out rolled back nights 5,6 (no half-booked state)? OK
+
+==========================================================================
+  SECTION 7: Dynamic pricing (occupancy-tier surge)
+==========================================================================
+price = base x (1 + surge), surge tiers by forward occupancy:
+
+  occupancy < 50%%  -> surge 0.00
+  50%% - 70%%        -> surge 0.10
+  70%% - 85%%        -> surge 0.25
+  85%% - 95%%        -> surge 0.50
+  >= 95%%           -> surge 0.80
+
+  base = $200
+  occupancy    surge    price  tier
+  40           0.00     $200    low
+  60           0.10     $220    low
+  80           0.25     $250    mid
+  90           0.50     $300    high
+  95           0.80     $360    PEAK
+  100          0.80     $360    PEAK
+
+=> Pricing is a SEPARATE bounded context from inventory; same room has
+   different prices per OTA channel. Surge recomputes off forward occupancy.
+
+[check] 80%% occupancy -> $250 (surge 0.25)? OK
+[check] 95%% occupancy -> $360 (surge 0.80)? OK
+[check] 40%% occupancy -> $200 (no surge)? OK
+
+==========================================================================
+  SECTION 8: Scale estimation
+==========================================================================
+Assumptions:
+  total listings                  = 28,000,000
+  room-types / listing (avg)      = 3
+  room-nights / day (avg)         = 1,500,000
+  avg nights / stay               = 3
+  inventory window                = 365 days
+  bytes / inventory row           = 100
+  search QPS avg / peak           = 520 / 5,000
+
+Inventory volume:
+  (room_type,date) pairs / day    = 84,000,000
+  inventory rows (365-day window) = 30,660,000,000
+  storage raw                     = 3.07 TB
+  storage w/ replicas + indexes   = 24.53 TB  (8x raw)
+
+Throughput:
+  room-nights / sec (avg)         = 17.4 /s
+  row updates / sec (avg, x3)     = 52.1 /s
+  bookings / day                  = 500,000
+  search QPS peak                 = 5,000 /s
+  inventory read:write ratio      = 1000:1 (justifies ES + DB split)
+
+Sync pipeline (Kafka -> ES), partition by hotel_id:
+  ~500 inventory partitions (one per ~56K hotels)
+
+[check] inventory rows 365d == 30,660,000,000? OK
+[check] raw storage == 3.07 TB? OK
+[check] room-nights/sec == 17.4? OK
+
+==========================================================================
+  SECTION 9: GOLD values (pinned for hotel_booking.html)
+==========================================================================
+  total_listings                 = 28000000
+  inventory_rows_365             = 30660000000
+  inventory_storage_tb           = 3.07
+  room_nights_per_sec            = 17.4
+  row_updates_per_sec            = 52.1
+  bookings_per_day               = 500000
+  search_qps_peak                = 5000
+  overbook_200_at_5pct           = 210
+  overbook_100_at_10pct          = 110
+  overbook_100_at_5pct           = 105
+  overbook_z_at_110pct           = -3.7
+  overbook_z_at_105pct           = -1.1
+  last_room_users                = 10000
+  pessimistic_serial_sec         = 100000
+  optimistic_total_db_ops        = 39997
+  redis_db_ops                   = 1
+  fanout_rows_for_3_nights       = 3
+  dynamic_price_occ_40pct        = 200
+  dynamic_price_occ_80pct        = 250
+  dynamic_price_occ_95pct        = 360
+
+[check] GOLD reproduces from scale constants + hotel formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

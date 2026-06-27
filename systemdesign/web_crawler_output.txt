@@ -1,0 +1,225 @@
+
+========================================================================
+ WEB CRAWLER - reference simulation
+========================================================================
+Source of truth for WEB_CRAWLER.md and web_crawler.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - URL Frontier (Mercator design: front + back queues)
+========================================================================
+Front queues hold URLs by PRIORITY. Back queues hold URLs per DOMAIN.
+The ready-time heap picks the domain whose next URL is most ready.
+This DECOUPLES priority (front) from politeness (back).
+
+Phase 1: enqueue 7 seed URLs → routed to front queues by priority.
+  HIGH (weight=6): ['https://example.com/a', 'https://news.com/x', 'https://blog.com/p']
+  MED  (weight=3): ['https://example.com/b', 'https://news.com/y']
+  LOW  (weight=1): ['https://example.com/c', 'https://blog.com/q']
+
+Phase 2: route front → back queues (priority order preserved per domain).
+  blog.com         delay=1s  back_queue=['https://blog.com/p', 'https://blog.com/q']
+  example.com      delay=2s  back_queue=['https://example.com/a', 'https://example.com/b', 'https://example.com/c']
+  news.com         delay=5s  back_queue=['https://news.com/x', 'https://news.com/y']
+  ready-time heap: [(0.0, 'blog.com'), (0.0, 'example.com'), (0.0, 'news.com')]
+
+Phase 3: crawl loop (dequeue by ready-time, enforce crawl-delay).
+  t=0s  FETCH  https://blog.com/p              domain=blog.com  delay=1s
+  t=0s  FETCH  https://example.com/a           domain=example.com  delay=2s
+  t=0s  FETCH  https://news.com/x              domain=news.com  delay=5s
+  t=0s  →  all back queues cooling; advance to t=1s
+  t=1s  FETCH  https://blog.com/q              domain=blog.com  delay=1s
+  t=1s  →  all back queues cooling; advance to t=2s
+  t=2s  FETCH  https://example.com/b           domain=example.com  delay=2s
+  t=2s  →  all back queues cooling; advance to t=4s
+  t=4s  FETCH  https://example.com/c           domain=example.com  delay=2s
+  t=4s  →  all back queues cooling; advance to t=5s
+  t=5s  FETCH  https://news.com/y              domain=news.com  delay=5s
+
+  Fetch schedule (7 URLs):
+    t=0s  https://blog.com/p              [blog.com]
+    t=0s  https://example.com/a           [example.com]
+    t=0s  https://news.com/x              [news.com]
+    t=1s  https://blog.com/q              [blog.com]
+    t=2s  https://example.com/b           [example.com]
+    t=4s  https://example.com/c           [example.com]
+    t=5s  https://news.com/y              [news.com]
+
+  Key observations:
+    • t=0: 3 parallel fetches across DIFFERENT domains (no cross-domain blocking)
+    • blog.com (delay=1s):     fetched at t=0, t=1  → 1s spacing
+    • example.com (delay=2s):  fetched at t=0, t=2, t=4  → 2s spacing
+    • news.com (delay=5s):     fetched at t=0, t=5  → 5s spacing
+    • 7 URLs crawled in 5s (not 7×max_delay=35s) because domains are independent
+
+========================================================================
+ Section B - BFS crawl simulation (frontier evolution step-by-step)
+========================================================================
+Crawl a 6-node graph. D is a cross-link (discovered by both B and C).
+The `seen` set prevents D from entering the frontier twice.
+
+  Graph:
+    A → ['B', 'C']
+    B → ['D']
+    C → ['D', 'E']
+    D → ['F']
+    E → []
+    F → []
+
+  Seed: A
+
+  step 1: pop 'A'  →  out-links=['B', 'C']
+           new:     ['B', 'C']  → enqueue
+           frontier=['B', 'C']  visited=['A']
+  step 2: pop 'B'  →  out-links=['D']
+           new:     ['D']  → enqueue
+           frontier=['C', 'D']  visited=['A', 'B']
+  step 3: pop 'C'  →  out-links=['D', 'E']
+           new:     ['E']  → enqueue
+           DEDUP:   ['D']  → skipped (already in seen set)
+           frontier=['D', 'E']  visited=['A', 'B', 'C']
+  step 4: pop 'D'  →  out-links=['F']
+           new:     ['F']  → enqueue
+           frontier=['E', 'F']  visited=['A', 'B', 'C', 'D']
+  step 5: pop 'E'  →  out-links=[]
+           (no out-links)
+           frontier=['F']  visited=['A', 'B', 'C', 'D', 'E']
+  step 6: pop 'F'  →  out-links=[]
+           (no out-links)
+           frontier=[]  visited=['A', 'B', 'C', 'D', 'E', 'F']
+
+  Result: 6 pages crawled, 1 duplicate URL(s) deduped
+  Crawl order: A → B → C → D → E → F
+
+========================================================================
+ Section C - Politeness (per-domain crawl-delay) + DNS caching
+========================================================================
+Phase 1: per-domain rate limiting without proper waiting.
+  3 requests to news.com at t=0, t=1, t=2 (crawl_delay=5s).
+
+  t=0s  FETCH news.com  (allowed — first access)
+  t=1s  BLOCKED  news.com  (must wait until t=5s)
+  t=2s  BLOCKED  news.com  (must wait until t=5s)
+
+Phase 2: with proper back-off (respect crawl-delay).
+  fetch #1 at t=0s
+  fetch #2 at t=5s
+  fetch #3 at t=10s
+  Schedule: [0, 5, 10]  (crawl_delay=5s → 0, 5, 10)
+
+Phase 3: DNS caching (resolve 3 domains × 3 lookups each).
+  resolve(example.com    ) → 121.81.142.73    [MISS]
+  resolve(example.com    ) → 121.81.142.73    [HIT ]
+  resolve(example.com    ) → 121.81.142.73    [HIT ]
+  resolve(news.com       ) → 202.180.111.58   [MISS]
+  resolve(news.com       ) → 202.180.111.58   [HIT ]
+  resolve(news.com       ) → 202.180.111.58   [HIT ]
+  resolve(blog.com       ) → 58.28.162.13     [MISS]
+  resolve(blog.com       ) → 58.28.162.13     [HIT ]
+  resolve(blog.com       ) → 58.28.162.13     [HIT ]
+
+  DNS lookups: 9 total (3 misses, 6 hits)
+  Time without cache: 9 × 50ms = 450ms
+  Time with cache:    3 × 50ms + 6 × 0.1ms = 150.6ms
+  Saved: 299.4ms (67%)
+
+========================================================================
+ Section D - Deduplication (canonicalization + Bloom filter + content hash)
+========================================================================
+Layer 1: URL canonicalization — variant URLs → one canonical form.
+
+  https://Example.com/a?b=2&a=1                 → https://example.com/a?a=1&b=2
+  https://www.example.com/a?a=1&b=2             → https://example.com/a?a=1&b=2
+  https://example.com/a?a=1&b=2#section         → https://example.com/a?a=1&b=2
+  https://example.com/a/?a=1&b=2                → https://example.com/a?a=1&b=2
+
+  4 variant URLs → 1 canonical URL(s)
+  Dedup rate: 75%
+
+Layer 2: Bloom filter (probabilistic URL set).
+
+  m = 958 bits (0.1 KB), k = 7 hash functions
+  Inserting 50 URLs (page0..page49)...
+
+  Bits set: 301 / 958 = 31.4%
+
+  False negative check: query all 50 inserted URLs
+    false negatives = 0  (MUST be 0 — bloom filters never miss)
+
+  False positive check: query 50 known-absent URLs
+    false positives = 0 / 50 = 0.0%  (target was 1%)
+
+Layer 3: content hash (SHA-256) — detect mirror/duplicate pages.
+
+  https://example.com/index.html                content_hash=90ac9b826607a70c
+  https://mirror.example.com/home               content_hash=90ac9b826607a70c  ← SAME (mirror)
+  https://example.com/about                     content_hash=0328bf83c2b1c3a1  ← different content
+
+  https://example.com/index.html and https://mirror.example.com/home are content duplicates despite different URLs
+
+========================================================================
+ Section E - robots.txt respect (Disallow / Allow / Crawl-delay)
+========================================================================
+  robots.txt for example.com:
+    User-agent: *
+    Crawl-delay: 2
+    Disallow: /private
+    Disallow: /tmp/
+    Allow: /public/news
+
+  Parsed: crawl_delay=2, disallow=['/private', '/tmp/'], allow=['/public/news']
+
+  URL checks (Allow overrides Disallow for more specific paths):
+
+    /index.html                    → ALLOWED
+    /private/secret                → BLOCKED
+    /tmp/cache/data                → BLOCKED
+    /public/news/today             → ALLOWED
+    /public                        → ALLOWED
+
+========================================================================
+ Section F - Scale estimation (10B pages)
+========================================================================
+  Metric                              Value
+  ----------------------------------------------------------------
+  Pages to crawl                      10,000,000,000
+  Avg page size                       50 KB
+  Content storage                     466 TB
+  URL frontier (URL + metadata)       0.9 TB  (100 B/URL)
+  Peak fetch rate                     50,000 pages/sec
+  Bandwidth at peak                   20.5 Gbps
+  Concurrent workers (~1s/page)       ~50,000
+
+  Bloom filter (URL dedup, 1% FP):
+    m = -n·ln(p)/(ln2)²              = 95,850,583,773 bits
+    size                              = 11.2 GB
+    k = (m/n)·ln2                     = 7 hash functions
+
+  Freshness (re-crawl every 30 days):
+    Daily re-crawl volume             = 333,333,333 pages/day
+    Re-crawl rate                     = 3,858 pages/sec
+
+  Politeness capacity (1,000,000 domains, avg delay 5s):
+    Max sustained fetch rate          = 200,000 pages/sec
+    Workers needed (at 50,000/sec)         = 50,000  (25.0% of polite max)
+
+========================================================================
+ Section G - [check] assertions
+========================================================================
+[check] Mercator: 7 URLs fetched                          ... OK
+[check] Mercator: t=0 fetches 3 domains in parallel       ... OK
+[check] Mercator: blog.com (delay=1) → fetch at [0, 1]    ... OK
+[check] Mercator: example.com (delay=2) → [0, 2, 4]       ... OK
+[check] Mercator: news.com (delay=5) → [0, 5]             ... OK
+[check] BFS: crawl order A→B→C→D→E→F                     ... OK
+[check] BFS: 1 duplicate URL (D) detected & deduped       ... OK
+[check] Politeness: delay=5s → fetch at [0, 5, 10]        ... OK
+[check] DNS cache: 3 misses, 6 hits (out of 9)            ... OK
+[check] Canonicalization: 4 variants → 1 canonical URL    ... OK
+[check] Bloom filter: 0 false negatives                   ... OK
+[check] Content hash: same content → same SHA-256         ... OK
+[check] robots.txt: /private blocked, /public/news allowed ... OK
+[check] Scale: bloom filter (10B URLs, 1% FP) = 11.2 GB   ... OK
+[check] Scale: 10B pages × 50KB = 466 TB            ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

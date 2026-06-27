@@ -1,0 +1,184 @@
+
+========================================================================
+ NOTIFICATION SERVICE - reference simulation (priority + fan-out + dedup + retry + rate limit)
+========================================================================
+Source of truth for NOTIFICATION_SERVICE.md and notification_service.html.
+All numbers below are deterministic; re-run reproduces them.
+
+========================================================================
+ Section A - Multi-channel fan-out (1 event -> N channels)
+========================================================================
+One notification requests multiple channels. The service fans it out
+into one Delivery per (effective) channel. Fan-out FACTOR = avg
+channels per notification; it MULTIPLIES the delivery workload.
+
+  n1 user=U1 type=dm        requested=['push', 'email']
+      -> effective (after prefs) = ['push', 'email']   fan-out = 2 deliveries
+  n2 user=U2 type=security  requested=['push', 'sms']
+      -> effective (after prefs) = ['push', 'sms']   fan-out = 2 deliveries
+  n5 user=U4 type=system    requested=['email', 'sms']
+      -> effective (after prefs) = ['email', 'sms']   fan-out = 2 deliveries
+
+  >>> Fan-out is a multiplier. At 3 channels/notification the
+      downstream push/email/SMS dispatchers see 3x the notification
+      volume. This dominates the throughput budget (Section G).
+
+========================================================================
+ Section B - Priority queue (urgent leap-frogs the backlog)
+========================================================================
+Events arrive in arrival order but are CONSUMED highest-priority
+first. Weights: urgent=4, high=3, normal=2, low=1
+
+  arrival order (raw, includes the duplicate):
+    #1 n1 priority=normal(2) type=dm
+    #2 n2 priority=urgent(4) type=security
+    #3 n3 priority=high(3) type=mention
+    #4 n1 priority=normal(2) type=dm
+    #5 n4 priority=low(1) type=marketing
+    #6 n5 priority=normal(2) type=system
+    #7 n6 priority=normal(2) type=comment
+
+  after dedup (7 -> 6 unique), processing order (priority desc, stable):
+    #1 n2 priority=urgent(4) type=security   <-- URGENT: jumps to front
+    #2 n3 priority=high(3) type=mention
+    #3 n1 priority=normal(2) type=dm
+    #4 n5 priority=normal(2) type=system
+    #5 n6 priority=normal(2) type=comment
+    #6 n4 priority=low(1) type=marketing
+
+  >>> n2 (urgent security alert, arrived 2nd) is processed FIRST.
+      A FIFO queue would bury it behind n1 (normal). Priority is a
+      per-message weight, not FIFO. Urgent also BYPASSES rate limits
+      and quiet hours (Section F).
+
+========================================================================
+ Section C - User preference aggregation (channel x category matrix)
+========================================================================
+Preferences are a MATRIX, not a single on/off. Each user sets, per
+channel, which CATEGORIES are allowed. A notification's channels are
+intersected with the allowed matrix -> effective channels.
+
+  preference matrix:
+    U1: push=ALL  email=ALL  sms=off  in_app=ALL
+    U2: push=ALL  email=off  sms={security}  in_app=ALL
+    U3: push=ALL  email={mention,system}  sms=off  in_app=ALL
+    U4: push=ALL  email=ALL  sms=ALL  in_app=ALL
+
+  filtering the unique notifications:
+    n1 user=U1 dm        requested=['push', 'email'] -> effective=['push', 'email']
+    n2 user=U2 security  requested=['push', 'sms'] -> effective=['push', 'sms']
+    n3 user=U1 mention   requested=['push', 'email'] -> effective=['push', 'email']
+    n4 user=U3 marketing requested=['email'] -> effective=[]  >>> SUPPRESSED (0 effective channels)
+    n5 user=U4 system    requested=['email', 'sms'] -> effective=['email', 'sms']
+    n6 user=U1 comment   requested=['push'] -> effective=['push']
+
+  >>> n4 (marketing email to U3) is SUPPRESSED entirely: U3 allows
+      email only for {mention,system}, not marketing. A single
+      boolean 'email on/off' could not express this - the matrix can.
+
+========================================================================
+ Section D - Delivery tracking (at-least-once, retry, DLQ)
+========================================================================
+At-least-once: each delivery retries up to MAX_RETRIES=3.
+Backoff before retries = [1, 2] s (2^(n-1) for retry n).
+
+  per-delivery outcome:
+    notif user channel  type      attempts  status   backoff(s)
+    ----------------------------------------------------------------
+    n2   U2   push    security   1/3        delivered -
+    n2   U2   sms     security   1/3        delivered -
+    n3   U1   push    mention    1/3        delivered -
+    n3   U1   email   mention    2/3        delivered 1
+    n1   U1   push    dm         1/3        delivered -
+    n1   U1   email   dm         1/3        delivered -
+    n5   U4   email   system     1/3        delivered -
+    n5   U4   sms     system     3/3        failed    1,2
+    n6   U1   push    comment    1/3        delivered -
+
+  deliveries: 9   delivered: 8   failed (DLQ): 1
+  total channel attempts: 12   success rate: 88.9%   avg attempts/delivery: 1.33
+
+  >>> n3 email: attempt 1 fails (transient), retries after 1s,
+      delivers on attempt 2. The receiver MUST be idempotent because
+      a retried push can arrive twice (dedup on notif_id client-side).
+  >>> n5 sms: all 3 attempts fail -> DEAD-LETTERED. DLQ
+      entries are alerted on for manual investigation. (A retried
+      delivery that 'succeeds' after the user already got it is the
+      classic at-least-once duplicate - hence client dedup.)
+
+========================================================================
+ Section E - Deduplication (idempotency key, TTL window)
+========================================================================
+The producer can double-fire the SAME event (retry, at-least-once on
+the producer side too). Dedup collapses it: key = (notif_id, user,
+type), stored in a Redis SET with a short TTL (e.g. 1h). A repeat key
+within the window is dropped BEFORE priority/fan-out.
+
+  events received : 7
+  deduped (dropped): 1
+      dropped n1 key=('n1', 'U1', 'dm') (duplicate within TTL window)
+  unique (kept)   : 6
+      kept    n1 key=('n1', 'U1', 'dm')
+      kept    n2 key=('n2', 'U2', 'security')
+      kept    n3 key=('n3', 'U1', 'mention')
+      kept    n4 key=('n4', 'U3', 'marketing')
+      kept    n5 key=('n5', 'U4', 'system')
+      kept    n6 key=('n6', 'U1', 'comment')
+
+  >>> Dedup != retry. Retry re-sends a FAILED delivery (Section D).
+      Dedup prevents the SAME logical event from entering the pipeline
+      twice. Without it, a producer retry would deliver n1 twice.
+
+========================================================================
+ Section F - Per-user rate limiting (urgent bypasses)
+========================================================================
+Each (user, channel) has a max notifications/hour. A burst beyond the
+limit is throttled (deferred or dropped). URGENT notifications bypass
+the limiter - you always get a security alert.
+
+  U1 push: limit=50/hour, burst=60 normal pushes + 1 urgent
+    normal delivered (within limit): 50
+    throttled (over limit)         : 10
+    urgent bypassed limiter        : 1
+    total delivered to U1 push     : 51
+
+  >>> Without the urgent bypass, a flooded user would MISS security
+      alerts. Priority and rate-limiting interact: urgent both jumps
+      the queue (Section B) AND ignores the throttle (here).
+
+========================================================================
+ Section G - Scale estimation (hyperscale multi-channel)
+========================================================================
+  users (total)            : 500,000,000
+  DAU                      : 100,000,000
+  notifications/day        : 1,000,000,000
+  avg channels/notif       : 3 (fan-out factor)
+  retry multiplier         : 1.5x (at-least-once)
+  peak notifications/sec   : 100,000
+
+  delivery attempts/day    : 3,000,000,000
+  total channel attempts/day (x1.5): 4,500,000,000
+  notifications/sec (avg)  : 11,574
+  attempts/sec (peak)      : 450,000
+
+  notification log/year    : ~182 TB (500B/log)
+  preferences (all users)  : ~512 GB (1024B/user, in SQL/Redis)
+  dedup keys (1h TTL peak) : ~360M keys -> ~14.4 GB Redis
+
+========================================================================
+ Section H - [check] assertions
+========================================================================
+[check] priority: order = n2,n3,n1,n5,n6,n4 ... OK
+[check] dedup: 7 events -> 1 deduped -> 6 unique ... OK
+[check] preference: n4 marketing email to U3 suppressed (0 effective channels) ... OK
+[check] fan-out: 9 deliveries after dedup + pref ... OK
+[check] delivery: 8 delivered, 1 failed (DLQ) ... OK
+[check] retry: total attempts = 12 (avg 1.33/delivery) ... OK
+[check] success: rate = 88.9% ... OK
+[check] retry: n3 email = 2 attempts -> delivered ... OK
+[check] DLQ: n5 sms = 3 attempts -> failed (DLQ) ... OK
+[check] backoff: retry delays = [1, 2] (2^(n-1)) ... OK
+[check] rate-limit: urgent bypassed, U1 push delivered = 51 (50+1) ... OK
+[check] scale: attempts/day = 4,500,000,000, peak attempts/sec = 450,000 ... OK
+
+All [check] assertions passed. Re-run reproduces every number above.

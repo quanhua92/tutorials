@@ -1,0 +1,277 @@
+# fraud_detection.py - Real-time fraud detection system simulation
+# Pure Python stdlib only. Numbers below feed FRAUD_DETECTION.md
+# and fraud_detection.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Rule engine (velocity, amount, geo, blacklist)
+==========================================================================
+Hard rules run FIRST, in-memory hash lookups (~3ms, 100% of traffic).
+They catch OBVIOUS fraud deterministically and short-circuit the ML
+scorer entirely. Anything PASS-ing falls through to the ML cascade.
+
+  blacklist cards           = ['CARD_EVIL']
+  max amount                > 4000
+  velocity 1h (count)       > 6
+  velocity 1h (amount sum)  > 15000
+  geo velocity              > 900 km/h  (impossible travel)
+  new device + amount >= 1500     -> REVIEW (human look)
+
+  tx           decision reasons
+  coffee       PASS     (none -- PASS to ML)
+  dinner       PASS     (none -- PASS to ML)
+  big_burst    BLOCK    velocity_1h>6 (8); vel_amt_1h>15000 (18000)
+  teleport     BLOCK    impossible_travel>900 km/h (2785)
+  blacklist    BLOCK    blacklisted_card:CARD_EVIL
+  newdev_big   REVIEW   new_device+amount>=1500
+
+  NOTE: 'teleport' is impossible travel -- NYC to London (~5570 km) in
+  2h needs 2785 km/h, faster than any airliner. One of the highest-
+  signal single features in card-not-present fraud.
+
+[check] coffee=PASS, big_burst/teleport/blacklist=BLOCK, newdev_big=REVIEW? OK
+
+==========================================================================
+  SECTION 2: Feature pipeline (aggregation windows)
+==========================================================================
+Streaming features are pre-aggregated by Flink into Redis counters so
+the scorer reads them in ~3ms instead of scanning history each time.
+The core idea: every feature is a SLIDING WINDOW over the user's past.
+
+  user history (minutes_ago, amount):
+       5 min ago       120
+      20 min ago        45
+      40 min ago       300
+      90 min ago        60
+     200 min ago       250
+    + current tx       500
+
+  computed features:
+    tx_count_1h        = 4.0000
+    amount_sum_1h      = 965.0000
+    tx_count_24h       = 6.0000
+    amount_sum_24h     = 1275.0000
+    amount_avg_30d     = 150.0000
+    amount_zscore      = 28.5774
+
+  tx_count_1h counts txs within the last 60 min -> 3 prior (5/20/40m)
+  + the current one = 4. This is the velocity signal rules + ML both use.
+
+[check] count_1h=4, sum_1h=965, count_24h=6, avg_30d=150? OK
+
+==========================================================================
+  SECTION 3: ML scoring (logistic regression on features)
+==========================================================================
+Primary scorer is a GBDT (LightGBM) in production, but the math of a
+SCORER is a calibrated P(fraud) over engineered features. We train a
+logistic regression by batch gradient descent -- pure stdlib, no deps.
+  z = b + sum(w_j * x_j);  P(fraud) = sigmoid(z)
+
+  normalization divisor per feature (x_j = raw / FEAT_MAX, capped 1.0):
+    amount       div = 10000.0
+    vel_1h       div =    12.0
+    vel_amt_1h   div = 20000.0
+    geo_kmh      div =  1200.0
+    new_dev      div =     1.0
+    m_risk       div =     1.0
+    graph_nbrs   div =     5.0
+    intl         div =     1.0
+  train set: 6 legit, 6 fraud  (real base rate is ~0.1%; we balance
+  for the toy model and would recalibrate via scale_pos_weight / Platt).
+  lr = 0.50, epochs = 2000
+
+  learned weights (per normalized feature):
+    amount        +4.0850
+    vel_1h        +2.1742
+    vel_amt_1h    +4.8281
+    geo_kmh       +1.0455
+    new_dev       -0.2454
+    m_risk        +4.5945
+    graph_nbrs    +5.0121
+    intl          +3.6513
+    (bias)        -6.0458
+
+  scores on training set (should separate the two classes):
+    tx#          amount  label P(fraud)
+    t1               45      0   0.0047
+    t2               89      0   0.0075
+    t3               12      0   0.0036
+    t4              210      0   0.0125
+    t5               55      0   0.0158
+    t6              340      0   0.0087
+    t7             3200      1   0.9994
+    t8             5400      1   1.0000
+    t9              870      1   0.9983
+    t10            1500      1   0.9960
+    t11            4200      1   0.9692
+    t12            2600      1   1.0000
+
+[check] legit tx P<0.15 (0.0075) and fraud tx P>0.85 (1.0000)? OK
+
+==========================================================================
+  SECTION 4: Optimal decision threshold (cost-based)
+==========================================================================
+NEVER use threshold 0.5. It assumes equal costs and balanced classes --
+both FALSE in fraud. The cost-optimal threshold is the point where the
+expected cost of a false positive equals that of a false negative:
+  tau = C_FP / (C_FN + C_FP)
+
+  C_FN (missed fraud)   = $535   (avg fraud amount + chargeback)
+  C_FP (wrongful block) = $100   (CLV x churn probability)
+  tau = 100 / (535 + 100) = 0.1575  -> block if P(fraud) > 15.75%
+
+  Requires CALIBRATED probabilities (Platt scaling / isotonic). On raw
+  unbalanced output, Bayes-correct: p' = p / (p + (1-p)/r) with r the
+  downsampling ratio. Below we apply tau on the trained LR scorer.
+
+  decisions (REVIEW band: P in [0.094, 0.220] -> human analyst):
+    tx#        P(fraud)   decision
+    t1             0.0047      ALLOW
+    t2             0.0075      ALLOW
+    t3             0.0036      ALLOW
+    t4             0.0125      ALLOW
+    t5             0.0158      ALLOW
+    t6             0.0087      ALLOW
+    t7             0.9994      BLOCK
+    t8             1.0000      BLOCK
+    t9             0.9983      BLOCK
+    t10            0.9960      BLOCK
+    t11            0.9692      BLOCK
+    t12            1.0000      BLOCK
+
+  cost on train set @0.5: 0 FP x $100 + 0 FN x $535 = $0
+  cost on train set @tau: 0 FP x $100 + 0 FN x $535 = $0
+  Lower tau blocks more aggressively -> cheaper when fraud is costly.
+
+[check] tau~0.1575 and tau-cost <= 0.5-cost on train? OK
+
+==========================================================================
+  SECTION 5: Real-time vs batch scoring (3-stage cascade)
+==========================================================================
+A single expensive model on every transaction blows the latency budget.
+Instead: CHEAP filters first, expensive models LAST on the few that
+survive. Each stage eliminates obvious cases for the next.
+
+  stage           latency    traffic %    avg contrib
+  rules              3 ms       100.00       3.00 ms
+  ML scorer         25 ms        30.00       7.50 ms
+  deep model        40 ms         2.00       0.80 ms
+  avg latency/tx                       (sum contrib)      11.30 ms
+  p99 (all stages)                       (sum latency)      68.00 ms
+  budget p99 < 100 ms -> 32 ms slack
+
+  REAL-TIME path = the cascade above (synchronous, <100ms). BATCH path
+  runs overnight: re-aggregate 30d features, retrain the scorer, refresh
+  GNN entity embeddings, and ingest delayed labels (chargebacks arrive
+  14-30 days later -- never evaluate on the last 30 days).
+
+[check] avg latency=11.3ms, p99=68ms, under 100ms budget? OK
+
+==========================================================================
+  SECTION 6: Graph analysis (account connectivity, fraud rings)
+==========================================================================
+Transaction-level features see ONE account. Coordinated fraud rings
+share devices, IPs, cards across MANY accounts -- invisible per-tx but
+obvious in the entity graph. GraphSAGE aggregates each node's 1-hop and
+2-hop neighborhood into an embedding; embeddings are pre-computed hourly
+and looked up at serve time (~5ms).
+
+  confirmed fraud accounts = ['A4', 'A5']
+  shared-identifier edges:
+    device  D1   -> A1,A2
+    device  D2   -> A2,A4
+    device  D3   -> A3,A5
+    device  D4   -> A1,A6
+    ip      IP1  -> A2,A3
+    ip      IP2  -> A6,A7
+    card    C1   -> A1,A3
+
+  adjacency (who is connected to whom):
+    A1 -> A2,A3,A6
+    A2 -> A1,A3,A4
+    A3 -> A1,A2,A5
+    A4 -> A2
+    A5 -> A3
+    A6 -> A1,A7
+    A7 -> A6
+
+  GraphSAGE-style aggregation for A1 (the account under review):
+    1-hop neighbors        = A2,A3,A6
+    2-hop neighbors        = A4,A5,A7
+    1-hop mean risk        = 0.3000
+    2-hop mean risk        = 0.6333
+    fraud within 2 hops    = 2   <- the ring signal
+
+  A1 alone is clean (risk 0.10). But A1->A2->A4(fraud) and A1->A3->
+  A5(fraud) via shared card/device. 2 fraud accounts within 2 hops is a
+  strong ring indicator -> boosts P(fraud) on every A1 transaction.
+
+[check] A1 1hop=[A2,A3,A6], 2hop=[A4,A5,A7], fraud2hop=2? OK
+
+==========================================================================
+  SECTION 7: Scale estimation
+==========================================================================
+Assumptions:
+  avg TPS                   = 1,000 /s
+  peak TPS                  = 5,000 /s  (Visa scale ~24K)
+  bytes / transaction       = 500 (tx row + features + decision)
+  active accounts           = 10,000,000
+  features / account        = 50 (velocity windows)
+  base fraud rate           = 0.1% (1 in 1000)
+
+Throughput:
+  transactions / day        = 86,400,000
+  fraud / day               = 86,400.0  (~0.1%)
+  scorer load at peak       = 1500 tx/s (30% reach ML) -> ~188 scorer-cores
+
+Storage:
+  tx log / day              = 43.20 GB
+  tx log / year             = 15.77 TB  (archive to S3 Parquet)
+  feature store (Redis)     = 4.00 GB  (10,000,000 accounts x 50 feats x 8 B)
+
+Latency budget (p99 < 100ms):
+  rules engine              < 3 ms
+  feature fetch (Redis)     < 5 ms
+  GBDT scorer (CPU)         < 25 ms
+  deep model (borderline)   < 40 ms
+  total (worst case)        < 73 ms  (slack for network/queueing)
+
+[check] tx/day=86.4M, storage/yr~15.77TB, feature store=4GB, fraud/day=86400? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for fraud_detection.html)
+==========================================================================
+  rule_teleport_decision       = BLOCK
+  rule_teleport_reasons        = impossible_travel>900 km/h (2785)
+  rule_coffee_decision         = PASS
+  feat_count_1h                = 4
+  feat_sum_1h                  = 965.0
+  feat_count_24h               = 6
+  feat_avg_30d                 = 150.0
+  feat_zscore                  = 28.5774
+  lr_lr                        = 0.5
+  lr_epochs                    = 2000
+  lr_w0_amount                 = 4.085
+  lr_w3_geo                    = 1.0455
+  lr_w6_graph                  = 5.0121
+  lr_bias                      = -6.0458
+  lr_p_legit                   = 0.0075
+  lr_p_fraud                   = 1.0
+  threshold_tau                = 0.1575
+  c_fn                         = 535.0
+  c_fp                         = 100.0
+  cascade_avg_ms               = 11.3
+  cascade_p99_ms               = 68.0
+  graph_a1_1hop                = A2,A3,A6
+  graph_a1_2hop                = A4,A5,A7
+  graph_a1_1hop_mean           = 0.3
+  graph_a1_2hop_mean           = 0.6333
+  graph_a1_fraud2hop           = 2
+  scale_tx_day                 = 86400000
+  scale_storage_year_tb        = 15.768
+  scale_feat_store_gb          = 4.0
+
+[check] GOLD reproduces from rules + features + LR + threshold + graph? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

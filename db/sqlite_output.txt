@@ -1,0 +1,439 @@
+sqlite.py - SQLite Day 0 -> Day 2 operations. Feeds SQLITE.md.
+stdlib only (sqlite3 3.53.1). Run: python3 sqlite.py
+
+========================================================================
+  SECTION A: architecture - SQL text -> bytecode -> B-tree -> file
+========================================================================
+SQLite (library version 3.53.1) is not a server.
+Your process links the engine in-process and owns one .db file.
+
+  1  Interface         sqlite3_open/prepare/step/close (the C API)
+  2  Tokenizer         splits SQL text into tokens (tokenize.c)
+  3  Parser            Lemon parser -> parse tree (parse.y)
+  4  Code Generator    the QUERY PLANNER: parse tree -> VDBE bytecode
+  5  VDBE              the Virtual DataBase Engine VM runs the bytecode
+  6  B-tree            B+tree per table (data in leaves), B-tree per index
+  7  Pager             fixed-size PAGES + page cache + WAL/journal + locks
+  8  OS Interface      VFS: unix (os_unix.c) / windows (os_win.c)
+
+Pipeline:  SQL text  ->  tokenizer  ->  parser  ->  code generator
+         ->  VDBE bytecode  ->  B-tree  ->  pager  ->  VFS  ->  file
+
+The key idea: SQLite COMPILES each SQL statement into a bytecode
+PROGRAM (a sqlite3_stmt) and runs it on the VDBE virtual machine -
+it does not interpret SQL on the fly. Tables and indexes are each a
+separate B-tree, all stored as pages in the SAME one file.
+
+SQLite vs PostgreSQL vs MySQL - what 'the database' actually is:
+| property          | SQLite            | PostgreSQL        | MySQL (InnoDB)    |
+|-------------------|-------------------|-------------------|-------------------|
+| runs as a server? | NO (in-process)   | YES (postmaster)  | YES (mysqld)      |
+| network protocol? | NO (library call) | YES (libpq/TCP)   | YES (TCP/socket)  |
+| storage           | 1 file (+wal/shm) | a directory tree  | a directory tree  |
+| users / roles     | filesystem perms  | full GRANT system | full GRANT system |
+| writers at once   | 1 (always)        | many (MVCC)       | many (MVCC)       |
+| readers @ write   | many (WAL)        | many (MVCC)       | many (MVCC)       |
+| install/config    | link the library  | run a server      | run a server      |
+| typical deploy    | app/device-local  | client/server     | client/server     |
+[check] engine is in-process (no server) - import sqlite3 links the lib: OK
+[check] a 'database' is a file path, not a host:port: OK
+
+========================================================================
+  SECTION B: day 0 - create a database + the 8 PRAGMAs that matter
+========================================================================
+Day 0 = make the file and tune the engine BEFORE creating tables.
+
+PRAGMAs are SQLite-specific knobs (not standard SQL). Order matters:
+page_size must be set on an EMPTY db (before any CREATE TABLE), and
+you cannot change page_size once in WAL mode.
+
+  PRAGMA page_size=4096            -> 4096  (powers of 2: 512..65536)
+     the on-disk block size. Set BEFORE creating tables; smaller pages
+     = finer-grained writes, larger pages = shallower B-trees.
+
+  PRAGMA journal_mode=WAL          -> wal  (was DELETE by default)
+     the default journal_mode is DELETE (rollback journal). WAL gives
+     many readers + 1 writer at once and fewer fsync()s. WAL mode is
+     PERSISTENT (survives close/reopen). WAL does NOT work on a network
+     filesystem (it needs shared memory on one host).
+
+  PRAGMA synchronous=NORMAL        -> 1  (0=OFF,1=NORMAL,2=FULL,3=EXTRA)
+     FULL fsync()s the WAL on every COMMIT (safest, slowest). NORMAL
+     fsync()s only at checkpoint -> far faster; risks losing the last
+     txn on power loss but NOT corrupting the db. WAL+NORMAL is the
+     standard production combo. OFF risks CORRUPTION - avoid.
+
+  PRAGMA cache_size=-8000          -> -8000  (= 8,192,000 B in page cache)
+     POSITIVE N = N pages cached; NEGATIVE N = abs(N*1024) bytes. The
+     default is -2000 (~2 MB). Bigger cache = fewer disk reads. Session
+     only (resets on reopen). Negative form scales auto with page_size.
+
+  PRAGMA mmap_size=268435456       -> 268,435,456  (256 MB)
+     memory-map the db file for reads (0 = off). Helps read-heavy/analytic
+     workloads by avoiding read() syscalls; no effect on writes.
+
+  PRAGMA temp_store=MEMORY         -> 2  (0=DEFAULT,1=FILE,2=MEMORY)
+     put temp B-trees (ORDER BY/GROUP BY spills) in RAM, not a temp file.
+
+  PRAGMA foreign_keys=ON           -> 1  (DEFAULT is 0 = OFF!)
+     SQLite does NOT enforce FKs unless you turn this on per-connection.
+     A no-op inside a transaction, so set it right after connect.
+
+  PRAGMA busy_timeout=5000         -> 5000  (milliseconds)
+     how long to retry on SQLITE_BUSY before giving up. Essential when
+     more than one connection may write.
+
+PRAGMA quick-start configs (copy-paste, set on a fresh connection):
+
+  -- (a) application database (the common case)
+  PRAGMA journal_mode=WAL;
+  PRAGMA synchronous=NORMAL;
+  PRAGMA cache_size=-8000;        -- ~8 MB
+  PRAGMA temp_store=MEMORY;
+  PRAGMA foreign_keys=ON;
+  PRAGMA busy_timeout=5000;
+
+  -- (b) analytics / read-mostly (big cache + mmap)
+  PRAGMA journal_mode=WAL;
+  PRAGMA synchronous=NORMAL;
+  PRAGMA cache_size=-200000;      -- ~200 MB
+  PRAGMA mmap_size=4294967296;    -- 4 GB mmap
+
+  -- (c) embedded / single-process (no shared memory needed)
+  PRAGMA journal_mode=WAL;
+  PRAGMA locking_mode=EXCLUSIVE;  -- no shm file; one owner only
+  PRAGMA synchronous=NORMAL;
+  PRAGMA temp_store=MEMORY;
+[check] journal_mode=WAL returned 'wal': OK
+[check] page_size is 4096 (default block): OK
+[check] synchronous=NORMAL encodes as 1: OK
+[check] cache_size -8000 => negative=kibibyte form: OK
+[check] temp_store=MEMORY encodes as 2: OK
+[check] foreign_keys enabled (1): OK
+
+========================================================================
+  SECTION C: day 1 - tables, indexes, EXPLAIN QUERY PLAN, FTS5, JSON
+========================================================================
+(1) CREATE TABLE - SQLite storage classes & the rowid alias
+
+  PRAGMA table_info(users):
+  cid  name   type     notnull  dflt  pk
+    0  id     INTEGER       0   None   1
+    1  name   TEXT          1   None   0
+    2  email  TEXT          0   None   0
+    3  score  REAL          0   0      0
+    4  bio    TEXT          0   None   0
+
+  Note 'id' has pk=1. Because it is INTEGER PRIMARY KEY it IS the
+  rowid (not a separate column) - a row lookup by id is a B+tree key
+  search, the fastest path in SQLite.
+
+(2) INSERT batch - 1000 rows via executemany (deterministic LCG data)
+  inserted 1000 rows (executemany + commit).
+  timed: 0.6 ms (machine-dependent - NOT a verified value)
+  Tip: executemany() batches in one trip; wrap many inserts in ONE
+  transaction (autocommit off) or a write is fsync'd per row.
+
+(3) CREATE INDEX - b-tree index, covering index, expression index
+
+  PRAGMA index_list(users):
+    idx_users_lower      unique=0 origin=c partial=0
+    idx_users_cov        unique=0 origin=c partial=0
+    idx_users_score      unique=0 origin=c partial=0
+    sqlite_autoindex_users_1 unique=1 origin=u partial=0
+
+  idx_users_score  : a B-tree on score (speeds WHERE/range on score).
+  idx_users_cov    : INCLUDES name, so SELECT score,name can be answered
+                     FROM THE INDEX ALONE (a covering index, no table read).
+  idx_users_lower  : an EXPRESSION index on lower(email) - lets a
+                     case-insensitive WHERE lower(email)=? use an index.
+
+(4) EXPLAIN QUERY PLAN - the 3 access patterns you must recognize
+
+  A. full scan (no index on bio):
+     SELECT id,bio FROM users WHERE bio LIKE '%sqlite%'
+     -> SCAN users
+     SCAN = reads EVERY row. On 1000 rows that is 1000 rows examined.
+
+  B. index search (idx_users_score):
+     SELECT id FROM users WHERE score=4.17
+     -> SEARCH users USING COVERING INDEX idx_users_score (score=?)
+     SEARCH USING INDEX = descends the index B-tree to matching keys.
+
+  C. covering index (idx_users_cov) - index-only scan:
+     SELECT score,name FROM users WHERE score BETWEEN 10 AND 20
+     -> SEARCH users USING COVERING INDEX idx_users_cov (score>? AND score<?)
+     COVERING INDEX = the index has every column the query needs, so
+     the table is never touched (no 'rowid' lookup per match).
+
+(5) scan vs index - cost shown by the PLAN, not a stopwatch
+
+  10,000 rows, WHERE kind='c'  (no index on kind):
+     -> SCAN events
+     matches=2016, but the engine examines ALL 10,000 rows.
+  after CREATE INDEX idx_events_kind(kind):
+     -> SEARCH events USING INDEX idx_events_kind (kind=?)
+     now only ~2016 rows are fetched via the index. A SCAN -> SEARCH
+     flip in EXPLAIN QUERY PLAN is the real signal an index helped.
+
+(6) FTS5 - full-text search with MATCH + bm25 ranking
+
+  CREATE VIRTUAL TABLE docs USING fts5(title, body);
+  query: SELECT title,rank FROM docs WHERE docs MATCH 'sqlite OR wal'
+         ORDER BY rank;   -- rank sorts by bm25 relevance (smaller=better)
+     doc5   rank=-1.064
+     doc0   rank=-1.022
+     doc9   rank=-1.022
+     doc10  rank=-1.022
+     doc4   rank=-0.983
+     doc1   rank=-0.947
+  FTS5 builds an inverted index (term -> rowids). MATCH is far faster
+  than LIKE '%x%' on large text. highlight()/snippet()/bm25() are built-in.
+
+(7) JSON - store JSON in a TEXT column, query + index a path
+
+  stored JSON: {"feature":"a","version":4,"enabled":false}
+  json_extract(payload,'$.version') -> 4
+  CREATE INDEX idx_cfg_ver ON config(json_extract(payload,'$.version'));
+  SELECT id FROM config WHERE json_extract(payload,'$.version')=5
+     -> SEARCH config USING COVERING INDEX idx_cfg_ver (<expr>=?)
+  JSON is built into modern SQLite (no separate extension). Indexing an
+  expression (here a json path) makes filtered JSON reads index-backed.
+
+(8) UPDATE/DELETE - and WAL keeps old readers consistent
+
+  user 1 score: 19.27 -> 1019.27 (UPDATE); user 2 now present=0 (DELETE).
+  Under WAL, a reader that started before this commit still sees the OLD
+  values - changes live in the -wal file until a checkpoint merges them.
+
+[check] inserted exactly 1000 users: OK
+[check] plan A is a SCAN (no index on bio): OK
+[check] plan B is an index SEARCH: OK
+[check] plan C uses a COVERING index: OK
+[check] events scan becomes a SEARCH after indexing kind: OK
+[check] FTS5 MATCH returned ranked hits: OK
+[check] json_extract read $.version: OK
+
+========================================================================
+  SECTION D: day 2 - concurrency, backup, litestream, migration
+========================================================================
+(1) Concurrency model - WAL = many readers + exactly ONE writer
+
+  rollback journal (DELETE mode): a writer EXCLUSIVE-locks the file;
+  readers wait. Only one connection does anything at a time.
+
+  WAL mode: writers append to the -wal file; readers read the main file
+  (+ the part of the WAL up to their snapshot). So:
+     * readers NEVER block writers
+     * writers NEVER block readers
+     * but there is only ever ONE writer (others get SQLITE_BUSY)
+
+  reader saw 500 rows before AND 500 during an uncommitted write
+     (snapshot isolation: the reader's view is frozen at txn start).
+
+(2) BEGIN IMMEDIATE vs BEGIN DEFERRED - when the write lock is taken
+
+  BEGIN DEFERRED  (default): starts a READ txn lazily. The lock is only
+    upgraded to a write lock on the FIRST write. Risk: two transactions
+    both read, then both try to write -> one gets SQLITE_BUSY at COMMIT
+    (after doing all its work). Good for read-mostly, bad for write races.
+
+  BEGIN IMMEDIATE: grabs the RESERVED/write lock IMMEDIATELY at BEGIN. If
+    another writer is active you find out NOW (SQLITE_BUSY), before any
+    work. Use this whenever the transaction WILL write, to fail fast and
+    let busy_timeout retry cleanly.
+
+  BEGIN EXCLUSIVE: same as IMMEDIATE under WAL mode.
+
+(3) Simulated write contention - the second writer gets SQLITE_BUSY
+
+  w2 got: OperationalError: database is locked
+  Fix: set PRAGMA busy_timeout=N (retry N ms), or retry the txn in a loop,
+  or use BEGIN IMMEDIATE so the contention surfaces at the start.
+  Practical max concurrent WRITERS = 1. Concurrent READERS: effectively
+  unbounded (limited by file descriptors / OS).
+
+(4) Backup - online backup API + plain file copy
+
+  conn.backup(dst) copied the live db page-by-page -> 16,384 B.
+  The Online Backup API is SAFE while the db is in use (it follows WAL).
+  Plain file copy also works if you checkpoint + quiesce first:
+
+     PRAGMA wal_checkpoint(TRUNCATE);
+     cp app.db app.db.bak   # main file only, after the wal is folded in
+
+  estimate for a 1 GB db = 262,144 pages (@4096 B) copied in
+  ~5.1 s at 200 MB/s sequential I/O (illustrative).
+
+(5) Litestream - continuous WAL replication to S3 (RPO ~1 s)
+
+  Litestream runs as a SEPARATE sidecar process alongside your app. It
+  tails the -wal file and ships new frames to object storage on an
+  interval (default ~1 s). On disaster you 'litestream restore' a fresh
+  replica. RPO (recovery point objective) ~= the sync interval ~ 1 s.
+
+  Why it works: SQLite is one file, WAL is append-only -> shipping the WAL
+  is exactly shipping committed transactions. No trigger/binlog rigging.
+
+  litestream.yml (sketch):
+
+     dbs:
+       - path: /var/app/app.db
+         replicas:
+           - type: s3
+             bucket: my-db-backups
+             path:   app.db
+             sync-interval: 1s   # controls RPO
+
+(6) When to migrate from SQLite to PostgreSQL
+
+  +---------------------------------------+----------------+
+  | requirement                           | stay SQLite?   |
+  +---------------------------------------+----------------+
+  | >1 concurrent writer (writes overlap) | NO -> Postgres |
+  | clients on DIFFERENT hosts (network)  | NO -> Postgres |
+  | data > ~1 TB on one host              | maybe Postgres|
+  | built-in streaming replication / HA   | NO -> Postgres |
+  | advanced planner / parallel queries   | NO -> Postgres |
+  | fine-grained users / roles / GRANT    | NO -> Postgres |
+  | app/device-local, read-mostly, <1 TB  | YES (SQLite)   |
+  | zero-admin embedded / edge            | YES (SQLite)   |
+  +---------------------------------------+----------------+
+
+  Migration checklist:
+    1. dump schema:    sqlite3 app.db .schema > schema.sql
+    2. fix dialect:    INTEGER PRIMARY KEY -> SERIAL/BIGSERIAL;
+                       PRAGMA pragmas removed; -> / ->> become json ops
+    3. export data:    sqlite3 app.db .dump > data.sql  (or CSV per table)
+    4. load:           psql -f schema.sql && psql -f data.sql
+    5. move writes:    point app at Postgres (one writer -> many writers)
+    6. cutover + keep  the SQLite file as a cold backup.
+
+[check] WAL reader stays on its snapshot during an uncommitted write: OK
+[check] second concurrent writer hit SQLITE_BUSY: OK
+[check] backup file was created and is non-empty: OK
+[check] 1 GB db estimate = 262144 pages: OK
+
+========================================================================
+  SECTION E: storage & limits - the math of one file
+========================================================================
+SQLite's limits come from fixed-size integers in the file format:
+
+| limit                  | value                          | note                       |
+|------------------------|--------------------------------|----------------------------|
+| max string / BLOB      | 1,000,000,000 bytes (~1 GB)     | SQLITE_MAX_LENGTH          |
+| max columns per table  | 2000                   | up to 32767 compile-time   |
+| max pages              | 4,294,967,294 (2^32-2)         | SQLITE_MAX_PAGE_COUNT      |
+| max db size @65536 pg  | 281,474,976,579,584 B (~281 TB) | 65536 * max_pages          |
+| max db size @4096 pg   | 17,592,186,036,224 B (~17.5 TB)| default page_size          |
+| max rows per table     | 2^64 (theoretical)             | 281 TB is hit first        |
+| max attached databases | 10 (125 hard max)              | ATTACH                     |
+| page_size options      | 512 .. 65536 (powers of 2)     | default 4096               |
+
+  Storage identity:  database file size = page_size * page_count.
+
+  built a table of 10,000 rows x 5 columns, then measured:
+
+     page_size      = 4096 B
+     page_count     = 103  (0 on the freelist)
+     file on disk   = 421,888 B
+     page_size*page_count = 421,888 B == file size: yes
+     bytes/row      ~ 42.2
+
+  project 1,000,000 rows of the same 5-column shape:
+     ~42.2 B/row * 1,000,000 / 4096 -> ~10,300 pages
+     -> ~42,188,800 B (40.2 MB) on disk.
+  (Real size grows with indexes too; this is the heap table only.)
+
+  WAL growth: in WAL mode the -wal file grows as pages are appended and
+  is folded back into the main file by a CHECKPOINT. Auto-checkpoint fires
+  when the WAL reaches ~1000 pages (~4 MB at 4096-byte pages). A long-lived
+  reader can block a checkpoint and let the WAL grow - mind reader gaps.
+
+[check] file size == page_size * page_count (storage identity): OK
+[check] 10k-row table is non-trivially sized: OK
+[check] max db bytes = 65536 * 4294967294: OK
+
+========================================================================
+  SECTION F: performance - when SQLite beats Postgres (and when not)
+========================================================================
+There is no universal winner. The right question is: 'does my workload
+need a server, or an embedded library?'
+
+SQLite WINS when:
+  * embedded / app-local db - no IPC, no server overhead, zero admin
+  * read-heavy (e.g. 100:1 read:write) - readers are raw file + mmap
+  * small-to-medium data (< ~1 TB on one host)
+  * single writer (or write contention serialized through one queue)
+  * you want a portable, versionable, emailable FILE as the database
+
+PostgreSQL WINS when:
+  * many concurrent writers - MVCC gives real parallel writes; SQLite = 1
+  * client-server topology (clients on other hosts over the network)
+  * complex analytics - a sophisticated planner + parallel query
+  * built-in streaming replication / hot standby / high availability
+  * fine-grained auth, roles, row-level security
+
+Illustrative relative timings (ratios, not measured absolutes; SQLite
+pays NO server/IPC cost so it leads on local single-process work):
+
+| workload                         | SQLite   | Postgres | winner    |
+|----------------------------------|----------|----------|-----------|
+| single-row PK lookup (in-process)|  ~1x     |  ~3-5x   | SQLite    |
+| bulk INSERT (1 txn)              |  ~1x     |  ~1-2x   | tie/SQLite|
+| read-only scan, 1 conn           |  ~1x     |  ~2x     | SQLite    |
+| 100 concurrent writers           |  serial  |  parallel| Postgres  |
+| cross-host clients               |  N/A     |  yes     | Postgres  |
+| full-text search                 |  FTS5    |  ts/GIN  | both ok   |
+  (Absolute ms depend on hardware; the DIRECTION is what matters.)
+
+[check] SQLite has no IPC overhead (in-process): OK
+[check] SQLite caps concurrent writers at 1: OK
+
+========================================================================
+  SECTION G: use cases & ecosystem
+========================================================================
+Where SQLite is the RIGHT choice (it is in billions of devices):
+
+| use case              | why SQLite                                   | example apps            |
+|-----------------------|----------------------------------------------|------------------------|
+| app-local database    | ships in the app, no server to run           | iOS/Android apps       |
+| desktop apps          | one file, zero config, ACID                  | browsers, editors      |
+| analytics / OLAP      | read a file, big cache+mmap; (DuckDB cousin) | ad-hoc data files      |
+| testing               | fast, disposable, file-per-test              | CI test databases      |
+| edge / IoT            | tiny footprint, embedded                     | routers, sensors       |
+| configuration storage | ACID replacement for JSON/INI                | tools, daemons         |
+| application file fmt  | a .sqlite file IS the document               | design/finance files   |
+| website (read-mostly) | litestream-backed, single-node               | docs sites, blogs      |
+
+Ecosystem:
+  DB Browser for SQLite - GUI to browse/edit a .db file
+  litestream            - continuous WAL -> S3/GCS/Azure replication
+  rqlite                - Raft consensus over SQLite -> HA, multi-node
+  dqlite                - distributed SQLite (Raft), by Canonical
+  Turso / libSQL        - SQLite fork with edge replication + HTTP API
+  DuckDB                - SQLite's analytical cousin (columnar, OLAP)
+
+One-line summary:
+  SQLite = the zero-server, one-file, ACID database. Use it for
+  embedded/app-local, read-mostly, single-writer workloads; reach for
+  PostgreSQL only when you need many writers, network clients, or HA.
+
+[check] use-case table present (>=6 rows): OK
+[check] ecosystem lists litestream + rqlite + dqlite + Turso: OK
+
+========================================================================
+  GOLD CHECK: max database size = 65536 * 4294967294 (recomputed in JS)
+========================================================================
+  MAX_PAGE_SIZE     = 65536
+  MAX_PAGES (2^32-2)= 4,294,967,294
+  gold bytes        = 281,474,976,579,584
+                   ~= 281.5 terabytes (decimal)
+  This is the SAME formula sqlite.html recomputes in JS to badge
+  [check: OK]. If the badge turns red, the JS drifted from the runnable.
+[check] gold value 65536*4294967294 == 281474976579584: OK
+[check] gold value ~= 281 TB (decimal): OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

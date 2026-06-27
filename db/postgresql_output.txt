@@ -1,0 +1,461 @@
+postgresql.py - ground truth for POSTGRESQL.md. stdlib only.
+Run: python3 postgresql.py
+Seeded LCG (seed=20240601). Deterministic. No wall-clock, no network.
+
+========================================================================
+  SECTION A: PostgreSQL Architecture -- process model + memory + storage
+========================================================================
+PostgreSQL is a multi-process server. One 'postgres' server process
+(historically 'postmaster') is the parent of everything: it allocates
+shared memory, launches the background workers, and forks a dedicated
+BACKEND process for every client connection. Default port: 5432.
+
+Process model (verified: postgresql.org docs + InterDB ch.2):
+  component                         role                                                      configurable param
+  ------------------------------------------------------------------------------------------------------------------------
+  postgres (postmaster)             parent of all; accepts connections, forks backends        port=5432, max_connections=100 (default)
+  backend (per connection)          parses/plans/executes SQL for ONE client session          max_connections=100
+  checkpointer                      writes all dirty shared buffers to disk at each checkpointcheckpoint_timeout, max_wal_size
+  background writer                 trickles dirty buffers out between checkpoints            bgwriter_delay=200ms, bgwriter_lru_maxpages=100
+  walwriter                         flushes WAL records from WAL buffer to WAL segment files  wal_buffers, commit_synchronous
+  autovacuum launcher               spawns autovacuum workers to VACUUM/ANALYZE tables        autovacuum=on, autovacuum_naptime=1min
+  logical replication launcher      starts apply workers for subscriptions                    max_logical_replication_workers
+  stats collector / stats           accumulates counters for pg_stat_* views                  track_activities, track_counts
+  logger (logging collector)        writes server messages to log files                       logging_collector
+  archiver                          copies completed WAL segments to archive (PITR)           archive_mode, archive_command
+  walsummarizer (v17+)              writes block-change summaries for incr. backup            summarize_wal
+  io worker (v18+)                  offloads async I/O from backends                          io_method, io_workers=3
+
+Memory architecture (postgresql.org docs 19.4.1 -- defaults):
+  parameter                       default                               role
+  ----------------------------------------------------------------------------------------------------------------------
+  shared_buffers                  128MB                                 shared page cache for ALL backends; 25% of RAM recommended
+  wal_buffers                     min(-1=>1/32 shared_buffers, 16MB)    WAL write buffer before flush
+  work_mem                        4MB                                   per-sort / per-hash memory BEFORE spilling to disk
+  hash_mem_multiplier             2.0                                   hash ops may use work_mem * this
+  maintenance_work_mem            64MB                                  VACUUM / CREATE INDEX / ADD FOREIGN KEY
+  autovacuum_work_mem             -1 (= maintenance_work_mem)           per autovacuum worker
+  temp_buffers                    8MB                                   session-local cache for temp tables
+  logical_decoding_work_mem       64MB                                  logical replication decode buffer
+  effective_cache_size            4GB                                   HINT to planner: OS cache + shared_buffers
+
+Storage layout (data directory, a.k.a. PGDATA):
+  base/            heap + index files per database (8KB pages)
+  global/          cluster-wide catalog tables
+  pg_wal/          WAL segment files (default 16MB each)
+  pg_xact/         commit status (committed/aborted) per transaction
+  pg_multixact/    shared-row-lock metadata
+  pg_commit_ts/    commit timestamps (if track_commit_timestamp)
+  pg_stat/         persistent stats (PG14+; was a file before)
+  pg_tblspc/       symlinks to tablespaces (alternative storage)
+  page (block) size = 8192 B = 8 KB (BLCKSZ, compiled in)
+  WAL segment size  = 16 MB (default, initdb --wal-segsize)
+[check] page size 8KB == 8192: OK
+[check] default shared_buffers 128MB: OK
+[check] default max_connections 100: OK
+
+========================================================================
+  SECTION B: Day 0 -- install, configure, create database
+========================================================================
+Install (pick one):
+
+  # Docker (fastest, reproducible):
+    docker run --name pg -e POSTGRES_PASSWORD=secret \
+        -p 5432:5432 -d postgres:16
+  # Debian/Ubuntu (apt):
+    sudo apt install -y postgresql postgresql-contrib
+    sudo -u postgres initdb -D /var/lib/postgresql/data   # if needed
+  # macOS (Homebrew):
+    brew install postgresql@16
+    brew services start postgresql@16
+  # then connect: psql -h localhost -U postgres -d postgres
+
+Recommended postgresql.conf for three RAM sizes (dedicated server):
+Rules: shared_buffers=25% RAM, effective_cache_size=75% RAM,
+wal_buffers=min(shared_buffers/32, 16MB), max_connections=100.
+
+  setting                         4GB server     16GB server     64GB server
+  --------------------------------------------------------------------------
+  shared_buffers                      1024MB          4096MB         16384MB
+  effective_cache_size                3072MB         12288MB         49152MB
+  maintenance_work_mem                 205MB           819MB          2048MB
+  wal_buffers                           16MB            16MB            16MB
+  work_mem                            10.2MB          41.0MB         163.8MB
+  max_connections                        100             100             100
+
+Worked example (16GB server):
+  shared_buffers       = 25% * 16384MB = 4096MB
+  effective_cache_size = 75% * 16384MB = 12288MB
+  maintenance_work_mem = min(5%*16384, 2048) = min(819, 2048) = 819MB
+  wal_buffers          = min(4096/32, 16) = 128MB -> 16MB (capped)
+  work_mem             = (16384-4096)/(100*3) = 40.96MB -> 41.00MB
+
+Create database + user + grant privileges:
+
+  -- run as the postgres superuser
+  CREATE ROLE app_user WITH LOGIN PASSWORD 'change_me';
+  CREATE DATABASE appdb OWNER app_user ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+  GRANT ALL PRIVILEGES ON DATABASE appdb TO app_user;
+  -- then connect to appdb and grant schema/object rights:
+  \c appdb
+  GRANT ALL ON SCHEMA public TO app_user;
+
+Verify the server is up and reachable:
+
+  pg_isready -h localhost -p 5432      # 'accepting connections'
+  psql -h localhost -U app_user -d appdb -c 'SELECT version();'
+  # expected: PostgreSQL 16.x on x86_64 ...
+
+pg_hba.conf basics (host-based authentication):
+  # TYPE  DATABASE  USER       ADDRESS          METHOD
+  local   all       all                         peer       # local socket
+  host    all       all        127.0.0.1/32     scram-sha-256
+  host    all       all        10.0.0.0/8       scram-sha-256
+  # reload after edit: SELECT pg_reload_conf();
+[check] 16GB shared_buffers == 4096MB: OK
+[check] 16GB effective_cache_size == 12288MB: OK
+[check] 16GB wal_buffers capped to 16MB: OK
+[check] 64GB maintenance_work_mem capped to 2048MB: OK
+[check] 4GB shared_buffers == 1024MB: OK
+
+========================================================================
+  SECTION C: Day 1 -- tables, indexes, queries, VACUUM
+========================================================================
+1) CREATE TABLE -- pick types for the access pattern:
+
+  CREATE TABLE orders (
+      id           BIGSERIAL PRIMARY KEY,            -- 8B; seq-assigned
+      customer_id  BIGINT      NOT NULL,             -- FK target
+      amount       NUMERIC(12,2) NOT NULL,           -- exact decimal money
+      status       TEXT        NOT NULL CHECK (status IN ('new','paid','shipped','cancelled')),
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),-- store UTC; timestamptz
+      metadata     JSONB       NOT NULL DEFAULT '{}',-- schema-flex, GIN-indexable
+      tags         TEXT[]                             -- array of labels
+  );
+  -- NUMERIC not float for money (no rounding error).
+  -- TIMESTAMPTZ not TIMESTAMP: stores UTC, displays in session tz.
+  -- JSONB not JSON: binary, GIN-indexable, no whitespace preserved.
+
+2) Seed 1M rows (simulated; in practice use COPY not 1M INSERTs):
+
+  table now holds 1,000,000 rows in ~100,000 heap pages (781MB).
+
+3) Index for the access patterns (create AFTER bulk load):
+
+  -- B-tree (default) for equality + range on customer_id:
+  CREATE INDEX idx_orders_customer ON orders(customer_id);
+  -- partial index: only 'new' orders are hot, so index just those:
+  CREATE INDEX idx_orders_new ON orders(customer_id) WHERE status = 'new';
+  -- GIN for JSONB containment queries (->> @> ?):
+  CREATE INDEX idx_orders_meta ON orders USING GIN (metadata);
+  -- BRIN on the append-only created_at column (tiny, ordered on disk):
+  CREATE INDEX idx_orders_created ON orders USING BRIN (created_at);
+
+4) EXPLAIN ANALYZE -- three plans, same table, different selectivity.
+
+   Cost model: seq_page_cost=1.0  random_page_cost=4.0  cpu_tuple=0.01
+
+   Q1  SELECT count(*) FROM orders WHERE amount > 10;
+       selectivity ~ 0.45 (nearly half the table matches)
+   ->  Seq Scan on orders  (cost=0.00..110000.00 rows=450000 width=8)
+         Filter: (amount > 10)
+   Planning Time: 0.18 ms   Execution Time: 110.0 ms
+
+   Q2  SELECT * FROM orders WHERE id = 874313;
+       selectivity = 1/1,000,000 = 0.0000010 (one row)
+       PK B-tree height = 3 (descent reads 3 index pages)
+   ->  Index Scan using orders_pkey on orders  (cost=0.42..16.01 rows=1 width=124)
+         Index Cond: (id = 874313)
+   Planning Time: 0.09 ms   Execution Time: 0.14 ms
+
+   Q3  SELECT * FROM orders WHERE customer_id BETWEEN 5000 AND 5200;
+       selectivity ~ 0.01 (~10,000 rows scattered across pages)
+   ->  Bitmap Heap Scan on orders  (cost=3780.00..6300.00 rows=10000 width=124)
+         Recheck Cond: (customer_id >= 5000) AND (customer_id <= 5200)
+         ->  Bitmap Index Scan on idx_orders_customer
+               Index Cond: (customer_id >= 5000) AND (customer_id <= 5200)
+   Planning Time: 0.21 ms   Execution Time: 63.0 ms
+
+   Planner choice rule of thumb (the cost crossover):
+     * sel ~ 1/N (point)    -> index scan wins  (idx cost 16.01 << seq 110000.00)
+     * sel ~ 1%             -> bitmap scan wins  (bmp 6300 < seq 110000 for scattered matches)
+     * sel ~ 45%+             -> seq scan wins (cheaper to read all once than jump around)
+   The crossover sits near ~5-10% selectivity on HDD-cost assumptions; lower random_page_cost on SSD pushes it higher.
+
+5) UPDATE creates DEAD TUPLES (MVCC): an UPDATE = INSERT new + DELETE old.
+
+   after 50,000 UPDATEs on a 1,000,000-row table:
+     live tuples  = 1,000,000    (unchanged)
+     dead tuples  = 50,000    (old versions not yet reclaimed)
+     table bloat  ~ 5,000 extra pages (39MB)
+     n_dead_tup   (pg_stat_user_tables) = 50,000
+
+   VACUUM ANALYZE orders;   -- reclaims dead tuples, refreshes stats
+     live tuples  = 1,000,000
+     dead tuples  = 0    (reclaimed -> pages reusable for new inserts)
+     NOTE: VACUUM marks space REUSABLE but does NOT shrink the file;
+           only VACUUM FULL (which locks the table) returns space to the OS.
+
+Autovacuum tuning (default thresholds, postgresql.org docs 19.11):
+   table size N              = 1,000,000
+   VACUUM triggers when dead > 50 + 0.2*1,000,000 = 200,050
+   ANALYZE triggers when ins/upd/del > 50 + 0.1*1,000,000 = 100,050
+   autovacuum_naptime        = 60s (checks each DB roughly this often)
+   -> on a 1,000,000-row table, ~200,050 dead tuples must pile up
+      before autovacuum acts. For hot UPDATE tables, lower the scale factor:
+      ALTER TABLE orders SET (autovacuum_vacuum_scale_factor = 0.05);
+[check] PK B-tree height for 1M rows is 3: OK
+[check] point index scan cost < seq scan cost: OK
+[check] seq scan cost = pages*1.0 + tuples*0.01: OK
+[check] dead tuples accumulate 1:1 with UPDATEs: OK
+[check] VACUUM zeroes dead tuples: OK
+[check] autovacuum trigger for 1M rows = 200050: OK
+
+========================================================================
+  SECTION D: Day 2 -- replication, partitioning, pooling, backup, extensions
+========================================================================
+Streaming replication -- primary ships WAL records to replicas in real time.
+
+  -- on the PRIMARY (postgresql.conf):
+    wal_level = replica
+    max_wal_senders = 10
+    synchronous_commit = on              # or 'remote_apply' for read-your-write
+  -- on the PRIMARY (pg_hba.conf): allow the replica's address with 'replication'
+    host replication replicator 10.0.0.11/32  scram-sha-256
+  -- on the REPLICA (after pg_basebackup):
+    primary_conninfo = 'host=10.0.0.10 port=5432 user=replicator'
+    hot_standby = on                      # allow read queries on replica
+  -- seed the replica with a base backup:
+    pg_basebackup -h 10.0.0.10 -U replicator -D /var/lib/pg/data -P -R
+
+  WAL-rate math (write rate = 50 MB/s, segment = 16 MB):
+    segments/s   = 50.0/16 = 3.12
+    segments/min = 187.5
+    daily WAL    = 50 * 86400 = 4320000 MB = 4218.8 GB/day
+  replica lag if network (45 MB/s) < write rate (50 MB/s):
+    backlog = 50-45 = 5.0 MB/s
+    after 1h = 18000 MB = 17.58 GB behind
+
+Logical replication -- row-level pub/sub; selective, cross-version.
+
+  -- PRIMARY: publish one table (or a column subset, or a WHERE filter)
+    CREATE PUBLICATION orders_pub FOR TABLE orders WHERE (status <> 'cancelled');
+  -- SUBSCRIBER: create the matching table, then subscribe
+    CREATE SUBSCRIPTION orders_sub
+      CONNECTION 'host=10.0.0.10 port=5432 user=repl'
+      PUBLICATION orders_pub;
+  -- difference from streaming: logical ships DECODED row changes (INSERT/UPDATE/DELETE),
+    not raw WAL bytes. Cross-major-version, cross-platform, table-selective;
+    cannot replicate schema changes or TRUNCATE-by-default (PG13+ can).
+
+Declarative partitioning -- split a big table; the planner PRUNES partitions.
+
+  CREATE TABLE orders (
+      id           BIGSERIAL,
+      customer_id  BIGINT NOT NULL,
+      amount       NUMERIC(12,2) NOT NULL,
+      created_at   TIMESTAMPTZ NOT NULL
+  ) PARTITION BY RANGE (created_at);
+  -- one partition per month:
+  CREATE TABLE orders_2025_01 PARTITION OF orders
+      FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
+  -- ...repeat for 12 months...
+  CREATE TABLE orders_2025_12 PARTITION OF orders
+      FOR VALUES FROM ('2025-12-01') TO ('2026-01-01');
+  -- HASH (distribute by key) and LIST (by discrete value) also supported:
+
+  Partition PRUNING payoff (table = 999,999,996 rows over 12 months):
+    full scan          : scans all 12 partitions = 99,999,996 pages = 763GB
+    WHERE month=2025-07: prunes to 1 partition = 8,333,333 pages = 64GB
+    reduction          : 12x fewer pages scanned
+  (Hash partitioning only prunes on equality; Range on <,<=,=,>=,>.)
+  DROP old data cheaply: DROP TABLE orders_2023_01; -- instant, no VACUUM.
+
+PgBouncer -- connection pooling. PostgreSQL forks a backend PER connection;
+thousands of idle web-app connections exhaust max_connections + RAM. The fix:
+
+  pool_mode = transaction   # assign a server connection only for the txn
+  max_client_conn = 5000    # cheap; clients are lightweight sockets
+  default_pool_size = 25    # server connections per db/user
+
+  with 1000 app connections but only 25 server connections:
+    backend processes on PG = 25  (instead of 1000)
+    multiplexing ratio     = 1000/25 = 40x
+    RAM saved (per backend ~10MB) ~ 9.5 GB
+  CAVEAT: transaction mode breaks session-level features (SET, temp tables,
+  LISTEN/NOTIFY, advisory locks held across transactions). Use session mode
+  if you need them, at the cost of less multiplexing.
+
+Backup -- two families, both essential:
+
+  pg_dump (LOGICAL) -- SQL or custom-format dump; portable, slow on restore.
+    pg_dump -Fc -f appdb.dump appdb        # custom (compressed) format
+    for 100 GB at ~50 MB/s: dump ~ 34m08s; restore ~ 1h42m (indexes rebuilt).
+    restore: pg_restore -j 4 -d appdb appdb.dump   # -j parallel
+
+  pg_basebackup + WAL archive (PHYSICAL) -- byte-exact; enables PITR.
+    pg_basebackup -D /backup/base -F c -z -P     # 34m08s at 50 MB/s
+    enable in postgresql.conf:
+      archive_mode = on
+      wal_level = replica
+      archive_command = 'test ! -f /backup/wal/%f && cp %p /backup/wal/%f'
+    PITR restore target via recovery.signal + restore_command:
+      restore_command = 'cp /backup/wal/%f %p'
+      recovery_target_time = '2025-07-15 14:30:00+00'
+      recovery_target_action = 'promote'
+
+    WAL archive volume at 50 MB/s writes = 4218.8 GB/day (retain per recovery window).
+    pg_verifybackup /backup/base  # validate a backup manifest (PG13+)
+
+Extensions -- CREATE EXTENSION after the files are installed:
+
+  -- pgvector: vector similarity search (AI embeddings)
+    CREATE EXTENSION vector;
+    CREATE TABLE docs (id bigint PRIMARY KEY, embedding vector(1536));
+    CREATE INDEX ON docs USING hnsw (embedding vector_cosine_ops);
+    SELECT id FROM docs ORDER BY embedding <=> $1 LIMIT 10;   -- cosine search
+  -- PostGIS: geospatial (point-in-polygon, distance, routing)
+    CREATE EXTENSION postgis;
+    CREATE TABLE shops (id bigint, loc geography(POINT,4326));
+    SELECT id FROM shops WHERE ST_DWithin(loc, ST_Point(lng,lat,4326), 1000);
+  -- pg_stat_statements: per-query timing/counters (load in shared_preload_libraries)
+    CREATE EXTENSION pg_stat_statements;
+    SELECT query, calls, mean_exec_time, total_exec_time
+      FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
+
+[check] WAL segments/s for 50MB/s = 3.125: OK
+[check] monthly partition reduces scan 12x: OK
+[check] PgBouncer 1000->25 is 40x multiplexing: OK
+[check] 100GB backup at 50MB/s ~ 34.1 min: OK
+
+========================================================================
+  SECTION E: index types -- when to use what
+========================================================================
+PostgreSQL supports six built-in access methods (postgresql.org docs 11.2).
+
+  type     best for      use case                                      build       size     operators
+  ----------------------------------------------------------------------------------------------------------------------------------
+  B-tree   default       equality, range, sort, UNIQUE                 medium      medium   =, <, <=, >=, >, BETWEEN, IS NULL, ORDER BY
+  Hash     small/flat    pure equality only (no range, no sort)        fast        small    = only; NOT crash-safe until PG10; rarely the right pick
+  GIN      large         composite values: arrays, JSONB, full-text tsvectorslow build  large    @>, <@, ?, ?|, ?&, full-text @@; slow to build, fast to query
+  GiST     medium        overlap/containment: geo, range, trigram, kNN medium      medium   &&, <<, >>, <>, fuzzy text (pg_trgm); balanced, not always optimal
+  SP-GiST  sparse        space-partitioned: trie, quadtree, kd-tree    medium      small    non-balanced trees; phone prefixes, IP routing, geo
+  BRIN     huge/ordered  block-range summaries for huge append-only tablesvery fast   tiny     min/max per block range; ~1000x smaller than B-tree, lossy
+
+Worked example: a 10,000,000-row table with a JSONB metadata column.
+  table size          = 10,000,000 rows * 220 B = 2.0GB
+  B-tree (expression ->>'source') ~ 229MB  (supports =, but not containment)
+  GIN   (whole JSONB column)      ~ 763MB  (supports @> containment, ? key, full-text)
+  BRIN (on appended created_at)   ~ 49KB  (range scan; ~4766x smaller than B-tree)
+
+  RECOMMENDATION for JSONB @> queries: GIN. For ->> 'x' = 'y': a B-tree
+  expression index. For range scans on a time-ordered column: BRIN.
+
+Decision tree:
+  equality + range on a scalar?             -> B-tree (the default)
+  containment / key existence in JSONB/array?-> GIN
+  geo / overlap / range types / fuzzy text? -> GiST (or SP-GiST for tries)
+  huge append-only, ordered, range queries? -> BRIN (smallest, lossy)
+  pure equality on a hash-like key?         -> Hash (rare; B-tree usually fine)
+[check] GIN larger than B-tree for whole-JSONB column: OK
+[check] BRIN far smaller than B-tree on appended column: OK
+[check] 6 built-in index types listed: OK
+
+========================================================================
+  SECTION F: performance tuning + cost comparison
+========================================================================
+Top knobs (after shared_buffers / work_mem from Section B):
+
+  setting                     recommended                   why
+  --------------------------------------------------------------------------------------------------------
+  shared_buffers              25% RAM                       the shared page cache; bigger = fewer disk reads
+  effective_cache_size        75% RAM                       planner HINT only; raise it so the planner uses indexes
+  work_mem                    (RAM-shared)/300              per sort/hash; too low = spills to disk (slow)
+  maintenance_work_mem        up to 2GB                     speeds VACUUM and CREATE INDEX
+  wal_buffers                 min(shared_buffers/32, 16MB)  WAL write buffer; rarely needs tuning
+  random_page_cost            1.1 on SSD / 4.0 on HDD       lower on SSD -> planner uses indexes more
+  max_connections             100 + PgBouncer               each backend ~10MB; use a pooler, not 1000 conns
+  checkpoint_timeout          15min                         longer = fewer full-page writes; raise max_wal_size
+  max_wal_size                4GB+                          how much WAL a checkpoint may accumulate
+  autovacuum_max_workers      3 (default)                   more workers = more concurrent cleanup
+  effective_io_concurrency    200 on NVMe / 16 default      parallel prefetch depth
+  jit                         off (OLTP) / on (OLAP)        JIT helps long queries, hurts short ones
+
+Cost comparison -- running a modest Postgres (per the brief's figures):
+  option                        RAM     price     what you get
+  ------------------------------------------------------------------------------------------------------
+  Self-hosted EC2 t3.medium     4 GB    $30/mo    you patch, backup, replicate; full control; cheapest bill
+  RDS db.t4g.medium             4 GB    $60/mo    managed: automated backups, patching, minor-version upgrades, PITR
+  Aurora PostgreSQL             ~scaled $90/mo    storage auto-scales, 6-way/3-AZ replication, up to 15 low-lag replicas
+
+  tradeoff: self-hosted saves money but costs engineering time. RDS/Aurora
+  trade money for not being paged at 3am. Multi-AZ RDS ~2x the single-AZ price.
+  Aurora's storage is shared across replicas -> replicas are cheap and fast.
+  Reserved Instances cut RDS/Aurora ~30-40% for a 1- or 3-year commitment.
+
+[check] RDS 2x self-hosted in the brief's figures: OK
+[check] Aurora most expensive of the three: OK
+[check] 12 top tuning knobs listed: OK
+
+========================================================================
+  SECTION G: monitoring + troubleshooting
+========================================================================
+The five metrics that catch most incidents:
+
+  metric                what it tells you                         query
+  --------------------------------------------------------------------------------------------------------------------------------
+  connection count      active/idle vs max_connections            SELECT count(*), state FROM pg_stat_activity GROUP BY state;
+  cache hit ratio       heap_blks_hit / (hit+read), want > 99%    SELECT sum(heap_blks_hit)/NULLIF(sum(heap_blks_hit+heap_blks_read),0) FROM pg_statio_user_tables;
+  dead tuple count      bloat building up; autovacuum keeping up? SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC;
+  replication lag       bytes or seconds behind primary           SELECT client_addr, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) FROM pg_stat_replication;
+  transaction rate      commits/rollbacks per second              SELECT xact_commit, xact_rollback FROM pg_stat_database WHERE datname='appdb';
+
+Top queries by total time (needs pg_stat_statements):
+  SELECT left(query,80) AS query, calls, round(mean_exec_time::numeric,2) AS mean_ms,
+         round(total_exec_time::numeric,2) AS total_ms
+    FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
+
+Find queries blocking on a lock (lock waits are the #1 'why is it slow'):
+  SELECT pid, state, wait_event_type, wait_event,
+         now() - query_start AS runtime, left(query,80) AS query
+    FROM pg_stat_activity WHERE wait_event_type = 'Lock';
+  -- and who is holding the lock:
+  SELECT blocked.pid     AS blocked_pid,
+         blocking.pid    AS blocking_pid,
+         left(blocking.query,60) AS blocking_query
+    FROM pg_stat_activity blocked
+    JOIN pg_stat_activity blocking
+      ON blocking.pid = ANY (pg_blocking_pids(blocked.pid));
+
+Common issues -> cause -> fix:
+
+  symptom                               cause                                               fix
+  ----------------------------------------------------------------------------------------------------------------------------------------------
+  'too many connections'                app opens a connection per request; max_connections=100 hitadd PgBouncer (transaction mode); lower pool idle timeout
+  slow queries that were fast yesterday stale planner stats after a big UPDATE/DELETE       ANALYZE the table; check autovacuum is running; raise stats target
+  table growing despite VACUUM          bloat: long-running txn pins dead tuples so autovacuum cannot reclaimfind long xacts in pg_stat_activity; kill them; VACUUM (not FULL) after
+  replica lag keeps climbing            write rate > replica apply rate; or a long query on replicaraise max_standby_streaming_delay; tune autovacuum on replica; add replicas
+  'permission denied' after restore     pg_restore recreates objects owned by a different rolerestore as the owner role; or re-GRANT after restore
+  disk fills up suddenly                pg_wal ballooning: archive_command failing or replica not consumingcheck pg_stat_archiver; fix archive_command; use a replication slot
+  cache hit ratio < 95%                 working set > shared_buffers; or a seq scan blowing the cacheraise shared_buffers; add indexes; EXPLAIN the offending query
+  XID wraparound panic (the scary one)  old unfrozen tuples; autovacuum fell behind on freezingmonitor pg_stat_database.n_dead_tup + age(datfrozenxid); VACUUM FREEZE
+[check] 5 key metrics listed: OK
+[check] 8 common issues documented: OK
+
+========================================================================
+  GOLD CHECK: every headline number recomputed + cross-verified
+========================================================================
+[check] shared_buffers(16GB) = 4096MB: OK
+[check] B-tree height(1M, fanout=256) = 3: OK
+[check] WAL seg/s(50MB/s,16MB) = 3.125: OK
+[check] autovacuum trigger(1M) = 200050: OK
+[check] 100GB/50MB/s = 2048s: OK
+[check] monthly pruning = 1/12: OK
+[check] point idx cost < seq cost: OK
+[check] LCG reseed reproduces sequence: OK
+
+[check] postgresql.py self-consistent:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

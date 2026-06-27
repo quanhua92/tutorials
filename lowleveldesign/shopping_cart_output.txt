@@ -1,0 +1,122 @@
+##############################################################################
+# SHOPPING CART & CHECKOUT -- aggregate, pricing engine, state machine, idempotent checkout
+##############################################################################
+
+==============================================================================
+MONEY & PRODUCT SNAPSHOT -- integer cents + frozen price
+==============================================================================
+
+  Money rule: store integer cents, NEVER float.
+    In IEEE-754:  0.10 + 0.20 == 0.30000000000000004
+    Over 1M orders that is a real ledger drift and a reconciliation headache.
+    MoneyCents(10).plus(MoneyCents(20)) == MoneyCents(30), always.
+
+  snapshot at add time : unit_price = $10.00
+  catalog reprices to  : unit_price = $12.00
+  cart line still sees : unit_price = $10.00  (frozen)
+  [check] OK -- snapshot price is immutable across catalog reprices
+
+==============================================================================
+CART STATE MACHINE -- Empty -> Active -> Checkout -> {Paid, Abandoned}
+==============================================================================
+
+  initial state        : EMPTY
+  add first item       -> ACTIVE
+  add another item     -> ACTIVE
+  begin checkout       -> CHECKOUT
+  payment captured     -> PAID
+
+  full transition table:
+    EMPTY      -> ACTIVE      on add_first_item
+    ACTIVE     -> ACTIVE      on add_or_update_item
+    ACTIVE     -> CHECKOUT    on begin_checkout
+    CHECKOUT   -> PAID        on payment_captured
+    CHECKOUT   -> ACTIVE      on cancel_checkout
+    CHECKOUT   -> ABANDONED   on checkout_timeout
+    ACTIVE     -> ABANDONED   on session_expired
+    ABANDONED  -> ACTIVE      on recover_cart
+
+  illegal EMPTY -> PAID rejected:
+    illegal cart transition: EMPTY -> PAID
+  [check] OK -- illegal transition raised IllegalTransitionError
+
+==============================================================================
+PRICING RULES ENGINE -- BOGO, BulkDiscount, coupons, free shipping
+==============================================================================
+
+  registered rules (Cart knows none of these -- engine owns them):
+    [LINE] BOGO(USB-CABLE,buy1get1)
+    [LINE] BulkDiscount(MOUSE,>=2,10%)
+    [CART] Coupon(SAVE15,-15%)
+    [CART] Coupon(WELCOME5,-$5.00)
+    [CART] FreeShipping(>=$150.00)
+
+  items + coupons=['SAVE15', 'WELCOME5']:
+    LineItem(L01, MOUSE, x2, $100.00)
+    LineItem(L02, USB-CABLE, x4, $40.00)
+
+  subtotal             :    $140.00
+    BOGO(USB-CABLE,buy1get1)               [LINE] -  $20.00
+    BulkDiscount(MOUSE,>=2,10%)            [LINE] -  $10.00
+    Coupon(SAVE15,-15%)                    [CART] -  $16.50
+    Coupon(WELCOME5,-$5.00)                [CART] -   $5.00
+  shipping             :      $8.00
+  TOTAL                :     $96.50  (9650 c)
+  [check] OK -- engine math matches hand-computed 9650
+
+==============================================================================
+COUPON VALIDATION -- accept good, reject unknown + duplicate
+==============================================================================
+  applied SAVE15       : coupons = ['SAVE15']
+  unknown coupon rejected: unknown coupon: DOES_NOT_EXIST
+  duplicate coupon rejected: coupon already applied: SAVE15
+  removed SAVE15       : coupons = []
+  [check] OK -- coupon apply/remove/validation all enforced
+
+==============================================================================
+INVENTORY PORT -- advisory on add, hard reserve at checkout
+==============================================================================
+  added 2x MOUSE       : stock left = 2
+  advisory add blocked : insufficient stock for MOUSE (want 3 total)
+  add in CHECKOUT blocked: cannot add items in state CHECKOUT
+  cancelled checkout   : state = ACTIVE
+  [check] OK -- inventory + state guards enforced
+
+==============================================================================
+IDEMPOTENT CHECKOUT -- replay returns same Order; conflict raises
+==============================================================================
+  submit #1            : Order(ORD-C3, 1 lines, total=$50.50, status=PAID)
+  factory size         : 1
+  cart state           : PAID  (PAID)
+  submit #2 (replay)   : Order(ORD-C3, 1 lines, total=$50.50, status=PAID)
+  factory size         : 1  (no duplicate Order)
+  key reuse w/ diff body rejected: idempotency key 'idem-abc' reused with different body
+  [check] OK -- exactly-once Order creation enforced
+
+==============================================================================
+FULL SCENARIO -- add items, apply coupons, price the cart
+==============================================================================
+
+  initial state        : EMPTY
+  after adds           : state = ACTIVE, 4 lines, version = 4
+  coupons applied      : ['SAVE15', 'WELCOME5']
+  subtotal             :    $335.00  (33500 c)
+    BOGO(USB-CABLE,buy1get1)               [LINE] L03   -  $20.00
+    BulkDiscount(MOUSE,>=2,10%)            [LINE] L01   -  $10.00
+    Coupon(SAVE15,-15%)                    [CART] CART  -  $45.75
+    Coupon(WELCOME5,-$5.00)                [CART] CART  -   $5.00
+    FreeShipping(>=$150.00)                [SHIP] CART  (waive)   $8.00
+  line discounts       :     $30.00  (-)
+  cart discounts       :     $50.75  (-)
+  shipping             :      $0.00  (+)
+  --------------------------------------------
+  TOTAL                :    $254.25  (25425 c)
+
+==============================================================================
+GOLD CHECK  (recomputed by shopping_cart.html in JS)
+==============================================================================
+  breakdown.signature() = 33500,3000,5075,0,25425
+  breakdown.total       = 25425 cents  ($254.25)
+  [check] OK
+
+[check] OK -- all sections ran

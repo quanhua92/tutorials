@@ -1,0 +1,124 @@
+##############################################################################
+# RATE LIMITER (LLD) -- Strategy pattern, thread safety, swappable algorithms (pure stdlib)
+##############################################################################
+
+==============================================================================
+THE STRATEGY PATTERN -- one interface, three interchangeable policies
+==============================================================================
+
+  The caller asks ONE question: "may this key proceed right now?" Three
+  algorithms answer it differently, but the call site never changes:
+
+      limiter = RateLimiterFactory.create("token_bucket", clock, ...)
+      limiter.allow("user:42")      # <-- identical call for every policy
+
+  Swapping the algorithm is a one-line config change. The Decision that comes
+  back is a plain value object, so it can be logged or compared across
+  policies without knowing which one produced it.
+  token_bucket     allow('k') -> Decision(allow, remaining=2)
+  sliding_window   allow('k') -> Decision(allow, remaining=2)
+  fixed_window     allow('k') -> Decision(allow, remaining=2)
+  [check] OK -- all three policies accept the first request
+
+==============================================================================
+TOKEN BUCKET -- burst drains, then refills continuously
+==============================================================================
+
+  capacity = 3, refill_rate = 1 token/sec. The bucket starts full, so the
+  first three requests pass as a burst. The fourth is denied and told to
+  retry in 1000ms (exactly one token's worth of refill). Half a second later
+  the bucket is half-full -- still a deny, but retry drops to 500ms.
+  t=0     ms  Decision(allow, remaining=2)            tokens=2.00  (burst #1)
+  t=0     ms  Decision(allow, remaining=1)            tokens=1.00  (burst #2)
+  t=0     ms  Decision(allow, remaining=0)            tokens=0.00  (burst #3)
+  t=0     ms  Decision(DENY, retry_in=1000ms)         tokens=0.00  (burst #4 (bucket empty))
+  t=500   ms  Decision(DENY, retry_in=500ms)          tokens=0.50  (half a second later)
+  t=1500  ms  Decision(allow, remaining=0)            tokens=0.50  (one full token refilled)
+  t=4500  ms  Decision(allow, remaining=2)            tokens=2.00  (long idle -> fully refilled)
+  [check] OK -- burst drained, denied with retry, refill restored budget
+
+==============================================================================
+SLIDING WINDOW LOG -- the window truly slides (no boundary burst)
+==============================================================================
+
+  limit = 3, window = 5000ms. Requests are timestamped into a deque; entries
+  older than (now - 5000) are evicted before each check. The 4th request at
+  t=0 is denied with retry=5000 (must wait for the oldest to age out). Five
+  seconds later the deque has drained and traffic flows again.
+  t=0     ms  Decision(allow, remaining=2)              in_window=1  (req #1)
+  t=0     ms  Decision(allow, remaining=1)              in_window=2  (req #2)
+  t=0     ms  Decision(allow, remaining=0)              in_window=3  (req #3 (window full))
+  t=0     ms  Decision(DENY, retry_in=5000ms)           in_window=3  (req #4 -> DENY)
+  t=4000  ms  Decision(DENY, retry_in=1000ms)           in_window=3  (still full (retry now 1000ms))
+  t=5001  ms  Decision(allow, remaining=2)              in_window=1  (oldest aged out -> window slid)
+  t=5501  ms  Decision(allow, remaining=1)              in_window=2  (second slot opened (first still in window))
+  [check] OK -- deny held until the oldest timestamp exited the window
+
+==============================================================================
+FIXED WINDOW -- the 2x boundary burst exploit (why it is unsafe)
+==============================================================================
+
+  limit = 3, window = 5000ms. The counter resets when window_id rolls over
+  (now // 5000). Three requests at t=4999 fill window 0; three more at t=5000
+  fill window 1. SIX requests passed in a single millisecond -- 2x the limit.
+  An attacker times the boundary; a fixed window cannot stop them. Use token
+  bucket or sliding window on any security-sensitive path.
+  window 0 (t=4999): ['allow', 'allow', 'allow']
+  window 1 (t=5000): ['allow', 'allow', 'allow']
+  total allowed in 1ms straddling the boundary = 6  (limit was 3!)
+  [check] OK -- 2x boundary burst reproduced (the textbook fixed-window flaw)
+
+==============================================================================
+STRATEGY COMPARISON -- one request stream, three policies
+==============================================================================
+
+  The SAME 8-request stream through every policy. Token bucket (cap=3, rate
+  1/s) refills continuously, so it lets the spaced-out requests through once
+  the burst drains. The window policies hold the line until their window
+  resets/slides. 1 = allow, 0 = deny.
+   r1  r2  r3  r4  r5  r6  r7  r8
+  token_bucket  cap=3 rate=1/s  1   1   1   0   1   1   1   1    7/8
+  sliding_window limit=3 win=5s  1   1   1   0   0   0   1   1    5/8
+  fixed_window   limit=3 win=5s  1   1   1   0   0   0   1   1    5/8
+
+  Reading: token bucket is the most permissive under spaced load (continuous
+  refill); the two window policies agree here but diverge under a boundary
+  burst (see the previous section). Pick the algorithm from the workload,
+  not from habit.
+  [check] OK -- three policies ran the same stream via one interface
+
+==============================================================================
+THREAD SAFETY -- per-key lock makes the race atomic
+==============================================================================
+
+  200 concurrent workers each fire 5 requests at the SAME key against a token
+  bucket with capacity = 50 and a frozen clock (so no refill during the test).
+  1000 requests, capacity 50 -> EXACTLY 50 must be allowed, no more. Without
+  per-key locking the read-modify-write races and over-admits; with it the
+  count is exact. Per-key (not global) means unrelated keys never contend.
+  200 workers x 5 requests = 1000 total
+  capacity        = 50
+  allowed (exact) = 50
+  [check] OK -- exactly 50 allowed, 1 per-key lock created, no over-admission across 1000 concurrent requests
+
+==============================================================================
+FACTORY + EXTENSIBILITY -- add an algorithm, touch nothing else
+==============================================================================
+
+  RateLimiterFactory turns a config string into a RateLimiter. To add a new
+  algorithm (e.g. leaky bucket) you write the class and add ONE branch to the
+  factory. RateLimiter, Decision, ThreadSafeRateLimiter, and every existing
+  limiter are untouched. That is the Open/Closed Principle.
+  token_bucket     wrapped -> Decision(allow, remaining=1), Decision(allow, remaining=0), Decision(DENY, retry_in=1000ms)
+  sliding_window   wrapped -> Decision(allow, remaining=1), Decision(allow, remaining=0), Decision(DENY, retry_in=1000ms)
+  fixed_window     wrapped -> Decision(allow, remaining=1), Decision(allow, remaining=0), Decision(DENY, retry_in=1000ms)
+  [check] OK -- unknown kind rejected; three policies composed + wrapped
+
+==============================================================================
+GOLD CHECK  (recomputed by rate_limiter_lld.html in JS)
+==============================================================================
+  tb.allow_flags = 1,1,1,0,0,1,1
+  tb.deny_retries= 1000,500
+  [check] OK
+
+[check] OK -- all sections ran

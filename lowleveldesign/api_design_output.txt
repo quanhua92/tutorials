@@ -1,0 +1,109 @@
+########################################################################
+# REST API DESIGN -- resource naming, HTTP semantics, versioning,
+# pagination, error contracts, idempotency (pure stdlib)
+########################################################################
+
+========================================================================
+=== 01. RESOURCE NAMING -- nouns not verbs, plural collections
+========================================================================
+  ANTI-PATTERN (verbs in the URL):
+    /createOrder                     -> REJECT (segment 'createOrder' is not lowercase)
+    /getUser                         -> REJECT (segment 'getUser' is not lowercase)
+    /deleteProduct                   -> REJECT (segment 'deleteProduct' is not lowercase)
+    /orders/createOrder              -> REJECT (segment 'createOrder' is not lowercase)
+    /listOrdersForUser               -> REJECT (segment 'listOrdersForUser' is not lowercase)
+  REST (nouns; verbs come from the HTTP method):
+    /orders                          -> accept
+    /orders/{id}                     -> accept
+    /orders/{id}/items               -> accept
+    /users/{id}/orders               -> accept
+    /orders/{id}/cancellations       -> accept
+  [check] OK   model resources as nouns; express actions through HTTP methods
+
+========================================================================
+=== 02. HTTP METHOD SEMANTICS -- safe / idempotent / status codes
+========================================================================
+  METHOD   safe   idempotent  success codes         body
+  GET      yes    yes         200                   no
+  POST     no     no          201,202               yes
+  PUT      no     yes         200,204               yes
+  PATCH    no     no          200,204               yes
+  DELETE   no     yes         204                   no
+  HEAD     yes    yes         200                   no
+  OPTIONS  yes    yes         200                   no
+  dispatch over /orders/{id}:
+    GET     read      -> 200 OK  body={"id": "ord_123"}
+    POST    create    -> 201 Created  body={"id": "ord_123"}
+    PUT     replace   -> 200 OK  body={"id": "ord_123"}
+    PATCH   partial   -> 200 OK  body={"id": "ord_123"}
+    DELETE  remove    -> 204 No Content  body=<none>
+  [check] OK   GET/PUT/DELETE idempotent; POST/PATCH not safe; codes align with intent
+
+========================================================================
+=== 03. STATUS CODES -- families 2xx/4xx/5xx mapped to error codes
+========================================================================
+  2xx success        -> 200 OK, 201 Created, 202 Accepted, 204 No Content
+  4xx client error   -> 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 409 Conflict, 422 Unprocessable Entity, 429 Too Many Requests
+  5xx server error   -> 500 Internal Server Error, 503 Service Unavailable
+  error_code -> HTTP status (clients switch on the code, not a string):
+    VALIDATION_FAILED      -> 400 Bad Request
+    RESOURCE_NOT_FOUND     -> 404 Not Found
+    UNAUTHORIZED           -> 401 Unauthorized
+    FORBIDDEN              -> 403 Forbidden
+    CONFLICT               -> 409 Conflict
+    PAYMENT_DECLINED       -> 422 Unprocessable Entity
+    RATE_LIMIT_EXCEEDED    -> 429 Too Many Requests
+    INTERNAL_ERROR         -> 500 Internal Server Error
+  [check] OK   status code aligns with machine-readable error_code (never 200 for errors)
+
+========================================================================
+=== 04. ERROR CONTRACT -- RFC 7807 Problem Details (machine-readable)
+========================================================================
+  HTTP 404 Not Found:
+    {"type": "https://api.example.com/errors/resource_not_found", "title": "Resource Not Found", "status": 404, "detail": "Order ord_123 does not exist.", "instance": "/v1/orders/ord_123"}
+  HTTP 400 Bad Request:
+    {"type": "https://api.example.com/errors/validation_failed", "title": "Validation Failed", "status": 400, "detail": "Field 'amount' must be positive.", "instance": "/v1/payments"}
+  HTTP 429 Too Many Requests:
+    {"type": "https://api.example.com/errors/rate_limit_exceeded", "title": "Rate Limit Exceeded", "status": 429, "detail": "Limit of 1000/min exceeded.", "instance": "/v1/orders"}
+  [check] OK   every error has type/title/status/detail/instance -- clients switch on type
+
+========================================================================
+=== 05. VERSIONING -- URI vs header vs query-param
+========================================================================
+  URI versioning         -> v2  via uri      (path=/v2/orders)
+  Header versioning      -> v2  via header   (path=/orders)
+  Query param            -> v2  via query    (path=/orders)
+  Default (no version)   -> v1  via uri      (path=/orders)
+  rule: v1 is forever -- ship /v1 from day one; maintain both in parallel through a 6-24 month deprecation window before removing v1
+  [check] OK   URI versioning is most practical; header is cleanest; query is simplest
+
+========================================================================
+=== 06. PAGINATION -- offset vs cursor (stability under inserts)
+========================================================================
+  OFFSET: GET /orders?offset=0&limit=2
+    page1 ids = [0, 1]  total=5  has_more=True
+  CURSOR: GET /orders?limit=2  (cursor omitted on first request)
+    page1 ids = [0, 1]  next_cursor=eyJpZCI6IDF9  (encodes id=1)
+  >> INSERT id=99 at index 1 (a new high-priority row jumps the queue)
+  offset page2 (offset=2) ids  = [1, 2]  -> id=1 DUPLICATED, id=99 MISSED
+  cursor page2 (after id=1) ids = [99, 2]  -> stable: no dup, no skip
+  [check] OK   cursor resumes after a value (stable); offset resumes at a position (shifts)
+
+========================================================================
+=== 07. IDEMPOTENCY -- safe retries on POST (Idempotency-Key store)
+========================================================================
+  POST /payments  Idempotency-Key=idem_a1b2c3
+    1st request   -> paid  charge count=1  (executed)
+    retry (same)  -> paid  charge count=1  (cached)
+    retry (diff)  -> 409 Conflict raised? True  (key reused, body drifted)
+  [check] OK   POST + Idempotency-Key: first call charges, retries dedup, drift -> 409
+
+========================================================================
+=== GOLD CHECK  (recomputed by api_design.html in JS)
+========================================================================
+  pagination_cost_ratio(total=100, limit=10)
+    num_pages=10  offset_cost=450  cursor_cost=100
+    ratio(offset/cursor) = 4.5
+  [check] OK
+
+[check] OK -- all 7 topics + gold check demoed

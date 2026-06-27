@@ -1,0 +1,193 @@
+########################################################################
+# DATABASE SCHEMA DESIGN -- ER modeling, normalization (1NF->BCNF),
+# denormalization, indexing strategy (pure stdlib)
+########################################################################
+
+========================================================================
+=== 01. ER MODELING -- entities and relationships
+========================================================================
+  Step 1 of the framework: circle the NOUNS in the requirements ->
+  each strong noun becomes a table; each relationship becomes a FK or junction.
+  ENTITIES:
+    users          (id:PK, email:data)
+    orders         (id:PK, user_id:FK, status:data)
+    order_items    (id:PK, order_id:FK, product_id:FK, quantity:data)
+    products       (id:PK, name:data, price_cents:data)
+  RELATIONSHIPS (cardinality, foreign key, ON DELETE):
+    users     1:N  orders       fk=orders.user_id               ON DELETE RESTRICT never auto-delete a user because of an order
+    orders    1:N  order_items  fk=order_items.order_id         ON DELETE CASCADE  items are OWNED by the order; delete together
+    products  1:N  order_items  fk=order_items.product_id       ON DELETE RESTRICT never lose history of a sold product
+    orders    1:1  payments     fk=payments.order_id UNIQUE     ON DELETE RESTRICT one payment per order
+    orders    M:N  order_items  fk=order_items (junction)       ON DELETE CASCADE  order_items resolves orders <-> products M:N
+  [check] OK   1:N -> FK on N side; M:N -> junction table; 1:1 -> FK + UNIQUE
+
+========================================================================
+=== 02. 1NF -- atomic values (no repeating groups / comma lists)
+========================================================================
+  RULE: every cell holds ONE atomic value. No "Widget,Gizmo" lists.
+  BEFORE -- UNNORMALIZED (items is a multi-valued cell):
+    order_id  customer  items            total
+    --------  --------  ---------------  -----
+    1001      Acme      Widget,Gizmo     70   
+    1002      Globex    Widget           25   
+    1003      Initech   Gizmo,Doohickey  45   
+  VIOLATION: the "items" column holds several products in one cell ->
+  you cannot query "who bought a Widget?" or index products.
+  AFTER 1NF -- one row per (order, item); composite PK = (order_id, item):
+    order_id  customer  item       total
+    --------  --------  ---------  -----
+    1001      Acme      Widget     70   
+    1001      Acme      Gizmo      70   
+    1002      Globex    Widget     25   
+    1003      Initech   Gizmo      45   
+    1003      Initech   Doohickey  45   
+  [check] OK   1NF: split the comma list into one atomic row per item
+
+========================================================================
+=== 03. 2NF -- no partial-key dependencies (needs a COMPOSITE key)
+========================================================================
+  RULE: every non-key column depends on the WHOLE primary key, not a subset.
+  BEFORE -- 1NF table, PK = (student, course):
+    student  course  course_loc  fee
+    -------  ------  ----------  ---
+    s1       DB      Room A      500
+    s1       OS      Room B      600
+    s2       DB      Room A      500
+  VIOLATION: course_loc and fee depend on COURSE alone (part of the key),
+  so 'Room A' / 500 is duplicated for every student taking DB.
+  Update anomaly: move DB to Room C -> touch every enrolled row.
+  AFTER 2NF -- courses(course PK) holds course_loc + fee:
+    course  course_loc  fee
+    ------  ----------  ---
+    DB      Room A      500
+    OS      Room B      600
+  AFTER 2NF -- enrollments(student FK, course FK, PK(student, course)):
+    student  course
+    -------  ------
+    s1       DB    
+    s1       OS    
+    s2       DB    
+  [check] OK   2NF: move columns that depend on part of a composite key to their own table
+
+========================================================================
+=== 04. 3NF -- no transitive dependencies (the classic product example)
+========================================================================
+  RULE: no non-key column depends on ANOTHER non-key column.
+  BEFORE -- order_items, PK = (order_id, product_id):
+    order_id  product_id  product_name  price  qty
+    --------  ----------  ------------  -----  ---
+    o1        p1          Widget        25     2  
+    o1        p2          Gizmo         20     1  
+    o2        p1          Widget        25     1  
+  VIOLATION: product_name and price depend on PRODUCT_ID (a non-key),
+  not on order_id. Rename 'Widget' -> you must edit every line that sold it.
+  Transitive chain: (order_id,product_id) -> product_id -> product_name.
+  AFTER 3NF -- products(product_id PK, name, price):
+    product_id  name    price
+    ----------  ------  -----
+    p1          Widget  25   
+    p2          Gizmo   20   
+  AFTER 3NF -- order_items(order_id FK, product_id FK, qty):
+    order_id  product_id  qty
+    --------  ----------  ---
+    o1        p1          2  
+    o1        p2          1  
+    o2        p1          1  
+  [check] OK   3NF: extract products; order_items references product_id only
+
+========================================================================
+=== 05. BCNF -- every determinant is a candidate key
+========================================================================
+  RULE: for every non-trivial FD X -> Y, X must be a SUPERKEY.
+  BCNF is stricter than 3NF; the textbook case is fine under 3NF but breaks BCNF.
+  BEFORE -- advising(student, course, professor):
+    student  course  professor
+    -------  ------  ---------
+    s1       DB      Dijkstra 
+    s2       DB      Dijkstra 
+    s1       OS      Tanenbaum
+    s3       OS      Tanenbaum
+  FUNCTIONAL DEPENDENCIES:
+    student,course     -> professor
+    professor          -> course
+  KEY = (student, course). But professor -> course, and 'professor' is NOT a
+  superkey (one professor teaches many students). That violates BCNF.
+  (It does NOT violate 3NF: 'course' is prime -- part of a candidate key.)
+  AFTER BCNF -- takes(student, professor) PK(student, professor):
+    student  professor
+    -------  ---------
+    s1       Dijkstra 
+    s2       Dijkstra 
+    s1       Tanenbaum
+    s3       Tanenbaum
+             teaches(professor PK, course):
+    professor  course
+    ---------  ------
+    Dijkstra   DB    
+    Tanenbaum  OS    
+  [check] OK   BCNF: split so the lone determinant (professor) becomes its own key
+
+========================================================================
+=== 06. DENORMALIZATION -- deliberate redundancy (read vs write tradeoff)
+========================================================================
+  Start from 3NF. Then identify the 1-3 HOT read paths where a join costs too
+  much and denormalize THOSE explicitly, with a documented invariant.
+  Example 1 -- price snapshot: product.price changes over time, but a past
+  order's total must NOT recompute. So order_items keeps unit_price_at_order.
+    This is NOT a 3NF violation: the snapshot is a fact about THIS order,
+    not about THIS product.
+  order_items with deliberate price snapshot:
+    order_id  product_id  qty  unit_price_at_order
+    --------  ----------  ---  -------------------
+    o1        p1          2    25                 
+    o2        p1          1    30                 
+    o1 paid 25 (old price), o2 paid 30 (new price) -- history is frozen.
+  Example 2 -- read-path denormalization: the order-detail page renders
+  50,000x/sec. Joining 4 tables per request is wasteful -> materialized view.
+    normalized read  = 4 joins x 4ms = 16ms
+    denormalized read = 1 lookup           = 2ms
+    write cost: denormalization needs ~4x writes to stay consistent
+    read speedup = 16/2 = 8.0x  (trades write amplification for read latency)
+  Invariant to document: 'order_summary is a cache of orders+users+items;
+  refreshed by a trigger; reconciled by a nightly job if it drifts.'
+  [check] OK   denormalize only hot paths; always pair it with a reconciliation plan
+
+========================================================================
+=== 07. INDEXING STRATEGY -- composite, covering, the 5% selectivity rule
+========================================================================
+  RULE: index from the QUERY MIX, not the column list. Every index costs
+  ~10-30% write throughput -- it is a budget, not a checklist.
+  COMPOSITE INDEX on (user_id, status, created_at)  -- leftmost prefix rules all:
+    WHERE user_id = ?                                -> usable=[user_id]  INDEX USED
+    WHERE user_id = ? AND status = ?                 -> usable=[user_id,status]  INDEX USED
+    WHERE user_id = ? AND status = ? AND created_at > ? -> usable=[user_id,status,created_at]  INDEX USED
+    WHERE status = ?                                 -> usable=[]  FULL SCAN
+    WHERE user_id = ? AND created_at > ?             -> usable=[user_id]  INDEX USED
+  Note the last query: created_at is skipped because 'status' (the middle
+  column) is not constrained -> the prefix breaks at user_id.
+  [check] OK   leftmost-prefix: a composite index serves any leftmost subset of its columns
+
+  COVERING INDEX (PostgreSQL INCLUDE): embed hot SELECT columns in the leaf
+  so the query never reads the heap row (index-only scan, Heap Fetches: 0).
+    CREATE INDEX idx_orders_cover ON orders (user_id, created_at)
+      INCLUDE (status, total_cents);
+
+  PARTIAL INDEX: index only the hot subset (<1% of rows) -> tiny + fast writes.
+    CREATE INDEX idx_tickets_active ON tickets (spot_id) WHERE status = 'active';
+
+  THE 5% SELECTIVITY RULE -- when NOT to index:
+    vehicle_plate point lookup         match=0.00%  -> INDEX HELPS
+    status = 'active' subset           match=1.00%  -> INDEX HELPS
+    gender = 'F' (half the table)      match=50.00%  -> PLANNER FULL-SCANS
+  Low-cardinality columns (gender, 3-value status) almost never earn an index.
+  [check] OK   index when selectivity < ~5%; skip on low-cardinality / tiny tables
+
+========================================================================
+=== GOLD CHECK  (recomputed by database_schema_design.html in JS)
+========================================================================
+  btree_depth(rows=1,000,000,000, fanout=200)
+    height = log(1,000,000,000) / log(200) = 3.9113
+    rounded = 3.9  ->  ceil = 4 disk seeks for ANY point lookup
+  [check] OK
+
+[check] OK -- all 7 topics + gold check demoed

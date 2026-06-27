@@ -1,0 +1,338 @@
+opentelemetry.py - OTel architecture & mechanics simulation.
+stdlib only; deterministic; fixed-seed LCG.
+Feeds OPENTELEMETRY.md and opentelemetry.html.
+
+==========================================================================
+  SECTION A: Architecture - API -> SDK -> Exporter -> Collector -> Backend
+==========================================================================
+
+  Layer       Role                      Responsibility
+  --------------------------------------------------------------------
+  API         Interfaces only           Tracer, Span, Meter, Context. Zero behavio
+  SDK         Implementation            Creates real spans, runs the sampler, batc
+  Exporter    Out-of-process transport  Serializes spans to OTLP (protobuf). Sends
+  Collector   Standalone pipeline       Receives OTLP from many apps, processes (b
+  Backend     Storage + UI              Jaeger, Tempo, Datadog, Honeycomb, New Rel
+
+  THE KEY SEPARATION:
+    - Libraries import the API (no SDK dep).
+    - The application installs exactly ONE SDK at startup.
+    - Swap backends = change the exporter/Collector config,
+      never the application code.
+
+  AUTO-INSTRUMENTATION vs MANUAL spans:
+
+    Library (auto-instrumented)Examples
+    -------------------------------------------------------
+    HTTP server         Flask, Django, Express, Spring
+    HTTP client         requests, urllib3, okhttp
+    DB drivers          psycopg2, pymysql, mongodb-driver
+    Messaging           Kafka, RabbitMQ, NATS
+
+    Auto-instrumentation wraps these with ZERO code changes.
+    Manual spans needed for: business logic, custom algorithms.
+
+    # AUTO (zero code):  OTEL_PYTHON_LOG_CORRELATION=true \
+    #   opentelemetry-instrument python app.py
+
+    # MANUAL (business logic):
+    #   with tracer.start_as_current_span('checkout.calc_total'):
+    #       total = sum(item.price for item in cart)
+[check] API/SDK separation: libraries depend on API only: OK
+[check] auto-instrumentation covers HTTP/DB/messaging: OK
+
+==========================================================================
+  SECTION B: Span lifecycle + trace tree
+==========================================================================
+
+  Trace ID: 1bb891f6f764cd8293d0c9ceeffc85da
+  Spans: 7    Max depth: 4
+  Root duration: 150 ms
+
+  span                  kind       start_ms  dur_ms  parent  status 
+  ----------------------------------------------------------------------
+  GET /checkout         SERVER          0.0   150.0    ROOT  OK     
+  auth.verify_token     CLIENT          5.0    15.00be801a6..  OK     
+  order.create          CLIENT         25.0    95.00be801a6..  OK     
+  db.insert_order       CLIENT         30.0    30.0fb187156..  OK     
+  payment.charge        CLIENT         65.0    45.0fb187156..  ERROR  
+  db.update_balance     CLIENT         72.0    23.0eb48e106..  OK     
+  resp.serialize        INTERNAL      125.0    20.00be801a6..  OK     
+
+  SPAN LIFECYCLE (per span):
+    1. start_span(name, kind)    -> assign span_id, parent_id
+    2. set_attribute(k, v)        -> key-value metadata
+    3. add_event(name, attrs)     -> timestamped log IN the span
+    4. add_link(span_ctx)         -> cross-trace reference
+    5. set_status(OK / ERROR)     -> outcome
+    6. end_span()                 -> fix end_time, enqueue export
+
+  ERROR EVENT example (payment.charge):
+    event: exception
+      exception.message = insufficient funds
+      exception.type = CardDeclined
+[check] trace tree: 7 spans, max depth 4: OK
+[check] root span duration = 150 ms: OK
+
+==========================================================================
+  SECTION C: W3C Trace Context - traceparent / tracestate / baggage
+==========================================================================
+
+  Trace ID (generated, seed=99): 6019debf8cd5eadb7851b6b7248d4253
+
+  traceparent FORMAT:
+    00-<trace_id 32hex>-<span_id 16hex>-<flags 2hex>
+     |       |               |             |
+   version  trace_id       span_id      sampled bit
+    (00)   (16 bytes)     (8 bytes)    (01=yes, 00=no)
+
+  REQUEST FLOW:  Gateway -> Auth -> Order
+
+  [Gateway] GET /api/data
+    CREATE root span  span_id=90898eafbc459acb
+    INJECT header:    traceparent: 00-6019debf8cd5eadb7851b6b7248d4253-90898eafbc459acb-01
+
+  [Auth] verify_token
+    EXTRACT header:   traceparent: 00-6019debf8cd5eadb7851b6b7248d4253-90898eafbc459acb-01
+    CREATE child span span_id=a8c166a754fdf243  parent=90898eafbc459acb
+    INJECT header:    traceparent: 00-6019debf8cd5eadb7851b6b7248d4253-a8c166a754fdf243-01
+
+  [Order] create_order
+    EXTRACT header:   traceparent: 00-6019debf8cd5eadb7851b6b7248d4253-a8c166a754fdf243-01
+    CREATE child span span_id=c0f93e9fecb54abb  parent=a8c166a754fdf243
+    INJECT header:    traceparent: 00-6019debf8cd5eadb7851b6b7248d4253-c0f93e9fecb54abb-01
+
+  ROUND-TRIP TEST:
+    built:        00-6019debf8cd5eadb7851b6b7248d4253-d8311697846da233-01
+    parsed:       version=00  trace_id=6019debf8cd5eadb7851b6b7248d4253
+                  span_id=d8311697846da233  sampled=True
+    reserialized: 00-6019debf8cd5eadb7851b6b7248d4253-d8311697846da233-01
+[check] traceparent round-trip preserves all fields: OK
+
+  TRACESTATE (vendor-specific, extends traceparent):
+    tracestate: congo=t61rcWkgMzE,rojo=00f067aa0ba902b7
+    (max 32 members; oldest first; each vendor updates only its own key)
+
+  BAGGAGE (cross-cutting context, propagated alongside trace):
+    baggage: user.id=42,user.tier=gold,request.region=us-east-1
+    (comma-separated key=value; readable in ANY service without DB lookup)
+[check] tracestate and baggage are comma-separated key=value: OK
+
+==========================================================================
+  SECTION D: Head-based sampling - TraceIDRatioBased + ParentBased
+==========================================================================
+
+  SAMPLING decides which traces are RECORDED. Head-based = decision at the
+  root span (before any work is done). Two samplers dominate:
+
+  TraceIDRatioBased(ratio)
+    sampled = (trace_id[:4 bytes] as u32) < ratio * 0xFFFFFFFF
+    Deterministic from trace_id alone. No per-span RNG. Reproducible.
+
+  ParentBased(root_sampler)
+    Root span -> delegates to root_sampler.
+    Child span -> INHERITS parent's decision. (A partial trace is useless.)
+
+  TraceIDRatioBased: 2000 traces, decision from trace_id
+
+    ratio   sampled   dropped  actual %
+  ---------------------------------------
+     10%       250      1750     12.5%
+     25%       500      1500     25.0%
+     50%      1000      1000     50.0%
+     75%      1500       500     75.0%
+    100%      2000         0    100.0%
+
+  ParentBased(TraceIDRatioBased(0.25)) - child inheritance:
+
+    root trace_id:   345dd2a3a0591effcc152a1bb891f6f7
+    root decision:   True  (TraceIDRatioBased 0.25)
+
+    child #   trace_id (first 16)  parent_sampled  child_sampled
+    ---------------------------------------------------------
+    0         64cd8293d0c9ceef..             True           True
+    1         943d328300397edf..             True           True
+    2         c4ade27330a92ecf..             True           True
+    3         f41d92636019debf..             True           True
+    4         248d425390898eaf..             True           True
+
+  ALL children inherit the root decision (True).
+  The child's trace_id is NEVER evaluated for sampling --
+  a partial trace (parent sampled, child not) is useless.
+[check] TraceIDRatioBased ratio close to target (within 5%): OK
+[check] ParentBased: all children inherit root decision: OK
+[check] ratio=1.00 samples everything: OK
+
+==========================================================================
+  SECTION E: OTLP protocol - gRPC vs HTTP/protobuf
+==========================================================================
+
+  OTLP (OpenTelemetry Protocol) is THE wire format. It uses protobuf for the
+  payload and supports two transports:
+
+  +-----------+----------+-------------------+---------------------------+
+  | Transport | Port     | Path              | Encoding                  |
+  +-----------+----------+-------------------+---------------------------+
+  | gRPC      | 4317     | (service method)  | protobuf over HTTP/2      |
+  | HTTP      | 4318     | /v1/traces        | protobuf body (Content-Type|
+  |           |          | /v1/metrics       |   application/x-protobuf)  |
+  |           |          | /v1/logs          |                           |
+  +-----------+----------+-------------------+---------------------------+
+
+  MESSAGE STRUCTURE (ExportTraceServiceRequest):
+
+    ExportTraceServiceRequest
+      +-- resource_spans[]          (one per Resource)
+            +-- resource
+            |     attributes[]       (service.name, host.name ...)
+            +-- scope_spans[]
+                  +-- scope
+                  +-- spans[]
+                        name, kind, trace_id, span_id,
+                        parent_span_id, start_time_unix_nano,
+                        end_time_unix_nano, attributes[],
+                        events[], links[], status
+
+  gRPC vs HTTP tradeoffs:
+
+    Aspect              gRPC (4317)           HTTP (4318)           
+    --------------------------------------------------------------
+    Multiplexing        HTTP/2 streams        one req / batch       
+    Load balancing      L7 (headers)          L4 (round-robin)      
+    Firewall friendly   needs h2              yes (plain HTTP)      
+    Streaming           yes (bidir)           no                    
+    Debugging           hard (binary)         curl + protobuf       
+[check] OTLP gRPC=4317, HTTP=4318, paths /v1/{traces,metrics,logs}: OK
+
+==========================================================================
+  SECTION F: Collector pipeline - receivers -> processors -> exporters
+==========================================================================
+
+  The Collector is configured as a set of PIPELINES. Each pipeline is:
+    receiver(s) -> processor(s) -> exporter(s)
+  A signal (traces / metrics / logs) flows in one direction.
+
+  +------------+      +-------------+      +-----------+
+  |  receivers | ---> |  processors | ---> | exporters |
+  | (OTLP,     |      | (batch,     |      | (Jaeger,  |
+  |  Jaeger,   |      |  memory_    |      |  Prom,    |
+  |  Zipkin)   |      |  limiter,   |      |  OTLP,    |
+  +------------+      |  attributes)|      |  file)    |
+                      +-------------+      +-----------+
+
+  COMPONENT CATALOG:
+
+  receivers:
+    otlp              OTLP gRPC(4317) + HTTP(4318)
+    jaeger            Jaeger Thrift / protobuf
+    zipkin            Zipkin v2 JSON
+    hostmetrics       CPU, mem, disk from /proc
+
+  processors:
+    batch             Accumulate, flush at size OR timeout
+    memory_limiter    Drop data if heap exceeds soft limit
+    attributes        Insert/update/delete span attributes
+    tail_sampling     Decide sampling AFTER trace completes
+    resource          Add fixed resource attributes
+
+  exporters:
+    otlp              Forward to another Collector / OTLP backend
+    jaeger            Jaeger storage (badger, cassandra, elasticsearch)
+    prometheus        Expose metrics on :8889 for scrape
+    debug             Print to stdout (was 'logging')
+
+  BATCH PROCESSOR SIMULATION:
+
+    2000 spans, one per 4 ms, batch_size=512, timeout=5000 ms
+
+    flush #   spans   trigger
+    -----------------------------------
+           1     512   size (>= 512)
+           2     512   size (>= 512)
+           3     512   size (>= 512)
+           4     464   timeout/end
+       total    2000
+[check] batch processor flushes all spans: OK
+[check] batch flush sizes = [512, 512, 512, 464]: OK
+
+==========================================================================
+  SECTION G: Overhead math - span size, batch bandwidth
+==========================================================================
+
+  A span in OTLP/protobuf costs bytes. Estimating the size lets you budget
+  bandwidth and CPU before deploying.
+
+  SPAN BYTE BUDGET (protobuf, estimated):
+
+    field                    bytes  encoding
+    ----------------------------------------------------
+    trace_id                    18  1(tag)+1(len)+16
+    span_id                     10  1+1+8
+    parent_span_id              10  1+1+8
+    name                        22  1+1+len(~20)
+    kind                         2  1+1 (varint enum)
+    start_time_unix_nano         9  1+8 (fixed64)
+    end_time_unix_nano           9  1+8 (fixed64)
+    status                       5  1+1+varint(code)
+
+    base fields                 85
+    attributes (4 x 30)        120
+    span subtotal              205
+    OTLP wrap overhead          50
+    TOTAL per span             255  bytes
+
+  BATCH BANDWIDTH (batch_size=512):
+
+    512 spans x 255 B = 130560 B
+                                  = 127.5 KB per batch
+       500 spans/s ->    124.5 KB/s  (  1.0 batches/s)
+      2000 spans/s ->    498.0 KB/s  (  3.9 batches/s)
+     10000 spans/s ->   2490.2 KB/s  ( 19.5 batches/s)
+     50000 spans/s ->  12451.2 KB/s  ( 97.7 batches/s)
+
+  RULE OF THUMB: OTel SDK overhead < 1% CPU at 10K spans/s/node.
+  The Collector's batch processor is the main memory consumer
+  (it buffers up to batch_size * send_queue_size spans in RAM).
+[check] span byte estimate: base=85, +4 attrs=120, total=255: OK
+
+==========================================================================
+  SECTION H: GOLD values - pinned for opentelemetry.html
+==========================================================================
+
+  GOLD 1 - traceparent round-trip:
+    trace_id:    98f1d657442d62f3b029ae4fdce5ba6b
+    span_id:     c8618647749d12e3
+    traceparent: 00-98f1d657442d62f3b029ae4fdce5ba6b-c8618647749d12e3-01
+    sampled:     True
+[check] traceparent round-trip == identity: OK
+
+  GOLD 2 - TraceIDRatioBased(0.25) decision:
+    trace_id:     021350494e6f7c055a8b6881266714bd
+    u32 value:    34820169
+    threshold:    1073741823  (0.25 * 0xFFFFFFFF)
+    sampled:      True
+[check] TraceIDRatioBased decision deterministic from trace_id: OK
+
+  GOLD 3 - span tree stats:
+    spans:        7
+    max depth:    4
+    root dur ms:  150
+[check] span tree: 7 spans, depth 4, root 150 ms: OK
+
+  GOLD 4 - batch processor:
+    flushes:      [512, 512, 512, 464]
+    total:        2000
+[check] batch flushes = [512,512,512,464], total=2000: OK
+
+  GOLD 5 - span byte estimate:
+    bytes/span:   255
+    batch (512):  130560 B (127.5 KB)
+[check] span bytes = 255, batch = 130560 B: OK
+
+  all GOLD asserts passed
+
+[check] GOLD values pinned for .html JS recompute: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

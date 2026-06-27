@@ -1,0 +1,238 @@
+
+========================================================================
+OBSERVABILITY FUNDAMENTALS - BUNDLE #01 - GROUND TRUTH
+========================================================================
+
+========================================================================
+SECTION A - THE THREE PILLARS: METRIC TYPES
+========================================================================
+Metrics are the numeric dashboard: numbers aggregated over a time
+  window. The unit is a time-series: (name, labels) -> value @ sample.
+  There are THREE primitive metric types, each answering a different
+  question.
+
+  A1. COUNTER - 'how many in total so far.' Only goes UP.
+      Use rate()/increase() over a window. Never subtract samples.
+  http_requests_total @ t=0min           120
+  http_requests_total @ t=1min           207
+  http_requests_total @ t=2min           288
+  http_requests_total @ t=3min           385
+  http_requests_total @ t=4min           480
+  http_requests_total @ t=5min           574
+  http_requests_total @ t=6min           662
+  http_requests_total @ t=7min           748
+  http_requests_total @ t=8min           862
+  http_requests_total @ t=9min           947
+  http_requests_total @ t=10min          1064
+  http_requests_total @ t=11min          1171
+  rate(http_requests_total[11m])         1.5924 req/s
+[check] counter monotonically non-decreasing: OK
+
+  A2. GAUGE - 'what is it right now.' Goes UP or DOWN.
+      e.g. queue_depth, memory_bytes, active_connections.
+  queue_depth @ t=0                      0
+  queue_depth @ t=1                      0
+  queue_depth @ t=2                      0
+  queue_depth @ t=3                      0
+  queue_depth @ t=4                      0
+  queue_depth @ t=5                      17
+  queue_depth @ t=6                      3
+  queue_depth @ t=7                      23
+  avg_over_time(queue_depth[8])          5.38
+[check] gauge can decrease: OK
+
+  A3. HISTOGRAM - buckets observations + sum + count.
+      Lets you compute percentiles (p95/p99). Cheaper than storing
+      every raw observation.
+      http_request_duration_seconds_bucket (CUMULATIVE):
+  0.005                                  7
+  0.01                                   140
+  0.025                                  691
+  0.05                                   948
+  0.1                                    997
+  0.25                                   1000
+  0.5                                    1000
+  1.0                                    1000
+  2.5                                    1000
+  5.0                                    1000
+  +Inf                                   1000
+  _count                                 1000
+  _sum                                   22.5311
+  histogram_quantile(..., 0.50) p50      0.0198s
+  histogram_quantile(..., 0.95) p95      0.0520s
+  histogram_quantile(..., 0.99) p99      0.0929s
+[check] p50 <= p95 <= p99 (monotonic percentiles): OK
+[check] p95 within bucket bounds: OK
+
+========================================================================
+SECTION B - STRUCTURED LOGS: THE 'WHY' OF ONE EVENT
+========================================================================
+A log is ONE timestamped event record, ideally structured JSON. Best
+  for the WHY of a single event. The KEY is a trace_id stamped into
+  every log line AND every metric label AND every trace span - that
+  correlation key is what lets you jump alert -> log -> trace.
+
+  Sample structured log stream (JSON lines):
+  {"level": "INFO", "method": "GET", "msg": "request start", "path": "/api/checkout", "svc": "gateway", "trace_id": "4a3b2c1d-trace-0001", "ts": "12:01:03.012", "user_id": 8842}
+  {"level": "INFO", "msg": "calling payment", "svc": "checkout", "trace_id": "4a3b2c1d-trace-0001", "ts": "12:01:03.087", "user_id": 8842}
+  {"code": "AUTH_EXPIRED", "level": "ERROR", "msg": "token expired", "svc": "payment", "trace_id": "4a3b2c1d-trace-0001", "ts": "12:01:03.901", "user_id": 8842}
+  {"level": "WARN", "msg": "request failed", "status": 502, "svc": "gateway", "trace_id": "4a3b2c1d-trace-0001", "ts": "12:01:03.905", "user_id": 8842}
+
+  Severity level taxonomy:
+  DEBUG                                  fine-grained dev detail
+  INFO                                   normal operation
+  WARN                                   unexpected but handled
+  ERROR                                  a request failed
+  FATAL                                  the process must exit
+  
+  correlated metric series            http_requests_total{trace_id="4a3b2c1d-trace-0001",status="502"}
+  logs sharing trace_id                  4
+[check] trace_id ties log lines together: OK
+
+========================================================================
+SECTION C - DISTRIBUTED TRACES: THE REQUEST JOURNEY
+========================================================================
+A TRACE records every hop (a SPAN) of one user request across services,
+  with start/end and a parent pointer. Best for 'where did the 800ms
+  go?' A span = (name, service, start_ms, end_ms, parent_id).
+
+  Span tree with self-time (the part the span was ACTUALLY working):
+  s0 gateway.GET /checkout               dur=890ms self=25ms parent=None
+  s1 checkout.validate_cart              dur=50ms self=50ms parent=s0
+  s2 payment.charge_card                 dur=815ms self=10ms parent=s0
+  s3 payment.stripe_api                  dur=805ms self=805ms parent=s2
+  
+  critical path                       gateway.GET /checkout -> payment.charge_card -> payment.stripe_api
+  trace duration (root span)             890ms
+[check] root span span_id s0 has no parent: OK
+[check] critical path visits the slow payment hop: OK
+[check] stripe_api self-time is small (it's a leaf, self==dur): OK
+
+========================================================================
+SECTION D - SLI / SLO / SLA + ERROR BUDGET
+========================================================================
+  SLI  Service Level Indicator  - the MEASUREMENT
+      ('fraction of requests < 500ms' or '2xx responses / total')
+  SLO  Service Level Objective  - the TARGET ('99.9% of requests ok')
+  SLA  Service Level Agreement  - the CONTRACT / consequence
+      (refunds/credits if you miss the SLO)
+  error budget = 1 - SLO. The allowed failure you can 'spend.'
+
+  Error budget per 30-day window by SLO target:
+  SLO            budget %     min/30d      sec/30d     
+  99%            1.0000       432.00       25920.0     
+  99.9%          0.1000       43.20        2592.0      
+  99.99%         0.0100       4.32         259.2       
+  99.999%        0.0010       0.43         25.9        
+  99.9999%       0.0001       0.04         2.6         
+  
+  PINNED: 99.9% SLO error budget      43.2 min / 30 days
+[check] 99.9% SLO -> 43.2 min / 30 days: OK
+[check] 99.999% (five nines) -> 25.9 sec / 30 days: OK
+  sample SLI (good/total)                0.700  (7/10)
+  SLO target                             0.999
+[check] SLI 0.8 < SLO 0.999 -> SLO missed: OK
+
+========================================================================
+SECTION E - ERROR BUDGET BURN RATE + MULTI-WINDOW ALERTING
+========================================================================
+  burn_rate = observed_error_rate / error_budget_fraction.
+    burn_rate > 1 means you are on pace to exhaust the entire error
+    budget within the SLO window. burn_rate = 14.4 means you spend
+    the whole budget in 1/14.4 of the window.
+
+  Google SRE multi-window burn-rate alerts (SRE Workbook ch.5):
+    page on a SHORT window (fast burn) + confirm with a LONG window
+    to avoid flapping. Thresholds below are for a 30-day SLO window.
+
+  action   budget    long win   short win    burn_rate 
+  PAGE     2.0     % 1          5            14.4      
+  PAGE     5.0     % 6          30           6.0       
+  TICKET   10.0    % 24         120          3.0       
+  TICKET   10.0    % 72         360          1.0       
+  
+  PINNED: 2% budget / 1h              14.4
+  PINNED: 5% budget / 6h                 6.0
+  PINNED: 10% budget / 3d                1.0
+[check] 2% budget in 1h -> burn rate 14.4: OK
+[check] 5% budget in 6h -> burn rate 6.0: OK
+[check] 10% budget in 3d -> burn rate 1.0: OK
+  
+  observed error rate                 0.50%
+  error budget fraction                  0.10%
+  burn rate                              5.00  (>1 => busting SLO)
+[check] 0.5% error vs 99.9% SLO -> burn 5.0: OK
+
+========================================================================
+SECTION F - USE METHOD (RESOURCES)
+========================================================================
+  USE (Brendan Gregg) is for RESOURCES: CPU, memory, disk, network.
+    Utilization : % time the resource was busy
+    Saturation  : how much work is queued / waiting
+    Errors      : hardware/transfer errors (CRC, dropped packets)
+  Apply all three to EVERY resource, every time.
+
+  CPU (8 cores):
+  t=0 busy=5 runq=3                      U=62.5%  S=3  E=0
+  t=1 busy=3 runq=1                      U=37.5%  S=1  E=0
+  t=2 busy=3 runq=2                      U=37.5%  S=2  E=0
+  t=3 busy=8 runq=1                      U=100.0%  S=1  E=0
+  t=4 busy=2 runq=3                      U=25.0%  S=3  E=0
+  t=5 busy=6 runq=2                      U=75.0%  S=2  E=0
+  avg utilization U                      56.2%
+  avg saturation S (runq len)            2.00
+  avg errors E (crc)                     0
+[check] USE CPU utilization in [0,1]: OK
+[check] USE saturation >= 0: OK
+  
+  memory util (14.2/16 GB)            88.8%
+  memory sat (major pagefaults/s)        3
+  memory err (oom_kills)                 0
+[check] memory util > 0.8 => near saturation: OK
+
+========================================================================
+SECTION G - RED METHOD (SERVICES)
+========================================================================
+  RED (Tom Wilkie) is for REQUEST-DRIVEN SERVICES:
+    Rate     : requests per second
+    Errors   : failed requests per second (or error %)
+    Duration : latency (p50 / p95 / p99)
+  RED is to services what USE is to resources.
+  
+  Rate     (req/s)                    1002.1
+  Errors    (err/s)                      3.75
+  Errors    (err %)                      0.37%
+  Duration  p95                          64.9 ms
+  Duration  p99                          83.0 ms
+[check] RED rate > 0: OK
+[check] RED error_pct >= 0: OK
+[check] RED p95 <= p99: OK
+
+========================================================================
+SECTION H - HIGH-CARDINALITY LABEL EXPLOSION
+========================================================================
+  Every UNIQUE set of label values = ONE time series in the TSDB.
+  Series count = the CARTESIAN PRODUCT of every label's cardinality.
+  Low-cardinality labels (method, status, instance) are fine.
+  HIGH-cardinality labels (user_id, session_id, trace_id, ip) explode
+  the series count and OOM your TSDB. THIS is the #1 Prometheus killer.
+
+  label added                  cardinality    series      
+  baseline: no labels                    1
+  + method      (4)                      4
+  + status      (6)                      24
+  + instance    (20)                     480
+  + user_id     (1000)                   480,000
+  
+  final series count                  480,000
+  est. memory @ 1.5KB/series             703 MB (0.69 GB)
+[check] user_id label causes ~1000x explosion vs prior step: OK
+[check] cartesian product == 4*6*20*1000 = 480000: OK
+[check] est. memory > 500 MB (this is why TSDBs OOM): OK
+
+  Rule of thumb: keep label cardinality under ~10 per label.
+  NEVER label with user_id / email / ip / trace_id / session_id.
+
+========================================================================
+DONE - all checks passed
+========================================================================

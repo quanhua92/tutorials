@@ -1,0 +1,370 @@
+OpenObserve INGESTION PIPELINES - ground-truth simulation
+How telemetry flows: app -> Fluent Bit/Vector -> VRL transform ->
+route -> O2 ingest API -> Ingester -> Parquet -> S3 (+ archive + alert).
+
+All numbers here are PINNED to official O2/Fluent Bit/Vector docs or
+computed from a transparent model. Deterministic (seeded LCG, seed=7, no wall-clock).
+
+
+========================================================================
+SECTION A - The four ingestion sources
+========================================================================
+
+Four ways data enters OpenObserve. All converge on the same ingest
+API -> Ingester -> WAL -> Memtable (256MB) -> Parquet -> S3 path:
+
+  Fluent Bit      lightweight C agent. Tails files / Docker / journald,
+                  -> parses, buffers (filesystem-backed), POSTs JSON to /api/{org}/{stream}/_json
+  Vector          Rust agent/router. Rich source+sink catalog + VRL
+                  -> transforms + conditional routing. HTTP/ES sink to O2.
+  OTel Collector  the vendor-neutral standard. OTLP in, batch processor,
+                  -> exporter to O2's OTLP endpoint (/otlp/v1/traces). Logs+metrics+traces.
+  direct API      any HTTP client. curl / SDK / app writes JSON arrays
+                  -> straight to /api/{org}/{stream}/_json with Basic auth. Simplest path.
+
+[check] exactly four ingestion sources: OK
+Endpoints by signal type (openobserve.ai/docs/reference/api/ingestion):
+
+  Logs - JSON     /api/{org}/{stream}/_json
+                  POST [{...},{...}]  bulk JSON array
+  Logs - _bulk    /api/{org}/{stream}/_bulk
+                  Elasticsearch _bulk wire format
+  Logs - _multi   /api/{org}/{stream}/_multi
+                  NDJSON: one JSON object per line
+  Logs - OTLP     /otlp/v1/traces
+                  OTLP/HTTP (OTel Collector exporter)
+  Traces          /otlp/v1/traces
+                  OTLP over HTTP/gRPC, span model
+  Metrics         /api/{org}/prometheus/api/v1/write
+                  Prometheus remote_write (Snappy+protobuf)
+
+[check] JSON ingest endpoint is _json: OK
+Pick by need:
+  * cheapest footprint + file tail : Fluent Bit (~450 KB binary)
+  * transform + route + multi-sink : Vector (Rust, VRL)
+  * unified logs+metrics+traces    : OTel Collector (the standard)
+  * quick test / SDK               : direct curl to _json
+
+
+========================================================================
+SECTION B - Fluent Bit -> O2 (Day 0 path)
+========================================================================
+
+Goal: tail a log file, parse it, buffer to disk, flush as a JSON
+batch to O2's _json endpoint. This is the fastest Day-0 path.
+
+--- fluent-bit.conf (HTTP output -> O2 _json) ---
+
+[SERVICE]
+    Flush             1              # seconds between flush attempts
+    storage.path      /var/log/flb   # filesystem-backed buffer (survives restart)
+    storage.sync      normal
+    storage.checksum  off
+
+[INPUT]
+    Name              tail
+    Path              /var/log/app/*.log
+    Tag               app.*
+    Mem_Buf_Limit     10MB           # in-RAM cap before spilling to disk buffer
+    Skip_Long_Lines   On
+    DB                /var/log/flb/pos.db   # tail position (resume on restart)
+
+[FILTER]
+    Name              lua
+    Match             app.*
+    script            add_fields.lua
+    call              append         # add service=, env= via Lua (or modify filter)
+
+[OUTPUT]
+    Name              http
+    Match             app.*
+    Host              localhost
+    Port              5080
+    URI               /api/default/app_logs/_json
+    Format            json           # JSON array body
+    HTTP_User         admin@openobserve.dev
+    HTTP_Passwd       ********       # -> O2 Basic auth token
+    tls               Off
+    Retry_Limit       5              # backpressure: retry then drop to disk
+
+[check] Fluent Bit output URI targets _json: OK
+SIMULATION - one second of Fluent Bit ingest:
+
+  events in   : 4,998
+  raw bytes   : 2,544,645  (2.54 MB/s)
+  parse cost  : 2 us/event -> 0.010 s CPU/s
+  buffer cap  : Mem_Buf_Limit = 10 MB (3.9s of headroom in RAM)
+  disk buffer : storage.path (filesystem) absorbs bursts > cap
+  flush       : every 1s, up to 2000 events/request
+  -> 3 HTTP POSTs/sec to O2 (1,666 events each)
+
+[check] raw ingest below O2 single-node ceiling: OK
+[check] Mem_Buf_Limit holds >1s of data: OK
+
+========================================================================
+SECTION C - Vector VRL transforms
+========================================================================
+
+Vector Remap Language (VRL) is an expression-oriented language for
+shaping logs/metrics. The remap transform runs a VRL program on each
+event. It is type-checked, fast (~us/event), and fail-safe (fallible
+functions use `??` for defaults). Below: four real transforms.
+
+INPUT event (as a source would hand it to Vector):
+
+  {"_timestamp": 1716950400000000, "service": "payment", "level": "info", "message": "{\"txn\":\"txn_8821\",\"amount\":4200,\"cc\":\"4111-1111-1111-1111\"}", "host": "ip-10-0-0-9"}
+
+--- VRL #1: parse embedded JSON ---
+
+  .message = parse_json(.message) ?? {"raw": .message}
+
+  -> {"_timestamp": 1716950400000000, "service": "payment", "level": "info", "message": {"txn": "txn_8821", "amount": 4200, "cc": "4111-1111-1111-1111"}, "host": "ip-10-0-0-9"}
+[check] VRL #1 parses cc into nested message: OK
+
+--- VRL #2: add derived fields ---
+
+  .env = "prod"
+  .source_type = "fluentbit"
+  .ingested_at = now()
+
+  -> env=prod, source_type=fluentbit, ingested_at=<ts>
+[check] VRL #2 added env field: OK
+
+--- VRL #3: flatten + rename ---
+
+  .txn_id  = .message.txn
+  .amount  = to_int(.message.amount) ?? 0
+  del(.message)
+
+  -> txn_id=txn_8821, amount=4200, message dropped
+[check] VRL #3 flattened txn into txn_id: OK
+
+--- VRL #4: drop PII (redact) ---
+
+  .cc_redacted = true
+  del(.message.cc)   # or redact(.fields, ...)
+
+  -> cc field removed, cc_redacted=true
+[check] VRL #4 removed cc: OK
+
+FINAL event after VRL pipeline:
+
+  {"_timestamp": 1716950400000000, "amount": 4200, "cc_redacted": true, "env": "prod", "host": "ip-10-0-0-9", "ingested_at": 1716950401000000, "level": "info", "service": "payment", "source_type": "fluentbit", "txn_id": "txn_8821"}
+
+VRL cost: 9 us/event x 4,998 events = 0.045 s CPU/s (0.0 core-equivalent of pure compute)
+  -> at 5000 eps a single Vector core is CPU-bound but not saturated;
+     scale horizontally (more Vector instances) past ~80k eps/core.
+
+[check] VRL cost < 1 core at 5000 eps: OK
+
+========================================================================
+SECTION D - Routing rules (log -> stream by service / level / tags)
+========================================================================
+
+O2 streams are cheap (one Parquet schema per stream). Routing lets you
+split telemetry so each stream has a tight schema + retention. Two
+places to route: (a) in the agent (Vector route transform) or (b) at
+the source-tag level (Fluent Bit Tag). Below: the agent-side model.
+
+Vector route transform -> streams:
+
+  level == 'error'      -> stream: errors   all ERROR/WARN across services
+  service == 'payment'  -> stream: payment  payment domain + PII-redacted
+  service == 'auth'     -> stream: auth     auth/login events, 90d retention
+  tags.env == 'prod'    -> stream: prod     prod-only stream (compliance)
+  match_all('declined') -> stream: fraud    FTS match -> fraud investigation
+  (default)             -> stream: default  everything else -> default
+
+--- vector.toml (route transform -> per-stream sinks) ---
+
+[transforms.route]
+  type = "route"
+  inputs = ["remap_out"]
+  route.errors   = '.level == "error"'
+  route.payment  = '.service == "payment"'
+  route.fraud    = 'match(match_all("declined"), .message) ?? false'
+
+[sinks.o2_errors]
+  type   = "http"
+  inputs = ["route.errors"]
+  uri    = "http://localhost:5080/api/default/errors/_json"
+  encoding.codec = "json"
+  auth.strategy = "basic"
+  auth.user     = "admin@openobserve.dev"
+  auth.password = "${O2_PASS}"
+
+[sinks.o2_default]
+  type   = "http"
+  inputs = ["route._unmatched"]      # everything not matched above
+  uri    = "http://localhost:5080/api/default/default/_json"
+  encoding.codec = "json"
+  auth.strategy = "basic"
+  auth.user     = "admin@openobserve.dev"
+  auth.password = "${O2_PASS}"
+
+[check] route config defines error + payment streams: OK
+ROUTING SIMULATION - 4,998 events/sec:
+
+  stream payment    1,624 events/s  (32.5%)
+  stream prod       2,147 events/s  (43.0%)
+  stream fraud        163 events/s  ( 3.3%)
+  stream default    1,064 events/s  (21.3%)
+
+[check] every event routed to exactly one primary stream: OK
+
+========================================================================
+SECTION E - Multi-sink fan-out (O2 + S3 archive + alert)
+========================================================================
+
+A pipeline rarely has one destination. Common fan-out: (1) O2 for
+search/alerts, (2) raw S3 archive (compliance/cost-tier), (3) a
+real-time alert tap (errors -> webhook). Vector does this natively:
+one transform feeds N sinks; each sink is independent + backpressured
+separately, so a slow archive can't block O2.
+
+Three sinks from one remap output:
+
+  o2_ingest    -> http -> /api/default/logs/_json
+                  live search + alerts  [primary]
+  s3_archive   -> aws_s3 sink (raw gzip)
+                  90d cold archive, $0.0125/GB IA  [secondary]
+  alert_tap    -> websocket / webhook (errors only)
+                  PagerDuty/Slack < 5s  [conditional]
+
+FAN-OUT SIMULATION - 4,998 events/sec to 3 sinks:
+
+  sink         latency_ms  delivered_eps     loss
+  ------------------------------------------------
+  o2_ingest            12          4,998        0
+  s3_archive          340          4,998        0
+  alert_tap             4          4,998        0
+
+Key: a slow s3_archive (340ms) does NOT slow o2_ingest (12ms) --
+Vector buffers per-sink. If s3_archive's disk buffer fills, ONLY that
+sink applies backpressure (drops/blocks); O2 keeps draining.
+
+[check] O2 sink delivers full rate: OK
+[check] archive loss is tiny: OK
+[check] three independent sinks: OK
+
+========================================================================
+SECTION F - Schema evolution (auto-detect, no reindex)
+========================================================================
+
+O2 has no declared schema. On ingest it inspects each JSON record,
+infers Arrow types, and registers the stream schema in Postgres/SQLite.
+When a NEW field appears later, it is auto-added -- old Parquet files
+simply lack the column and return NULL for it. No reindex, no downtime.
+
+SCHEMA GROWTH across a week of new instrumentation:
+
+  day 1: 4 fields  + new: ['_timestamp', 'level', 'log', 'service']
+  day 2: 5 fields  + new: ['latency_ms']
+  day 3: 6 fields  + new: ['user_id']
+  day 4: 7 fields  + new: ['trace_id']
+  day 5: 8 fields  + new: ['region']
+
+TYPE INFERENCE (JSON -> Arrow) on first ingest:
+
+  _timestamp   JSON int   -> Arrow Int64
+  latency_ms   JSON int   -> Arrow Int64
+  ok           JSON bool  -> Arrow Boolean
+  service      JSON str   -> Arrow Utf8
+  tags         JSON dict  -> Arrow Struct/JSON
+
+COST of schema growth: Parquet is COLUMNAR, so a new column only adds
+a column chunk per file. A low-cardinality column (env=prod/staging)
+adds ~tens of KB per 256MB file. A high-cardinality column (user_id)
+adds ~MBs and slows scans that touch it.
+
+  latency_ms   (low  card) ~  3,000 B/file x 250 files =  0.75 MB/day added
+  user_id      (high card) ~800,000 B/file x 250 files = 200.00 MB/day added
+  trace_id     (high card) ~800,000 B/file x 250 files = 200.00 MB/day added
+  region       (low  card) ~  3,000 B/file x 250 files =  0.75 MB/day added
+  total extra/day from 4 new cols: 401.50 MB (12045.0 MB/month) -- trivial vs base ingest.
+
+[check] schema grew monotonically: OK
+[check] low-cardinality col cheaper than high: OK
+
+========================================================================
+SECTION G - Batch / buffer math + backpressure
+========================================================================
+
+Every stage has a buffer (RAM or disk) and a batch policy. The game:
+big batches = fewer requests + better compression, but more memory +
+latency. Backpressure = when a downstream stage can't keep up, the
+upstream buffer fills; once full, the agent spills to disk or drops.
+
+BATCH SIZE vs MEMORY (Vector http sink):
+
+  sink.batch.max_events = 1000
+  sink.batch.max_bytes  = 4,000,000 (4 MB)
+  avg event size        = 480 B
+
+  effective batch = min(1000, 8333) = 1,000 events
+  in-flight memory per sink = 1,000 x 480 B = 0.48 MB
+  at 4,998 eps -> 5 batches/s -> 2.4 MB/s out
+
+BACKPRESSURE - queue depth when O2 slows (simulated outage):
+
+  Scenario: O2 down for 30s. Vector buffers; disk buffer = 10 GB.
+
+  incoming       : 4,998 eps x 480 B = 2.4 MB/s
+  disk buffer    : 10 GB (10,000,000,000 B)
+  time to fill   : 10,000,000,000 / 2,399,040 = 4168s (69.5 min) before data is at risk
+  => 10 GB disk buffer buys ~69 minutes of O2 outage tolerance at this rate.
+
+  Backpressure actions (in order):
+    1. RAM buffer fills (1000 events) -> spill to disk buffer
+    2. disk buffer fills -> DROP oldest (default) or BLOCK (lossless)
+    3. set when = 'max_size' on disk buffer to cap + warn
+
+FLUENT BIT backpressure (storage.type = filesystem):
+
+  Mem_Buf_Limit = 10 MB in RAM; over -> chunk on disk
+  at 2.4 MB/s, RAM holds 4.2s; disk
+  chunks (storage.path) hold the rest. With 10 GB disk,
+  ~69 min tolerance (same math).
+
+[check] disk buffer tolerance > 30s outage: OK
+[check] effective batch bounded by byte cap: OK
+
+========================================================================
+SECTION H - Throughput & memory per stage (end-to-end)
+========================================================================
+
+End-to-end pipeline throughput + memory, stage by stage. The bottleneck
+is the SLOWEST stage. Below: the full app -> O2 -> S3 path at
+4,998 events/sec from 6 sources.
+
+  stage                   events/s     MB/s   RAM_MB  CPU_s/s  role
+  ----------------------------------------------------------------------
+  1 source (app)             4,998     2.40        0    0.000  producer
+  2 Fluent Bit               4,998     2.40       10    0.010  parse+buffer
+  3 Vector VRL               4,997     2.40     0.48    0.045  transform+route
+  4 O2 ingest API            4,997     2.40        0    0.000  HTTP receive
+  5 O2 Ingester->S3          4,997     2.40      256    0.000  WAL->Parquet
+
+  END-TO-END: 4,997/4,998 eps delivered (loss 1 = 0.02%)
+  bottleneck : O2 Ingester ceiling = 31 MB/s; here 2.40 MB/s << OK
+  peak RAM   : O2 Memtable 256 MB (dominates) + Vector 0.5 MB + FB 10 MB
+
+=== GOLD-CHECK (recomputed in JS by openobserve_ingest.html) ===
+
+  effective throughput (events/s reaching S3) = 4997
+  end-to-end loss %%                          = 0.02
+  raw ingest MB/s                             = 2.40
+
+[check] effective throughput == 4997: OK
+[check] end-to-end loss < 0.3%%: OK
+[check] raw ingest below 31 MB/s O2 ceiling: OK
+
+========================================================================
+SECTION DONE
+========================================================================
+
+All [check] assertions passed. This output is the source of truth
+for OPENOBSERVE_INGEST.md.
+GOLD: effective throughput = 4997 eps, loss = 0.02%, raw = 2.40 MB/s
+
+Re-run:  python3 openobserve_ingest.py > openobserve_ingest_output.txt

@@ -1,0 +1,246 @@
+loki.py -- every value below is computed by this file.
+
+======================================================================
+SECTION A: the ingestion pipeline (distributor -> ingester -> chunk store)
+======================================================================
+Loki's write path is a fan-out-and-quorum pipeline. A client pushes a
+batch of (labels, lines); the distributor hashes the label set, picks
+N ingesters from a consistent-hash ring, and writes with a quorum.
+
+  ring: 3 ingesters, replication_factor=3, write quorum=2
+
+  distributor: hash(label-set) -> pick REPLICATION ingesters on the ring
+    {env="prod",job="api"}  -> stream=0x86ca6afa  ingesters=[2, 0, 1]
+    {env="staging",job="api"}  -> stream=0xabe9156c  ingesters=[2, 0, 1]
+    {env="prod",job="worker"}  -> stream=0xa12d8278  ingesters=[0, 1, 2]
+    {env="prod",job="api"}  -> stream=0x86ca6afa  ingesters=[2, 0, 1]
+[check] identical label-set -> identical stream id (stable hashing): OK
+[check] write quorum 2 <= replication 3: OK
+
+  write quorum: distributor waits for WRITE_QUORUM acks before
+  replying 204 to the client. The 3rd replica converges in the background.
+[check] 3 acks >= quorum 2 -> batch committed: OK
+
+  ingester: owns a slice of the ring. For each owned stream it keeps
+  an IN-MEMORY chunk and appends incoming lines. A chunk is FLUSHED
+  (compressed -> S3, index entry written) when it hits the size or age
+  limit. See Section B.
+[check] distributor is stateless; ingester is stateful + replicated: OK
+
+======================================================================
+SECTION B: the chunk format (raw lines -> compressed chunk -> store)
+======================================================================
+A chunk is a batch of consecutive lines from ONE stream, compressed and
+flushed to the chunk store when it hits the size limit (~1.5 MiB raw)
+or the age limit (~2h). The index stores ONLY the label-set -> chunk-ID
+mapping -- never the content.
+
+  chunk_target_size = 1572864 bytes (1.5 MiB)
+  max_chunk_age     = 7200s (2h)
+  codecs & compression ratios (log text): none=1.0x, snappy=4.0x, gzip=6.0x, zstd=5.5x
+
+  synthesized 12338 lines (1572888 raw bytes) to fill ONE chunk
+[check] chunk filled past target size: OK
+
+  compressed chunk size by codec (raw_bytes / ratio):
+    none    ratio=1.0 x  chunk=  1572888 bytes (1536.0 KiB)
+    snappy  ratio=4.0 x  chunk=   393222 bytes (384.0 KiB)
+    gzip    ratio=6.0 x  chunk=   262148 bytes (256.0 KiB)
+    zstd    ratio=5.5 x  chunk=   285979 bytes (279.3 KiB)
+[check] gzip ~6x ratio applied to raw bytes: OK
+
+  chunks/day at a fixed raw ingest rate (gzip):
+    ingest=1.0 MiB/s raw  -> 90.6 GB raw/day
+    chunks/day   = 57,600   (90.6 GB / 1.5 MiB per chunk)
+    stored/day   = 15.1 GB (gzip 6x of raw)
+[check] 1 MiB/s raw @ gzip 6x -> 90.6/6 = 15.1 GB stored/day: OK
+
+  --> The chunk IS the storage unit. Compression is why Loki's object
+      storage bill is a fraction of raw ingest: you pay for COMPRESSED
+      bytes on S3, not the bytes you ingested.
+
+======================================================================
+SECTION C: label indexing -- one stream per label-set (the cardinality trap)
+======================================================================
+Loki indexes ONLY labels. One distinct label-set = ONE stream. The
+index entry per stream is tiny (~1-2 KiB: the label-set + chunk IDs),
+but each NEW stream opens a NEW in-memory chunk on an ingester and a
+NEW index entry. High-cardinality labels (user_id, trace_id, request_id)
+fragment logs into millions of short streams -> ingester OOM + index
+bloat. This is the SAME trap as Prometheus, but Loki wants even fewer
+labels (aim for 5-10, describing infrastructure, long-lived values).
+
+  Scenario A (sane, infrastructure labels):
+    env         cardinality=3     running streams=3
+    job         cardinality=6     running streams=18
+    namespace   cardinality=12    running streams=216
+[check] sane streams = 6*3*12 = 216: OK
+
+  Scenario B (add trace_id=1,000,000):
+    product = 3*6*12*1000000 = 216,000,000
+[check] toxic streams = 216 * 1,000,000 = 216,000,000: OK
+
+  Cost @ index entry + live head per ACTIVE stream:
+    sane              216 streams -> index          0.3 MB, ingester head         13.5 MB
+    toxic     216,000,000 streams -> index    308,990.5 MB, ingester head 13,500,000.0 MB
+[check] toxic head = 216M * 64KiB = ~13.5 TB of ingester RAM (impossible): OK
+
+  --> NEVER put user_id / trace_id / request_id in a label. Leave it
+      IN the log line and filter at query time: {app="api"} |= "trace=abc".
+      Loki 3.0+ adds STRUCTURED METADATA (kv pairs stored alongside,
+      not indexed) and BLOOM FILTERS (skip chunks that definitely don't
+      contain a token) to make needle-in-haystack searches fast without
+      an inverted index.
+[check] good labels describe infrastructure + are long-lived + intuitive to query: OK
+
+======================================================================
+SECTION D: LogQL -- stream selector -> line filter -> parse -> aggregation
+======================================================================
+A LogQL query is a PIPELINE:
+    {stream selector} | line filter | parser | label filter | range agg
+The selector narrows to a stream SET (cheap: index lookup). Then line
+filters / parsers run over the decompressed chunk bytes. Order matters:
+put the cheapest, most-selective filter first so later stages see less.
+
+  corpus: 120 lines across 3 streams
+[check] corpus = 3 streams * 40 lines = 120 lines: OK
+
+  Q1  {job="api"}                     # selector: match streams
+      -> 80 lines (2 of 3 streams match: api/prod + api/staging)
+[check] Q1 selector {job=api} -> 80 lines (2 streams * 40): OK
+
+  Q2  {job="api"} |= "level=ERROR"      # selector + line contains
+      -> 14 ERROR lines from job=api
+[check] Q2 narrows to ERROR lines in job=api: OK
+
+  Q3  {job="api"} |~ "status=5.."        # selector + regex
+      -> 14 lines matching status=5.., of which 14 are status=500
+[check] Q3 regex matches status=500 lines: OK
+
+  Q4  count_over_time({job="api"} |= "level=ERROR" [1h])
+      -> 14  (number of ERROR lines from job=api in the window)
+[check] count_over_time == len of filtered lines: OK
+
+  Q5  top 3 lines by latency (job=api, env=prod)
+         883ms  level=INFO msg="request" status=200 trace=abc037 latency=883ms
+         875ms  level=WARN msg="request" status=200 trace=abc009 latency=875ms
+         871ms  level=WARN msg="request" status=200 trace=abc036 latency=871ms
+[check] topk is sorted descending: OK
+
+  Filter ordering rule (the LogQL performance lever):
+    1. narrow the stream selector as much as possible (index lookup).
+    2. then |= substring (fastest content stage).
+    3. then | json / | regexp extract.
+    4. then | label-filter (>=, =~) on extracted fields.
+    5. then the range aggregation (rate, count_over_time, topk).
+  A broad selector {env="prod"} |= "abc" over weeks of data is a FULL
+  CHUNK SCAN -- fast in parallel (~0.5 TB/s in Grafana Cloud) but still
+  proportional to bytes touched. Bloom filters (3.0+) skip chunks that
+  definitely don't contain the token.
+
+======================================================================
+SECTION E: S3 chunk store + BoltDB index (the cost model)
+======================================================================
+Loki's storage is split: CHUNKS go to object storage (S3/GCS/MinIO),
+the INDEX (label-set -> chunk IDs) goes to BoltDB-Shipper files (also
+shipped to S3) or TSDB. Chunks are 100% of the bytes; the index is a
+rounding error because it stores ONLY labels, never content.
+
+  raw ingest      = 200 GB/day
+  codec           = gzip (6.0x)
+  stored ingest   = 33.33 GB/day (raw / ratio)
+  retention       = 30d
+  steady-state    = 1000.0 GB compressed chunks on S3
+[check] 200 GB/day gzip 6x -> ~33.3 GB/day stored: OK
+
+  index (BoltDB)  = 10,000 streams * 1500 B = 14.3 MB total
+                  = 0.0014% of chunk storage (a rounding error)
+[check] index is < 0.01% of chunk storage (labels only, no content): OK
+
+  S3 cost @ $0.023/GB-month:
+    monthly = 1000.0 GB * $0.023 = $23.00
+    yearly  = $276.00
+[check] 1000 GB * $0.023 = $23/mo: OK
+
+  --> Object storage IS the long-term store. There is no local disk to
+      fill; you just keep paying ~$0.023/GB-month for compressed chunks.
+      The index is so small you can cache it entirely in a querier's RAM.
+
+======================================================================
+SECTION F: Loki vs Elasticsearch -- label index vs inverted index
+======================================================================
+Elasticsearch INVERTS every token at INGEST time: each word -> posting
+list of (doc, position). A term lookup is O(1) but the index is large
+(typically 1-2x the raw text). Loki indexes ONLY labels and stores raw
+compressed chunks; a substring search SCANS bytes. The trade:
+    Loki   : cheap ingest, tiny storage, SLOW needle-in-haystack search.
+    ES     : expensive ingest, fat storage, FAST full-text search.
+
+  Elasticsearch disk/day = raw * 1.5 (index) * 2 (replica)
+                          = 200.0 * 1.5 * 2 = 600 GB/day
+  Loki S3/day            = raw / 6.0 (gzip) = 33.33 GB/day
+
+  storage ratio ES / Loki = 600 / 33.33 = 18.0x
+[check] ES uses ~18x more storage than Loki (600 / 33.33): OK
+
+  ingest RAM profile (index in memory):
+    ES   : ~100 GB RAM/day of ingest (heap + segment caches)
+    Loki : ~10.0 GB RAM/day of ingest (just stream heads)
+[check] Loki uses ~10x less ingest RAM than ES: OK
+
+  query latency profile (same 1 TB of logs):
+    ES   : term lookup = O(1) posting list. Needle-in-haystack in ~ms.
+    Loki : {env="prod"} |= "abc" = a CHUNK SCAN. ~0.5 TB/s parallel ->
+           1 TB / 0.5 TB/s = 2s end-to-end for a full scan. Bloom filters
+           (3.0+) skip chunks that definitely don't contain 'abc'.
+[check] 1 TB chunk scan @ 0.5 TB/s = 2s: OK
+
+  WHEN TO PICK WHICH:
+    Loki        : label-filtered queries ({app=..}), high volume, low
+                  budget, Kubernetes/container logs (label-rich). The
+                  90% case for ops dashboards.
+    Elasticsearch: ad-hoc full-text search, faceted search, relevance
+                   scoring, complex aggregations over log CONTENT.
+    Hybrid      : ship logs to Loki for ops + a small sampled slice to
+                  ES for product analytics.
+
+======================================================================
+SECTION G: retention, compaction, multi-tenant, bloom filters (Day 2)
+======================================================================
+Day 2 ops: keep the storage bill bounded (retention + compaction),
+isolate tenants (X-Scope-OrgID), and speed up needle-in-haystack
+searches without an inverted index (bloom filters).
+
+  RETENTION -- delete chunks older than the window (compactor or table manager):
+      7d ->     233.3 GB (  0.23 TB) compressed on S3
+     30d ->   1,000.0 GB (  0.98 TB) compressed on S3
+     90d ->   3,000.0 GB (  2.93 TB) compressed on S3
+    365d ->  12,166.7 GB ( 11.88 TB) compressed on S3
+[check] 365d retention of 33.3 GB/day = ~12.2 TB: OK
+
+  COMPACTION -- merge small chunks, prune the index for deleted chunks:
+    * TSDB period: 24h blocks, compacted 1 -> 2 -> ... like Prometheus.
+    * Removes references to chunks deleted by retention.
+    * Runs in the COMPACTOR (single instance per tenant, elected via ring).
+
+  MULTI-TENANT -- X-Scope-OrgID header on every request:
+    tenant=acme     -> ring slot 15 (namespaced; no cross-tenant leaks)
+    tenant=globex   -> ring slot 14 (namespaced; no cross-tenant leaks)
+    tenant=initech  -> ring slot  1 (namespaced; no cross-tenant leaks)
+[check] each tenant has its own ring slot: OK
+
+  BLOOM FILTERS (Loki 3.0+) -- skip chunks that DEFINITELY don't contain a token:
+    10,000 chunks, only 100 contain the token
+    scan without bloom : 10,000 chunks
+    scan with    bloom : 199 chunks (100 true + false positives)
+    speedup            : 50.3x
+[check] bloom @ 1% FPR -> ~50x fewer chunks scanned for a rare token: OK
+
+  --> Retention is your cost dial: halve the window, halve the S3 bill.
+      Multi-tenancy is free (just a header). Bloom filters recover most
+      of Elasticsearch's needle-in-haystack speed WITHOUT an inverted
+      index, preserving Loki's cheap-ingest/small-index design.
+
+======================================================================
+SECTION DONE -- all sections printed
+======================================================================

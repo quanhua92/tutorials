@@ -1,0 +1,244 @@
+prometheus.py -- every value below is computed by this file.
+
+======================================================================
+SECTION A: the four metric types
+======================================================================
+A metric type is a CONTRACT about how a value moves. The type decides
+which PromQL functions are legal on it and how the TSDB chunks it.
+
+COUNTER http_requests_total  (only goes UP; reset on restart)
+  samples : 11, 19, 35, 50, 65, 77, 11, 36, 46, 67
+[check] counter sample[5] > sample[0] before reset (monotonic): OK
+[check] counter reset detected (sample[6] < sample[5]): OK
+
+GAUGE node_memory_active_bytes  (any value, any direction)
+  samples : 475.2, 444.5, 427.8, 448.0, 464.1, 495.7, 525.9, 527.8
+[check] gauge can decrease (not monotonic): OK
+
+HISTOGRAM http_request_duration_seconds_bucket  (cumulative)
+  A histogram is stored as N CUMULATIVE counters -- one per bucket
+  boundary `le` -- plus a _sum and _count. Each bucket counts ALL
+  observations <= its boundary (so the last bucket = total count).
+  Default buckets: .005 .01 .025 .05 .1 .25 .5 1 2.5 5 10  (+Inf)
+  le=0.0050	      le=0.0100	      le=0.0250	      le=0.0500	      le=0.1000	      le=0.2500	      le=0.5000	      le=1.0000	      le=2.5000	      le=5.0000	      le=10.0000	      +Inf
+  count 0  0  2  5  12  25  40  48  50  50  50  50
+  _count = 50    _sum = 18.84
+[check] histogram = 12 bucket series + _sum + _count = 14 series: OK
+[check] last (+Inf) bucket equals total count: OK
+
+SUMMARY rpc_duration_seconds  (quantiles computed CLIENT-side)
+  A summary ships PRECOMPUTED quantiles (e.g. {quantile="0.95"}),
+  NOT buckets. You cannot aggregate quantiles across instances
+  (you cannot average the 0.95s). That is why histograms usually win.
+  {quantile="0.5"} = 0.21, {quantile="0.9"} = 0.63, {quantile="0.99"} = 1.84
+[check] summary quantiles are point-in-time (no _bucket series): OK
+
+======================================================================
+SECTION B: the TSDB storage engine (series -> chunks -> blocks)
+======================================================================
+Prometheus stores samples in a 3-tier engine: an in-memory HEAD (recent
+samples), immutable on-disk BLOCKS (compacted every 2h), and a WAL.
+
+  scrape_interval   = 15s
+  block window      = 2h = 7200s
+  samples/series    = 480  (block_window / scrape_interval)
+  chunks/series     = 4  (ceil(samples/120))
+[check] 480 samples / 120 = 4 chunks per series per 2h block: OK
+
+  HEAD memory = N_series * chunks_per_series * chunk_size (approx)
+    N=    1,000 series ->      4.1 MB head chunks
+    N=  100,000 series ->    409.6 MB head chunks
+    N=1,000,000 series ->   4096.0 MB head chunks
+[check] 1M series * 4 chunks * 1KB = 4096 MB head: OK
+
+  WAL write amplification (every scrape appended to WAL first)
+    1M series @ 15s -> 240000000 samples/h -> 1920.0 MB WAL/h
+[check] 1M series @ 15s produces 240,000,000 samples/h (1M * 3600/15): OK
+
+  retention = 15d -> 180 blocks of 2h on disk
+[check] 15d / 2h = 180 blocks: OK
+
+  mmap: chunks in blocks are mmap-able. The OS page cache -- not the
+  Go heap -- holds them. This is why Prometheus can query years of
+  history without loading it all into the process address space, and
+  why RSS undercounts real cache use (look at page cache instead).
+[check] TSDB tiers: Head (RAM) -> WAL -> 2h blocks (mmap'd) -> compact: OK
+
+======================================================================
+SECTION C: cardinality explosion (series = product of label cardinalities)
+======================================================================
+Active series count = the PRODUCT of the cardinality of each label.
+Adding ONE high-cardinality label multiplies the series count (and
+RAM, and ingest CPU) by that label's unique-value count. There is no
+deduplication. This is THE Prometheus failure mode.
+
+  Scenario A (sane):
+    endpoint   cardinality=50    running series=50
+    method     cardinality=4     running series=200
+    status     cardinality=5     running series=1000
+[check] sane series = 4*5*50 = 1000: OK
+
+  Scenario B (add user_id=10000):
+    product = 4*5*50*10000 = 10,000,000
+[check] toxic series = 1000 * 10000 = 10,000,000: OK
+
+  Memory cost @ ~1.5 KB per active series (index + head + labels):
+    sane          1,000 series ->        1.5 MB =   0.00 GB
+    toxic    10,000,000 series ->    14648.4 MB =  14.31 GB
+[check] 10M series * 1.5KB = ~14.3 GB (OOM for a typical 8-16GB Prometheus): OK
+
+  Histogram amplifier: 1 histogram metric = 14 series per combo.
+    toxic * 14 = 140,000,000 series from a SINGLE histogram metric
+[check] toxic * 14 = 140,000,000: OK
+
+  --> The label set, not the metric value, is the budget. Never put
+      user_id / email / request_id / session_id on a metric. Log them
+      instead (see LOKI.md), or use exemplars (a single trace id per
+      series, stored out-of-band).
+
+======================================================================
+SECTION D: PromQL -- rate(), increase(), histogram_quantile(), aggregations
+======================================================================
+rate(http_requests_total[1m]) -- clean monotonic counter
+  samples (t, v): (0,1000) (15,1030) (30,1060) (45,1090) (60,1120)
+  increase = last - first = 120.0    rate = increase/60s = 2.0000/s
+[check] clean rate = 120/60 = 2.0/s: OK
+[check] clean increase = 120: OK
+
+rate(http_requests_total[1m]) -- with a mid-window RESET (restart)
+  samples (t, v): (0,1000) (15,1030) (30,1060) (45,20) (60,50)
+  raw delta = 50 - 1000 = -950  (WRONG, negative)
+  correction = pre-reset value = 1060  -> increase = 50 + 1060 - 1000 = 110.0
+  rate = 1.8333/s
+[check] reset-corrected increase = 110: OK
+[check] reset-corrected rate = 110/60 = 1.8333/s: OK
+
+histogram_quantile(phi, rate(http_req_duration_seconds_bucket[5m]))
+  cumulative buckets:
+    le=0.0050  count=0
+    le=0.0100  count=0
+    le=0.0250  count=2
+    le=0.0500  count=5
+    le=0.1000  count=12
+    le=0.2500  count=25
+    le=0.5000  count=40
+    le=1.0000  count=48
+    le=2.5000  count=50
+    le=5.0000  count=50
+    le=10.0000 count=50
+    le=+Inf    count=50
+  phi=0.5   -> quantile = 0.2500
+  phi=0.95  -> quantile = 0.9688
+  phi=0.99  -> quantile = 2.1250
+[check] p50 = 0.25 (interpolated in le=0.25 bucket, rank 25 hits its boundary): OK
+[check] p95 = 0.9688 (0.5 + 0.5*(47.5-40)/8): OK
+[check] p99 = 2.125 (1.0 + 1.5*(49.5-48)/2): OK
+
+aggregations: sum by (method) ( http_requests_total )
+  {method="GET"} = 5460
+  {method="POST"} = 3140
+[check] sum by (method): GET=5460, POST=3140: OK
+  sum without (status, method) (total) = 8600
+[check] total = 8600: OK
+
+======================================================================
+SECTION E: service discovery -- static, DNS, EC2, Kubernetes
+======================================================================
+A scrape config names TARGETS. Service discovery (SD) expands a config
+into the live list of (ip:port) endpoints to scrape. Each SD type is a
+different way to enumerate that list, refreshed on a fixed interval.
+
+static_configs  (hardcoded list -- good for tiny fixed deployments)
+  targets: 10.0.0.1:9100, 10.0.0.2:9100, 10.0.0.3:9100
+[check] static SD = fixed list: OK
+
+dns_sd_configs  (resolve a name -> N A records; SRV gives port too)
+  node.internal -> 4 A records
+  targets: 10.0.0.11:9100, 10.0.0.12:9100, 10.0.0.13:9100, 10.0.0.14:9100
+[check] DNS SD resolved 4 endpoints: OK
+
+ec2_sd_configs  (DescribeInstances API -> private/public IPs)
+  DescribeInstances returned 4 instances
+  running -> scraped: 10.0.1.5:9100, 10.0.1.6:9100, 10.0.1.8:9100
+  skipped (not running): i-0ccc
+[check] EC2 SD scrapes running instances only (3 of 4): OK
+
+kubernetes_sd_configs (role=pod -> every Pod IP matching selectors)
+  pod watch returned 4 pods for app=api
+  Running -> scraped: 172.16.0.5:8080, 172.16.0.6:8080, 172.16.0.8:8080
+  skipped (Pending): api-7f9-ccc
+[check] k8s SD scrapes Running pods (3 of 4): OK
+
+  total active targets across all SD jobs: 13
+[check] total targets = 3+4+3+3 = 13: OK
+
+  --> SD is a PULL-enabler: the app does not register itself. Prom
+      DISCOVERS it and pulls. New pods are scraped within one refresh.
+
+======================================================================
+SECTION F: the two clocks -- scrape_interval vs evaluation_interval
+======================================================================
+Prometheus runs TWO independent ticker loops:
+  * scrape_interval      -- how often each TARGET is pulled.
+  * evaluation_interval  -- how often RECORDING + ALERT RULES run.
+They are decoupled. A recording rule consumes whatever samples exist.
+
+  scrape_interval=15s  evaluation_interval=30s  horizon=120s
+  scrapes @ [0, 15, 30, 45, 60, 75, 90, 105]
+  evals   @ [0, 30, 60, 90]
+  scrapes that coincide with a rule eval: [0, 30, 60, 90]
+[check] 8 scrapes in 120s @ 15s: OK
+[check] 4 evals in 120s @ 30s: OK
+[check] scrapes coincide with evals at 0,30,60,90 (range(0,120,30)): OK
+
+  recording rule example (runs every evaluation_interval=30s):
+    record: job:http_requests:rate5m
+    expr:   sum by (job)(rate(http_requests_total[5m]))
+  -> produces a NEW pre-computed series. Dashboards/Grafana query the
+     rule output (cheap) instead of re-running rate() each render.
+  -> ALERT rules also fire here. Firing -> pushed to Alertmanager.
+[check] recording rules run on evaluation_interval, NOT scrape_interval: OK
+
+  missed scrape -> after the staleness window (5min default), the
+  series is marked stale; gaps render as gaps, not frozen values.
+[check] staleness marker after ~5min without samples: OK
+
+======================================================================
+SECTION G: retention, remote_write (long-term), federation, Alertmanager
+======================================================================
+Prometheus is single-node by design: one instance, one local TSDB.
+Day 2 is about escaping that limit without losing the pull model.
+
+  local retention = 15d (default)
+  ingest ~ 8.0 GB/day -> 120 GB on disk at steady state
+[check] 15d * 8GB = 120 GB: OK
+
+  remote_write -> long-term storage (choose one):
+    Thanos   : sidecar adds S3 to each Prom; queries federate via Store Gateway.
+    Mimir    : multi-tenant, horizontally scalable, S3-backed (Grafana Labs).
+    Cortex   : predecessor of Mimir, same idea.
+    VictoriaMetrics : drop-in remote_write target, very cost-efficient.
+  All use the SAME remote_write protocol -> swap by changing one URL.
+[check] remote_write is the standard escape hatch for >15d retention: OK
+
+  federation:
+    global Prom --(scrape /federate)--> shard-A Prom (region us-east)
+                                       --> shard-B Prom (region eu-west)
+    Used for ROLL-UP (a few aggregate series up to a global view).
+    NOT for mirroring every raw series -- that does not scale.
+[check] federation = hierarchical scrape of /federate (subset only): OK
+
+  Alertmanager (decoupled from Prom):
+    Prom fires an alert -> pushes to Alertmanager -> AM groups, inhibits,
+    and ROUTES (email / PagerDuty / Slack) based on severity & labels.
+    Dedup: 1000 pods firing 'NodeDown' -> 1 notification.
+
+  capacity planning rules of thumb:
+    * keep active series < ~1M per Prometheus shard (RAM-bound).
+    * shard by a stable label (job, tenant) and run N Prometheuses.
+    * remote_write + Thanos/Mimir for global view + long retention.
+[check] sharding + remote_write is the standard >1M-series path: OK
+
+======================================================================
+SECTION DONE -- all sections printed
+======================================================================

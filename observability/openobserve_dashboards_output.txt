@@ -1,0 +1,485 @@
+openobserve_dashboards.py
+OpenObserve (O2) UI layer: dashboards, alerts, reports, RUM, traces,
+functions. Single source of truth for OPENOBSERVE_DASHBOARDS.md.
+Deterministic (LCG RNG, no wall-clock). Pure stdlib.
+
+
+========================================================================
+SECTION A - The six UI modules (one Rust/S3 backend under them all)
+========================================================================
+
+OpenObserve is a SINGLE binary that does logs + metrics + traces + RUM,
+all on Parquet over S3. The USER-FACING layer is six UI modules. Each
+module is just a different LENS over the same streams -- a dashboard
+panel, an alert query, a RUM session, and a trace all SELECT from the
+same columnar Parquet. That is why a trace span can be joined to a log
+line can drive a dashboard gauge can fire an alert, all without moving
+data between systems.
+
+  Dashboards   stream -> SQL -> panel -> dashboard. Folders, tabs, vars.
+  Alerts       SQL/PromQL condition -> threshold -> frequency -> dest.
+  Reports      render dashboard -> PDF screenshot / CSV -> email on cron.
+  RUM          browser SDK -> `rum` stream -> web vitals, sessions, replay.
+  Traces       OTLP -> span waterfall (Gantt), service graph, flame view.
+  Functions    VRL transforms (ingest/query) + Python Actions (UDFs).
+
+Data flow (the whole story):
+
+  sources (apps/OTel/RUM SDK)  -->  ingest (Router -> Ingester)
+     |                                     |
+     v                                     v
+  streams (logs/metrics/traces/rum)  -->  Parquet on S3
+     |
+     +-- Dashboards (SQL SELECT, render)
+     +-- Alerts    (SQL condition, evaluate on schedule)
+     +-- Reports   (render dashboard at cron time)
+     +-- Functions (VRL/Python mutate rows in flight)
+
+Key insight: a PANEL, an ALERT, and a REPORT all start life as the same
+thing -- a SQL query against a stream. The difference is what happens to
+the result set: draw it (panel), test it against a threshold (alert), or
+screenshot it to a PDF (report).
+
+[check] six UI modules: OK
+
+
+========================================================================
+SECTION B - Dashboard creation: stream -> SQL -> panel -> dashboard
+========================================================================
+
+A dashboard is a JSON document of panels. Each panel carries ONE SQL (or
+PromQL) query against ONE stream. The four-step build is identical every
+time:
+
+  1. PICK STREAM      -> the data source (logs/metrics/traces/rum).
+  2. WRITE SQL        -> SELECT ... FROM <stream> WHERE ... GROUP BY ...
+  3. CHOOSE PANEL TYPE-> line/bar/gauge/table/... maps the result to pixels.
+  4. SAVE TO DASHBOARD-> gridPos (x/y/w/h), title, folder, tab.
+
+--- worked example: latency-over-time panel on the `default` logs stream ---
+
+stream : default  (log stream, service=checkout)
+query  :
+
+  SELECT
+    histogram(_timestamp) AS bucket,
+    avg(cast(duration as float)) AS p50_ms,
+    approx_quantile(cast(duration as float), 0.95) AS p95_ms
+  FROM "default"
+  WHERE service = 'checkout'
+    AND level = 'INFO'
+  GROUP BY bucket
+  ORDER BY bucket
+
+panel  : line chart  (x = bucket/time, y = p50_ms + p95_ms series)
+dashboard : SLO Overview, tab 'Latency', gridPos {x:0,y:0,w:12,h:8}
+
+--- the panel JSON shape (what gets saved/exported) ---
+
+  {
+    "title": "Checkout latency (p50/p95)",
+    "type": "line",
+    "stream": "default",
+    "query": "SELECT histogram(_timestamp) AS bucket, ...",
+    "queryType": "sql",
+    "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+    "config": {"y_axis_unit": "ms", "legend": true},
+    "variables": ["$service", "$env"]
+  }
+
+Variables ($service, $env) parameterize the dashboard -- a variable is a
+saved query whose result becomes a dropdown. 'Repeat by variable' clones
+a panel once per value (the one-graph-per-instance overview pattern).
+
+[check] dashboard build is exactly 4 steps: OK
+
+
+========================================================================
+SECTION C - Panel types: pick the chart that matches the question
+========================================================================
+
+O2 ships 19+ chart types. The 8 CORE ones below cover ~90% of dashboards.
+The rule: the panel type is dictated by the QUESTION, not the data.
+
+  type     best for                                 axes                    
+  -------  ---------------------------------------  ------------------------
+  line     time series: latency, QPS, error rate    y=metric, x=time        
+  area     stacked volume: ingest GB/day by stream  cumulative over time    
+  bar      discrete buckets: logs/min by level      categorical or histogram
+  gauge    single KPI: SLO attainment, CPU %        one number + threshold  
+  table    raw rows: top slow queries, log samples  columns from SQL SELECT 
+  pie      share of total: traffic by status code   proportion of a whole   
+  scatter  correlation: latency vs request size     x,y point cloud         
+  geomap   geo distribution: requests by region     lat/long -> bubble      
+
+Decision shortcut:
+
+  * 'how does X change over time?'       -> line / area
+  * 'what is X right now vs threshold?'  -> gauge
+  * 'what are the actual rows?'          -> table
+  * 'how is the total split up?'         -> pie / bar
+  * 'do X and Y correlate?'              -> scatter
+  * 'where geographically?'              -> geomap
+
+Beyond the 8: stacked-bar, area-stacked, h-bar, heatmap, sankey, treemap,
+markdown, custom-chart (write your own ECharts spec). The custom-chart
+panel lets you paste raw ECharts JSON -- an escape hatch for anything the
+built-in types can't draw.
+
+[check] 8 core panel types catalogued: OK
+
+
+========================================================================
+SECTION D - Alerting + lifecycle (evaluate -> fire -> notify -> resolve)
+========================================================================
+
+An alert is a SQL (or PromQL) condition tested on a schedule. The parts:
+
+  stream     : the data source (logs/metrics/traces).
+  condition  : 'avg(error_rate) >= 5'  (builder / SQL / PromQL modes).
+  frequency  : how often to evaluate (every N min, or a cron expr).
+  period     : look-back window of data per evaluation (e.g. last 5 min).
+  for/duration: consecutive true evaluations before FIRING (noise gate).
+  cooldown   : min gap between re-notifications (anti-storm).
+  destination: where the notification goes (Slack/email/PagerDuty/...).
+
+Three alert types:
+
+  Scheduled   : runs at a fixed interval. Best for aggregates/trends.
+                e.g. every 10 min, if avg latency > 500ms over 30 min.
+  Real-time   : evaluates on INGEST, fires within seconds. For 'needle in
+                the haystack' patterns (a specific error string appears).
+  Anomaly     : Enterprise ML -- no manual threshold, learns the baseline.
+
+--- lifecycle simulation: error_rate >= 5%, for=2 evals, cooldown=5 ---
+
+  tick  error%  state      event
+  ----  ------  ---------  -----------------------------
+     0    0.80  Normal     
+     1    2.22  Normal     
+     2    1.59  Normal     
+     3    2.25  Normal     
+     4    0.40  Normal     
+     5    2.10  Normal     
+     6    1.06  Normal     
+     7    0.41  Normal     
+     8    0.44  Normal     
+     9    2.37  Normal     
+    10    8.67  Normal     
+    11    7.62  Firing     FIRE -> notify destination  <<<
+    12    8.51  Firing       <<<
+    13    7.98  Firing       <<<
+    14    8.43  Firing       <<<
+    15    7.26  Firing       <<<
+    16    7.37  Firing     re-notify (dedup within cooldown)  <<<
+    17    7.95  Firing       <<<
+    18    8.13  Firing       <<<
+    19    6.69  Firing       <<<
+    20    6.53  Firing       <<<
+    21    7.09  Firing     re-notify (dedup within cooldown)  <<<
+    22    7.13  Firing       <<<
+    23    1.57  Normal     RESOLVE -> notify destination
+    24    2.25  Normal     
+    25    0.86  Normal     
+    26    1.54  Normal     
+    27    1.04  Normal     
+    28    0.96  Normal     
+    29    1.38  Normal     
+    30    1.79  Normal     
+    31    0.95  Normal     
+    32    0.63  Normal     
+    33    2.14  Normal     
+    34    1.61  Normal     
+    35    1.10  Normal     
+    36    2.39  Normal     
+    37    1.32  Normal     
+    38    0.67  Normal     
+    39    0.83  Normal     
+
+Summary of the run:
+
+  first above-threshold tick : 10   (incident window opens)
+  FIRE tick (for=2 satisfied)  : 11
+  resolve tick               : 23   (back below threshold)
+  firing notifications sent  : 3   (cooldown dedup applied)
+  resolve notification sent  : 1
+
+The lifecycle is: evaluate (every frequency) -> FIRE (after `for` gate) ->
+notify destination (respecting cooldown) -> RESOLVE (condition false) ->
+notify resolution. This is WHY cooldown + `for` exist: without them a
+flapping metric spams Slack. `for`=2 needs two confirmations; cooldown=5
+caps re-notifications to one every 5 evals during a sustained incident.
+
+[check] alert fires at tick 11 (for=2 after first above at 10): OK
+[check] alert resolves at tick 23 (first below after window 10-22): OK
+[check] 3 firing notifications (at 11, 16, 21): OK
+
+
+========================================================================
+SECTION E - Alert destinations + notification templates
+========================================================================
+
+Where the notification goes. Pick by URGENCY + toolchain:
+
+  destination  transport                     use case                             
+  -----------  ----------------------------  -------------------------------------
+  Slack        incoming webhook POST         team channel, low-noise acks         
+  email        SMTP (TLS)                    distribution lists, audit trail      
+  webhook      HTTP POST to your endpoint    Jira/ServiceNow/automation           
+  PagerDuty    Events API v2                 on-call, escalation policy           
+  Teams        Office 365 connector webhook  MS-shop chat                         
+  Actions      Python script (server-side)   fan-out: Slack + write back to stream
+
+--- Slack destination setup (incoming webhook) ---
+
+  1. Slack app -> Incoming Webhooks -> create hook for #alerts channel.
+  2. O2 UI: Management -> Alert Destinations -> + Add -> Slack.
+  3. Paste webhook URL: https://hooks.slack.com/services/T.../B.../...
+  4. (optional) attach a Template with the message body + variables.
+
+--- notification template (Go templating, variables injected) ---
+
+  {{template "slack.title" .}}
+  Alert: {{.AlertName}}  [{{.OrgName}}]
+  Stream: {{.StreamName}}  Triggered: {{.TriggerTime}}
+  Value: {{.Results.[0].value}}  (threshold: 5)
+  {{range .Results}}
+    {{.ts}}  {{.value}}
+  {{end}}
+  View: http://o2:5080/web/alerts/history?alert_id={{.AlertId}}
+
+Template variables O2 injects: AlertName, StreamName, TriggerTime,
+Results (the matching rows), OrgName, AlertId, plus any custom context
+vars you define on the alert. One template can serve many alerts.
+
+Actions (Python) is the most powerful destination: a server-side script
+that can hit MULTIPLE endpoints AND write back to a stream -- e.g. page
+PagerDuty + post to Slack + write an incident row to a `incidents`
+stream, all from one firing. This is the stateful-routing escape hatch.
+
+[check] 6 alert destination types catalogued: OK
+
+
+========================================================================
+SECTION F - Scheduled reports: render dashboard -> PDF/CSV -> email
+========================================================================
+
+A report snapshots a dashboard on a schedule and emails it. Two formats:
+
+  PDF : the report server renders the dashboard in a headless browser,
+        screenshots each panel, and stitches them into a PDF. Good for
+        stakeholders who want a weekly 'state of the system' email.
+  CSV : exports the raw result set of a chosen panel's SQL. Good for
+        piping into spreadsheets or a data warehouse.
+
+--- report config (UI + API) ---
+
+  name         : Weekly SLO Report
+  dashboard    : SLO Overview  (uid: d8f3...)
+  tab          : Latency
+  format       : pdf
+  schedule     : cron  '0 9 * * 1'   (every Monday 09:00)
+  time_range   : last 7 days
+  recipients   : ['sre-team@corp.com', 'eng-leads@corp.com']
+  subject      : '[O2] Weekly SLO Report - SLO Overview'
+  timezone     : Asia/Ho_Chi_Minh
+
+The report SERVER is a separate process (openobserve/reporter image)
+that polls O2 for due reports, renders, and sends. In single-node deploys
+it runs in the same container; in HA it is its own pod so heavy rendering
+doesn't compete with ingest.
+
+--- report-run math: 30-day window, two cron schedules ---
+
+  daily  report ('0 9 * * *')  : 30 runs over 30 days
+  weekly report ('0 9 * * 1')  : 5 runs (Mondays in window)
+  PDF  storage : 30 x 820 KB = 24.0 MB
+  CSV  storage : 5 x 120 KB = 0.59 MB
+  total report runs : 35
+
+Gotcha: report rendering is EXPENSIVE (headless browser). A dashboard
+with 20 panels rendered hourly for 50 recipients is 20*24*50 = 24,000
+panel renders/day -- keep schedules coarse (daily/weekly) and recipient
+lists tight. Reports store their output in the same S3 bucket as data.
+
+[check] 5 weekly Monday runs in a 30-day window starting Monday: OK
+[check] 30 daily runs over 30 days: OK
+
+
+========================================================================
+SECTION G - RUM: real user monitoring (web vitals, sessions, replay)
+========================================================================
+
+RUM is the BROWSER side of observability. A tiny JS SDK (the O2 RUM SDK,
+built on OpenTelemetry) runs in your web app and ships events to a `rum`
+stream over HTTP. Four event types:
+
+  page views  : navigation, route, referrer -> a session timeline.
+  web vitals  : Core Web Vitals (LCP, INP, CLS) + TTFB, FCP, TTFB.
+  errors      : uncaught JS exceptions + console.error -> error tracking.
+  resources   : XHR/fetch timing, long tasks -> perf waterfall.
+
+--- Core Web Vitals (the 3 numbers Google ranks you on) ---
+
+  LCP  Largest Contentful Paint : good <= 2500ms, poor >= 4000ms
+  INP  Interaction to Next Paint: good <= 200ms, poor >= 500ms
+  CLS  Cumulative Layout Shift  : good <= 0.1,  poor >= 0.25
+
+  sample session p75 vitals: LCP=2100ms INP=240ms CLS=0.08
+
+  buckets : LCP=100  INP=50  CLS=100  (100=good, 50=needs, 0=poor)
+  weighted perf score : 0.35*100 + 0.35*50 + 0.3*100 = 82.5 / 100
+
+--- session replay ---
+
+  O2 records DOM mutations + user interactions (clicks, scrolls, input)
+  as a compact event stream, then RECONSTRUCTS the pixel-perfect session
+  in the player. PII redaction via CSS selectors (mask `.credit-card`).
+  Replay is the difference between 'INP was 480ms' and SEEING the frozen
+  screen that caused it.
+
+--- error tracking ---
+
+  uncaught exceptions are grouped by stack-trace fingerprint. The UI
+  shows: error message, first/last seen, affected sessions, the exact
+  browser/OS/version, and a one-click jump to the session replay at the
+  moment the error threw. This closes the loop: metric -> user -> cause.
+
+[check] RUM perf score = 82.5 for LCP=2100/INP=240/CLS=0.08: OK
+
+
+========================================================================
+SECTION H - Traces UI: span waterfall from OTLP
+========================================================================
+
+Traces arrive via OTLP (the OpenTelemetry protocol). O2 ingests them into
+a `traces` stream. Each span is a row:
+
+  trace_id, span_id, parent_span_id, service, operation,
+  start_time, duration_ms, status, attributes{...}
+
+The TRACES UI renders these as a GANTT waterfall: parent spans on top,
+children indented below, bars positioned by start/duration. The critical
+path (longest parent->child chain) is what latency optimisation targets.
+
+--- checkout trace (6 spans) ---
+
+  span  service   operation          start  dur   parent
+  ----  -------   ---------          -----  ---   ------
+  s1  gateway   GET /checkout          0  120   -
+  s2  auth      verify_token           2   23   s1
+  s3  cart      load_cart             25   30   s1
+  s4  db        SELECT cart_items     27   23   s3
+  s5  payment   charge_card           55   60   s1
+  s6  notify    send_receipt         116    4   s1
+
+  total trace duration : 120 ms
+  span count           : 6
+  slowest non-root     : 60 ms  (payment.charge_card)
+
+--- waterfall (ASCII; the UI draws this as colored Gantt bars) ---
+
+  s1 gateway  ########################################  GET /checkout (120ms)
+    s2 auth      #######                                  verify_token (23ms)
+    s3 cart             ##########                        load_cart (30ms)
+      s4 db                ########                         SELECT cart_items (23ms)
+    s5 payment                    ####################    charge_card (60ms)
+    s6 notify                                          #  send_receipt (4ms)
+  0         30        60        90        120ms
+
+The UI also has a SERVICE GRAPH (nodes = services, edges = calls, edge
+width = traffic, edge color = error rate) and a flame-graph breakdown of
+a single span's self-time vs child-time. Click any span -> jump to the
+matching logs (trace_id correlation) -- the three-pillar join.
+
+[check] trace total duration = 120 ms: OK
+[check] trace has 6 spans: OK
+[check] slowest non-root span = 60 ms: OK
+
+
+========================================================================
+SECTION I - Functions: VRL transforms + Python Actions (UDFs)
+========================================================================
+
+Functions let you TRANSFORM data. Two flavours:
+
+  VRL (Vector Remap Language) : a small, fast, sandboxed language used
+    at INGEST time (mutate every row as it lands) or at QUERY time
+    (transform a result set on read). Compiled to Rust, no GC.
+  Python Actions              : full Python scripts that run server-side
+    as either real-time (on ingest) or scheduled (cron) jobs. Can import
+    pip packages (declared per-action), hit the network, and write back
+    to streams. The most powerful 'destination' too.
+
+--- VRL ingest transform: parse a nginx log line into fields ---
+
+  .service = "nginx"
+  .remote_addr = parse_regex!(.message, r'^(?P<ip>\d+\.\d+\.\d+\.\d+)').ip
+  .status = to_int!(parse_regex!(.message, r' (?P<code>\d{3}) ').code)
+  .level = if .status >= 500 { "ERROR" } else if .status >= 400 { "WARN" } else { "INFO" }
+  del(.message)
+
+  -> every nginx row now has service/status/level columns, queryable +
+     indexable. This is CHEAPER than parsing at query time (done once).
+
+--- Python Action: enrich + alert + write-back ---
+
+  def run(context, rows):
+      # rows: list of dicts from the triggering query/alert
+      for r in rows:
+          r['severity'] = 'HIGH' if r['error_rate'] > 10 else 'MED'
+          r['oncall'] = lookup_oncall(r['service'])   # enrichment table
+      # fan-out: page on-call + write an incident row
+      pagerduty.trigger(rows)
+      openobserve.ingest('incidents', rows)           # write-back
+      return rows
+
+  -> the same firing can enrich rows, page someone, AND persist a record
+     for postmortem. This is the stateful-routing use case from Section E.
+
+When to use which:
+
+  * structured-field extraction on every row  -> VRL at ingest (one-time)
+  * ad-hoc calc on a query result             -> VRL at query time
+  * need network/pip/stateful side effects    -> Python Action
+  * scheduled batch enrichment                -> scheduled Action
+
+[check] two function flavours: VRL + Python Actions: OK
+
+
+========================================================================
+SECTION J - Day 0 -> Day 1 -> Day 2 recap
+========================================================================
+
+DAY 0 -- first dashboard (the 15-minute win)
+
+  * Ingest anything (a log stream from curl/Fluent Bit is enough).
+  * UI: Dashboards -> + Add -> name it -> + Add Panel.
+  * Pick stream, paste SQL (or use the visual builder), pick 'line'.
+  * Save. You have a panel. Repeat 4-6x = a real dashboard.
+
+  Verify: open the dashboard in another tab, refresh -> panel redraws.
+
+DAY 1 -- alerts + first destination
+
+  * Management -> Alert Destinations -> add Slack (paste webhook).
+  * Alerts -> + Add -> Scheduled -> pick stream -> 'count >= 10 of ERROR'.
+  * Set frequency=5min, period=5min, cooldown=10min, destination=Slack.
+  * Save. Deliberately push an error log -> watch Slack light up.
+
+DAY 2 -- reports, RUM, traces, functions
+
+  * Reports : schedule the Day-0 dashboard as a weekly PDF email.
+  * RUM     : drop the RUM SDK in your web app -> watch web vitals land.
+  * Traces  : point your OTel collector at O2 -> open the traces waterfall.
+  * Functions: write a VRL ingest transform to parse nginx -> fields.
+
+  * Pipelines: chain VRL + routing + remote-destination at ingest.
+
+The whole UI layer is the SAME six modules over the SAME backend. Once
+Day 0's dashboard works, Day 1's alert and Day 2's report/RUM/traces are
+just new LENSES on data you already have.
+
+========================================================================
+ALL SECTIONS COMPLETE -- every [check] passed.
+========================================================================

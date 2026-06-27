@@ -1,0 +1,162 @@
+
+====================================================================
+DISTRIBUTED TRACING -- span model, propagation, sampling, logs, critical path
+====================================================================
+
+====================================================================
+A: Span data model
+====================================================================
+  trace_id = ff778740f88ddcf102aeb81daee289c0  (32 hex chars = 16 bytes)
+  7 spans across services: auth,cart,db,gateway,inventory,payment,stripe
+
+  service    operation          span      parent    start  dur   end status
+  -------------------------------------------------------------------------
+  gateway    GET /checkout      44c4a457  (root)        0  250   250 OK    
+  auth       verify_token       7400f4b8  44c4a457      5   15    20 OK    
+  cart       get_cart           80c32d81  44c4a457     25   35    60 OK    
+  db         SELECT cart_items  4cd7a381  80c32d81     30   25    55 OK    
+  payment    charge_card        c3298af4  44c4a457     65  170   235 OK    
+  stripe     POST /v1/charges   0099527d  c3298af4     70  160   230 OK    
+  inventory  reserve_items      e0fcd4ce  44c4a457    236    9   245 OK    
+[check] trace_id is 32 hex chars: OK
+[check] all spans share the trace_id: OK
+[check] exactly one root span (parent_span_id is None): OK
+
+====================================================================
+B: Context propagation formats
+====================================================================
+  Gateway -> Auth hop (sampled=True):
+    outgoing W3C traceparent:
+      00-ff778740f88ddcf102aeb81daee289c0-7400f4b8e0b843f8-01
+    outgoing B3 headers:
+      X-B3-TraceId: ff778740f88ddcf102aeb81daee289c0
+      X-B3-SpanId: 7400f4b8e0b843f8
+      X-B3-Sampled: 1
+      X-B3-ParentSpanId: 44c4a4571c4b6f28
+    outgoing B3 single-header:
+      b3: ff778740f88ddcf102aeb81daee289c0-7400f4b8e0b843f8-1
+    outgoing Jaeger uber-trace-id:
+      uber-trace-id: ff778740f88ddcf102aeb81daee289c0:7400f4b8e0b843f8:44c4a4571c4b6f28:03
+
+  W3C decode of the documented example:
+    00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+      version   = 00
+      trace_id  = 4bf92f3577b34da6a3ce929d0e0e4736
+      span_id   = 00f067aa0ba902b7
+      sampled   = True
+[check] W3C encode->decode round-trips trace_id: OK
+[check] W3C decode sampled bit (01 -> True): OK
+[check] B3 single-header carries trace-id: OK
+[check] Jaeger round-trips trace_id: OK
+[check] Jaeger sampled bit (flags & 1): OK
+[check] W3C trace_id field == 32 hex: OK
+[check] W3C span_id field == 16 hex: OK
+
+====================================================================
+C: Trace reconstruction from distributed spans
+====================================================================
+  Spans arrive at the collector out of order and from different
+  services. They are grouped by trace_id, then assembled into a tree
+  using parent_span_id:
+
+  gateway.GET /checkout  [250ms, OK]  span=44c4a457
+      ├─ auth.verify_token  [15ms, OK]  span=7400f4b8
+      ├─ cart.get_cart  [35ms, OK]  span=80c32d81
+      │   └─ db.SELECT cart_items  [25ms, OK]  span=4cd7a381
+      ├─ payment.charge_card  [170ms, OK]  span=c3298af4
+      │   └─ stripe.POST /v1/charges  [160ms, OK]  span=0099527d
+      └─ inventory.reserve_items  [9ms, OK]  span=e0fcd4ce
+[check] reconstruction is order-independent: OK
+[check] tree has a single root: OK
+[check] parent_span_id edges == 6: OK
+
+====================================================================
+D: Head-based sampling (decided at ingest, propagates)
+====================================================================
+  Decision made ONCE at the entry service using TraceIdRatio.
+  Encoded into trace-flags; every downstream service obeys it, so a
+  trace is kept or dropped as a whole unit.
+
+  rate=100.0%  -> kept 12/12 of demo trace-ids
+  rate= 10.0%  -> kept 1/12 of demo trace-ids
+  rate=  1.0%  -> kept 0/12 of demo trace-ids
+[check] same trace-id yields identical decision at every hop: OK
+[check] rate=100% keeps everything: OK
+[check] rate=0% keeps nothing: OK
+
+====================================================================
+E: Tail-based sampling (decided at collector after full trace)
+====================================================================
+  The collector buffers ALL spans, groups by trace_id, rebuilds the
+  trace, THEN decides. It can keep every trace that errored or was
+  slow -- exactly what head sampling CANNOT do.
+
+  OK   trace: wall=250ms error=False -> keep=True
+  ERROR trace: wall=250ms error=True -> keep=True
+[check] tail keeps the error trace: OK
+[check] tail may drop a fast clean trace (slow_ms=9999): OK
+
+====================================================================
+F: Sampling rate math -- how many error traces are LOST?
+====================================================================
+  Empirical batch: 2000 traces, 4 with errors
+
+     rate   kept  err_kept  err_lost
+   100.0%   2000         4         0
+    10.0%    185         0         4
+     1.0%     12         0         4
+
+  Closed form: P(capture >=1 in K occurrences) = 1 - (1-rate)^K
+    rate=1%  K=  1  ->  P=  1.000%
+    rate=1%  K= 10  ->  P=  9.562%
+    rate=1%  K= 50  ->  P= 39.499%
+    rate=1%  K=100  ->  P= 63.397%
+    rate=1%  K=459  ->  P= 99.008%
+
+  PINNED gold value: P(1%, K=100) = 0.6339676587
+  Occurrences needed for 99% capture at 1% rate: K = 459
+[check] P(1%,100) == 1 - 0.99**100: OK
+[check] at 1% you need >=458 occurrences for 99% capture: OK
+[check] 1% sampling drops ~99% of traces: OK
+
+====================================================================
+G: Trace-to-log correlation (trace_id injected into structured logs)
+====================================================================
+  7 structured JSON log lines carrying trace_id=ff778740...
+
+  {"level": "INFO", "msg": "handling GET /checkout", "service": "gateway", "span_id": "44c4a4571c4b6f28", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 0}
+  {"level": "INFO", "msg": "handling verify_token", "service": "auth", "span_id": "7400f4b8e0b843f8", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 5}
+  {"level": "INFO", "msg": "handling get_cart", "service": "cart", "span_id": "80c32d81e91bdea0", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 25}
+  {"level": "INFO", "msg": "handling SELECT cart_items", "service": "db", "span_id": "4cd7a3819b32275f", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 30}
+  {"level": "INFO", "msg": "handling charge_card", "service": "payment", "span_id": "c3298af4c7ec87eb", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 65}
+  {"level": "INFO", "msg": "handling POST /v1/charges", "service": "stripe", "span_id": "0099527d041ced5c", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 70}
+  {"level": "INFO", "msg": "handling reserve_items", "service": "inventory", "span_id": "e0fcd4ce4e3d0e3d", "trace_id": "ff778740f88ddcf102aeb81daee289c0", "ts_ms": 236}
+
+  Query: pull every log for THIS request by trace_id:
+    -> 7/7 logs matched
+[check] every log carries the trace_id: OK
+[check] error span produced an ERROR-level log: OK
+
+====================================================================
+H: Critical path analysis
+====================================================================
+  The critical path is the chain of spans whose sequential duration
+  sets the end-to-end latency. Found by descending into the child with
+  the largest duration at each step (the bottleneck call):
+
+        gateway.GET /checkout  [250ms]  44c4a457
+    -> payment.charge_card  [170ms]  c3298af4
+    -> stripe.POST /v1/charges  [160ms]  0099527d
+
+  chain length: 3 spans
+  sum of durations on path: 580ms
+  root span wall-clock:      250ms
+  (sum >= wall because the path's spans are nested, not additive;
+   the leaf duration is what the root actually waited on.)
+[check] critical path starts at the root: OK
+[check] critical path reaches a leaf (no children): OK
+[check] bottleneck chain is gateway->payment->stripe: OK
+
+====================================================================
+DONE
+====================================================================

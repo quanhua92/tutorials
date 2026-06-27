@@ -1,0 +1,428 @@
+grafana.py -- every value below is computed by this file.
+
+======================================================================
+SECTION A: the request path -- browser to rendered pixels
+======================================================================
+Grafana is a SERVER + BROWSER APP. A dashboard render is one HTTP page
+load, then N parallel query requests fanned out to data sources. The
+path below is what EVERY panel refresh walks, end to end.
+
+  browser          60 ms   user opens /d/<uid>; SPA boots; dashboard JSON fetched
+  frontend          8 ms   React parses JSON; expands $variables; builds query list
+  query_proxy       5 ms   Grafana server routes each query to its data-source plugin
+  ds_plugin         3 ms   plugin translates Grafana query -> native (PromQL/LogQL/SQL)
+  backend         120 ms   the actual store (Prometheus/Loki/Postgres) executes
+  to_dataframe      6 ms   plugin converts native response -> Grafana data frame
+  panel_render     18 ms   browser panel plugin (time series/stat/...) draws pixels
+  TOTAL           220 ms   (one panel, one query, warm view)
+[check] per-panel render budget = sum of 7 layer latencies: OK
+
+  DATA PROXY: for 'server' access mode (access=proxy) Grafana's backend
+  makes the data-source call. This avoids CORS and keeps SECRETS
+  server-side (API keys never reach the browser). For 'browser' access
+  mode the browser calls the source directly -- rare, requires the
+  source to allow CORS, and cannot use secret credentials safely.
+[check] server access mode proxies via backend (secrets stay server-side): OK
+
+  DATA FRAME: the universal return type. A DataFrame is a columnar
+  table with named Fields (e.g. Time=[..], Value=[..]) plus optional
+  labels. One panel query returns 1..N frames; the panel plugin knows
+  how to draw a frame of a given shape (wide vs long). This contract is
+  WHY any data source can feed any panel -- the source plugin owns the
+  translation, the panel plugin owns the pixels.
+
+  PromQL vector  http_requests_total{job="api"} 1234 @1700000000
+  -> DataFrame   fields=[('Time', [1700000000]), ('Value', [1234.0])]
+                 labels={'job': 'api'}
+[check] DataFrame has a Time field and a Value field: OK
+
+======================================================================
+SECTION B: the dashboard JSON model
+======================================================================
+A dashboard IS a JSON object. The same JSON is what you edit in the UI,
+export, import, and version in git via provisioning. Knowing the shape
+is what makes 'dashboards-as-code' possible (Section G).
+
+{
+  "title": "API latency overview",
+  "uid": "api-latency",
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "Prometheus"
+        }
+      },
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": "$datasource",
+        "query": "label_values(http_requests_total, job)",
+        "includeAll": true
+      },
+      {
+        "name": "interval",
+        "type": "interval",
+        "options": [
+          {
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "text": "5m",
+            "value": "5m"
+          }
+        ],
+        "current": {
+          "text": "5m",
+          "value": "5m"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "p95 latency by job",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(http_req_duration_seconds_bucket{job=~\"$job\"}[$interval])))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "error rate",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "recent errors",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "expr": "{job=~\"$job\"} |= \"error\"",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}
+[check] dashboard has 3 panels: OK
+[check] panel ids are unique: OK
+[check] every panel has a gridPos (x,y,w,h): OK
+[check] schemaVersion is an int (versioned JSON shape): OK
+
+  KEY FIELDS:
+    uid              stable identifier (URLs use it; rename-safe)
+    schemaVersion    JSON shape version (drives migrations on import)
+    time.from/to     the default time window (e.g. now-6h .. now)
+    refresh          auto-refresh interval (30s, 5m, or ''=off)
+    templating.list  the variables ($job, $interval, $datasource)
+    panels[].gridPos x/y/w/h on a 24-COLUMN grid (w in 1..24)
+    panels[].targets the query list (expr + refId A/B/C...)
+    panels[].datasource {type, uid} -- uid can be a $variable
+[check] grid is 24 columns wide (w max = 24): OK
+[check] datasource uid can itself be a $variable (swap source per dashboard): OK
+
+======================================================================
+SECTION C: query languages -- one panel, many source dialects
+======================================================================
+Every data-source plugin speaks its own query dialect. Grafana's job is
+to translate the panel's request into that dialect and the native result
+back into a DataFrame. The dialect you write lives in targets[].expr.
+
+  source        type          language      example query
+  ----------------------------------------------------------------------------------------------
+  Prometheus    prometheus    PromQL        histogram_quantile(0.95, sum by (le)(rate(http_req_duration_seconds_bucket[5m])))
+  Loki          loki          LogQL         {job="api"} |= "error" | json | line_format "{{.msg}}"
+  PostgreSQL    postgres      SQL           SELECT time, cpu FROM host_metrics WHERE host=$host AND $__timeFilter(time)
+  MySQL         mysql         SQL           SELECT $__timeGroup(created_at,'5m'), count(*) FROM events GROUP BY 1
+  Elasticsearch elasticsearch Lucene/KQL    status:5xx AND service:api
+  InfluxDB      influxdb      InfluxQL/Flux from(bucket:"metrics") |> range(start: v.timeRangeStart) |> filter(fn:(r)=> r._measurement=="cpu")
+  Tempo         tempo         TraceQL       { span.http.status_code >= 500 }
+
+  data-source dialects modeled: 7
+[check] 7 data-source dialects modeled: OK
+[check] metric (Prom) + log (Loki) + trace (Tempo) dialects all present: OK
+
+  SQL MACROS (Postgres/MySQL) -- Grafana rewrites these at query time:
+    $__timeFilter(col)      -> col BETWEEN '<from>' AND '<to>'
+    $__timeGroup(col,'5m')  -> floor(extract(epoch from col)/300)*300
+    $__interval             -> a bucket width derived from time-range/1000
+  These are why SQL dashboards auto-scale bucketing to the zoom level.
+
+  NORMALIZATION: every dialect's native response is converted into a
+  DataFrame before the panel plugin sees it. A PromQL vector, a SQL row
+  set, and a Loki log stream all become {Time:[..], Value:[..]} frames.
+  The panel plugin draws the frame regardless of where the data came
+  from -- that decoupling is the whole multi-source value proposition.
+[check] all dialects normalize to a DataFrame before rendering: OK
+
+======================================================================
+SECTION D: templating variables -- the $var and [[var]] system
+======================================================================
+A variable is a named placeholder resolved at render time. It turns a
+static dashboard into a parameterized template: pick a job, a region, a
+host -> every panel's query re-runs with that value. Variables are
+substituted as $name, [[name]], or ${name}.
+
+  type        what it resolves to
+  ------------------------------------------------------------
+  query       values from a data-source query (e.g. label_values)
+  interval    a time bucket (1m, 5m, 1h) -- often drives $__interval
+  custom      a hardcoded list you define (env: dev/stage/prod)
+  datasource  pick WHICH data source the dashboard queries
+  textbox     free text the user types
+  constant    a fixed value hidden from the user
+  adhoc       auto-discovered key=value filters (Prometheus label pairs)
+[check] 7 variable types: OK
+
+  template : rate(http_requests_total{job="$job",env="$env"}[$interval])
+  bindings : {'job': 'api', 'env': 'prod', 'interval': '5m'}
+  resolved : rate(http_requests_total{job="api",env="prod"}[5m])
+[check] $job, $env, $interval all interpolated: OK
+
+  MULTI-VALUE: if a variable has includeAll or multi-select, a value
+  like ['api','web'] becomes the regex 'api|web' meant for PromQL's =~
+  match operator:  {job=~"$job"}  ->  {job=~"api|web"}.
+  includeAll sets the value to '.*' (matches everything).
+  $job values = ['api', 'web', 'batch']  ->  regex = 'api|web|batch'
+[check] multi-value joins with | into a regex (no spaces): OK
+
+  REPEAT BY VARIABLE: set 'repeat by $host' on a panel and Grafana
+  clones the panel once per host value, auto-layouting on the grid.
+  This is how 'one graph per instance' overview dashboards are built.
+  hosts=['h-01', 'h-02', 'h-03'] -> 3 panels rendered
+[check] repeat by variable yields N panels (1 per value): OK
+
+======================================================================
+SECTION E: panel types -- when to use which
+======================================================================
+The panel TYPE decides how a DataFrame is drawn. Picking the wrong one
+hides the signal (a stat panel for a trend, a table for a rate). Match
+the visualization to the QUESTION the panel answers.
+
+  type          question it answers                   draws
+  --------------------------------------------------------------------------------------------
+  timeseries    How does this move over time?         lines/areas/bars over time
+  stat          What is the current single value?     big number + sparkline
+  gauge         Is a bounded value in a safe range?   arc + threshold bands
+  bargauge      Compare a few values at a glance?     horizontal bars
+  table         Show many columns of raw/aggregated?  rows x columns, sortable
+  heatmap       Where is the density over time?       2D bins: time x value-bucket
+  nodegraph     What does a graph of nodes/edges look like?nodes + edges
+  logs          Show log lines (with metadata)?       streaming log lines
+  statetimeline When was each state active?           colored time segments
+  candlestick   OHLC financial-style series?          open/high/low/close candles
+  geomap        Where on a map?                       points/lines on geo tiles
+  piechart      Share of a total (a few slices)?      slices
+
+  panel types modeled: 12
+[check] 12 panel types in the matrix: OK
+
+  RULE OF THUMB:
+    trend over time       -> timeseries
+    single current value  -> stat
+    bounded 0-100% watch  -> gauge
+    distribution / tail   -> heatmap (or histogram)
+    a trace / dependency  -> nodegraph
+    raw rows              -> table
+  Heatmap beats stat for latency: a single p95 hides the tail; a heatmap
+  shows the whole distribution shifting over time.
+[check] heatmap shows distribution; a single stat hides the tail: OK
+
+======================================================================
+SECTION F: alerting -- rules, states, policies, contact points
+======================================================================
+Grafana's UNIFIED alerting runs alert rules against ANY data source,
+drives each through a 3-state machine (Normal -> Pending -> Alerting),
+then routes firing instances through a notification policy tree to a
+contact point (Slack / PagerDuty / email / webhook).
+
+  PIPELINE:
+    alert rule (query + threshold condition + for:duration)
+      -> evaluated every evaluation interval
+      -> state machine: Normal / Pending / Alerting
+      -> firing instance carries labels
+    notification policy (tree, matched on labels, first-match-wins)
+      -> routes to a contact point
+    contact point (Slack / PagerDuty / email / webhook)
+
+  STATE MACHINE  (threshold=0.05, for=120s, eval=30s)
+  t(s)  error_rate  condition   state       note
+  ----------------------------------------------------------------------
+  0     0.012       False       Normal      
+  30    0.061       True        Pending     
+  60    0.072       True        Pending     
+  90    0.058       True        Pending     
+  120   0.070       True        Pending     
+  150   0.066       True        Alerting    <-- FIRES (notification sent)
+  180   0.011       False       Normal      <-- RESOLVED
+[check] fires at t=150 (for:2m satisfied: first true t=30 + 120s): OK
+[check] resolves at t=180 (condition false again): OK
+[check] Pending -> Alerting requires the for: duration to elapse: OK
+
+  NOTIFICATION POLICY (label-matched routing tree):
+    (root)                      -> default-slack (default)
+    severity="critical"         -> pagerduty
+    severity="warning"          -> slack-warnings
+    team="db"                   -> dba-oncall
+
+  ROUTING EXAMPLES (first-match-wins):
+    {severity="critical", team="app"} -> pagerduty   [OK]
+    {severity="warning", team="app"} -> slack-warnings   [OK]
+    {severity="warning", team="db"} -> slack-warnings   [OK]
+    {team="db"} -> dba-oncall   [OK]
+    {severity="info"} -> default-slack   [OK]
+[check] critical -> pagerduty: OK
+[check] warning+db -> slack-warnings (severity checked before team): OK
+[check] only team=db -> dba-oncall: OK
+[check] no match -> default-slack (root fallback): OK
+
+======================================================================
+SECTION G: provisioning -- dashboards & datasources as code
+======================================================================
+Provisioning loads datasources and dashboards from YAML at startup. The
+files live under /etc/grafana/provisioning/{datasources,dashboards}/.
+Provisioned objects are READ-ONLY in the UI -- the git repo is the source
+of truth. This is the foundation of dashboards-as-code / GitOps.
+
+  provisioning/datasources/datasources.yml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        editable: false
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+      - name: Postgres
+        type: postgres
+        url: postgres:5432
+        user: readonly
+        secureJsonData:
+          password: ${PG_PASSWORD}
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1500
+[check] 3 datasources provisioned (Prom, Loki, Postgres): OK
+[check] secrets use secureJsonData (never plain jsonData): OK
+
+  provisioning/dashboards/dashboards.yml:
+    apiVersion: 1
+    providers:
+      - name: 'dashboards-from-git'
+        orgId: 1
+        folder: 'Services'
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: true
+[check] provider type is 'file' (reads JSON from disk): OK
+[check] allowUiUpdates false keeps dashboards git-controlled: OK
+
+  THE GITOPS LOOP:
+    1. author dashboard JSON (or generate with grafonnet/Terraform)
+    2. commit to git -> CI lints against the dashboard jsonschema
+    3. CD (ArgoCD/Flux) syncs the repo onto the Grafana container's
+       /var/lib/grafana/dashboards volume
+    4. Grafana's file provider polls that dir every updateIntervalSeconds
+       and reloads changed dashboards (no API call needed)
+  -> a dashboard PR that merges is live within 30s. No UI clicks.
+[check] file-provider + GitOps = dashboards live on merge, no UI clicks: OK
+
+======================================================================
+SECTION H: rendering cost -- queries per refresh x concurrent viewers
+======================================================================
+Every dashboard refresh fires P panels x Q queries each against the
+backends. The load you place on Prometheus/Loki/Postgres is the PRODUCT
+of panel count, refresh rate, and concurrent viewers. This is THE
+Grafana overload pattern: a 24-panel wall dashboard at 5s refresh with
+100 war-room onlookers hammers the backend.
+
+  scenario                            P   Q   R(s)   U    q/u   qps/u   total qps
+  ----------------------------------------------------------------------------------------
+  laptop dev (1 viewer)               6   1   30     1    6     0.20    0.2
+  team overview (10 viewers)          12  1   30     10   12    0.40    4.0
+  wall display (1 viewer, fast)       24  1   5      1    24    4.80    4.8
+  incident war room (100 viewers)     24  1   5      100  24    4.80    480.0
+
+  REFERENCE: 12 panels x 1 query @ 30s x 10 viewers
+    = 12 q/u = 0.4 qps/u = 4.0 total qps
+[check] reference = 4.0 total qps (12*1/30*10): OK
+  WAR ROOM : 24 panels @ 5s x 100 viewers
+    = 480.0 total qps  (120x the reference load)
+[check] war room = 480.0 total qps (24*1/5*100): OK
+[check] war room is 120x the reference load: OK
+
+  LEVERS (in order of impact):
+    1. slow the refresh (30s -> 1m halves the load; wall displays can be 1m)
+    2. query recording-rule outputs, not raw rate() (Prometheus side)
+    3. use shared queries (one query feeds multiple panels)
+    4. reduce panels (split into multiple dashboards by audience)
+    5. enable query caching (Grafana Enterprise / Cloud)
+    6. scope the time range (now-1h is cheaper than now-7d)
+  The refresh slider is a COST DIAL. Treat it like one.
+[check] slower refresh is the #1 cost lever: OK
+
+======================================================================
+SECTION DONE -- all sections printed
+======================================================================

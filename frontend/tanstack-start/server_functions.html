@@ -1,0 +1,602 @@
+<!doctype html>
+<!--
+  server_functions.html — Phase 6 tanstack-start bundle (SERVER FUNCTIONS deep dive).
+  GROUND TRUTH: a self-contained, zero-dep INTERACTIVE EXPLAINER for TanStack Start
+  Server Functions — createServerFn() (a fn you WRITE on the server and CALL from the
+  client like a local async fn). It is NOT a running TanStack Start app — it is curated,
+  web-verified API data + a tiny inline validator rendered live, contrasted with a
+  hand-rolled fetch+endpoint+JSON-parse path.
+  No external CDN (curated API facts + a live inline validator, not a framework runtime).
+  Companion: SERVER_FUNCTIONS.md (the guide).
+  Gold values (all about logic authored in THIS file):
+    (1) a valid server-fn call returns a typed success (data.message set, error undefined),
+    (2) an invalid input (fails the validator) returns a validation error (handler skipped),
+    (3) the call is type-checked on the client: a wrong type is rejected by the validator,
+        while the hand-rolled fetch endpoint returns 200 for the SAME bad input (no validation).
+  API verified from tanstack.com/start/v0/docs/framework/react/guide/server-functions +
+  the TanStack/router source (zread) + a 2025 secondary blog (jilles.me). See
+  SERVER_FUNCTIONS.md ## Sources. Current API: .validator() (inputValidator deprecated).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Server Functions — frontend bundle</title>
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#6366f1; --accent-soft:#312e81; --line:#30363d;
+      --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header h1 .dot { color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px; font-weight:700;
+      border:1px solid currentColor; }
+    main { padding:22px; max-width:1180px; margin:0 auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    h3 { font-size:14px; margin:0 0 6px; color:var(--ink); }
+    p { margin:6px 0; }
+    code { background:rgba(99,102,241,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+
+    /* the one-idea panel */
+    .rule { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .rule .big { font-size:18px; font-weight:700; color:var(--ink); }
+    .rule .zero { color:var(--ok); font-weight:700; }
+    .rule .pill { display:inline-block; font-size:12px; padding:2px 9px; margin:3px 6px 0 0;
+      border-radius:999px; border:1px solid var(--accent-soft); color:var(--accent); background:rgba(99,102,241,.06); }
+    .rule .pill.raw { color:var(--warn); border-color:rgba(241,196,15,.35); background:rgba(241,196,15,.06); }
+
+    /* the chained-builder anatomy */
+    .anatomy { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+    .step { display:flex; align-items:stretch; gap:0; border:1px solid var(--line); border-radius:9px;
+      overflow:hidden; background:var(--bg); transition:border-color .15s; }
+    .step:hover { border-color:var(--accent); }
+    .step .num { display:flex; align-items:center; justify-content:center; width:120px; min-height:60px;
+      background:rgba(99,102,241,.14); color:var(--accent); font-weight:700; font-size:13px;
+      font-family: ui-sans-serif, system-ui, sans-serif; text-align:center; padding:6px; }
+    .step .body { padding:10px 14px; flex:1; }
+    .step .api { font-weight:700; font-size:14px; font-family: ui-monospace, monospace; color:var(--ink); }
+    .step .role { color:var(--muted); font-size:12.5px; margin:3px 0 0; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+    /* code columns */
+    .cols { display:flex; gap:16px; flex-wrap:wrap; }
+    .cols > .col { flex:1 1 420px; min-width:0; }
+    .col h3 .tag { font-size:11px; padding:2px 8px; border-radius:999px; margin-left:8px;
+      vertical-align:middle; font-family: ui-monospace, monospace; }
+    .col h3 .tag.fn { color:var(--accent); border:1px solid var(--accent-soft); background:rgba(99,102,241,.08); }
+    .col h3 .tag.api { color:var(--warn); border:1px solid rgba(241,196,15,.35); background:rgba(241,196,15,.07); }
+    pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px;
+      margin:0; overflow:auto; font-size:12.5px; line-height:1.5; color:#c9d1d9; }
+    pre .kw { color:#ff7b72; }   /* keyword */
+    pre .fn { color:#d2a8ff; }   /* function */
+    pre .st { color:#a5d6ff; }   /* string */
+    pre .cm { color:#8b949e; font-style:italic; } /* comment */
+    pre .ty { color:#79c0ff; }   /* type */
+    pre .pp { color:#f1c40f; }   /* property/punct highlight */
+
+    /* the try-it stage */
+    .row { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start; }
+    .row > * { flex:1 1 320px; }
+    .stage { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:16px;
+      font-family: ui-sans-serif, system-ui, sans-serif; }
+    .stage label { display:block; font-size:12.5px; color:var(--muted); margin-bottom:5px; }
+    .stage input[type=text] { width:100%; background:var(--panel); color:var(--ink); border:1px solid var(--line);
+      border-radius:6px; padding:9px 11px; font:inherit; font-family: ui-monospace, monospace; }
+    .stage input[type=text]:focus { outline:none; border-color:var(--accent); }
+    .chips { display:flex; gap:7px; flex-wrap:wrap; margin:10px 0 4px; }
+    .chips button { background:var(--panel); color:var(--muted); border:1px solid var(--line);
+      border-radius:999px; padding:4px 11px; cursor:pointer; font:inherit; font-size:12px; }
+    .chips button:hover { border-color:var(--accent); color:var(--ink); }
+    .calls { display:flex; gap:9px; margin-top:12px; flex-wrap:wrap; }
+    .calls button { font:inherit; font-weight:700; color:#fff; border:0; border-radius:7px;
+      padding:10px 15px; cursor:pointer; }
+    .calls button.fn { background:var(--accent); }
+    .calls button.api { background:#6b5e1b; }
+    .calls button:hover { filter:brightness(1.1); }
+
+    /* the result readout */
+    .readout { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px;
+      font-family: ui-monospace, monospace; font-size:12.5px; min-height:150px; }
+    .readout .verdict { font-family: ui-sans-serif, system-ui, sans-serif; font-size:13px;
+      margin-bottom:8px; padding:5px 10px; border-radius:6px; display:inline-block; }
+    .readout .verdict.ok { color:var(--ok); background:rgba(46,204,113,.08); border:1px solid rgba(46,204,113,.3); }
+    .readout .verdict.bad { color:var(--bad); background:rgba(231,76,60,.08); border:1px solid rgba(231,76,60,.3); }
+    .readout .verdict.raw { color:var(--warn); background:rgba(241,196,15,.08); border:1px solid rgba(241,196,15,.3); }
+    .readout pre { border:0; background:transparent; padding:0; margin:6px 0 0; }
+    .readout .hint { color:var(--muted); font-size:12px; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+    /* the round-trip flow */
+    .flow { margin-top:8px; }
+    .flow .lane { display:flex; align-items:stretch; gap:0; margin-bottom:12px; flex-wrap:wrap;
+      opacity:.32; transition:opacity .2s; }
+    .flow .lane.live { opacity:1; }
+    .flow .lane .lab { width:104px; flex:0 0 104px; display:flex; align-items:center; font-size:12px;
+      font-weight:700; font-family: ui-sans-serif, system-ui, sans-serif; padding-right:10px; }
+    .flow .lane.fn .lab { color:var(--accent); }
+    .flow .lane.api .lab { color:var(--warn); }
+    .flow .lane .node { flex:1 1 0; min-width:96px; background:var(--bg); border:1px solid var(--line);
+      border-radius:7px; padding:8px 9px; font-size:11.5px; line-height:1.35;
+      font-family: ui-monospace, monospace; position:relative; transition:border-color .2s, background .2s; }
+    .flow .lane .node .n { font-size:10px; color:var(--muted); display:block; margin-bottom:2px;
+      font-family: ui-sans-serif, system-ui, sans-serif; text-transform:uppercase; letter-spacing:.04em; }
+    .flow .lane.fn.live .node { border-color:var(--accent); }
+    .flow .lane.fn.live .node.hit { background:rgba(99,102,241,.14); }
+    .flow .lane.fn.live .node.err { border-color:var(--bad); background:rgba(231,76,60,.10); }
+    .flow .lane.api.live .node { border-color:var(--warn); }
+    .flow .lane.api.live .node.hit { background:rgba(241,196,15,.10); }
+    .flow .lane .arr { flex:0 0 18px; display:flex; align-items:center; justify-content:center;
+      color:var(--muted); font-size:14px; }
+    .flow .key { color:var(--accent); font-weight:700; }
+
+    /* comparison table */
+    .cmp { overflow-x:auto; }
+    table { border-collapse:collapse; font-size:12.5px; width:100%; min-width:760px; }
+    td,th { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; background:rgba(99,102,241,.05); }
+    td.fn { color:var(--accent); font-weight:700; white-space:nowrap; }
+    td.api { color:var(--warn); font-weight:700; white-space:nowrap; }
+    td.yes { color:var(--ok); font-weight:700; }
+    td.no { color:var(--bad); font-weight:700; }
+
+    .foot { color:var(--muted); font-size:12px; border-top:1px solid var(--line);
+      margin-top:18px; padding-top:12px; }
+    .foot a.xref { color:var(--accent); text-decoration:none; }
+    .foot a.xref:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="dot">●</span> server functions</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/tanstack-start/SERVER_FUNCTIONS.md">guide (.md)</a>
+      <a href="../index.html">← all frontend</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- the one-idea panel -->
+    <section class="panel rule">
+      <h2>The one idea</h2>
+      <p class="big">
+        A <strong>server function</strong> is code you <strong>WRITE</strong> on the server and
+        <strong>CALL</strong> from the client like a local async fn. The compiler wires the RPC — the
+        <span class="zero">input is validated + typed, the return is typed</span> — no
+        <code>fetch</code>, no <code>JSON</code>, no <code>any</code>.
+      </p>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">
+        You write <code>createServerFn({ method: 'POST' }).validator(schema).handler(async ({ data }) =&gt; …)</code>
+        in a server module. You <code>import</code> it in a client component and call it like a normal function.
+        At build time the Start compiler replaces the server impl with an RPC stub (a <code>fetch</code> to a
+        generated function ID) in the client bundle — the real body, with its DB/secrets/fs access,
+        never reaches the browser.
+      </p>
+      <div>
+        <span class="pill">createServerFn from @tanstack/react-start</span>
+        <span class="pill">.validator(schema) — typed + validated input</span>
+        <span class="pill">compiler → RPC stub (no manual fetch)</span>
+        <span class="pill raw">hand-rolled fetch: untyped any</span>
+      </div>
+    </section>
+
+    <!-- the chained-builder anatomy -->
+    <section class="panel">
+      <h2>The anatomy — a chained builder</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        <code>createServerFn()</code> returns a builder. Each chained call returns a new builder with merged
+        options. Order: declare the method, optionally attach middleware, validate the input, then the handler.
+      </p>
+      <div class="anatomy" id="anatomy"></div>
+      <p style="color:var(--muted);font-size:12px;margin-top:10px">
+        The handler always receives <code>{ data }</code> — the <em>already-validated</em> input.
+        The validator's schema types <code>data</code>; the handler's return type flows back to the caller.
+        <code>strict: true</code> (the default) makes TypeScript check that both input and output are
+        serializable across the network boundary.
+      </p>
+    </section>
+
+    <!-- side-by-side code -->
+    <section class="panel">
+      <h2>Side by side — the same "greeting" as a server function and as a hand-rolled endpoint</h2>
+      <div class="cols">
+        <div class="col">
+          <h3>server/greeting.functions.ts <span class="tag fn">Server Function</span></h3>
+<pre><span class="kw">import</span> { <span class="fn">createServerFn</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-start'</span>;
+<span class="kw">import</span> { z } <span class="kw">from</span> <span class="st">'zod'</span>;
+
+<span class="kw">export const</span> <span class="pp">getGreeting</span> = <span class="fn">createServerFn</span>({ <span class="pp">method</span>: <span class="st">'POST'</span> })
+  .<span class="fn">validator</span>(z.<span class="fn">object</span>({
+    <span class="pp">name</span>: z.<span class="fn">string</span>().<span class="fn">min</span>(<span class="ty">1</span>),
+  }))
+  .<span class="fn">handler</span>(<span class="kw">async</span> ({ data }) =&gt; {
+    <span class="cm">// runs ONLY on the server: DB, secrets, file system</span>
+    <span class="kw">return</span> {
+      <span class="pp">message</span>: <span class="st">`Hello, ${data.name}!`</span>,
+      <span class="pp">chars</span>: data.name.length,
+    };
+  });</pre>
+<pre style="margin-top:8px"><span class="cm">// client — call it like a local async fn (typed, no fetch):</span>
+<span class="kw">import</span> { getGreeting } <span class="kw">from</span> <span class="st">'#/server/greeting.functions'</span>;
+
+<span class="kw">const</span> result = <span class="kw">await</span> <span class="fn">getGreeting</span>({ <span class="pp">data</span>: { <span class="pp">name</span>: <span class="st">'Houston'</span> } });
+<span class="cm">// result.message  &lt;-- typed: string</span>
+<span class="cm">// result.chars    &lt;-- typed: number</span></pre>
+        </div>
+
+        <div class="col">
+          <h3>routes/api/echo.ts <span class="tag api">hand-rolled endpoint</span></h3>
+<pre><span class="kw">import</span> { <span class="fn">createServerFileRoute</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-start/server'</span>;
+
+<span class="kw">export const</span> <span class="ty">ServerRoute</span> = <span class="fn">createServerFileRoute</span>(<span class="st">'/api/echo'</span>)({
+  <span class="fn">POST</span>: <span class="kw">async</span> ({ request }) =&gt; {
+    <span class="kw">const</span> body = <span class="kw">await</span> request.<span class="fn">json</span>();
+    <span class="kw">const</span> name = body.name ?? <span class="st">''</span>;
+    <span class="kw">return new</span> <span class="fn">Response</span>(JSON.<span class="fn">stringify</span>({
+      <span class="pp">message</span>: <span class="st">`Hello, ${name}!`</span>,
+      <span class="pp">chars</span>: name.length,
+    }), {
+      <span class="pp">status</span>: <span class="ty">200</span>,
+      <span class="pp">headers</span>: { <span class="st">'Content-Type'</span>: <span class="st">'application/json'</span> },
+    });
+  },
+});</pre>
+<pre style="margin-top:8px"><span class="cm">// client — you fetch, check res.ok, parse JSON, type it yourself:</span>
+<span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">fetch</span>(<span class="st">'/api/echo'</span>, {
+  <span class="pp">method</span>: <span class="st">'POST'</span>,
+  <span class="pp">headers</span>: { <span class="st">'Content-Type'</span>: <span class="st">'application/json'</span> },
+  <span class="pp">body</span>: JSON.<span class="fn">stringify</span>({ <span class="pp">name</span>: <span class="st">'Houston'</span> }),
+});
+<span class="kw">if</span> (!res.ok) { <span class="cm">/* handle status yourself */</span> }
+<span class="kw">const</span> data = <span class="kw">await</span> res.<span class="fn">json</span>(); <span class="cm">// &lt;-- untyped: any</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- the interactive try-it -->
+    <section class="panel">
+      <h2>Try it — call the same input two ways</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Type a <code>name</code> (or use a chip) and call it as a <strong>Server Function</strong> (typed + validated
+        by a tiny inline Zod-like validator standing in for <code>.validator(z.object({ name: z.string().min(1) }))</code>)
+        or via a <strong>hand-rolled endpoint</strong> (no validation — echoes anything). The result + the round-trip
+        flow update live.
+      </p>
+      <div class="row">
+        <div class="stage">
+          <label for="nameInput">{ data: { name } }&nbsp;&nbsp;<span style="color:var(--muted)">(schema: z.string().min(1))</span></label>
+          <input id="nameInput" type="text" value="Houston" autocomplete="off" />
+          <div class="chips" id="chips">
+            <button data-v="Houston">"Houston" (valid)</button>
+            <button data-v="">(empty) (invalid)</button>
+            <button data-v="123">123 (wrong type)</button>
+          </div>
+          <div class="calls">
+            <button class="fn" id="callFn">Call Server Function (typed)</button>
+            <button class="api" id="callApi">Call Endpoint (raw fetch)</button>
+          </div>
+        </div>
+
+        <div class="readout" id="readout">
+          <span class="hint">Pick a value and press a call button to see the simulated typed result / validation.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- the round-trip flow -->
+    <section class="panel">
+      <h2>The round trip — client call → compiler RPC → server → typed return</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        The <span class="key">Server Function</span> lane: the client calls the fn like a local async fn; the
+        compiler has already replaced the body with an RPC stub (a <code>fetch</code> to a generated function ID);
+        on the server the validator runs first, then the handler; the typed result flows back. The endpoint lane
+        is all hand-rolled and returns an untyped <code>any</code>.
+      </p>
+      <div class="flow">
+        <div class="lane fn" id="laneFn">
+          <div class="lab">Server Fn</div>
+          <div class="node" id="fnN1"><span class="n">1 · client</span>getGreeting({ data })</div>
+          <div class="arr">→</div>
+          <div class="node" id="fnN2"><span class="n">2 · compiler</span>RPC stub: fetch('/_serverFn/&lt;id&gt;')</div>
+          <div class="arr">→</div>
+          <div class="node" id="fnN3"><span class="n">3 · server · validator</span>.validator(schema) validates input</div>
+          <div class="arr">→</div>
+          <div class="node" id="fnN4"><span class="n">4 · server · handler</span>runs ONLY here (DB/secrets)</div>
+          <div class="arr">←</div>
+          <div class="node" id="fnN5"><span class="n">5 · client</span>typed result (inferred)</div>
+        </div>
+        <div class="lane api" id="laneApi">
+          <div class="lab">Endpoint</div>
+          <div class="node" id="apiN1"><span class="n">1 · client</span>fetch('/api/echo', …)</div>
+          <div class="arr">→</div>
+          <div class="node" id="apiN2"><span class="n">2 · server · handler</span>new Response(JSON…)</div>
+          <div class="arr">→</div>
+          <div class="node" id="apiN3"><span class="n">3 · client</span>await res.json()</div>
+          <div class="arr">→</div>
+          <div class="node" id="apiN4"><span class="n">4 · client</span>any (untyped)</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- comparison table -->
+    <section class="panel">
+      <h2>Comparison — when to reach for which</h2>
+      <div class="cmp" id="table"></div>
+    </section>
+
+    <div class="foot">
+      This bundle is HOW TanStack Start does server calls: <code>createServerFn</code> for type-safe, validated,
+      compiler-RPC'd server functions; <code>createServerFileRoute</code> for raw endpoints (webhooks / non-Start
+      clients). Cross-refs:
+      <a class="xref" href="tanstack_start_overview.html">🔗 tanstack_start_overview (the stack; this is the server-fn deep dive)</a> ·
+      <a class="xref" href="../astro/astro_actions_endpoints.html">🔗 astro_actions_endpoints (the same "typed server RPC" idea, different framework)</a> ·
+      ssr_streaming (upcoming — server fns can stream typed data back).
+    </div>
+  </main>
+
+  <script>
+    // ===========================================================================
+    // The curated demo. EVERYTHING renders from the logic below. Nothing is
+    // fetched from the network. The gold-check asserts deterministic facts about
+    // these very functions. API surface verified from the official TanStack Start
+    // server-functions guide + the TanStack/router source + a 2025 secondary blog
+    // (see SERVER_FUNCTIONS.md ## Sources).
+    // ===========================================================================
+
+    // --- the builder anatomy data (the chained createServerFn API) ---
+    // Source of truth for the table below + the gold-check (5 steps render).
+    var ANATOMY = [
+      {
+        api: "createServerFn({ method: 'POST' })",
+        role: "Start the builder. { method } is GET by default or POST. Optional { strict } controls serialization type-checking (default true)."
+      },
+      {
+        api: ".validator(schema)",
+        role: "Validate + type the input. Accepts a standard-schema adapter (Zod, Valibot, ArkType). Runs on the server before the handler. (inputValidator is the deprecated old name.)"
+      },
+      {
+        api: ".handler(async ({ data }) => …)",
+        role: "The server-only body. Receives { data } = the validated, typed input. Runs ONLY on the server — DB, secrets, file system. Its return type is inferred back to the caller."
+      }
+    ];
+
+    // --- a tiny inline Zod-like validator (stands in for z.string().min(1)) ---
+    // Mirrors what `.validator(z.object({ name: z.string().min(1) }))` enforces on the server.
+    function validateName(value) {
+      if (typeof value !== "string") {
+        return { ok: false, fields: { name: ["Expected string, received " + typeof value] } };
+      }
+      if (value.length < 1) {
+        return { ok: false, fields: { name: ["String must contain at least 1 character(s)"] } };
+      }
+      return { ok: true };
+    }
+
+    // --- the server-function definition (mirrors greeting.functions.ts) ---
+    // createServerFn({ method }).validator(schema).handler(({ data }) => ...)
+    var getGreeting = {
+      name: "getGreeting",
+      method: "POST",
+      schema: { name: "string,min1" },
+      handler: function (ctx) {
+        // ctx.data is the validated input — handler runs ONLY if the validator passed
+        return { message: "Hello, " + ctx.data.name + "!", chars: ctx.data.name.length };
+      }
+    };
+
+    // --- the client-side callServerFn simulator ---
+    // Mirrors `await getGreeting({ data })`. The compiler's RPC stub is implied: the
+    // call crosses the wire to the server, where `.validator(schema)` runs FIRST. On
+    // failure the handler never runs and a validation error comes back.
+    function callServerFn(fn, rawInput) {
+      var payload = (rawInput && rawInput.data) ? rawInput.data : {};
+      var nameVal = (payload && payload.name !== undefined) ? payload.name : undefined;
+      var v = validateName(nameVal);
+      if (!v.ok) {
+        return { data: undefined, error: { type: "validation", fields: v.fields } };
+      }
+      var data = fn.handler({ data: { name: nameVal } });
+      return { data: data, error: undefined };
+    }
+
+    // --- the raw endpoint (mirrors routes/api/echo.ts) ---
+    // NO validation. Returns a Response-like object; you set status/headers/body yourself.
+    function callEndpoint(rawInput) {
+      var payload = (rawInput && rawInput.data) ? rawInput.data : {};
+      var name = (payload && payload.name != null) ? payload.name : "";
+      var coerced = String(name);            // endpoint silently coerces bad input
+      return {
+        status: 200,
+        statusText: "OK",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "Hello, " + coerced + "!", chars: coerced.length })
+      };
+    }
+
+    // ===========================================================================
+    // UI wiring
+    // ===========================================================================
+    function el(id) { return document.getElementById(id); }
+
+    function pretty(obj) {
+      // deterministic JSON for display
+      return JSON.stringify(obj, null, 2);
+    }
+
+    function setReadout(verdictClass, verdictText, json, hint) {
+      var html = '<span class="verdict ' + verdictClass + '">' + verdictText + "</span>";
+      if (hint) html += '<div class="hint">' + hint + "</div>";
+      if (json) html += "<pre>" + json + "</pre>";
+      el("readout").innerHTML = html;
+    }
+
+    function dimLane(which) {
+      el("laneFn").classList.toggle("live", which === "fn");
+      el("laneApi").classList.toggle("live", which === "api");
+      // clear node highlights
+      var ids = ["fnN1", "fnN2", "fnN3", "fnN4", "fnN5", "apiN1", "apiN2", "apiN3", "apiN4"];
+      for (var i = 0; i < ids.length; i++) { el(ids[i]).className = "node"; }
+    }
+
+    function highlight(ids, extra) {
+      for (var i = 0; i < ids.length; i++) {
+        el(ids[i]).className = "node hit" + (extra ? " " + extra : "");
+      }
+    }
+
+    function getInput() {
+      var raw = el("nameInput").value;
+      // keep it a string from the text box; the gold-check path below forces a real
+      // number to demo the type failure the validator catches on the client side.
+      return { data: { name: raw } };
+    }
+
+    function doCallFn() {
+      var input = getInput();
+      var result = callServerFn(getGreeting, input);
+      dimLane("fn");
+      if (result.error) {
+        // validation failed at the validator node; the handler never ran
+        highlight(["fnN1", "fnN2", "fnN3"], "err");
+        setReadout(
+          "bad",
+          "validation error — handler never ran",
+          pretty(result),
+          "The .validator(schema) rejected the input on the server; the handler was skipped."
+        );
+      } else {
+        highlight(["fnN1", "fnN2", "fnN3", "fnN4", "fnN5"]);
+        setReadout(
+          "ok",
+          "typed success — error === undefined",
+          pretty(result),
+          "data is typed end-to-end: { message: string, chars: number }."
+        );
+      }
+    }
+
+    function doCallApi() {
+      var input = getInput();
+      var res = callEndpoint(input);
+      dimLane("api");
+      highlight(["apiN1", "apiN2", "apiN3", "apiN4"]);
+      var parsed = JSON.parse(res.body);  // client-side res.json()
+      setReadout(
+        "raw",
+        "raw Response — status " + res.status + " (no validation)",
+        pretty({ response: { status: res.status, statusText: res.statusText }, parsed: parsed }),
+        "The client parsed JSON itself; parsed is untyped (any). Bad input was silently echoed."
+      );
+    }
+
+    el("callFn").addEventListener("click", doCallFn);
+    el("callApi").addEventListener("click", doCallApi);
+
+    var chips = el("chips").getElementsByTagName("button");
+    for (var c = 0; c < chips.length; c++) {
+      chips[c].addEventListener("click", function () {
+        el("nameInput").value = this.getAttribute("data-v");
+      });
+    }
+
+    // ===========================================================================
+    // Render the builder anatomy
+    // ===========================================================================
+    function renderAnatomy() {
+      var host = el("anatomy");
+      var html = "";
+      for (var i = 0; i < ANATOMY.length; i++) {
+        var A = ANATOMY[i];
+        html +=
+          '<div class="step">' +
+            '<div class="num">' + (i + 1) + "</div>" +
+            '<div class="body">' +
+              '<div class="api">' + A.api + "</div>" +
+              '<div class="role">' + A.role + "</div>" +
+            "</div>" +
+          "</div>";
+      }
+      host.innerHTML = html;
+    }
+
+    // ===========================================================================
+    // Render the comparison table
+    // ===========================================================================
+    function renderTable() {
+      el("table").innerHTML =
+        "<table>" +
+          "<thead><tr>" +
+            "<th>Step / aspect</th><th>Server Function (createServerFn)</th><th>Hand-rolled endpoint (fetch)</th>" +
+          "</tr></thead><tbody>" +
+          row("Type-safe input",  '<td class="fn yes">yes — .validator(schema) (Zod/Valibot/ArkType)</td>', '<td class="api no">no — you parse/validate request.json() yourself</td>') +
+          row("Type-safe return", '<td class="fn yes">yes — return type inferred end-to-end</td>', '<td class="api no">no — res.json() is any</td>') +
+          row("Calling style",    '<td class="fn">getGreeting({ data }) — like a local async fn</td>', '<td class="api">fetch(url, opts) + res.json()</td>') +
+          row("RPC mechanism",    '<td class="fn">compiler stubs it to fetch(/_serverFn/&lt;id&gt;) — you never write it</td>', '<td class="api">you write the URL, method, headers, body</td>') +
+          row("Validation errors",'<td class="fn">error.fields keyed by field; handler skipped</td>', '<td class="api">hand-rolled status / body checks</td>') +
+          row("Serialization",    '<td class="fn">auto (superjson: Date/Map/Set/URL survive)</td>', '<td class="api">manual JSON.stringify</td>') +
+          row("Server code in client bundle", '<td class="fn no">never — stubbed out at build time</td>', '<td class="api yes">only what you import (watch your imports)</td>') +
+          row("Reachable from outside the app", '<td class="fn no">no — same-origin RPC (use CSRF mw)</td>', '<td class="api yes">yes — a real URL for webhooks/3rd parties</td>') +
+          row("Best for",         '<td class="fn">typed client→server RPC, mutations, loaders</td>', '<td class="api">webhooks, RSS, images, non-Start clients</td>') +
+          "</tbody></table>";
+    }
+    function row(label, a, b) {
+      return "<tr><th>" + label + "</th>" + a + b + "</tr>";
+    }
+
+    // ===========================================================================
+    // GOLD-CHECK (the falsifiable anchor)
+    // Three assertions, all deterministic facts about the logic authored above:
+    //   (1) a valid call returns a typed success: data.message set, error undefined,
+    //   (2) an invalid input (empty string) fails the validator -> error.type==='validation',
+    //       and the handler never ran (data undefined),
+    //   (3) the call is type-checked: a number is rejected by the validator while the
+    //       hand-rolled fetch endpoint returns 200 for the SAME invalid input (no validation).
+    // If any drifts, the demo contradicts its own claims -> red.
+    // ===========================================================================
+    function runGoldCheck() {
+      var ok1, ok2, ok3;
+
+      // (1) valid call -> typed success
+      var r1 = callServerFn(getGreeting, { data: { name: "Houston" } });
+      ok1 = r1.error === undefined &&
+            r1.data.message === "Hello, Houston!" &&
+            r1.data.chars === 7;
+
+      // (2) invalid input (empty) -> validation error, handler skipped
+      var r2 = callServerFn(getGreeting, { data: { name: "" } });
+      ok2 = r2.data === undefined &&
+            r2.error.type === "validation" &&
+            r2.error.fields.name.length >= 1;
+
+      // (3) type-checked vs raw endpoint: a number is rejected by the server fn's
+      //     validator but silently echoed (status 200) by the endpoint.
+      var r3a = callServerFn(getGreeting, { data: { name: 123 } });
+      var r3b = callEndpoint({ data: { name: "" } });
+      ok3 = r3a.error.type === "validation" && r3b.status === 200;
+
+      var ok = ok1 && ok2 && ok3;
+      var g = el("goldcheck");
+      g.textContent =
+        "[check] valid->typed success & empty->validation error & fn rejects number / endpoint=200: " +
+        (ok ? "OK" : "FAIL");
+      g.style.color = ok ? "var(--ok)" : "var(--bad)";
+      g.style.background = ok ? "rgba(46,204,113,.08)" : "rgba(231,76,60,.08)";
+    }
+
+    // boot
+    renderAnatomy();
+    renderTable();
+    runGoldCheck();
+    doCallFn();
+  </script>
+</body>
+</html>

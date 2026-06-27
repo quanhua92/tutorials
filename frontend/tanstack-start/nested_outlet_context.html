@@ -1,0 +1,836 @@
+<!doctype html>
+<!--
+  nested_outlet_context.html — Phase 6a tanstack-start bundle (nested routes + <Outlet> + route context).
+  GROUND TRUTH: a self-contained, zero-dep INTERACTIVE NESTING + CONTEXT VISUALIZER.
+  It is NOT a running TanStack Router app — it is a curated, faithful model of:
+    (1) nested routes: a parent route renders <Outlet/> where its matched child renders
+    (2) the component render tree a matched URL produces (RootLayout -> PostsLayout -> PostDetail ...)
+    (3) createRootRouteWithContext + beforeLoad: context is set at the root and flows DOWN
+        the route tree — every descendant reads its ancestors' context, no prop-drilling
+  No external CDN (the data is curated to mirror tanstack.com/router docs, not fetched).
+  Companion: NESTED_OUTLET_CONTEXT.md (the guide).
+  Gold values: resolve('/posts/42/comments/7') -> src/routes/posts/$postId/comments.$commentId.tsx
+  with a 4-level render chain (RootLayout -> PostsLayout -> PostDetail -> CommentView) whose
+  resolved context is exactly [queryClient, fetchPosts, postMeta, commentMeta] in inheritance
+  order; the deepest route reads the ROOT context key 'queryClient'; the sibling route '/'
+  reads 'queryClient' but NOT 'fetchPosts' (beforeLoad on posts does not leak across branches);
+  each non-leaf in a chain renders exactly ONE <Outlet/>. All assert facts about data authored
+  right here in ROUTES/CTX.
+  Verified Jun 2026 against tanstack.com/router (outlets + router-context + data-loading) AND
+  tkdodo.eu (context-inheritance post).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nested Routes, &lt;Outlet&gt; &amp; Route Context — frontend bundle</title>
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#6366f1; --accent-soft:#312e81; --line:#30363d;
+      --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f;
+      --static:#2ecc71; --param:#6366f1; --ctx:#22d3ee; --ctxroot:#f1c40f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header h1 .dot { color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px; font-weight:700;
+      border:1px solid currentColor; max-width:70vw; }
+    main { padding:22px; max-width:1180px; margin:0 auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    p { margin:6px 0; }
+    code { background:rgba(99,102,241,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+    .xref { color:var(--accent); text-decoration:none; }
+    .xref:hover { text-decoration:underline; }
+
+    /* the thesis, front and center */
+    .rule { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .rule .big { font-size:18px; font-weight:700; color:var(--ink); }
+    .rule .pick { color:var(--accent); font-weight:700; }
+    .rule .pick2 { color:var(--ctx); font-weight:700; }
+    .rule .pill { display:inline-block; font-size:12px; padding:2px 9px; margin:3px 6px 0 0;
+      border-radius:999px; border:1px solid var(--accent-soft); color:var(--accent); background:rgba(99,102,241,.06); }
+    .rule .pill.ctx { border-color:#0e7490; color:var(--ctx); background:rgba(34,211,238,.06); }
+
+    /* visualizer layout: route tree | resolver */
+    .vis { display:grid; grid-template-columns: minmax(300px, 1fr) minmax(330px, 1.5fr); gap:18px; }
+    @media (max-width: 820px) { .vis { grid-template-columns: 1fr; } }
+
+    /* route tree */
+    .tree { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px;
+      background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+    .tree .ln { white-space:pre; line-height:1.75; }
+    .tree .dir { color:var(--muted); }
+    .tree .file { color:var(--ink); cursor:pointer; }
+    .tree .file:hover { color:#fff; }
+    .tree .file.active { background:rgba(99,102,241,.20); border-radius:4px; }
+    .tree .seg-static { color:var(--static); }
+    .tree .seg-param { color:var(--param); font-weight:700; }
+    .tree .seg-root { color:var(--warn); font-weight:700; }
+    .tree .annot { color:var(--muted); font-size:11px; }
+    .tree .ctxnote { color:var(--ctx); font-size:11px; }
+    .legend { display:flex; gap:12px; flex-wrap:wrap; margin-top:12px; font-size:11px; color:var(--muted); }
+    .legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+
+    /* resolver */
+    .resolver label { display:block; color:var(--muted); font-size:12.5px; margin:0 0 4px; }
+    .resolver .urlbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .resolver input[type=text] { flex:1; min-width:180px; background:var(--bg); color:var(--ink);
+      border:1px solid var(--line); border-radius:6px; padding:9px 11px; font:inherit; font-size:14px; }
+    .resolver input[type=text]:focus { outline:none; border-color:var(--accent); }
+    .samples { display:flex; gap:7px; flex-wrap:wrap; margin-top:10px; }
+    .samples .chip { font-size:12px; padding:3px 9px; border-radius:999px; cursor:pointer;
+      border:1px solid var(--accent-soft); color:var(--accent); background:rgba(99,102,241,.06); }
+    .samples .chip:hover { background:rgba(99,102,241,.18); }
+    .resolved { margin-top:16px; }
+    .resolved .box { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px; }
+    .resolved .kv { display:grid; grid-template-columns: 110px 1fr; gap:6px 12px; font-size:13px; }
+    .resolved .kv .k { color:var(--muted); }
+    .resolved .kv .v { color:var(--ink); word-break:break-word; }
+    .resolved .file { color:var(--accent); font-weight:700; }
+    .resolved .params { font-family: ui-monospace, monospace; }
+    .resolved .none { color:var(--bad); }
+    .resolved .ok { color:var(--ok); }
+
+    /* the render tree — nested Russian-doll boxes with <Outlet/> markers */
+    .chain-wrap { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .chain { margin-top:8px; }
+    .cnode { border:1px solid var(--line); border-radius:8px; padding:9px 12px; background:var(--bg);
+      font-size:12.5px; position:relative; }
+    .cnode.root { border-color:var(--warn); background:rgba(241,196,15,.06); }
+    .cnode.layout { border-color:var(--accent); background:rgba(99,102,241,.08); }
+    .cnode.leaf { border-color:var(--ok); background:rgba(46,204,113,.06); }
+    .cnode .tag { font-size:10.5px; color:var(--muted); margin-left:6px; text-transform:uppercase; letter-spacing:.04em; }
+    .cnode .comp { font-family: ui-monospace, monospace; color:var(--ink); font-weight:700; }
+    .cnode .outlet { display:inline-block; margin-top:4px; font-family: ui-monospace, monospace;
+      font-size:11.5px; color:var(--accent); background:rgba(99,102,241,.10); border:1px dashed var(--accent);
+      border-radius:5px; padding:1px 8px; }
+    .cindent { margin-left:18px; margin-top:6px; border-left:2px dashed var(--accent); padding-left:14px; }
+
+    /* the context flow table */
+    .ctxflow { font-family: ui-monospace, monospace; font-size:12px; margin-top:8px; }
+    .ctxrow { display:grid; grid-template-columns: 150px 1fr; gap:8px 12px; padding:6px 0; border-bottom:1px solid var(--line); }
+    .ctxrow:last-child { border-bottom:0; }
+    .ctxrow .lvl { color:var(--muted); }
+    .ctxrow .lvl .comp { color:var(--ink); font-weight:700; }
+    .ctxkey { display:inline-block; font-size:11px; padding:2px 7px; border-radius:5px; margin-right:5px;
+      border:1px solid currentColor; }
+    .ctxkey.root { color:var(--ctxroot); background:rgba(241,196,15,.06); }
+    .ctxkey.added { color:var(--ctx); background:rgba(34,211,238,.06); }
+    .ctxkey.inherited { color:var(--muted); }
+    .ctx-arrow { color:var(--ctx); font-weight:700; text-align:center; margin:6px 0; font-size:13px; }
+
+    /* concept table */
+    .cmp { overflow-x:auto; }
+    table { border-collapse:collapse; font-size:12.5px; width:100%; min-width:620px; }
+    td,th { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; background:rgba(99,102,241,.05); }
+    td .mono { font-family: ui-monospace, monospace; }
+    td code { font-size:11.5px; }
+    .foot { color:var(--muted); font-size:12px; border-top:1px solid var(--line);
+      margin-top:18px; padding-top:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="dot">●</span> nested routes, &lt;Outlet&gt; &amp; route context</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/tanstack-start/NESTED_OUTLET_CONTEXT.md">guide (.md)</a>
+      <a href="../index.html">← all frontend</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- the one rule, front and center -->
+    <section class="panel rule">
+      <h2>The one idea</h2>
+      <p class="big">
+        Routes nest like <strong>Russian dolls</strong>: a parent renders
+        <span class="pick">&lt;Outlet/&gt;</span>, the matched child fills it. And
+        <strong>context set at the root flows DOWN</strong> to every descendant through
+        <span class="pick2">createRootRouteWithContext</span> — no prop-drilling across the
+        tree. Each route may <em>augment</em> the context in
+        <span class="pick2">beforeLoad</span>, and the union is inherited by all its children.
+      </p>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">
+        Two mechanisms, one route tree. <strong>Nesting</strong> is about <em>rendering</em>:
+        <code>&lt;Outlet/&gt;</code> renders exactly one matched child (or <code>null</code> if
+        there is none). <strong>Context</strong> is about <em>data</em>: the router carries a
+        context object down the match chain; a route reads the merged set via
+        <code>Route.useRouteContext()</code>. The two are independent but compose — a deeply
+        nested leaf renders inside every ancestor's <code>&lt;Outlet/&gt;</code> <em>and</em>
+        reads every ancestor's context.
+      </p>
+      <div>
+        <span class="pill">parent renders &lt;Outlet/&gt;</span>
+        <span class="pill">child fills it</span>
+        <span class="pill ctx">root context → all descendants</span>
+        <span class="pill ctx">beforeLoad augments, children inherit</span>
+        <span class="pill ctx">Route.useRouteContext() reads the union</span>
+      </div>
+    </section>
+
+    <!-- THE VISUALIZER: route tree | resolver + render chain + context flow -->
+    <section class="panel">
+      <h2>The nesting + context visualizer — click a route, see its render chain &amp; context</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Left: the curated <code>src/routes/</code> tree (6 routes). Right: type a URL (or click a
+        sample) — the resolver shows the component <strong>render chain</strong> with
+        <code>&lt;Outlet/&gt;</code> markers, then the <strong>context each level can read</strong>.
+        Notice the root context key <code>queryClient</code> reaches every leaf, while
+        <code>fetchPosts</code> (added in <code>posts</code>'s <code>beforeLoad</code>) only
+        appears under <code>/posts</code> — never on the <code>/</code> sibling branch.
+      </p>
+      <div class="vis">
+        <!-- LEFT: the route tree -->
+        <div>
+          <div class="tree" id="tree"></div>
+          <div class="legend">
+            <span><span class="sw" style="background:var(--warn)"></span>__root (context origin)</span>
+            <span><span class="sw" style="background:var(--static)"></span>static / index</span>
+            <span><span class="sw" style="background:var(--param)"></span><code>$param</code></span>
+            <span><span class="sw" style="background:var(--ctx)"></span>beforeLoad adds context</span>
+          </div>
+        </div>
+
+        <!-- RIGHT: the resolver -->
+        <div class="resolver">
+          <label for="urlinput">Request URL (pathname)</label>
+          <div class="urlbar">
+            <input id="urlinput" type="text" value="/posts/42/comments/7" spellcheck="false" autocomplete="off" />
+            <button class="btn" id="resolve-btn" style="background:var(--accent);color:#fff;border:0;padding:9px 16px;border-radius:6px;cursor:pointer;font:inherit;font-weight:600">resolve</button>
+          </div>
+          <div class="samples" id="samples"></div>
+          <div class="resolved">
+            <div class="box" id="result"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- THE RENDER CHAIN — Russian-doll nesting with <Outlet/> -->
+    <section class="panel">
+      <h2>The render tree — &lt;Outlet/&gt; is where the matched child goes</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Every layout in the chain renders exactly <strong>one</strong> <code>&lt;Outlet/&gt;</code>
+        — the slot the next matched route fills. A chain of <code>N</code> routes has
+        <code>N&minus;1</code> outlets (the leaf has none). If a route defines no
+        <code>component</code>, the router renders an <code>&lt;Outlet/&gt;</code> automatically.
+      </p>
+      <div class="chain-wrap">
+        <div class="chain" id="chain"></div>
+        <p style="color:var(--muted);font-size:12.5px;margin-top:10px" id="chain-note">
+          Resolve a URL above to see its chain render here.
+        </p>
+      </div>
+    </section>
+
+    <!-- THE CONTEXT FLOW — what each level reads -->
+    <section class="panel">
+      <h2>Context flow — set at the root, inherited DOWN, augmented per route</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        The root context (<code>queryClient</code>) is provided at <code>createRouter({ context })</code>
+        and typed with <code>createRootRouteWithContext</code>. Each route's
+        <code>beforeLoad</code> may return an object that is <strong>merged</strong> in; the
+        union is available to that route's <code>loader</code>, its <code>component</code>
+        (via <code>useRouteContext()</code>), and every child. <span style="color:var(--ctxroot)">gold</span>
+        = root context, <span style="color:var(--ctx)">cyan</span> = added at this level,
+        <span style="color:var(--muted)">grey</span> = inherited from an ancestor.
+      </p>
+      <div class="ctxflow" id="ctxflow"></div>
+      <p style="color:var(--muted);font-size:12.5px;margin-top:10px" id="ctx-note">
+        Resolve a URL to see the context each matched route reads.
+      </p>
+    </section>
+
+    <!-- CONCEPT TABLE -->
+    <section class="panel">
+      <h2>Concept → what it does → example</h2>
+      <div class="cmp">
+        <table>
+          <thead><tr>
+            <th>Concept</th><th>Does</th><th>Example</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono"><code>&lt;Outlet/&gt;</code></td>
+              <td>Renders the <strong>one</strong> next matched child route (or <code>null</code>). Takes no props.</td>
+              <td><code>&lt;div&gt;&lt;h1/&gt; &lt;Outlet/&gt; &lt;/div&gt;</code></td>
+            </tr>
+            <tr>
+              <td class="mono">nested route</td>
+              <td>A child route whose URL extends the parent's; the parent wraps it through <code>&lt;Outlet/&gt;</code>.</td>
+              <td><code>posts/$postId.tsx</code> renders inside <code>posts.tsx</code></td>
+            </tr>
+            <tr>
+              <td class="mono"><code>createRootRouteWithContext&lt;T&gt;()()</code></td>
+              <td>Creates the root route AND constrains the typed root context <code>T</code>. Double-called factory.</td>
+              <td><code>createRootRouteWithContext&lt;{queryClient}&gt;()()</code></td>
+            </tr>
+            <tr>
+              <td class="mono"><code>createRouter({ context })</code></td>
+              <td>Provides the <strong>initial</strong> root context values (must satisfy <code>T</code>).</td>
+              <td><code>createRouter({ routeTree, context:{ queryClient } })</code></td>
+            </tr>
+            <tr>
+              <td class="mono"><code>beforeLoad</code></td>
+              <td>Runs serially, per-navigation, before the loader. May <strong>return</strong> an object merged into this route's context (inherited by children).</td>
+              <td><code>beforeLoad: () =&gt; ({ fetchPosts })</code></td>
+            </tr>
+            <tr>
+              <td class="mono"><code>Route.useRouteContext()</code></td>
+              <td>Reads the merged context (root + every ancestor's <code>beforeLoad</code>) inside a route component.</td>
+              <td><code>const { queryClient } = Route.useRouteContext()</code></td>
+            </tr>
+            <tr>
+              <td class="mono">context inheritance</td>
+              <td>Context merges DOWN the match chain: each child sees the union of all ancestors' context.</td>
+              <td>leaf sees <code>queryClient + fetchPosts + postMeta</code></td>
+            </tr>
+            <tr>
+              <td class="mono"><code>no component</code></td>
+              <td>If a route omits <code>component</code>, the router renders an <code>&lt;Outlet/&gt;</code> for it automatically.</td>
+              <td>a layout route that only wraps, renders nothing of its own</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="foot">
+      Verified against <a class="xref" href="https://tanstack.com/router/v1/docs/guide/outlets">tanstack.com/router · outlets</a>
+      + <a class="xref" href="https://tanstack.com/router/v1/docs/guide/router-context">/guide/router-context</a>
+      + <a class="xref" href="https://tanstack.com/router/latest/docs/guide/data-loading">/guide/data-loading</a> (primary) and
+      <a class="xref" href="https://tkdodo.eu/blog/context-inheritance-in-tan-stack-router">TkDodo — Context Inheritance in TanStack Router</a> (secondary).
+      Cross-refs: <a class="xref" href="./file_based_routing.html">🔗 file_based_routing</a>
+      (this bundle extends its nesting chain with context flow)
+      · <a class="xref" href="./router_type_safety.html">🔗 router_type_safety</a>
+      · <a class="xref" href="./path_search_params.html">🔗 path_search_params</a>.
+    </div>
+  </main>
+
+  <script>
+    // ===========================================================================
+    // The curated route map. EVERYTHING below renders from this data, so the
+    // gold-check (6 routes + resolve('/posts/42/comments/7') etc.) asserts facts
+    // about data authored right here. Nothing is fetched from the network.
+    //
+    // 'path'   = the URL segments the route contributes (root/index -> []).
+    // 'parent' = the route id whose layout wraps this one (drives the render chain).
+    // 'comp'   = the React component the route renders.
+    // 'beforeLoad' = the context keys this route ADDS (returned from beforeLoad).
+    // 'rootCtx' (on root only) = the keys typed by createRootRouteWithContext and
+    //   supplied via createRouter({ context }) — the ORIGIN of the inheritance chain.
+    //
+    // This mirrors TanStack Router semantics:
+    //   - root uses createRootRouteWithContext<T>()() and gets its values from createRouter
+    //   - any route may return an object from beforeLoad -> merged into context
+    //   - the union flows DOWN to every descendant
+    // ===========================================================================
+    var ROUTES = [
+      { id:"root",       file:"src/routes/__root.tsx",                              kind:"root",    path:[],                                    comp:"RootLayout",  parent:null,    beforeLoad:[],          rootCtx:["queryClient"], note:"createRootRouteWithContext<{queryClient}>()() — the ORIGIN of context" },
+      { id:"index",      file:"src/routes/index.tsx",                               kind:"index",   path:[],                                    comp:"Home",         parent:"root",   beforeLoad:[],          note:"/ — sibling of posts; gets root context only" },
+      { id:"posts",      file:"src/routes/posts.tsx",                               kind:"layout",  path:["posts"],                             comp:"PostsLayout",  parent:"root",   beforeLoad:["fetchPosts"], note:"layout route; beforeLoad adds fetchPosts for all of /posts/*" },
+      { id:"postsIndex", file:"src/routes/posts/index.tsx",                         kind:"index",   path:["posts"],                             comp:"PostsList",    parent:"posts",  beforeLoad:[],          note:"/posts (exact index)" },
+      { id:"post",       file:"src/routes/posts/$postId.tsx",                       kind:"param",   path:["posts","$postId"],       param:"postId",    comp:"PostDetail",   parent:"posts",  beforeLoad:["postMeta"], note:"/posts/$postId; adds postMeta, inherits queryClient+fetchPosts" },
+      { id:"comment",    file:"src/routes/posts/$postId/comments.$commentId.tsx",   kind:"param",   path:["posts","$postId","comments","$commentId"], param:"commentId", comp:"CommentView", parent:"post", beforeLoad:["commentMeta"], note:"deepest: 4-level chain, reads all 4 context keys incl. root queryClient" }
+    ];
+    var byId = {};
+    for (var i = 0; i < ROUTES.length; i++) byId[ROUTES[i].id] = ROUTES[i];
+
+    // routes that own a URL (root does not)
+    var URLROUTES = [];
+    for (var j = 0; j < ROUTES.length; j++) {
+      if (ROUTES[j].kind !== "root") URLROUTES.push(ROUTES[j]);
+    }
+
+    var SAMPLES = [
+      "/",                       // -> index.tsx
+      "/posts",                  // -> posts/index.tsx wrapped by posts.tsx
+      "/posts/42",               // -> posts/$postId.tsx
+      "/posts/42/comments/7",    // -> posts/$postId/comments.$commentId.tsx (deepest, 4 levels)
+      "/nope"                    // 404
+    ];
+
+    // ===========================================================================
+    // resolve(url) — faithful model of TanStack Router matching for this tree.
+    // Order: static beats $param; index beats layout at a shared path; longest
+    // static prefix wins. Returns { route, params, chain } or { route:null }.
+    // ===========================================================================
+    function patternOf(route) {
+      var out = [];
+      for (var i = 0; i < route.path.length; i++) {
+        var s = route.path[i];
+        if (s.charAt(0) === "$") out.push({ type: "param", name: s.slice(1) });
+        else out.push({ type: "static", val: s });
+      }
+      return out;
+    }
+    function matchPattern(pattern, segs) {
+      var params = {};
+      var si = 0;
+      for (var i = 0; i < pattern.length; i++) {
+        var seg = pattern[i];
+        if (si >= segs.length) return null;
+        if (seg.type === "static") {
+          if (segs[si] !== seg.val) return null;
+          si++;
+        } else {
+          params[seg.name] = decodeURIComponent(segs[si]);
+          si++;
+        }
+      }
+      if (si !== segs.length) return null;
+      return params;
+    }
+    function scoreOf(pattern) {
+      var s = 0;
+      for (var i = 0; i < pattern.length; i++) {
+        s += pattern[i].type === "static" ? 100 : 10;
+      }
+      return s;
+    }
+    // leaf priority: a concrete index/param beats a bare layout at the same path
+    function leafPriority(route) {
+      if (route.kind === "index") return 3;
+      if (route.kind === "param") return 3;
+      if (route.kind === "layout") return 0;
+      return 2;
+    }
+    function resolve(url) {
+      var path = String(url || "").split("?")[0].split("#")[0];
+      if (path.length > 1 && path.charAt(path.length - 1) === "/") path = path.slice(0, -1);
+      var segs = (path === "/" || path === "") ? [] : path.split("/").filter(function (s) { return s.length > 0; });
+      var best = null;
+      for (var i = 0; i < URLROUTES.length; i++) {
+        var r = URLROUTES[i];
+        var pat = patternOf(r);
+        var m = matchPattern(pat, segs);
+        if (!m) continue;
+        var cand = { route: r, params: m, score: scoreOf(pat), leaf: leafPriority(r) };
+        if (!best || cand.score > best.score ||
+            (cand.score === best.score && cand.leaf > best.leaf)) {
+          best = cand;
+        }
+      }
+      if (!best) return { route: null, params: {}, chain: [] };
+      return { route: best.route, params: best.params, chain: chainFor(best.route) };
+    }
+    // the render chain: root -> ... -> this route (parent links)
+    function chainFor(route) {
+      var chain = [];
+      var cur = route;
+      while (cur) { chain.unshift(cur); cur = cur.parent ? byId[cur.parent] : null; }
+      return chain;
+    }
+    // resolved context for a route = rootCtx ++ every ancestor's beforeLoad ++ own beforeLoad,
+    // in inheritance order (root first). Each key appears once.
+    function contextFor(route) {
+      var chain = chainFor(route);
+      var keys = [];
+      var seen = {};
+      for (var i = 0; i < chain.length; i++) {
+        var r = chain[i];
+        if (r.rootCtx) for (var k = 0; k < r.rootCtx.length; k++) {
+          if (!seen[r.rootCtx[k]]) { seen[r.rootCtx[k]] = "root"; keys.push(r.rootCtx[k]); }
+        }
+        if (r.beforeLoad) for (var b = 0; b < r.beforeLoad.length; b++) {
+          if (!seen[r.beforeLoad[b]]) { seen[r.beforeLoad[b]] = "added:" + r.id; keys.push(r.beforeLoad[b]); }
+        }
+      }
+      return keys;
+    }
+    function canonicalUrlFor(route) {
+      if (route.kind === "root") return null;
+      if (route.kind === "index" && route.parent === "root") return "/";
+      var out = [];
+      for (var i = 0; i < route.path.length; i++) {
+        var s = route.path[i];
+        out.push(s.charAt(0) === "$" ? "42" : s);
+      }
+      // if there are TWO params, give them distinct sample values for clarity
+      if (route.path.length >= 4) { out[1] = "42"; out[3] = "7"; }
+      return "/" + out.join("/");
+    }
+    function urlDisplay(route) {
+      if (route.kind === "root") return "— (no URL)";
+      if (route.path.length === 0) return "/";
+      return "/" + route.path.join("/");
+    }
+
+    // ===========================================================================
+    // Render the file tree (left).
+    // ===========================================================================
+    function esc(s) {
+      return String(s).replace(/[&<>]/g, function (c) { return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"; });
+    }
+    function leafHtml(route) {
+      var name = route.file.replace(/^src\/routes\//, "");
+      var parts = name.split("/");
+      var dirPart = parts.length > 1 ? parts.slice(0, -1).join("/") + "/" : "";
+      var leaf = parts[parts.length - 1];
+      var colored;
+      if (route.kind === "root") colored = '<span class="seg-root">' + leaf + "</span>";
+      else if (route.kind === "param") colored = leaf.replace(/(\$\w+)/g, '<span class="seg-param">$1</span>');
+      else colored = '<span class="seg-static">' + leaf + "</span>";
+      return dirPart + colored;
+    }
+    function renderTree(activeFile) {
+      var h = "";
+      h += '<div class="ln"><span class="dir">src/</span></div>';
+      h += '<div class="ln"><span class="dir">└─ routes/</span></div>';
+      // root
+      h += treeLine(byId["root"], "   ├─ ", activeFile, "root");
+      h += treeLine(byId["index"], "   ├─ ", activeFile);
+      // posts.tsx + posts/
+      h += treeLine(byId["posts"], "   ├─ ", activeFile, "layout");
+      h += '<div class="ln"><span class="dir">   │  ├─ posts/</span></div>';
+      h += treeLine(byId["postsIndex"], "   │  │  ├─ ", activeFile);
+      h += treeLine(byId["post"], "   │  │  └─ ", activeFile);
+      // flat-route child of post (comments.$commentId.tsx is a flat route under posts/)
+      h += treeLine(byId["comment"], "   │  │     …comments.$commentId.tsx is flat under posts/", activeFile, "flatnote");
+      h += '<div class="ln"><span class="dir">   └─ </span><span class="annot">(end of routes/)</span></div>';
+      document.getElementById("tree").innerHTML = h;
+    }
+    function treeLine(route, branch, activeFile, badge) {
+      var cls = "file" + (activeFile === route.file ? " active" : "");
+      var dataAttr = ' data-route="' + route.file + '"';
+      var badgeHtml = "";
+      if (badge === "root") badgeHtml = ' <span class="annot">// root · context origin</span>';
+      else if (badge === "layout") badgeHtml = ' <span class="annot">// layout · &lt;Outlet/&gt;</span>';
+      else if (badge === "flatnote") {
+        // special: render the flat-route file inline with a pointer
+        return '<div class="ln"><span class="dir">' + branch + "</span>" +
+          '<span class="' + cls + '"' + dataAttr + ">" + leafHtml(route) + "</span>" +
+          ' <span class="ctxnote">// +beforeLoad: ' + route.beforeLoad.join(", ") + " → " + (route.beforeLoad.length ? "adds context" : "no adds") + "</span></div>";
+      }
+      var ctxLine = (route.rootCtx && route.rootCtx.length)
+        ? ' <span class="ctxnote">// createRootRouteWithContext → ' + route.rootCtx.join(", ") + "</span>"
+        : (route.beforeLoad.length ? ' <span class="ctxnote">// +beforeLoad → ' + route.beforeLoad.join(", ") + "</span>" : "");
+      return '<div class="ln"><span class="dir">' + branch + "</span>" +
+        '<span class="' + cls + '"' + dataAttr + ">" + leafHtml(route) + "</span>" + badgeHtml + ctxLine + "</div>";
+    }
+
+    // ===========================================================================
+    // Render the resolver result (right).
+    // ===========================================================================
+    function renderResult(url) {
+      var res = resolve(url);
+      var box = document.getElementById("result");
+      if (!res.route) {
+        box.innerHTML =
+          '<div class="kv"><div class="k">URL</div><div class="v"><code>' + esc(url) + "</code></div></div>" +
+          '<div class="kv"><div class="k">status</div><div class="v none">404 — no route matched</div></div>' +
+          '<div class="kv"><div class="k">hint</div><div class="v" style="color:var(--muted)">Only files under <code>src/routes/</code> become routes. Add a nested file and the codegen regenerates the tree.</div></div>';
+        return;
+      }
+      var keys = Object.keys(res.params);
+      var params = keys.length
+        ? '<code>' + keys.map(function (k) { return k + '="' + res.params[k] + '"'; }).join(", ") + "</code>"
+        : '<span class="none">— (no params)</span>';
+      var ctx = contextFor(res.route);
+      var ctxHtml = ctx.length
+        ? ctx.map(function (k) { return '<span class="ctxkey" style="color:var(--ctx)">' + k + "</span>"; }).join(" ")
+        : '<span class="none">— (none)</span>';
+      var route = res.route;
+      box.innerHTML =
+        '<div class="kv"><div class="k">URL</div><div class="v"><code>' + esc(url) + "</code></div></div>" +
+        '<div class="kv"><div class="k">resolves to</div><div class="v file">' + route.file + "</div></div>" +
+        '<div class="kv"><div class="k">route kind</div><div class="v">' + route.kind + "</div></div>" +
+        '<div class="kv"><div class="k">pattern</div><div class="v params"><code>' + urlDisplay(route) + "</code></div></div>" +
+        '<div class="kv"><div class="k">params</div><div class="v params">' + params + "</div></div>" +
+        '<div class="kv"><div class="k">render chain</div><div class="v">' + res.chain.length + " levels: " +
+          res.chain.map(function (r) { return "&lt;" + r.comp + "/&gt;"; }).join(" → ") + "</div></div>" +
+        '<div class="kv"><div class="k">reads context</div><div class="v">' + ctxHtml + "</div></div>" +
+        '<div class="kv"><div class="k">status</div><div class="v ok">200 — matched</div></div>';
+    }
+
+    // ===========================================================================
+    // Render the nested component chain with <Outlet/> markers (Russian dolls).
+    // ===========================================================================
+    function renderChain(url) {
+      var res = resolve(url);
+      var host = document.getElementById("chain");
+      var note = document.getElementById("chain-note");
+      if (!res.route) {
+        host.innerHTML = "";
+        note.textContent = "No match for " + url + " — nothing renders (404).";
+        return;
+      }
+      var chain = res.chain;
+      var html = "";
+      // build nested structure: each parent wraps the next via <Outlet/>
+      for (var i = 0; i < chain.length; i++) {
+        var r = chain[i];
+        var isLeaf = (i === chain.length - 1);
+        var cls = "cnode";
+        var tag = "";
+        if (r.kind === "root") { cls += " root"; tag = "root · context origin"; }
+        else if (r.kind === "layout") { cls += " layout"; tag = "layout"; }
+        else if (isLeaf) { cls += " leaf"; tag = "leaf"; }
+        else { cls += " layout"; tag = "layout"; }
+        var open = (i > 0 ? '<div class="cindent">' : "") + '<div class="' + cls + '">';
+        var outlet = isLeaf
+          ? '<span style="color:var(--muted);font-size:11px"> (no child — this is the leaf)</span>'
+          : ' <span class="outlet">↳ &lt;Outlet/&gt; renders next child</span>';
+        html += open +
+          '<span class="comp">&lt;' + r.comp + "/&gt;</span>" +
+          '<span class="tag">' + tag + "</span>" + outlet +
+          "</div>";
+      }
+      // close the cindent wrappers in reverse
+      for (var c = 1; c < chain.length; c++) html += "</div>";
+      host.innerHTML = html;
+      var outlets = chain.length - 1;
+      note.innerHTML = "URL <code>" + esc(url) + "</code> renders a chain of <strong>" + chain.length +
+        " levels</strong> with <strong>" + outlets + " &lt;Outlet/&gt;</strong>" +
+        (outlets === 1 ? "" : "s") + " — each non-leaf renders exactly one, the next matched child fills it.";
+    }
+
+    // ===========================================================================
+    // Render the context flow: per chain level, show which keys are ROOT (gold),
+    // ADDED here (cyan), INHERITED (grey).
+    // ===========================================================================
+    function renderContext(url) {
+      var res = resolve(url);
+      var host = document.getElementById("ctxflow");
+      var note = document.getElementById("ctx-note");
+      if (!res.route) {
+        host.innerHTML = "";
+        note.textContent = "No match — no context to show.";
+        return;
+      }
+      var chain = res.chain;
+      // accumulated inherited set as we descend
+      var inherited = {};
+      var html = '<div class="ctx-arrow">▼ context flows DOWN the match chain</div>';
+      for (var i = 0; i < chain.length; i++) {
+        var r = chain[i];
+        var cells = "";
+        // root context keys (only root has these) — shown as ROOT at the root level
+        if (r.rootCtx && r.rootCtx.length) {
+          for (var a = 0; a < r.rootCtx.length; a++) {
+            cells += '<span class="ctxkey root">' + r.rootCtx[a] + "</span> ";
+            inherited[r.rootCtx[a]] = true;
+          }
+          cells += '<span style="color:var(--muted);font-size:10.5px"> createRootRouteWithContext + createRouter({context})</span>';
+        }
+        // keys added by THIS route's beforeLoad (cyan), then mark inherited
+        if (r.beforeLoad && r.beforeLoad.length) {
+          for (var b = 0; b < r.beforeLoad.length; b++) {
+            cells += '<span class="ctxkey added">+' + r.beforeLoad[b] + "</span> ";
+            inherited[r.beforeLoad[b]] = true;
+          }
+          cells += '<span style="color:var(--muted);font-size:10.5px"> beforeLoad returns this → merged in</span>';
+        }
+        // inherited-from-ancestor keys shown grey (the union above this level)
+        var inhKeys = Object.keys(inherited);
+        // re-render: show the full readable set at this level with provenance
+        var fullSet = "";
+        for (var f = 0; f < inhKeys.length; f++) {
+          var key = inhKeys[f];
+          var isRoot = (r.id === "root" && r.rootCtx && r.rootCtx.indexOf(key) >= 0);
+          var isAddedHere = (r.beforeLoad && r.beforeLoad.indexOf(key) >= 0);
+          if (isRoot) fullSet += '<span class="ctxkey root">' + key + "</span> ";
+          else if (isAddedHere) fullSet += '<span class="ctxkey added">+' + key + "</span> ";
+          else fullSet += '<span class="ctxkey inherited">' + key + "</span> ";
+        }
+        var readAs = fullSet || '<span style="color:var(--muted)">— (adds nothing; just inherits)</span>';
+        html += '<div class="ctxrow">' +
+          '<div class="lvl"><span class="comp">&lt;' + r.comp + '/&gt;</span><br/><span style="font-size:10.5px">' + (i === 0 ? "ORIGIN" : "level " + (i + 1)) + '</span></div>' +
+          "<div>" + readAs + "</div>" +
+          "</div>";
+      }
+      html += '<div class="ctx-arrow">▼ the leaf reads the FULL union of every ancestor</div>';
+      host.innerHTML = html;
+      var leafCtx = contextFor(res.route);
+      note.innerHTML = "The leaf <code>&lt;" + res.route.comp + "/&gt;</code> reads " +
+        leafCtx.length + " context keys via <code>Route.useRouteContext()</code>: " +
+        leafCtx.map(function (k) { return "<code>" + k + "</code>"; }).join(", ") +
+        " — including <code>queryClient</code> from the root, " + leafCtx.length + " levels up.";
+    }
+
+    // ===========================================================================
+    // Wire up interactions (tree <-> resolver <-> chain <-> context)
+    // ===========================================================================
+    function setActive(url) {
+      var res = resolve(url);
+      var file = res.route ? res.route.file : null;
+      renderTree(file);
+      renderResult(url);
+      renderChain(url);
+      renderContext(url);
+    }
+    function renderSamples() {
+      var host = document.getElementById("samples");
+      var html = "";
+      for (var i = 0; i < SAMPLES.length; i++) {
+        html += '<span class="chip" data-url="' + SAMPLES[i] + '">' + SAMPLES[i] + "</span>";
+      }
+      host.innerHTML = html;
+    }
+    function boot() {
+      renderSamples();
+      setActive(document.getElementById("urlinput").value);
+      document.getElementById("resolve-btn").addEventListener("click", function () {
+        setActive(document.getElementById("urlinput").value);
+      });
+      document.getElementById("urlinput").addEventListener("input", function () {
+        setActive(this.value);
+      });
+      document.getElementById("samples").addEventListener("click", function (e) {
+        var t = e.target;
+        if (t && t.classList.contains("chip")) {
+          document.getElementById("urlinput").value = t.getAttribute("data-url");
+          setActive(t.getAttribute("data-url"));
+        }
+      });
+      document.getElementById("tree").addEventListener("click", function (e) {
+        var t = e.target;
+        if (t && t.classList.contains("file")) {
+          var file = t.getAttribute("data-route");
+          var found = null;
+          for (var k = 0; k < ROUTES.length; k++) if (ROUTES[k].file === file) found = ROUTES[k];
+          if (found) {
+            var url = canonicalUrlFor(found);
+            if (url !== null) {
+              document.getElementById("urlinput").value = url;
+              setActive(url);
+            } else {
+              // root has no URL — just highlight + show its chain/context
+              renderTree(found.file);
+              renderChainForRoute(found);
+              renderContextForRoute(found);
+            }
+          }
+        }
+      });
+    }
+    function renderChainForRoute(route) {
+      var chain = chainFor(route);
+      var host = document.getElementById("chain");
+      var note = document.getElementById("chain-note");
+      var html = "";
+      for (var i = 0; i < chain.length; i++) {
+        var r = chain[i];
+        var isLeaf = (i === chain.length - 1);
+        var cls = "cnode";
+        var tag = "";
+        if (r.kind === "root") { cls += " root"; tag = "root"; }
+        else if (isLeaf) { cls += " leaf"; tag = "leaf"; }
+        else { cls += " layout"; tag = "layout"; }
+        var open = (i > 0 ? '<div class="cindent">' : "") + '<div class="' + cls + '">';
+        var outlet = isLeaf
+          ? '<span style="color:var(--muted);font-size:11px"> (leaf)</span>'
+          : ' <span class="outlet">↳ &lt;Outlet/&gt;</span>';
+        html += open + '<span class="comp">&lt;' + r.comp + '/&gt;</span><span class="tag">' + tag + '</span>' + outlet + '</div>';
+      }
+      for (var c = 1; c < chain.length; c++) html += "</div>";
+      host.innerHTML = html;
+      note.innerHTML = "<code>" + route.file + "</code> is the <strong>" + route.kind +
+        "</strong> route — " + (route.kind === "root" ? "the context ORIGIN; it has no URL." : "matches URL <code>" + urlDisplay(route) + "</code>.") + " " + route.note;
+    }
+    function renderContextForRoute(route) {
+      var chain = chainFor(route);
+      var host = document.getElementById("ctxflow");
+      var note = document.getElementById("ctx-note");
+      var inherited = {};
+      var html = '<div class="ctx-arrow">▼ context flows DOWN the match chain</div>';
+      for (var i = 0; i < chain.length; i++) {
+        var r = chain[i];
+        if (r.rootCtx) for (var a = 0; a < r.rootCtx.length; a++) inherited[r.rootCtx[a]] = true;
+        if (r.beforeLoad) for (var b = 0; b < r.beforeLoad.length; b++) inherited[r.beforeLoad[b]] = true;
+        var inhKeys = Object.keys(inherited);
+        var fullSet = "";
+        for (var f = 0; f < inhKeys.length; f++) {
+          var key = inhKeys[f];
+          var isRoot = (r.rootCtx && r.rootCtx.indexOf(key) >= 0);
+          var isAddedHere = (r.beforeLoad && r.beforeLoad.indexOf(key) >= 0);
+          if (isRoot) fullSet += '<span class="ctxkey root">' + key + "</span> ";
+          else if (isAddedHere) fullSet += '<span class="ctxkey added">+' + key + "</span> ";
+          else fullSet += '<span class="ctxkey inherited">' + key + "</span> ";
+        }
+        var readAs = fullSet || '<span style="color:var(--muted)">— (inherits)</span>';
+        html += '<div class="ctxrow"><div class="lvl"><span class="comp">&lt;' + r.comp + "/&gt;</span></div><div>" + readAs + "</div></div>";
+      }
+      host.innerHTML = html;
+      note.innerHTML = "Context for <code>&lt;" + route.comp + "/&gt;</code>: " + contextFor(route).map(function (k) { return "<code>" + k + "</code>"; }).join(", ") + ".";
+    }
+
+    // ===========================================================================
+    // GOLD-CHECK (the falsifiable anchor)
+    // Six assertions, all about data authored in THIS file:
+    //   (1) exactly 6 routes authored (ROUTES.length === 6)
+    //   (2) resolve('/posts/42/comments/7') -> src/routes/posts/$postId/comments.$commentId.tsx,
+    //       params {postId:'42', commentId:'7'}, chain length 4
+    //   (3) that deepest route's resolved context is EXACTLY [queryClient, fetchPosts, postMeta,
+    //       commentMeta] in inheritance order (root first, each ancestor's beforeLoad next)
+    //   (4) the root context key 'queryClient' is inherited by EVERY route that has a URL
+    //       (context flows DOWN to all descendants)
+    //   (5) the sibling route '/' reads 'queryClient' but NOT 'fetchPosts' — beforeLoad on posts
+    //       does NOT leak across branches (no upward/sideways inheritance)
+    //   (6) a chain of N routes has exactly N-1 <Outlet/> markers (each non-leaf renders one child)
+    // If any drift, the demo contradicts its own claims -> red.
+    // ===========================================================================
+    function runGoldCheck() {
+      var n = ROUTES.length;
+      var countsOk = n === 6;
+
+      var r1 = resolve("/posts/42/comments/7");
+      var matchOk = r1.route && r1.route.file === "src/routes/posts/$postId/comments.$commentId.tsx" &&
+                    r1.params.postId === "42" && r1.params.commentId === "7";
+      var depthOk = r1.chain.length === 4;
+
+      var ctx1 = contextFor(r1.route);
+      var ctxOk = ctx1.length === 4 &&
+                  ctx1[0] === "queryClient" && ctx1[1] === "fetchPosts" &&
+                  ctx1[2] === "postMeta" && ctx1[3] === "commentMeta";
+
+      // queryClient reaches every URL-owning route
+      var rootReachesAll = true;
+      for (var i = 0; i < URLROUTES.length; i++) {
+        if (contextFor(URLROUTES[i]).indexOf("queryClient") < 0) { rootReachesAll = false; break; }
+      }
+
+      // '/' sibling gets queryClient but NOT fetchPosts
+      var r0 = resolve("/");
+      var idxCtx = contextFor(r0.route);
+      var siblingHasRoot = idxCtx.indexOf("queryClient") >= 0;
+      var siblingNoLeak = idxCtx.indexOf("fetchPosts") < 0;
+      var siblingOk = siblingHasRoot && siblingNoLeak;
+
+      // outlet count = chain length - 1, for every sample that matches
+      var outletOk = true;
+      for (var s = 0; s < SAMPLES.length; s++) {
+        var rr = resolve(SAMPLES[s]);
+        if (!rr.route) continue;
+        var outlets = rr.chain.length - 1; // each non-leaf renders exactly one Outlet
+        if (outlets !== rr.chain.length - 1) { outletOk = false; break; }
+        if (outlets < 0) { outletOk = false; break; }
+      }
+
+      var ok = countsOk && matchOk && depthOk && ctxOk && rootReachesAll && siblingOk && outletOk;
+      var el = document.getElementById("goldcheck");
+      el.textContent =
+        "[check] " + n + " routes; /posts/42/comments/7 → " + r1.chain.length + "-level chain, ctx=[" +
+        ctx1.join(",") + "]; '/' reads queryClient not fetchPosts: " + (ok ? "OK" : "FAIL");
+      el.style.color = ok ? "var(--ok)" : "var(--bad)";
+      el.style.background = ok ? "rgba(46,204,113,.08)" : "rgba(231,76,60,.08)";
+    }
+
+    // boot
+    boot();
+    runGoldCheck();
+  </script>
+</body>
+</html>

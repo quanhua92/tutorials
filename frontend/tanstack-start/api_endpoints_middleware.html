@@ -1,0 +1,717 @@
+<!doctype html>
+<!--
+  api_endpoints_middleware.html — Phase 6b tanstack-start bundle
+    (API ENDPOINTS [now "Server Routes"] + SERVER MIDDLEWARE).
+  GROUND TRUTH: a self-contained, zero-dep INTERACTIVE EXPLAINER for TanStack Start
+    Server Routes (a createFileRoute('/path')({ server: { handlers: { METHOD } } })
+    file in src/routes/ exporting an HTTP method handler that returns a Response —
+    for webhooks / 3rd-party / JSON APIs) and Server Middleware (createMiddleware()
+    chained per-request: auth, logging, context injection — runs on EVERY server
+    request including server routes AND server fns).
+  It is NOT a running TanStack Start app — it is curated, web-verified API data + a
+    tiny inline request simulator rendered live, contrasted: a webhook endpoint
+    (raw Response) vs a server function (typed RPC), BOTH flowing through the same
+    global middleware chain.
+  No external CDN (curated API facts + a live inline request simulator, not a framework runtime).
+  Companion: API_ENDPOINTS_MIDDLEWARE.md (the guide).
+
+  Gold values (all deterministic facts about logic authored in THIS file):
+    (1) the global request middleware chain has exactly 2 steps (auth → logging) and
+        they run IN ORDER before the handler, on EVERY request — both the server-route
+        path and the server-function path log the same ['auth','logging','handler'],
+    (2) the webhook server route returns a Response shape { status, headers, body }
+        (status 200, Content-Type application/json) — the right surface for a webhook,
+    (3) the server function returns a typed { data, error } RPC result — NOT a Response
+        (no status/headers), for your own app code.
+
+  API verified from:
+    - https://tanstack.com/start/v0/docs/framework/react/guide/server-routes  (Server Routes:
+      createFileRoute + server.handlers; old createAPIFileRoute DEPRECATED; files in src/routes/)
+    - https://tanstack.com/start/v0/docs/framework/react/guide/middleware    (createMiddleware;
+      request vs function mw; global via createStart().requestMiddleware runs on EVERY request)
+    + GitHub discussion #2863 (the "API Routes" → "Server Routes" rename + src/api.ts removal)
+    + answeroverflow thread (createAPIFileRoute deprecation). See API_ENDPOINTS_MIDDLEWARE.md
+    ## Sources. CURRENT endpoint file convention = createFileRoute + `server` property (NOT
+    createAPIFileRoute, NOT an `api/` dir). NOTE: there is no `createServerMiddleware` — the
+    current API is `createMiddleware()`; the sibling server_functions.html used an intermediate
+    `createServerFileRoute` that has since been unified into createFileRoute({ server }).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>API Endpoints &amp; Middleware — frontend bundle</title>
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#6366f1; --accent-soft:#312e81; --line:#30363d;
+      --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header h1 .dot { color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px; font-weight:700;
+      border:1px solid currentColor; }
+    main { padding:22px; max-width:1180px; margin:0 auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    h3 { font-size:14px; margin:0 0 6px; color:var(--ink); }
+    p { margin:6px 0; }
+    code { background:rgba(99,102,241,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+
+    /* the one-idea panel */
+    .rule { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .rule .big { font-size:18px; font-weight:700; color:var(--ink); }
+    .rule .zero { color:var(--ok); font-weight:700; }
+    .rule .pill { display:inline-block; font-size:12px; padding:2px 9px; margin:3px 6px 0 0;
+      border-radius:999px; border:1px solid var(--accent-soft); color:var(--accent); background:rgba(99,102,241,.06); }
+    .rule .pill.raw { color:var(--warn); border-color:rgba(241,196,15,.35); background:rgba(241,196,15,.06); }
+    .rule .pill.fn  { color:#a5d6ff; border-color:rgba(120,170,255,.35); background:rgba(120,170,255,.06); }
+    .rule .pill.mw  { color:#2ecc71; border-color:rgba(46,204,113,.35); background:rgba(46,204,113,.06); }
+
+    /* the file-convention anatomy */
+    .anatomy { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+    .step { display:flex; align-items:stretch; gap:0; border:1px solid var(--line); border-radius:9px;
+      overflow:hidden; background:var(--bg); transition:border-color .15s; }
+    .step:hover { border-color:var(--accent); }
+    .step .num { display:flex; align-items:center; justify-content:center; width:34px; min-height:60px;
+      background:rgba(99,102,241,.14); color:var(--accent); font-weight:700; font-size:14px;
+      font-family: ui-sans-serif, system-ui, sans-serif; }
+    .step .body { padding:10px 14px; flex:1; }
+    .step .api { font-weight:700; font-size:14px; font-family: ui-monospace, monospace; color:var(--ink); }
+    .step .role { color:var(--muted); font-size:12.5px; margin:3px 0 0; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .step.dep  { opacity:.55; }
+    .step.dep .num { background:rgba(231,76,60,.14); color:var(--bad); }
+
+    /* code columns */
+    .cols { display:flex; gap:16px; flex-wrap:wrap; }
+    .cols > .col { flex:1 1 420px; min-width:0; }
+    .col h3 .tag { font-size:11px; padding:2px 8px; border-radius:999px; margin-left:8px;
+      vertical-align:middle; font-family: ui-monospace, monospace; }
+    .col h3 .tag.api { color:var(--warn); border:1px solid rgba(241,196,15,.35); background:rgba(241,196,15,.07); }
+    .col h3 .tag.fn  { color:#a5d6ff; border:1px solid rgba(120,170,255,.35); background:rgba(120,170,255,.07); }
+    pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px;
+      margin:0; overflow:auto; font-size:12.5px; line-height:1.5; color:#c9d1d9; }
+    pre .kw { color:#ff7b72; }   /* keyword */
+    pre .fn { color:#d2a8ff; }   /* function */
+    pre .st { color:#a5d6ff; }   /* string */
+    pre .cm { color:#8b949e; font-style:italic; } /* comment */
+    pre .ty { color:#79c0ff; }   /* type */
+    pre .pp { color:#f1c40f; }   /* property/punct highlight */
+
+    /* the visualizer stage */
+    .row { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start; }
+    .row > * { flex:1 1 320px; }
+    .stage { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:16px;
+      font-family: ui-sans-serif, system-ui, sans-serif; }
+    .stage label { display:block; font-size:12.5px; color:var(--muted); margin-bottom:8px; }
+    .seg { display:inline-flex; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .seg button { background:var(--panel); color:var(--muted); border:0; padding:9px 14px; cursor:pointer;
+      font:inherit; font-weight:600; font-size:13px; }
+    .seg button.api.active { background:rgba(241,196,15,.16); color:var(--warn); }
+    .seg button.fn.active  { background:rgba(120,170,255,.16); color:#a5d6ff; }
+    .seg button:hover { color:var(--ink); }
+    .calls { margin-top:14px; }
+    .calls button.run { font:inherit; font-weight:700; color:#fff; border:0; border-radius:7px;
+      padding:10px 15px; cursor:pointer; background:var(--accent); }
+    .calls button.run:hover { filter:brightness(1.1); }
+    .stepcount { margin-top:14px; font-size:13px; }
+    .stepcount b { color:var(--ok); }
+
+    /* the result readout */
+    .readout { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px;
+      font-family: ui-monospace, monospace; font-size:12.5px; min-height:170px; }
+    .readout .verdict { font-family: ui-sans-serif, system-ui, sans-serif; font-size:13px;
+      margin-bottom:8px; padding:5px 10px; border-radius:6px; display:inline-block; }
+    .readout .verdict.ok { color:var(--ok); background:rgba(46,204,113,.08); border:1px solid rgba(46,204,113,.3); }
+    .readout .verdict.raw { color:var(--warn); background:rgba(241,196,15,.08); border:1px solid rgba(241,196,15,.3); }
+    .readout .verdict.typed { color:#a5d6ff; background:rgba(120,170,255,.08); border:1px solid rgba(120,170,255,.3); }
+    .readout pre { border:0; background:transparent; padding:0; margin:6px 0 0; }
+    .readout .hint { color:var(--muted); font-size:12px; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+    /* the request flow */
+    .flow { margin-top:8px; }
+    .flow .lane { display:flex; align-items:stretch; gap:0; margin-bottom:6px; flex-wrap:wrap;
+      opacity:.40; transition:opacity .2s; }
+    .flow .lane.live { opacity:1; }
+    .flow .lane .lab { width:104px; flex:0 0 104px; display:flex; align-items:center; font-size:12px;
+      font-weight:700; font-family: ui-sans-serif, system-ui, sans-serif; padding-right:10px; }
+    .flow .lane.api .lab { color:var(--warn); }
+    .flow .lane.fn  .lab { color:#a5d6ff; }
+    .flow .lane .node { flex:1 1 0; min-width:96px; background:var(--bg); border:1px solid var(--line);
+      border-radius:7px; padding:8px 9px; font-size:11.5px; line-height:1.35;
+      font-family: ui-monospace, monospace; position:relative; transition:border-color .2s, background .2s; }
+    .flow .lane .node .n { font-size:10px; color:var(--muted); display:block; margin-bottom:2px;
+      font-family: ui-sans-serif, system-ui, sans-serif; text-transform:uppercase; letter-spacing:.04em; }
+    .flow .lane .node.mw   .n { color:#2ecc71; }
+    .flow .lane.api.live .node { border-color:var(--warn); }
+    .flow .lane.api.live .node.hit { background:rgba(241,196,15,.10); }
+    .flow .lane.fn.live  .node { border-color:#a5d6ff; }
+    .flow .lane.fn.live  .node.hit { background:rgba(120,170,255,.10); }
+    .flow .lane.live .node.mw.hit { background:rgba(46,204,113,.12); border-color:#2ecc71; }
+    .flow .lane .arr { flex:0 0 18px; display:flex; align-items:center; justify-content:center;
+      color:var(--muted); font-size:14px; }
+
+    /* comparison table */
+    .cmp { overflow-x:auto; }
+    table { border-collapse:collapse; font-size:12.5px; width:100%; min-width:820px; }
+    td,th { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; background:rgba(99,102,241,.05); }
+    td.api { color:var(--warn); font-weight:700; white-space:nowrap; }
+    td.fn  { color:#a5d6ff; font-weight:700; white-space:nowrap; }
+    td.mw  { color:#2ecc71; font-weight:700; white-space:nowrap; }
+    td.yes { color:var(--ok); font-weight:700; }
+    td.no  { color:var(--bad); font-weight:700; }
+
+    .foot { color:var(--muted); font-size:12px; border-top:1px solid var(--line);
+      margin-top:18px; padding-top:12px; }
+    .foot a.xref { color:var(--accent); text-decoration:none; }
+    .foot a.xref:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="dot">●</span> server routes &amp; middleware</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/tanstack-start/API_ENDPOINTS_MIDDLEWARE.md">guide (.md)</a>
+      <a href="../index.html">← all frontend</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- the one-idea panel -->
+    <section class="panel rule">
+      <h2>The one idea</h2>
+      <p class="big">
+        A <strong>Server Route</strong> (formerly "API Route") is a raw HTTP handler that returns a
+        <code>Response</code> — for <strong>webhooks, 3rd-party callers, JSON/RSS/image APIs</strong>.
+        A <strong>Server Function</strong> is typed RPC for <span class="zero">your own app code</span>.
+        <strong>Middleware</strong> is the <span class="zero">per-request chain that wraps BOTH</span> —
+        auth, logging, context injection.
+      </p>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">
+        A server route is a file in <code>src/routes/</code> calling
+        <code>createFileRoute('/path')({ server: { handlers: { POST: async ({ request }) =&gt; new Response(...) } } })</code>.
+        The handler returns a <code>Response</code> — you set status, headers, and body manually; it is
+        <strong>not</strong> type-safe RPC. Middleware is <code>createMiddleware()</code> from
+        <code>@tanstack/react-start</code>; the global <code>requestMiddleware</code> (set in
+        <code>src/start.ts</code> via <code>createStart()</code>) runs on <strong>every server request</strong> —
+        server routes, SSR, and server functions alike.
+      </p>
+      <div>
+        <span class="pill raw">Server Route: returns a raw Response</span>
+        <span class="pill raw">for webhooks / 3rd-party / JSON APIs</span>
+        <span class="pill fn">Server Function: typed { data, error } RPC</span>
+        <span class="pill mw">Middleware: auth → logging → handler (every request)</span>
+      </div>
+    </section>
+
+    <!-- the file convention anatomy -->
+    <section class="panel">
+      <h2>The file convention — current vs deprecated</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        The CURRENT endpoint convention is <code>createFileRoute('/path')({ server: { handlers } })</code> — a
+        file in <code>src/routes/</code> (the same dir as your app routes). The old
+        <code>createAPIFileRoute()</code> and the separate <code>src/api.ts</code> entry handler were removed
+        in the beta (the feature was renamed "API Routes" → "Server Routes"). <code>routes/api/webhook.ts</code>
+        maps to the URL <code>/api/webhook</code> — the <code>api/</code> prefix is just a path segment, not a
+        special directory.
+      </p>
+      <div class="anatomy" id="anatomy"></div>
+    </section>
+
+    <!-- side-by-side code -->
+    <section class="panel">
+      <h2>Side by side — a webhook server route vs a server function</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Both run on the server; both are reachable by URL. The server route returns a raw
+        <code>Response</code> (Stripe/whichever webhook calls it). The server function returns typed data to
+        <em>your own</em> client. Both pass through the same global middleware first.
+      </p>
+      <div class="cols">
+        <div class="col">
+          <h3>src/routes/api/webhook.ts <span class="tag api">Server Route</span></h3>
+<pre><span class="cm">// CURRENT convention: createFileRoute + `server` property (NOT createAPIFileRoute).</span>
+<span class="kw">import</span> { <span class="fn">createFileRoute</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-router'</span>;
+
+<span class="kw">export const</span> <span class="ty">Route</span> = <span class="fn">createFileRoute</span>(<span class="st">'/api/webhook'</span>)({
+  <span class="pp">server</span>: {
+    <span class="cm">// route-level middleware runs for ALL methods on this route:</span>
+    <span class="pp">middleware</span>: [<span class="fn">rawBodyMiddleware</span>],
+    <span class="pp">handlers</span>: {
+      <span class="fn">POST</span>: <span class="kw">async</span> ({ request, context }) =&gt; {
+        <span class="kw">const</span> event = <span class="kw">await</span> <span class="fn">verifyStripeSignature</span>(
+          request, context.<span class="pp">rawBody</span>,
+        );
+        <span class="kw">await</span> db.<span class="fn">insertEvent</span>(event);
+        <span class="cm">// returns a raw Response — status, headers, body are YOUR job:</span>
+        <span class="kw">return new</span> <span class="fn">Response</span>(JSON.<span class="fn">stringify</span>({ <span class="pp">received</span>: <span class="ty">true</span> }), {
+          <span class="pp">status</span>: <span class="ty">200</span>,
+          <span class="pp">headers</span>: { <span class="st">'Content-Type'</span>: <span class="st">'application/json'</span> },
+        });
+      },
+    },
+  },
+});</pre>
+<pre style="margin-top:8px"><span class="cm">// called by a 3rd-party webhook (Stripe) — a real URL, no Start client needed:</span>
+<span class="cm">//   POST https://app.example.com/api/webhook   body=stripe-event</span>
+<span class="cm">//   -&gt; Response { status: 200, headers, body }   (untyped to the caller)</span></pre>
+        </div>
+
+        <div class="col">
+          <h3>src/server/process.event.ts <span class="tag fn">Server Function</span></h3>
+<pre><span class="cm">// typed RPC for YOUR app code — validated input, inferred return, no fetch.</span>
+<span class="kw">import</span> { <span class="fn">createServerFn</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-start'</span>;
+<span class="kw">import</span> { z } <span class="kw">from</span> <span class="st">'zod'</span>;
+
+<span class="kw">export const</span> <span class="pp">processEvent</span> = <span class="fn">createServerFn</span>({ <span class="pp">method</span>: <span class="st">'POST'</span> })
+  .<span class="fn">validator</span>(z.<span class="fn">object</span>({
+    <span class="pp">eventId</span>: z.<span class="fn">string</span>().<span class="fn">uuid</span>(),
+  }))
+  .<span class="fn">handler</span>(<span class="kw">async</span> ({ data }) =&gt; {
+    <span class="kw">const</span> event = <span class="kw">await</span> db.<span class="fn">findEvent</span>(data.eventId);
+    <span class="kw">return</span> { <span class="pp">processedAt</span>: <span class="kw">new</span> <span class="fn">Date</span>(), <span class="pp">ok</span>: <span class="ty">true</span> };
+  });</pre>
+<pre style="margin-top:8px"><span class="cm">// called from YOUR client like a local async fn — typed end-to-end:</span>
+<span class="kw">const</span> { data, error } = <span class="kw">await</span> <span class="fn">processEvent</span>({ <span class="pp">data</span>: { <span class="pp">eventId</span>: id } });
+<span class="cm">// data.processedAt &lt;-- typed: Date   (NOT a Response — no status/headers)</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- middleware definition -->
+    <section class="panel">
+      <h2>The middleware — createMiddleware() + global createStart()</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        There is no <code>createServerMiddleware</code> — the current API is <code>createMiddleware()</code>.
+        A <strong>request</strong> middleware (the default) runs on every server request; a
+        <strong>function</strong> middleware (<code>{ type: 'function' }</code>) adds client + validator steps
+        for server fns. Both are next-able — call <code>next()</code> to continue the chain.
+      </p>
+<pre><span class="cm">// src/middleware.ts</span>
+<span class="kw">import</span> { <span class="fn">createMiddleware</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-start'</span>;
+
+<span class="kw">export const</span> <span class="pp">authMiddleware</span> = <span class="fn">createMiddleware</span>().<span class="fn">server</span>(
+  <span class="kw">async</span> ({ next, request }) =&gt; {
+    <span class="kw">const</span> session = <span class="kw">await</span> <span class="fn">getSession</span>(request.headers);   <span class="cm">// read cookie</span>
+    <span class="kw">return</span> <span class="fn">next</span>({ <span class="pp">context</span>: { session } });          <span class="cm">// inject into context</span>
+  },
+);
+
+<span class="kw">export const</span> <span class="pp">loggingMiddleware</span> = <span class="fn">createMiddleware</span>().<span class="fn">server</span>(
+  <span class="kw">async</span> ({ next, request }) =&gt; {
+    <span class="kw">const</span> t = <span class="fn">Date</span>.<span class="fn">now</span>();
+    <span class="kw">const</span> res = <span class="kw">await</span> <span class="fn">next</span>();
+    <span class="fn">console</span>.<span class="fn">log</span>(request.method, request.url, <span class="fn">Date</span>.<span class="fn">now</span>() - t + <span class="st">'ms'</span>);
+    <span class="kw">return</span> res;
+  },
+);</pre>
+<pre style="margin-top:8px"><span class="cm">// src/start.ts — GLOBAL request middleware runs on EVERY request</span>
+<span class="cm">// (server routes + SSR + server functions). NOT included in the default template.</span>
+<span class="kw">import</span> { <span class="fn">createStart</span>, <span class="fn">createCsrfMiddleware</span> } <span class="kw">from</span> <span class="st">'@tanstack/react-start'</span>;
+<span class="kw">import</span> { authMiddleware, loggingMiddleware } <span class="kw">from</span> <span class="st">'./middleware'</span>;
+
+<span class="kw">export const</span> <span class="pp">startInstance</span> = <span class="fn">createStart</span>(() =&gt; ({
+  <span class="pp">requestMiddleware</span>: [
+    <span class="fn">createCsrfMiddleware</span>(),     <span class="cm">// Start installs this automatically if no src/start.ts</span>
+    authMiddleware,                <span class="cm">// order = execution order, dependency-first</span>
+    loggingMiddleware,
+  ],
+}));</pre>
+    </section>
+
+    <!-- the interactive visualizer -->
+    <section class="panel">
+      <h2>Try it — send a request through the chain two ways</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Pick a target and send the request. The <strong>global middleware chain runs identically on both
+        paths</strong> — that's the point: middleware is per-request, not per-surface. What differs is the
+        handler's <em>return shape</em>: a raw <code>Response</code> (server route) vs a typed
+        <code>{ data, error }</code> (server function).
+      </p>
+      <div class="row">
+        <div class="stage">
+          <label>Request target</label>
+          <div class="seg" id="targetSeg">
+            <button class="api active" data-target="api">Server Route<br/><small>POST /api/webhook</small></button>
+            <button class="fn" data-target="fn">Server Function<br/><small>processEvent({ data })</small></button>
+          </div>
+          <div class="calls">
+            <button class="run" id="runBtn">Send request →</button>
+          </div>
+          <div class="stepcount" id="stepcount"></div>
+        </div>
+
+        <div class="readout" id="readout">
+          <span class="hint">Press "Send request" to watch the request flow through the chain.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- the request flow -->
+    <section class="panel">
+      <h2>The flow — request → middleware stack → endpoint OR server-fn</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Both lanes share the green <strong>middleware</strong> nodes (they run on every request, in order).
+        The branch happens at the handler: a server route returns a <code>Response</code>; a server function
+        returns typed <code>{ data, error }</code>.
+      </p>
+      <div class="flow">
+        <div class="lane api" id="laneApi">
+          <div class="lab">Server Route</div>
+          <div class="node" id="apiN0"><span class="n">client</span>POST /api/webhook</div>
+          <div class="arr">→</div>
+          <div class="node mw" id="apiN1"><span class="n">mw · auth</span>authMiddleware → context.session</div>
+          <div class="arr">→</div>
+          <div class="node mw" id="apiN2"><span class="n">mw · logging</span>loggingMiddleware → next()</div>
+          <div class="arr">→</div>
+          <div class="node" id="apiN3"><span class="n">server · handler</span>POST → new Response(...)</div>
+          <div class="arr">←</div>
+          <div class="node" id="apiN4"><span class="n">client</span>Response { status, headers, body }</div>
+        </div>
+        <div class="lane fn" id="laneFn">
+          <div class="lab">Server Function</div>
+          <div class="node" id="fnN0"><span class="n">client</span>processEvent({ data })</div>
+          <div class="arr">→</div>
+          <div class="node mw" id="fnN1"><span class="n">mw · auth</span>authMiddleware → context.session</div>
+          <div class="arr">→</div>
+          <div class="node mw" id="fnN2"><span class="n">mw · logging</span>loggingMiddleware → next()</div>
+          <div class="arr">→</div>
+          <div class="node" id="fnN3"><span class="n">server · validator+handler</span>.validator → .handler → typed</div>
+          <div class="arr">←</div>
+          <div class="node" id="fnN4"><span class="n">client</span>{ data, error } (typed)</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- comparison table -->
+    <section class="panel">
+      <h2>Comparison — which surface for what</h2>
+      <div class="cmp" id="table"></div>
+    </section>
+
+    <div class="foot">
+      This bundle is HOW TanStack Start does the OTHER server surfaces: <code>createFileRoute + server</code>
+      for raw HTTP endpoints (webhooks/3rd-party), <code>createMiddleware</code> for the per-request chain that
+      wraps everything. Cross-refs:
+      <a class="xref" href="server_functions.html">🔗 server_functions (the OTHER server surface — typed RPC)</a> ·
+      <a class="xref" href="ssr_streaming.html">🔗 ssr_streaming (SSR requests also pass the global middleware)</a> ·
+      <a class="xref" href="../astro/astro_actions_endpoints.html">🔗 astro_actions_endpoints (the same endpoint idea, Astro side)</a>.
+    </div>
+  </main>
+
+  <script>
+    // ===========================================================================
+    // The curated demo. EVERYTHING renders from the logic below. Nothing is
+    // fetched from the network. The gold-check asserts deterministic facts about
+    // these very functions. API surface verified from the official TanStack Start
+    // server-routes + middleware guides + a 2025 migration discussion (see
+    // API_ENDPOINTS_MIDDLEWARE.md ## Sources).
+    //
+    // CURRENT conventions (web-verified):
+    //   - Server Route: createFileRoute('/path')({ server: { handlers: { METHOD } } })
+    //     (createAPIFileRoute is DEPRECATED; src/api.ts entry handler removed in beta)
+    //   - Middleware: createMiddleware() from @tanstack/react-start
+    //     (there is NO createServerMiddleware; request mw runs on EVERY server request)
+    // ===========================================================================
+
+    // --- the global REQUEST middleware chain (mirrors src/start.ts requestMiddleware) ---
+    // Order = execution order. These run on EVERY server request: routes + SSR + server fns.
+    var GLOBAL_REQUEST_MIDDLEWARE = [
+      {
+        name: "authMiddleware",
+        inject: { session: { userId: "u_123", role: "admin" } },
+        role: "Reads the session cookie, injects context.session. Throws if absent (short-circuits the chain)."
+      },
+      {
+        name: "loggingMiddleware",
+        inject: {},
+        role: "Times the request, logs method + url + latency after next() returns. Does NOT inject context."
+      }
+    ];
+
+    // --- the request simulator: runs the chain dependency-first, then dispatches ---
+    // Mirrors Start's createStartHandler: for each mw in order, run .server(), merge context, call next().
+    // When the chain ends, dispatch to the handler (a server route OR a server function).
+    function runRequest(mwChain, dispatch) {
+      var log = [];                          // ordered list of steps that ran (for the gold-check)
+      function makeNext(i, ctx) {
+        return function (extra) {
+          var merged = extra && extra.context
+            ? Object.assign({}, ctx, extra.context)
+            : ctx;
+          if (i >= mwChain.length) {
+            log.push("handler");
+            return dispatch(merged);
+          }
+          var mw = mwChain[i];
+          log.push(mw.name);
+          return makeNext(i + 1, Object.assign({}, merged, mw.inject || {}));
+        };
+      }
+      var startCtx = { request: { method: "POST", url: "/api/webhook" } };
+      var result = makeNext(0, startCtx)({});
+      return { log: log, result: result, context: startCtx };
+    }
+
+    // --- the webhook SERVER ROUTE handler (mirrors routes/api/webhook.ts POST) ---
+    // Returns a raw Response: status, headers, body are set MANUALLY. NOT typed RPC.
+    function webhookServerRoute(ctx) {
+      var payload = { received: true, event: "payment.succeeded", userId: ctx.session.userId };
+      return {
+        __kind: "Response",
+        status: 200,
+        statusText: "OK",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      };
+    }
+
+    // --- the SERVER FUNCTION (mirrors process.event.ts: validator + handler) ---
+    // Returns a typed { data, error } RPC result — NOT a Response (no status/headers).
+    function processEventServerFn(ctx) {
+      // (validator conceptually passed; handler runs server-only)
+      return {
+        __kind: "typed-rpc",
+        data: { processedAt: "2026-06-27T00:00:00.000Z", ok: true, userId: ctx.session.userId },
+        error: undefined
+      };
+    }
+
+    // dispatch map for the two surfaces
+    var DISPATCH = {
+      api: webhookServerRoute,
+      fn:  processEventServerFn
+    };
+
+    // ===========================================================================
+    // UI wiring
+    // ===========================================================================
+    function el(id) { return document.getElementById(id); }
+    var currentTarget = "api";
+
+    function pretty(obj) {
+      return JSON.stringify(obj, null, 2);
+    }
+
+    function setReadout(verdictClass, verdictText, json, hint) {
+      var html = '<span class="verdict ' + verdictClass + '">' + verdictText + "</span>";
+      if (hint) html += '<div class="hint">' + hint + "</div>";
+      if (json) html += "<pre>" + json + "</pre>";
+      el("readout").innerHTML = html;
+    }
+
+    function setStepcount(log) {
+      // log = [...middlewareNames, 'handler'] — the chain runs N middleware steps before the handler
+      var mwSteps = log.length - 1;
+      var names = log.slice(0, -1).join(" → ");
+      el("stepcount").innerHTML =
+        "chain ran <b>" + mwSteps + " middleware step" + (mwSteps === 1 ? "" : "s") + "</b> " +
+        "before the handler: " + names + " → handler";
+    }
+
+    function dimLane(which) {
+      el("laneApi").classList.toggle("live", which === "api");
+      el("laneFn").classList.toggle("live", which === "fn");
+      var ids = ["apiN0","apiN1","apiN2","apiN3","apiN4","fnN0","fnN1","fnN2","fnN3","fnN4"];
+      for (var i = 0; i < ids.length; i++) { el(ids[i]).className = el(ids[i]).className.replace(/\s*hit\s*/g, " ").replace(/\s*hit$/,"").trim(); }
+    }
+
+    function addHit(id) {
+      var n = el(id);
+      if (n) n.className = n.className + " hit";
+    }
+
+    function runOnce(target) {
+      var trace = runRequest(GLOBAL_REQUEST_MIDDLEWARE, DISPATCH[target]);
+      dimLane(target);
+      var prefix = target === "api" ? "apiN" : "fnN";
+      // highlight: client(0) → mw(1) → mw(2) → handler(3) → result(4)
+      addHit(prefix + "0");
+      addHit(prefix + "1");
+      addHit(prefix + "2");
+      addHit(prefix + "3");
+      addHit(prefix + "4");
+
+      setStepcount(trace.log);
+
+      if (target === "api") {
+        var parsed = JSON.parse(trace.result.body);
+        setReadout(
+          "raw",
+          "raw Response — status " + trace.result.status + " (server route)",
+          pretty({ response: { status: trace.result.status, headers: trace.result.headers }, body: parsed }),
+          "A 3rd-party webhook (Stripe) called a real URL and got a Response. Caller sees untyped JSON; status/headers were set manually."
+        );
+      } else {
+        setReadout(
+          "typed",
+          "typed { data, error } — server function RPC",
+          pretty({ data: trace.result.data, error: trace.result.error }),
+          "Your client called processEvent() like a local async fn. data is typed end-to-end (NOT a Response)."
+        );
+      }
+    }
+
+    el("runBtn").addEventListener("click", function () { runOnce(currentTarget); });
+
+    var segButtons = el("targetSeg").getElementsByTagName("button");
+    for (var s = 0; s < segButtons.length; s++) {
+      segButtons[s].addEventListener("click", function () {
+        for (var j = 0; j < segButtons.length; j++) {
+          segButtons[j].classList.remove("active");
+        }
+        this.classList.add("active");
+        currentTarget = this.getAttribute("data-target");
+        runOnce(currentTarget);
+      });
+    }
+
+    // ===========================================================================
+    // Render the file-convention anatomy
+    // ===========================================================================
+    var ANATOMY = [
+      {
+        api: "createFileRoute('/api/webhook')({ server: { handlers: { POST } } })",
+        role: "CURRENT. A file in src/routes/ (same dir as app routes) with a `server` property. Each method handler (GET/POST/PUT/...) receives { request, params, context } and returns a Response."
+      },
+      {
+        api: "createAPIFileRoute('/api/webhook')({ POST })",
+        role: "DEPRECATED. The old 'API Routes' API. Removed in the beta when the feature was renamed 'Server Routes' and src/api.ts was deleted. Tutorials still show it — it no longer exists.",
+        dep: true
+      },
+      {
+        api: "src/api/ directory (separate from src/routes/)",
+        role: "NOT a convention. Server routes live in src/routes/ (file-based). An api/ subfolder is just a path segment: routes/api/webhook.ts → /api/webhook.",
+        dep: true
+      }
+    ];
+    function renderAnatomy() {
+      var host = el("anatomy");
+      var html = "";
+      for (var i = 0; i < ANATOMY.length; i++) {
+        var A = ANATOMY[i];
+        html +=
+          '<div class="step' + (A.dep ? " dep" : "") + '">' +
+            '<div class="num">' + (A.dep ? "✕" : "✓") + "</div>" +
+            '<div class="body">' +
+              '<div class="api">' + A.api + "</div>" +
+              '<div class="role">' + A.role + "</div>" +
+            "</div>" +
+          "</div>";
+      }
+      host.innerHTML = html;
+    }
+
+    // ===========================================================================
+    // Render the comparison table
+    // ===========================================================================
+    function renderTable() {
+      el("table").innerHTML =
+        "<table>" +
+          "<thead><tr>" +
+            "<th>surface</th><th>returns</th><th>typed?</th><th>runs through global MW?</th><th>use for</th>" +
+          "</tr></thead><tbody>" +
+          "<tr>" +
+            '<td class="api">Server Route<br/><small>createFileRoute + server</small></td>' +
+            '<td class="api">a raw Response (status + headers + body)</td>' +
+            '<td class="no">no — caller sees untyped JSON</td>' +
+            '<td class="yes">yes (request mw)</td>' +
+            '<td class="api">webhooks, 3rd-party callers, RSS/images, public JSON APIs</td>' +
+          "</tr>" +
+          "<tr>" +
+            '<td class="fn">Server Function<br/><small>createServerFn + validator + handler</small></td>' +
+            '<td class="fn">typed { data, error }</td>' +
+            '<td class="yes">yes — input + return inferred end-to-end</td>' +
+            '<td class="yes">yes (request + function mw)</td>' +
+            '<td class="fn">your own app mutations, loaders, typed client→server RPC</td>' +
+          "</tr>" +
+          "<tr>" +
+            '<td class="mw">Middleware<br/><small>createMiddleware + createStart</small></td>' +
+            '<td class="mw">nothing — wraps the chain, calls next()</td>' +
+            '<td class="yes">context is typed as it flows</td>' +
+            '<td class="yes">IS the chain (runs on every request)</td>' +
+            '<td class="mw">auth, logging, CSRF, CSP, observability, context injection</td>' +
+          "</tr>" +
+          "</tbody></table>";
+    }
+
+    // ===========================================================================
+    // GOLD-CHECK (the falsifiable anchor)
+    // Five deterministic assertions, all about the logic authored above:
+    //   (1) the global request middleware chain has exactly 2 steps,
+    //   (2) for the SERVER ROUTE path, the chain runs ['authMiddleware','loggingMiddleware','handler']
+    //       IN ORDER — the handler is last, after exactly 2 middleware steps,
+    //   (3) for the SERVER FUNCTION path, the SAME chain runs in the SAME order —
+    //       middleware is per-request, not per-surface,
+    //   (4) the webhook server route returns a Response shape (__kind 'Response', status 200,
+    //       Content-Type application/json, body is a string) — the right surface for a webhook,
+    //   (5) the server function returns typed RPC (__kind 'typed-rpc', data set, error undefined,
+    //       NO status/headers) — NOT a Response.
+    // If any drifts, the demo contradicts its own claims -> red.
+    // ===========================================================================
+    function runGoldCheck() {
+      var ok1, ok2, ok3, ok4, ok5;
+
+      // (1) exactly 2 global middleware steps
+      ok1 = GLOBAL_REQUEST_MIDDLEWARE.length === 2 &&
+            GLOBAL_REQUEST_MIDDLEWARE[0].name === "authMiddleware" &&
+            GLOBAL_REQUEST_MIDDLEWARE[1].name === "loggingMiddleware";
+
+      // (2) server route path: chain = auth, logging, handler (in order)
+      var tApi = runRequest(GLOBAL_REQUEST_MIDDLEWARE, webhookServerRoute);
+      ok2 = tApi.log.length === 3 &&
+            tApi.log[0] === "authMiddleware" &&
+            tApi.log[1] === "loggingMiddleware" &&
+            tApi.log[2] === "handler";
+
+      // (3) server function path: SAME chain, SAME order (middleware runs on every request)
+      var tFn = runRequest(GLOBAL_REQUEST_MIDDLEWARE, processEventServerFn);
+      ok3 = tFn.log.length === 3 &&
+            tFn.log[0] === "authMiddleware" &&
+            tFn.log[1] === "loggingMiddleware" &&
+            tFn.log[2] === "handler" &&
+            JSON.stringify(tFn.log) === JSON.stringify(tApi.log);
+
+      // (4) webhook server route returns a Response shape
+      var r4 = tApi.result;
+      ok4 = r4.__kind === "Response" &&
+            r4.status === 200 &&
+            r4.headers["Content-Type"] === "application/json" &&
+            typeof r4.body === "string" &&
+            JSON.parse(r4.body).received === true;
+
+      // (5) server function returns typed RPC — NOT a Response
+      var r5 = tFn.result;
+      ok5 = r5.__kind === "typed-rpc" &&
+            r5.error === undefined &&
+            r5.data.ok === true &&
+            r5.status === undefined &&
+            r5.headers === undefined;
+
+      var ok = ok1 && ok2 && ok3 && ok4 && ok5;
+      var g = el("goldcheck");
+      g.textContent =
+        "[check] 2 mw steps; chain order matches on both paths; route=Response(200); fn=typed{data,error}: " +
+        (ok ? "OK" : "FAIL");
+      g.style.color = ok ? "var(--ok)" : "var(--bad)";
+      g.style.background = ok ? "rgba(46,204,113,.08)" : "rgba(231,76,60,.08)";
+    }
+
+    // boot
+    renderAnatomy();
+    renderTable();
+    runGoldCheck();
+    runOnce(currentTarget);
+  </script>
+</body>
+</html>

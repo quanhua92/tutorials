@@ -44,7 +44,7 @@ frontend/
 ├── react/                      ← Phase 3 (4)
 ├── metaframeworks/             ← Phase 4 (1)
 ├── astro/                      ← Phase 5 (8)
-├── tanstack-start/             ← Phase 6 (1)
+├── tanstack-start/             ← Phase 6 (12: Router deep-dive + Start deep-dive)
 ├── tanstack-query/             ← (existing — untouched)
 └── tanstack-router/            ← (existing — untouched)
 ```
@@ -154,11 +154,27 @@ graph LR
 
 ---
 
-## Phase 6 — `tanstack-start/` — the SaaS pick (1 bundle)
+## Phase 6a — `tanstack-start/` — TanStack Router deep-dive (6 bundles)
 
 | # | Stem | Concept |
 |---|---|---|
-| 26 | `tanstack_start_overview` | full-stack React on TanStack Router, file-based routing, server functions, the SaaS fit (contrast to Astro). |
+| 27 | `router_type_safety` | end-to-end type-safe routing — the thesis; type inference from route definitions. |
+| 28 | `file_based_routing` | the `routes/` file convention + route-tree codegen. |
+| 29 | `path_search_params` | typed `:path` params + the killer feature: validated (zod) URL **search params**. |
+| 30 | `navigation_links` | `<Link>`, `navigate()`, preload, active/link-props. |
+| 31 | `loaders_data` | route loaders, type-safe data loading, TanStack Query integration. |
+| 32 | `nested_outlet_context` | nested routes, `<Outlet>`, route-context inheritance down the tree. |
+
+## Phase 6b — `tanstack-start/` — TanStack Start deep-dive (5 bundles + the overview)
+
+| # | Stem | Concept |
+|---|---|---|
+| 26 | `tanstack_start_overview` | the intro/anchor: Router + Server Fns + Nitro; contrast to Astro. |
+| 33 | `server_functions` | `createServerFn` — the type-safe RPC boundary (client → server). |
+| 34 | `ssr_streaming` | server-side rendering, streaming + hydration. |
+| 35 | `api_endpoints_middleware` | server API routes (`api/`) + request middleware. |
+| 36 | `spa_vs_mpa` | **SPA mode vs SSR/MPA** — how TanStack spans both; when each fits. |
+| 37 | `deployment_nitro` | Nitro/Vinxi, deployment targets, build outputs. |
 
 ---
 
@@ -175,6 +191,9 @@ briefs, launches ≤4 workers in ONE message, sweeps, re-spawns, ticks.
 - [ ] **Batch 5:** `astro_islands`, `astro_routing_layouts`, `astro_react_integration`, `astro_content_collections`.
 - [ ] **Batch 6:** `astro_rendering_modes`, `astro_view_transitions`, `astro_actions_endpoints`, `astro_assets_optimization`.
 - [ ] **Batch 7:** `tanstack_start_overview`.
+- [ ] **TS Batch A:** `router_type_safety`, `file_based_routing`, `path_search_params`, `navigation_links`.
+- [ ] **TS Batch B:** `loaders_data`, `nested_outlet_context`, `server_functions`, `ssr_streaming`.
+- [ ] **TS Batch C:** `api_endpoints_middleware`, `spa_vs_mpa`, `deployment_nitro`.
 
 ---
 
@@ -188,8 +207,8 @@ briefs, launches ≤4 workers in ONE message, sweeps, re-spawns, ticks.
 | 3 — react | 4 | 4 |
 | 4 — metaframeworks | 1 | 1 |
 | 5 — astro | 8 | 8 |
-| 6 — tanstack-start | 1 | 1 |
-| **Total** | **26** | **26 + 5 foundation** |
+| 6 — tanstack-start | 12 | 12 |
+| **Total** | **37** | **37 + 5 foundation** |
 
 ## Non-negotiables (from the skill)
 

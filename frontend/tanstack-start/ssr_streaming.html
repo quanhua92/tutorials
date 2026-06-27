@@ -1,0 +1,672 @@
+<!doctype html>
+<!--
+  ssr_streaming.html — Phase 6b tanstack-start bundle #34 (SSR + STREAMING).
+  GROUND TRUTH: a self-contained, zero-dep INTERACTIVE SSR/STREAMING VISUALIZER.
+  It is NOT a running TanStack Start app — it is a deterministic simulation of how
+  a page with a FAST part + a SLOW (Suspense) part renders under two modes:
+    (1) NON-STREAMING (renderToString): the whole page waits for the slow data,
+        so first paint == full load (one late blob).
+    (2) STREAMING (renderToPipeableStream + Suspense): the fast shell flushes
+        immediately (early first paint), the slow chunk streams in later when its
+        data resolves.
+  Toggle streaming on/off, drag the slow-data delay, hit replay, and watch the
+  TTFB / full-load bars move. No external CDN (curated simulation, not a live app).
+  Companion: SSR_STREAMING.md (the guide).
+  Gold values (all about data authored in THIS file):
+    (1) streaming  -> first paint (100ms) < full load (100 + delay),
+    (2) non-stream -> first paint == full load (whole page waits),
+    (3) chunk count: streaming = 2 (shell + 1 streamed), non-streaming = 1,
+    (4) streaming first paint is INDEPENDENT of the slow delay (always 100ms).
+  Behaviors verified from tanstack.com/router/v1/docs/guide/ssr +
+  blog.logrocket.com/streaming-ssr-with-react-18 + react.dev/renderToPipeableStream
+  (see SSR_STREAMING.md ## Sources).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SSR &amp; Streaming — frontend bundle</title>
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#6366f1; --accent-soft:#312e81; --line:#30363d;
+      --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header h1 .dot { color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px; font-weight:700;
+      border:1px solid currentColor; }
+    main { padding:22px; max-width:1180px; margin:0 auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    h3 { font-size:14px; margin:0 0 6px; color:var(--ink); }
+    p { margin:6px 0; }
+    code { background:rgba(99,102,241,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+
+    /* the thesis, front and center */
+    .thesis { font-family: ui-sans-serif, system-ui, sans-serif; }
+    .thesis .big { font-size:18px; font-weight:700; color:var(--ink); }
+    .thesis .big .ssr { color:var(--accent); }
+    .thesis .big .str { color:var(--ok); }
+    .thesis .pill { display:inline-block; font-size:12px; padding:2px 9px; margin:3px 6px 0 0;
+      border-radius:999px; border:1px solid var(--accent-soft); color:var(--accent); background:rgba(99,102,241,.06); }
+
+    /* controls */
+    .picker { display:flex; gap:8px; flex-wrap:wrap; }
+    .picker button { flex:1 1 auto; min-width:170px; background:var(--bg); color:var(--ink);
+      border:1px solid var(--line); border-radius:7px; padding:10px 12px; cursor:pointer; font:inherit;
+      text-align:left; transition:border-color .15s, background .15s; }
+    .picker button:hover { border-color:var(--accent); }
+    .picker button.active { border-color:var(--accent); background:rgba(99,102,241,.14); }
+    .picker button .pn { display:block; color:var(--accent); font-weight:700; font-size:13px; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .picker button .pp { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+
+    .slider-row { display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-top:14px; }
+    .slider-row label { color:var(--muted); font-size:13px; }
+    .slider-row input[type=range] { flex:1 1 280px; min-width:200px; accent-color:var(--accent); }
+    .slider-row .val { color:var(--accent); font-weight:700; min-width:64px; }
+
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+    .btn { background:var(--accent); color:#fff; border:0; padding:9px 16px; border-radius:6px;
+      cursor:pointer; font:inherit; font-weight:600; }
+    .btn:hover { background:#4f52d8; }
+    .btn.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+    .btn.ghost:hover { color:var(--ink); border-color:var(--ink); }
+    .btn:disabled { opacity:.45; cursor:default; }
+
+    .row { display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+    .row > * { flex:1 1 360px; }
+
+    /* metrics readout */
+    .metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin-top:14px; }
+    .metric { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; }
+    .metric .k { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+    .metric .v { font-size:20px; font-weight:700; color:var(--accent); font-family: ui-sans-serif, system-ui, sans-serif; margin-top:2px; }
+    .metric .v.ok { color:var(--ok); }
+    .metric .v.warn { color:var(--warn); }
+    .metric .sub { font-size:11px; color:var(--muted); margin-top:2px; }
+
+    /* the page preview — a mock browser */
+    .preview { background:var(--bg); border:1px solid var(--line); border-radius:8px; overflow:hidden;
+      font-family: ui-sans-serif, system-ui, sans-serif; }
+    .preview .bar { display:flex; align-items:center; gap:6px; padding:8px 12px; background:#0a0e14; border-bottom:1px solid var(--line); }
+    .preview .bar .dot { width:10px; height:10px; border-radius:50%; background:var(--line); }
+    .preview .bar .url { font-size:11px; color:var(--muted); margin-left:6px; }
+    .preview .stage { padding:14px; min-height:200px; position:relative; }
+    .pv-header { height:34px; border-radius:6px; background:rgba(99,102,241,.10); border:1px solid var(--accent-soft);
+      display:flex; align-items:center; padding:0 10px; font-size:12px; color:var(--accent); font-weight:600;
+      transition:opacity .2s; opacity:0; }
+    .pv-header.on { opacity:1; }
+    .pv-nav { display:flex; gap:8px; margin-top:8px; transition:opacity .2s; opacity:0; }
+    .pv-nav.on { opacity:1; }
+    .pv-nav .nb { height:14px; flex:1; border-radius:4px; background:rgba(99,102,241,.08); border:1px solid var(--line); }
+    .pv-slow { margin-top:14px; border-radius:6px; border:1px dashed var(--warn); background:rgba(241,196,15,.05);
+      padding:18px 12px; text-align:center; font-size:12.5px; color:var(--warn); min-height:74px;
+      display:flex; align-items:center; justify-content:center; transition:all .25s; }
+    .pv-slow.landed { border-style:solid; border-color:var(--ok); background:rgba(46,204,113,.08); color:var(--ok); }
+    .preview .clock { position:absolute; top:10px; right:12px; font-size:11px; color:var(--muted); }
+
+    /* timeline track */
+    .tl { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px; margin-top:12px;
+      transition:border-color .2s, opacity .2s; }
+    .tl.active { border-color:var(--accent); }
+    .tl.dim { opacity:.5; }
+    .tl .head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+    .tl .title { font-weight:700; font-size:13.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .tl .title .api { color:var(--muted); font-weight:400; font-size:11.5px; margin-left:6px; }
+    .tl .tag { font-size:10.5px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+    .track { position:relative; height:34px; background:#0a0e14; border:1px solid var(--line); border-radius:6px; margin:6px 0; overflow:hidden; }
+    .seg { position:absolute; top:0; bottom:0; display:flex; align-items:center; padding:0 8px;
+      font-size:11px; font-family: ui-sans-serif, system-ui, sans-serif; overflow:hidden; white-space:nowrap; transition:width .2s, left .2s; }
+    .seg.wait { background:rgba(231,76,60,.18); border-right:1px solid rgba(231,76,60,.5); color:#e74c3c; }
+    .seg.fast { background:rgba(46,204,113,.20); border-right:1px solid rgba(46,204,113,.5); color:var(--ok); }
+    .seg.pending { background:repeating-linear-gradient(45deg,rgba(241,196,15,.10),rgba(241,196,15,.10) 6px,transparent 6px,transparent 12px);
+      border-right:1px solid rgba(241,196,15,.4); color:var(--warn); }
+    .seg.slow { background:rgba(99,102,241,.20); border-right:1px solid rgba(99,102,241,.5); color:var(--accent); }
+    .flag { position:absolute; top:-7px; width:2px; height:48px; }
+    .flag .lab { position:absolute; top:-15px; left:50%; transform:translateX(-50%); font-size:10px; white-space:nowrap;
+      font-family: ui-sans-serif, system-ui, sans-serif; font-weight:700; }
+    .flag.fp { background:var(--ok); }
+    .flag.fp .lab { color:var(--ok); }
+    .flag.fl { background:var(--accent); }
+    .flag.fl .lab { color:var(--accent); top:auto; bottom:-15px; }
+    .nowbar { position:absolute; top:0; bottom:0; width:2px; background:#fff; opacity:.85; transition:left .05s linear; display:none; }
+    .nowbar.run { display:block; }
+    .tl .axis { display:flex; justify-content:space-between; font-size:10.5px; color:var(--muted); margin-top:6px; }
+
+    /* render -> flush -> hydrate flow */
+    .flow { display:flex; align-items:stretch; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    .node { flex:1; min-width:170px; border:1px solid var(--line); border-radius:9px; padding:12px; background:var(--bg); }
+    .node .kind { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+    .node .where { font-weight:700; font-size:13px; color:var(--accent); font-family: ui-sans-serif, system-ui, sans-serif; margin-top:2px; }
+    .node pre { margin:6px 0 0; font-size:11.5px; line-height:1.45; color:var(--ink); white-space:pre-wrap; }
+    .node pre .cm { color:var(--muted); }
+    .node pre .kw { color:var(--accent); }
+    .arrow { display:flex; align-items:center; color:var(--muted); font-size:18px; }
+
+    /* comparison table */
+    .cmp { overflow-x:auto; }
+    table { border-collapse:collapse; font-size:12.5px; width:100%; min-width:720px; }
+    td,th { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; background:rgba(99,102,241,.05); }
+    td.mode { color:var(--accent); font-weight:700; white-space:nowrap; }
+    td.good { color:var(--ok); font-weight:700; }
+    td.warn { color:var(--warn); font-weight:700; }
+
+    .foot { color:var(--muted); font-size:12px; border-top:1px solid var(--line);
+      margin-top:18px; padding-top:12px; }
+    .xref { color:var(--accent); text-decoration:none; }
+    .xref:hover { text-decoration:underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="dot">●</span> ssr &amp; streaming</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/tanstack-start/SSR_STREAMING.md">guide (.md)</a>
+      <a href="../index.html">← all frontend</a>
+    </div>
+  </header>
+
+  <main>
+    <!-- the thesis, front and center -->
+    <section class="panel thesis">
+      <h2>The one idea</h2>
+      <p class="big">
+        <span class="ssr">SSR</span> renders the React tree to HTML on the server for instant first paint +
+        SEO. <span class="str">STREAMING</span> flushes that HTML as it's ready — so a slow
+        <code>&lt;Suspense&gt;</code> boundary stops blocking the rest of the page. The user sees the fast
+        shell now; the slow chunk streams in later in the same response.
+      </p>
+      <p style="color:var(--muted);font-size:13px;margin-top:8px">
+        Non-streaming waits for <strong style="color:var(--ink)">all</strong> data, then sends one blob:
+        first paint == full load. Streaming sends the ready shell first and keeps the connection open,
+        appending chunks as each Suspense boundary resolves. Hydration (<code>hydrateRoot</code>) then
+        attaches interactivity to whatever HTML has arrived.
+      </p>
+      <div>
+        <span class="pill">renderToPipeableStream + Suspense = streaming</span>
+        <span class="pill">renderToString = one blob, no streaming</span>
+        <span class="pill">hydrateRoot = client takes over server HTML</span>
+      </div>
+    </section>
+
+    <!-- THE INTERACTIVE VISUALIZER -->
+    <section class="panel">
+      <h2>The visualizer — fast shell + slow Suspense chunk</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        A page has a <strong style="color:var(--ok)">fast part</strong> (header + nav, ready at 100 ms) and a
+        <strong style="color:var(--warn)">slow part</strong> (a Suspense boundary waiting on data that takes
+        <em>delay</em> ms). Toggle streaming, drag the delay, and watch first paint vs full load diverge or merge.
+      </p>
+
+      <h3 style="margin-bottom:6px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em">1. rendering mode</h3>
+      <div class="picker" id="modePicker" style="margin-bottom:14px"></div>
+
+      <div class="slider-row">
+        <label for="delay">2. slow data delay</label>
+        <input id="delay" type="range" min="0" max="4000" step="100" value="2000" />
+        <span class="val" id="delayVal">2000 ms</span>
+      </div>
+
+      <div class="controls">
+        <button class="btn" id="replay">▶ replay the render</button>
+        <button class="btn ghost" id="reset">reset preview</button>
+      </div>
+
+      <div class="row" style="margin-top:16px">
+        <!-- the mock page preview -->
+        <div>
+          <h3>Page preview (simulated)</h3>
+          <div class="preview">
+            <div class="bar">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="url">localhost:3000/dashboard</span>
+            </div>
+            <div class="stage">
+              <span class="clock" id="clock">t = 0 ms</span>
+              <div class="pv-header" id="pvHeader">▎ Acme Dashboard</div>
+              <div class="pv-nav" id="pvNav"><span class="nb"></span><span class="nb"></span><span class="nb"></span></div>
+              <div class="pv-slow" id="pvSlow">⏳ loading slow data… (Suspense fallback)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- the metrics -->
+        <div>
+          <h3>Metrics for current mode</h3>
+          <div class="metrics" id="metrics"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- THE TWO TIMELINES (side by side for comparison) -->
+    <section class="panel">
+      <h2>Non-streaming vs streaming — the timelines</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Both timelines recompute from the same delay. The one matching your toggle is lit; the other is dimmed
+        for contrast. <strong style="color:var(--ok)">▲ first paint</strong> is when bytes first hit the browser;
+        <strong style="color:var(--accent)">● fully loaded</strong> is when the last chunk lands.
+      </p>
+
+      <div class="tl" id="tlNon">
+        <div class="head">
+          <span class="title">NON-STREAMING <span class="api">renderToString</span></span>
+          <span class="tag">whole page waits</span>
+        </div>
+        <div class="track" id="trackNon">
+          <div class="nowbar" id="nowNon"></div>
+        </div>
+        <div class="axis"><span>0 ms</span><span id="axisNon">—</span></div>
+      </div>
+
+      <div class="tl" id="tlStr">
+        <div class="head">
+          <span class="title">STREAMING <span class="api">renderToPipeableStream + Suspense</span></span>
+          <span class="tag">shell now, slow chunk later</span>
+        </div>
+        <div class="track" id="trackStr">
+          <div class="nowbar" id="nowStr"></div>
+        </div>
+        <div class="axis"><span>0 ms</span><span id="axisStr">—</span></div>
+      </div>
+    </section>
+
+    <!-- RENDER -> FLUSH -> HYDRATE FLOW -->
+    <section class="panel">
+      <h2>Render → flush → hydrate (how Start orchestrates it)</h2>
+      <p style="color:var(--muted);font-size:13px;margin-top:0">
+        Start wires this through Nitro/Vite. The server entry picks a handler: <code>defaultRenderHandler</code> /
+        <code>renderRouterToString</code> (non-streaming) or <code>defaultStreamHandler</code> /
+        <code>renderRouterToStream</code> (streaming). Loader/server-function data is auto-dehydrated into the
+        HTML and rehydrated on the client.
+      </p>
+      <div class="flow">
+        <div class="node">
+          <div class="kind">1 · server</div>
+          <div class="where">RENDER</div>
+<pre><span class="cm">// React tree -> HTML</span>
+<span class="kw">import</span> { renderRouterToStream }
+  <span class="kw">from</span> '@tanstack/react-router/ssr/server'
+<span class="cm">// under the hood: React's</span>
+<span class="cm">// renderToPipeableStream(&lt;App/&gt;)</span></pre>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node">
+          <div class="kind">2 · wire</div>
+          <div class="where">FLUSH / STREAM</div>
+<pre><span class="cm">// onShellReady: send the fast shell</span>
+<span class="cm">//   -> first paint (early!)</span>
+<span class="cm">// stream stays OPEN; each resolved</span>
+<span class="cm">// &lt;Suspense&gt; appends a chunk</span></pre>
+        </div>
+        <div class="arrow">→</div>
+        <div class="node">
+          <div class="kind">3 · client</div>
+          <div class="where">HYDRATE</div>
+<pre><span class="kw">import</span> { hydrateRoot }
+  <span class="kw">from</span> 'react-dom/client'
+hydrateRoot(document,
+  &lt;RouterClient router={router} /&gt;)
+<span class="cm">// attaches events; selective</span>
+<span class="cm">// hydration per chunk</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- COMPARISON TABLE -->
+    <section class="panel">
+      <h2>Comparison — mode × behavior</h2>
+      <div class="cmp" id="table"></div>
+    </section>
+
+    <div class="foot">
+      This bundle is HOW TanStack Start turns React into server HTML and streams it: <code>renderRouterToStream</code>
+      + Suspense flushes the shell early; <code>hydrateRoot</code> finishes the job on the client.
+      Cross-refs:
+      <a class="xref" href="server_functions.html">🔗 server_functions (where server data comes from under SSR)</a> ·
+      <a class="xref" href="../astro/astro_rendering_modes.html">🔗 astro_rendering_modes (the rendering-mode choice)</a> ·
+      <a class="xref" href="spa_vs_mpa.html">🔗 spa_vs_mpa (SPA vs SSR/MPA — TanStack spans both)</a>.
+    </div>
+  </main>
+
+  <script>
+    // ===========================================================================
+    // The curated simulation model. EVERYTHING below renders from this, so the
+    // gold-check asserts facts about logic authored right here. Nothing is fetched.
+    //
+    // THE MODEL (web-verified in 3 places — see SSR_STREAMING.md ## Sources):
+    //   - a page = FAST part (shell, ready at FAST_READY ms) + SLOW part (Suspense
+    //     boundary whose data resolves FAST_READY + delay ms).
+    //   - NON-STREAMING (renderToString): server waits for ALL data, then sends one
+    //     HTML blob. So first paint == full load == FAST_READY + delay. 1 chunk.
+    //   - STREAMING (renderToPipeableStream + Suspense): the shell flushes at
+    //     onShellReady (= FAST_READY) -> early first paint; the stream stays open
+    //     and the slow chunk is appended when its Suspense resolves (= full load).
+    //     first paint < full load. 2 chunks.
+    //   - hydration (hydrateRoot) follows the HTML in both modes.
+    // ===========================================================================
+    var FAST_READY = 100;   // ms — the always-ready shell (header + nav + layout)
+
+    // Pure, deterministic. The same (streaming, delay) always returns the same
+    // numbers. Identical logic to the gold-check.
+    function simulate(streaming, delay) {
+      var slowReady = FAST_READY + delay;
+      if (streaming) {
+        return {
+          streaming: true,
+          firstPaint: FAST_READY,   // shell flushes immediately (onShellReady)
+          fullLoad: slowReady,       // slow chunk lands when data resolves
+          chunks: 2,                 // shell + 1 streamed chunk
+          fastReady: FAST_READY,
+          slowReady: slowReady
+        };
+      }
+      return {
+        streaming: false,
+        firstPaint: slowReady,       // whole page blocked on slow data
+        fullLoad: slowReady,
+        chunks: 1,                   // single blob
+        fastReady: FAST_READY,
+        slowReady: slowReady
+      };
+    }
+
+    // The comparison table (curated, web-verified Jun 2026)
+    var CMP = [
+      { dim: "First paint (slow data)",  non: "waits for ALL data — late",        str: "shell flushes at ~100 ms — early" },
+      { dim: "First paint == full load?", non: "YES (one blob, one timestamp)",   str: "NO (shell first, slow chunk later)" },
+      { dim: "Render chunks",            non: "1 (entire page)",                   str: "2+ (shell + 1 per Suspense)" },
+      { dim: "Connection",               non: "send once, close",                  str: "send shell, keep open, append" },
+      { dim: "Needs <Suspense>?",        non: "no (Suspense ignored server-side)", str: "YES — boundaries mark the chunks" },
+      { dim: "SEO",                      non: "full HTML in response — great",     str: "full HTML in response — great" },
+      { dim: "TanStack Start handler",   non: "defaultRenderHandler / renderRouterToString", str: "defaultStreamHandler / renderRouterToStream" },
+      { dim: "Underlying React API",     non: "renderToString",                    str: "renderToPipeableStream (onShellReady)" }
+    ];
+
+    var MODES = [
+      { key: false, label: "non-streaming", tag: "renderToString", sub: "whole page waits → first paint == full load" },
+      { key: true,  label: "streaming",     tag: "renderToPipeableStream", sub: "shell now, slow chunk streams in" }
+    ];
+
+    // state
+    var streaming = true;
+    var delay = 2000;
+
+    // ===========================================================================
+    // Render the mode picker
+    // ===========================================================================
+    function renderPicker() {
+      var host = document.getElementById("modePicker");
+      var html = "";
+      for (var i = 0; i < MODES.length; i++) {
+        var m = MODES[i];
+        html +=
+          '<button data-key="' + m.key + '">' +
+            '<span class="pn">' + m.label + '</span>' +
+            '<span class="pp">' + m.tag + ' · ' + m.sub + '</span>' +
+          '</button>';
+      }
+      host.innerHTML = html;
+      var btns = host.getElementsByTagName("button");
+      for (var j = 0; j < btns.length; j++) {
+        btns[j].addEventListener("click", function () {
+          streaming = this.getAttribute("data-key") === "true";
+          sync();
+        });
+      }
+    }
+
+    // ===========================================================================
+    // Render the metrics readout for the CURRENT mode
+    // ===========================================================================
+    function renderMetrics() {
+      var r = simulate(streaming, delay);
+      var host = document.getElementById("metrics");
+      var fpCls = r.firstPaint < r.fullLoad ? "ok" : "warn";
+      var html =
+        '<div class="metric"><div class="k">first paint / TTFB</div>' +
+          '<div class="v ' + fpCls + '">' + r.firstPaint + ' ms</div>' +
+          '<div class="sub">' + (streaming ? "shell flushes (onShellReady)" : "blocked on slow data") + '</div></div>' +
+        '<div class="metric"><div class="k">fully loaded</div>' +
+          '<div class="v">' + r.fullLoad + ' ms</div>' +
+          '<div class="sub">last chunk lands</div></div>' +
+        '<div class="metric"><div class="k">render chunks</div>' +
+          '<div class="v">' + r.chunks + '</div>' +
+          '<div class="sub">' + (streaming ? "shell + 1 streamed" : "single blob") + '</div></div>' +
+        '<div class="metric"><div class="k">gap (full − first)</div>' +
+          '<div class="v ' + fpCls + '">' + (r.fullLoad - r.firstPaint) + ' ms</div>' +
+          '<div class="sub">' + (streaming ? "slow data window" : "none — merged") + '</div></div>';
+      host.innerHTML = html;
+    }
+
+    // ===========================================================================
+    // Render BOTH timelines. Each is recomputed from `delay`; the active mode is
+    // lit, the other dimmed. Segments are percentage-positioned on a shared scale.
+    // ===========================================================================
+    function pct(t, max) { return Math.max(0, Math.min(100, (t / max) * 100)); }
+
+    function renderTimelines() {
+      var s = simulate(true, delay);    // streaming numbers
+      var n = simulate(false, delay);   // non-streaming numbers
+      var max = Math.max(s.fullLoad, n.fullLoad, FAST_READY + 4000, 1);
+
+      // axis labels
+      document.getElementById("axisNon").textContent = max + " ms";
+      document.getElementById("axisStr").textContent = max + " ms";
+
+      // ---- NON-STREAMING track ----
+      var tNon = document.getElementById("trackNon");
+      var nonHtml = '<div class="nowbar" id="nowNon"></div>';
+      nonHtml +=
+        '<div class="seg wait" style="left:0;width:' + pct(n.fullLoad, max) + '%">' +
+          'waiting for slow data… (no bytes sent)</div>';
+      // first paint == full load flag at fullLoad
+      nonHtml +=
+        '<div class="flag fp" style="left:' + pct(n.firstPaint, max) + '%"><span class="lab">▲ first paint</span></div>' +
+        '<div class="flag fl" style="left:' + pct(n.fullLoad, max) + '%"><span class="lab">● full load</span></div>';
+      tNon.innerHTML = nonHtml;
+
+      // ---- STREAMING track ----
+      var tStr = document.getElementById("trackStr");
+      var strHtml = '<div class="nowbar" id="nowStr"></div>';
+      strHtml +=
+        '<div class="seg fast" style="left:0;width:' + pct(s.firstPaint, max) + '%">fast shell flushed</div>';
+      if (s.fullLoad > s.firstPaint) {
+        strHtml +=
+          '<div class="seg pending" style="left:' + pct(s.firstPaint, max) + '%;width:' + (pct(s.fullLoad, max) - pct(s.firstPaint, max)) + '%">Suspense fallback…</div>';
+      }
+      strHtml +=
+        '<div class="seg slow" style="left:' + pct(s.fullLoad, max) + '%;width:' + Math.max(2, 100 - pct(s.fullLoad, max)) + '%">slow chunk</div>';
+      strHtml +=
+        '<div class="flag fp" style="left:' + pct(s.firstPaint, max) + '%"><span class="lab">▲ first paint</span></div>' +
+        '<div class="flag fl" style="left:' + pct(s.fullLoad, max) + '%"><span class="lab">● full load</span></div>';
+      tStr.innerHTML = strHtml;
+
+      // light the active timeline
+      document.getElementById("tlNon").className = "tl " + (streaming ? "dim" : "active");
+      document.getElementById("tlStr").className = "tl " + (streaming ? "active" : "dim");
+    }
+
+    // ===========================================================================
+    // Render the comparison table
+    // ===========================================================================
+    function renderTable() {
+      var host = document.getElementById("table");
+      var html =
+        "<table><thead><tr><th>behavior</th><th>non-streaming</th><th>streaming</th></tr></thead><tbody>";
+      for (var i = 0; i < CMP.length; i++) {
+        var r = CMP[i];
+        html +=
+          "<tr>" +
+            "<td><strong>" + r.dim + "</strong></td>" +
+            "<td>" + r.non + "</td>" +
+            "<td>" + r.str + "</td>" +
+          "</tr>";
+      }
+      html += "</tbody></table>";
+      host.innerHTML = html;
+    }
+
+    // ===========================================================================
+    // Reveal the preview according to current mode WITHOUT animation (snap state)
+    // ===========================================================================
+    function snapPreview() {
+      var r = simulate(streaming, delay);
+      var clock = document.getElementById("clock");
+      var header = document.getElementById("pvHeader");
+      var nav = document.getElementById("pvNav");
+      var slow = document.getElementById("pvSlow");
+      header.classList.remove("on");
+      nav.classList.remove("on");
+      slow.classList.remove("landed");
+      slow.textContent = "⏳ loading slow data… (Suspense fallback)";
+      clock.textContent = "t = 0 ms";
+      return r;
+    }
+
+    // ===========================================================================
+    // Animate the render: advance a clock from 0 -> fullLoad, revealing the shell
+    // at firstPaint and the slow block at fullLoad, and moving the now-cursor.
+    // ===========================================================================
+    var animTimer = null;
+    function replay() {
+      if (animTimer) { window.clearInterval(animTimer); animTimer = null; }
+      var r = simulate(streaming, delay);
+      snapPreview();
+
+      var btn = document.getElementById("replay");
+      btn.disabled = true;
+
+      var header = document.getElementById("pvHeader");
+      var nav = document.getElementById("pvNav");
+      var slow = document.getElementById("pvSlow");
+      var clock = document.getElementById("clock");
+      var nowNon = document.getElementById("nowNon");
+      var nowStr = document.getElementById("nowStr");
+      nowNon.classList.add("run");
+      nowStr.classList.add("run");
+
+      var dur = Math.max(r.fullLoad, 900);          // real ms to animate
+      var start = 0;
+      var stepMs = 30;
+
+      function frame() {
+        start += stepMs;
+        // map wall-clock -> simulated ms
+        var tSim = Math.min(r.fullLoad, (start / dur) * r.fullLoad);
+        clock.textContent = "t = " + Math.round(tSim) + " ms";
+
+        // shell visible once tSim >= firstPaint
+        if (tSim >= r.firstPaint) {
+          header.classList.add("on");
+          nav.classList.add("on");
+        }
+        // slow block lands at fullLoad
+        if (tSim >= r.fullLoad) {
+          slow.classList.add("landed");
+          slow.textContent = "✓ slow data landed — chunk streamed in";
+        }
+
+        // move now-cursors (on the active timeline) — scale to that track's own max
+        var maxNon = simulate(false, delay).fullLoad;
+        var maxStr = simulate(true, delay).fullLoad;
+        var maxAxis = Math.max(maxNon, maxStr, FAST_READY + 4000, 1);
+        var p = Math.min(100, (tSim / maxAxis) * 100);
+        if (streaming) {
+          nowStr.style.left = p + "%";
+          nowNon.style.left = p + "%";
+        } else {
+          nowNon.style.left = p + "%";
+          nowStr.style.left = p + "%";
+        }
+
+        if (start >= dur) {
+          window.clearInterval(animTimer);
+          animTimer = null;
+          btn.disabled = false;
+        }
+      }
+      animTimer = window.setInterval(frame, stepMs);
+    }
+
+    function resetPreview() {
+      if (animTimer) { window.clearInterval(animTimer); animTimer = null; }
+      snapPreview();
+      var nowNon = document.getElementById("nowNon");
+      var nowStr = document.getElementById("nowStr");
+      nowNon.classList.remove("run");
+      nowStr.classList.remove("run");
+      nowNon.style.left = "0%";
+      nowStr.style.left = "0%";
+      document.getElementById("replay").disabled = false;
+    }
+
+    // ===========================================================================
+    // sync() — recompute everything from (streaming, delay) and re-render
+    // ===========================================================================
+    function sync() {
+      // mark active picker button
+      var btns = document.getElementById("modePicker").getElementsByTagName("button");
+      for (var i = 0; i < btns.length; i++) {
+        var isOn = btns[i].getAttribute("data-key") === String(streaming);
+        btns[i].classList.toggle("active", isOn);
+      }
+      document.getElementById("delayVal").textContent = delay + " ms";
+      renderMetrics();
+      renderTimelines();
+      resetPreview();
+      runGoldCheck();
+    }
+
+    // wiring
+    document.getElementById("delay").addEventListener("input", function () {
+      delay = parseInt(this.value, 10);
+      sync();
+    });
+    document.getElementById("replay").addEventListener("click", replay);
+    document.getElementById("reset").addEventListener("click", resetPreview);
+
+    // ===========================================================================
+    // GOLD-CHECK (the falsifiable anchor)
+    // Four assertions, all about logic authored in THIS file:
+    //   (1) streaming        -> first paint (100) < full load (100 + delay),
+    //   (2) non-streaming    -> first paint == full load (whole page waits),
+    //   (3) chunk counts     -> streaming = 2, non-streaming = 1,
+    //   (4) streaming first paint is INDEPENDENT of delay (always FAST_READY).
+    // If any drifts, the demo contradicts its own claims -> red.
+    // ===========================================================================
+    function runGoldCheck() {
+      var s = simulate(true, 2000);
+      var n = simulate(false, 2000);
+      var ok1 = s.firstPaint < s.fullLoad;                              // streaming: fp < fl
+      var ok2 = n.firstPaint === n.fullLoad;                            // non-stream: fp == fl
+      var ok3 = s.chunks === 2 && n.chunks === 1;                       // chunk counts
+      var ok4 = simulate(true, 5000).firstPaint === FAST_READY;         // TTFB indep. of delay
+      var ok = ok1 && ok2 && ok3 && ok4;
+      var el = document.getElementById("goldcheck");
+      el.textContent =
+        "[check] stream:fp<fl (" + (ok1 ? "Y" : "N") + ") & non:fp==fl (" + (ok2 ? "Y" : "N") +
+        ") & chunks 2/1 (" + (ok3 ? "Y" : "N") + ") & TTFB indep (" + (ok4 ? "Y" : "N") + "): " +
+        (ok ? "OK" : "FAIL");
+      el.style.color = ok ? "var(--ok)" : "var(--bad)";
+      el.style.background = ok ? "rgba(46,204,113,.08)" : "rgba(231,76,60,.08)";
+    }
+
+    // boot
+    renderPicker();
+    renderTable();
+    sync();
+  </script>
+</body>
+</html>

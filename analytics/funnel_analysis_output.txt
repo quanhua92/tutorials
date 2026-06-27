@@ -1,0 +1,165 @@
+# funnel_analysis.py - Funnel analysis simulation
+# Pure Python stdlib only. Numbers below feed FUNNEL_ANALYSIS.md
+# and funnel_analysis.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Multi-step funnel (visit -> signup -> activate -> purchase)
+==========================================================================
+Events pivoted with MIN(CASE WHEN event_type=... THEN ts END) per user;
+a step counts only if it occurred AFTER the prior step (time ordering).
+
+Funnel counts + step-over-step conversion:
+  visit     100,000  ##################################
+  signup     62,000  #####################  (step  62.0%, drop  38.0%)
+  activate   37,200  #############  (step  60.0%, drop  40.0%)
+  purchase   11,160  ####  (step  30.0%, drop  70.0%)
+
+Overall conversion: 11,160 / 100,000 = 11.16%
+
+=> activate -> purchase is the WORST step (30% step rate, 70% drop),
+   but the biggest absolute leak is visit -> signup (38,000 users lost).
+
+[check] SQL pivot reproduces MAIN counts? OK
+[check] overall conversion == 11.16%? OK
+
+==========================================================================
+  SECTION 2: Drop-off analysis + impact ranking
+==========================================================================
+At each transition: users lost, drop rate, and users recovered if we
+recovered 10% of the dropped cohort (impact = entering x drop x 0.10).
+
+  transition               entering       lost    drop %   impact@10%
+  visit -> signup           100,000     38,000     38.0%        3,800
+  signup -> activate         62,000     24,800     40.0%        2,480
+  activate -> purchase       37,200     26,040     70.0%        2,604
+
+Priority by IMPACT (not worst conversion rate):
+  1. visit -> signup        recover ~3,800 users  (drop 38.0%)
+  2. activate -> purchase   recover ~2,604 users  (drop 70.0%)
+  3. signup -> activate     recover ~2,480 users  (drop 40.0%)
+
+=> the worst rate (activate -> purchase, 70% drop) is NOT the top priority:
+   visit -> signup wins because 100,000 users enter it. Prioritize absolute
+   users recovered, never the worst percentage alone.
+
+[check] top-impact step is visit -> signup? OK
+[check] total recoverable (10%) == 8,884 users? OK
+
+==========================================================================
+  SECTION 3: Time-to-convert distribution (purchasers only)
+==========================================================================
+Time from first visit to purchase for the 11,160 purchasers.
+
+  bucket       users    share   histogram
+  <1h          1,500    13.4%   ##########
+  1-6h         3,000    26.9%   #####################
+  6-24h        3,500    31.4%   ########################
+  1-3d         2,000    17.9%   ##############
+  3-7d           800     7.2%   #####
+  7-14d          360     3.2%   ##
+
+P50 time-to-convert = 11.55 hours
+P90 time-to-convert = 77.28 hours  (~3.2 days)
+
+=> P90 of 3.2 days signals friction: 1 in 10 purchasers needs
+   more than 3 days. A long P90 points at onboarding/payment friction that
+   the step rates alone cannot see.
+
+[check] P50 == 11.55h? OK
+[check] P90 == 77.28h? OK
+[check] TTC buckets sum to purchasers (11,160)? OK
+
+==========================================================================
+  SECTION 4: Funnel comparison (Variant A vs Variant B)
+==========================================================================
+  step         A (control)    B (variant)
+  visit             50,000         50,000
+  signup            30,000         33,000
+  activate          18,000         21,450
+  purchase           5,400          7,722
+
+Step-over-step conversion:
+  transition                      A          B     delta
+  visit -> signup             60.0%      66.0%     +6.0 pp
+  signup -> activate          60.0%      65.0%     +5.0 pp
+  activate -> purchase        30.0%      36.0%     +6.0 pp
+
+Overall conversion:  A 10.80%   B 15.444%
+Absolute lift:  +4.644 pp      Relative lift:  +43.0%
+
+=> Variant B wins on overall conversion (+4.644 pp).
+   Validate with a proper A/B test (sample size, guardrails) before rollout,
+   and ALWAYS check segment-level rates for Simpson's paradox (Section 6).
+
+[check] B overall == 15.444%? OK
+[check] relative lift == 43.0%? OK
+
+==========================================================================
+  SECTION 5: Cohort-segmented funnels (by device)
+==========================================================================
+GROUP BY device on the users table reveals WHERE the drop-offs concentrate.
+
+  device      visit   signup  activate  purchase
+  desktop    35,000   24,300    15,965     5,851
+  mobile     65,000   37,700    21,235     5,309
+
+Step-over-step + overall by device:
+  device    visit->up   up->act   act->buy    overall
+  mobile        58.0%     56.3%      25.0%      8.17%
+  desktop       69.4%     65.7%      36.6%     16.72%
+
+=> mobile converts WORSE at every step (overall 8.17% vs desktop 16.72%).
+   The activate -> purchase gap (25.0% mobile vs 36.6% desktop) is the loudest
+   UX signal: mobile checkout/payment has friction worth fixing first.
+
+[check] mobile + desktop == MAIN at every step? OK
+[check] mobile overall (8.17%) < desktop overall (16.72%)? OK
+
+==========================================================================
+  SECTION 6: Simpson's paradox (aggregate vs segment)
+==========================================================================
+Two periods, mobile + desktop. The aggregate 'improves' while mobile
+actually gets WORSE -- the lift came from a traffic-mix shift.
+
+                         Period 1               Period 2
+  mobile   1,200 / 8,000 (15.0%)     480 / 4,000 (12.0%)
+  desktop    560 / 2,000 (28.0%)   1,740 / 6,000 (29.0%)
+  TOTAL    1,760 / 10,000 (17.6%)   2,220 / 10,000 (22.2%)
+
+Aggregate conversion: 17.6% -> 22.2%  (+4.6 pp, looks like a WIN)
+Mobile conversion:    15.0% -> 12.0%  (-3.0 pp, WORSE)
+
+Cause: desktop traffic share rose 20% -> 60%. Desktop converts
+higher, so the mix shift -- NOT product improvement -- lifted the aggregate.
+=> ALWAYS segment before claiming causality.
+
+[check] aggregate improved (+4.6 pp)? OK
+[check] mobile degraded (-3.0 pp)? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for funnel_analysis.html)
+==========================================================================
+  check                      py recompute       GOLD   match
+  main_visit                       100000     100000      OK
+  main_purchase                     11160      11160      OK
+  main_overall_pct                  11.16      11.16      OK
+  main_step_signup_pct               62.0       62.0      OK
+  main_step_activate_pct             60.0       60.0      OK
+  main_step_purchase_pct             30.0       30.0      OK
+  variant_a_overall_pct             10.80      10.80      OK
+  variant_b_overall_pct            15.444     15.444      OK
+  variant_lift_rel_pct               43.0       43.0      OK
+  mobile_overall_pct                 8.17       8.17      OK
+  desktop_overall_pct               16.72      16.72      OK
+  mobile_purchase_rate               25.0       25.0      OK
+  desktop_purchase_rate              36.6       36.6      OK
+  ttc_p50_hours                     11.55      11.55      OK
+  ttc_p90_hours                     77.28      77.28      OK
+  simpson_aggregate_p1               17.6       17.6      OK
+  simpson_aggregate_p2               22.2       22.2      OK
+
+[check] ALL GOLD values reproduce from the funnel formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

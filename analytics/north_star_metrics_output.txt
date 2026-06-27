@@ -1,0 +1,189 @@
+# north_star_metrics.py - North Star Metric simulation
+# Pure Python stdlib only. Numbers below feed NORTH_STAR_METRICS.md
+# and north_star_metrics.html (gold-checked).
+
+==========================================================================
+  SECTION 1: North Star Metric definition (Weekly Active Engaged Listeners)
+==========================================================================
+Product: podcast streaming app.
+NSM = Weekly Active Engaged Listeners (WAEL): unique users who listened
+      >= 30 min (1800s) in the past 7 days.
+
+Listen-time distribution of the weekly active users:
+  0-5min     5,000   15.6%  ######################
+  5-15min    4,800   15.0%  #####################
+  15-30min   3,800   11.9%  #################  <-- engagement threshold (30 min)
+  30-60min   6,200   19.4%  ###########################
+  60-120min  5,400   16.9%  ########################
+  120min+    6,800   21.2%  ##############################
+
+WAU  (weekly active, > 0 min)  =  32,000
+WAEL (engaged, >= 30 min)      =  18,400
+Engagement rate = WAEL / WAU   = 57.5%
+
+=> WAEL counts VALUE DELIVERED, not revenue or raw presence. A user who opens
+   the app and dismisses a notification is active but NOT engaged; WAEL filters
+   them out. Cadence = weekly, matching the podcast listening habit (not DAU).
+
+[check] SQL reproduces WAU == 32,000? OK
+[check] SQL reproduces WAEL == 18,400? OK
+[check] engagement rate == 57.5%? OK
+
+==========================================================================
+  SECTION 2: Metric tree decomposition (NSM -> L1 drivers -> L2 inputs)
+==========================================================================
+L0 NSM = WAEL = 18,400   (weekly, leadership)
+
+Multiplicative decomposition:
+    WAEL  =  WAU  x  Engagement Rate
+          =  32,000  x  57.5%
+          =  18,400
+
+Additive (cohort) decomposition:
+    WAEL  =  New engaged  +  Returning engaged
+          =  4,000 x 62.0%  +  28,000 x 56.86%
+          =  2,480  +  15,920
+          =  18,400
+
+L1 product-area drivers (daily, owned by PMs):
+    activation rate (new)    = 62.0%   <- onboarding team
+    engagement rate (ret)    = 56.86%  <- retention team
+    completion rate          = 69.79%  <- content team
+    discovery -> start rate  = 426.2% ep/user  <- discovery team
+
+L2 feature-level input metrics (hourly/daily, owned by feature eng):
+    search CTR, autoplay-rate, episode-start rate, playlist-save rate
+
+Causal attribution chain (how a feature reaches the NSM):
+    Feature: autoplay toggle
+      -> L2  autoplay-rate      +8.0%   (40% -> 48%)
+      -> L1  completion rate    +3.2 pp (69.79% -> 73.0%)
+      -> NSM WAEL               +2.1%   (18,400 -> 18,787)
+
+=> Each driver is owned by ONE team and is independently A/B-testable. A good
+   tree is exhaustive-but-not-redundant: drivers cover the variance in WAEL
+   without overlapping (no double-counted team incentives).
+
+[check] WAU x Engagement == WAEL (18,400)? OK
+[check] New + Returning engaged == WAEL? OK
+[check] new activation == 62.0%? OK
+[check] returning engagement == 56.86%? OK
+
+==========================================================================
+  SECTION 3: Guardrail & counter-metrics (four-layer measurement stack)
+==========================================================================
+Layer 01  North Star Metric : WAEL = 18,400
+Layer 02  Driver Tree       : WAU, activation, completion, discovery
+Layer 03  Guardrail Metrics : checked in EVERY A/B test + launch decision
+Layer 04  Counter-Metrics   : expose whether a WAEL lift is real or gamed
+
+  guardrail                  current      target   status  rationale
+  skip rate                   8.94%     15.00%       OK  listening is real, not bot skipping
+  p99 start latency         640.00ms    800.00ms       OK  system health; slow starts lose listeners
+  error rate (5xx)            0.21%      0.50%       OK  infra health; errors block playback
+  voluntary churn             2.10%      3.00%       OK  user-wellbeing floor
+
+  counter-metric: share rate = 3.25%   (1,040 sharers / 32,000 WAU)
+    -> if WAEL rises but share rate FALLS, the extra listening is low-quality
+       (autoplay, accidental plays). That is Goodhart's Law in action.
+
+=> A feature that lifts WAEL but breaches ANY guardrail does NOT ship. The
+   counter-metric is designed AT THE SAME TIME as the NSM, before any team has
+   an incentive to game it.
+
+[check] all guardrails within target? OK
+[check] completion rate == 69.79%? OK
+[check] skip rate == 8.94%? OK
+[check] share rate == 3.25%? OK
+
+==========================================================================
+  SECTION 4: Leading vs lagging indicators (time-horizon map)
+==========================================================================
+A LEADING indicator moves BEFORE the outcome and lets you act within a sprint.
+A LAGGING indicator confirms an outcome that already happened (the scoreboard).
+Pair them so you can course-correct before revenue moves.
+
+  type         metric                   moves          signal                       layer     
+  leading      episode start rate       same day       WAEL next week               L2        
+  leading      new-user activation %    same week      WAEL in 2-4 weeks            L1        
+  leading      search CTR               same day       discovery -> engagement      L2        
+  coincident   WAEL (the NSM)           this week      IS the outcome               L0        
+  coincident   completion rate          this week      content quality now          L1        
+  lagging      premium conversion       +3-6 months    monetization of WAEL         revenue   
+  lagging      monthly churn            past month     retention already realized   guardrail 
+  lagging      MRR                      this month     revenue realized             revenue   
+
+=> Leading indicators let teams course-correct WITHIN a sprint; lagging
+   indicators are the scoreboard. Revenue (premium conversion, MRR) is lagging
+   by months, which is EXACTLY why it must NOT be the NSM.
+
+[check] all revenue metrics are lagging? OK
+[check] WAEL is coincident (the NSM itself)? OK
+[check] leading (3) + lagging (3) both present? OK
+
+==========================================================================
+  SECTION 5: Goodhart's Law simulation (genuine lift vs autoplay gaming)
+==========================================================================
+"When a measure becomes a target, it ceases to be a good measure."
+Decision rule: SHIP only if WAEL rises AND counter-metrics hold:
+
+    WAEL delta       > 0
+    skip-rate delta  <= +1.0 pp
+    share-rate delta >= -0.1 pp
+
+  scenario                WAEL    skip d   share d  verdict   
+  A genuine lift        +12.0%     -1.2pp     +0.4pp  SHIP      
+  B autoplay gaming     +18.0%     +4.8pp     -0.6pp  REJECT    
+
+=> Scenario A lifts WAEL +12% with skip FALLING and share RISING => genuine.
+   Scenario B lifts WAEL +18% (bigger!) but skip spikes +4.8pp and share drops
+   => autoplay inflated the listening. The counter-metrics catch the gaming the
+   NSM alone would reward. This is why every NSM needs a counter-metric.
+
+[check] Scenario A ships? OK
+[check] Scenario B rejected? OK
+
+==========================================================================
+  SECTION 6: Metric cadence hierarchy (who owns what, how often)
+==========================================================================
+  level kind       metric                           cadence    owner          question
+  L0    NSM        WAEL                             weekly     leadership     is the company healthy?
+  L1    product    WAU / activation / completion    daily      PMs            is my product area healthy?
+  L2    feature    search CTR / autoplay rate       hourly     feature eng    did my feature move the lever?
+  GR    guardrail  p99 latency / error rate         real-time  SRE / on-call  is the system floor holding?
+
+=> Cadence matches decision speed: guardrails are real-time (a latency spike
+   must page on-call within minutes); the NSM is weekly (slow enough to see real
+   trend above noise, fast enough to course-correct within a sprint). Daily L1
+   metrics are noisy for a product this size, so the NSM rolls them up weekly.
+
+[check] NSM cadence == weekly? OK
+[check] guardrail cadence == real-time? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for north_star_metrics.html)
+==========================================================================
+  check                    py recompute       GOLD   match
+  wau                             32000      32000      OK
+  wael                            18400      18400      OK
+  engagement_rate                  57.5       57.5      OK
+  new_active                       4000       4000      OK
+  new_engaged                      2480       2480      OK
+  new_activation                   62.0       62.0      OK
+  returning_active                28000      28000      OK
+  returning_engaged               15920      15920      OK
+  returning_eng                   56.86      56.86      OK
+  completion_rate                 69.79      69.79      OK
+  skip_rate                        8.94       8.94      OK
+  share_rate                       3.25       3.25      OK
+  p99_latency_ms                    640        640      OK
+  error_rate_pct                   0.21       0.21      OK
+  churn_pct                         2.1        2.1      OK
+  goodhart_a_verdict               SHIP       SHIP      OK
+  goodhart_b_verdict             REJECT     REJECT      OK
+
+[check] ALL GOLD values reproduce from the NSM formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

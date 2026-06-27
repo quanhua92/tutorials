@@ -1,0 +1,440 @@
+scenario_problems.py - ground truth for SCENARIO_PROBLEMS.md.
+Four canonical interview scenarios run end-to-end through DIAGNOSE:
+DAU drop, revenue decline, broken A/B test, payment P0 outage.
+Pure stdlib.
+
+[check] built DB: 4 scenarios, 16 hypotheses, 15 slices, 3 SRM slices, 4 root causes, 36 decision choices, 7 traps
+[check] SRM engine + signal-score engine + sanity asserts:  OK
+
+========================================================================
+  SECTION 0: the DIAGNOSE framework  (instrument first, always)
+========================================================================
+Scenario problems have NO single correct answer -- the interviewer
+evaluates your REASONING PROCESS. Run these IN ORDER.
+
+  letter | step                  | time  | what
+  -------|-----------------------|-------|-----------------------------------
+    D    | Define the signal     | 1 min | metric, magnitude, timeline, affected segments, normal baseline
+    I    | Check the instrument  | 2 min | pipeline integrity FIRST -- ~30-40% of drops are data bugs
+    A    | Assemble hypotheses   | 3 min | internal (product/eng/data/algo) + external (seasonal/competitor/platform/macro)
+    G    | Generate queries      | 2 min | segment by platform/geo/cohort/time/funnel -- each tests one hypothesis
+    N    | Narrow to root cause  | 3 min | process of elimination; localize to a version/geo/tenure slice
+    O    | Own the recommendation | 2 min | rollback / investigate / monitor + impact sizing + next check
+    S    | State uncertainty     | 1 min | what you still do NOT know; time-box the next check
+
+  The separator between 9/10 and 6/10:
+    6/10: 'I'd look at the data, check deployments, figure it out.'
+    9/10: 'I'd verify the signal is real, check the pipeline, build a
+          hypothesis tree, prioritize by probability x falsification cost,
+          pull the most diagnostic query, narrow, then OWN a recommendation
+          with impact sizing and a time-boxed next check.'
+
+  Four scenarios follow -- each run end-to-end through DIAGNOSE.
+
+========================================================================
+  SECTION 1: the four scenarios  (one per common interview type)
+========================================================================
+  # | scenario                         | type         | severity | prompt
+  --|----------------------------------|--------------|----------|--------
+  1 | DAU dropped 10%                  | dau_drop     | P1       | DAU dropped 10% starting yesterday at 17:00 UTC 
+  2 | Revenue per user declining       | rev_decline  | P2       | Ad revenue per DAU (ARPU) is down 7% over the la
+  3 | New feature A/B test             | ab_break     | invalid  | New checkout redesign A/B shows +15% conversion 
+  4 | Payment service returning 500s   | p0_outage    | P0       | Payment 500 error rate jumped from 0.1% to 8.5% 
+
+  Each maps to a scenario TYPE with a tailored first check:
+    dau_drop   -> pipeline integrity, then platform segmentation
+    rev_decline-> revenue source agreement, then inventory-type segmentation
+    ab_break   -> SRM chi-square FIRST (before reading any metric)
+    p0_outage  -> service health, then region x provider segmentation
+
+========================================================================
+  SCENARIO 1: DAU dropped 10%  (dau_drop)
+========================================================================
+  [D] DEFINE THE SIGNAL
+      prompt        : DAU dropped 10% starting yesterday at 17:00 UTC -- investigate
+      primary metric: DAU (users with 1+ active event / 24h)
+      magnitude     : -10.0%  (2,000,000 -> 1,800,000 users)
+      timeline      : step change at 17:00 UTC, flat before
+      decomposition : DAU = new + returning (+ resurrected).
+                      Triangulate with signups, session_start, WAU.
+
+  [I] CHECK THE INSTRUMENT  (always first; ~30-40% of drops are data bugs)
+      [OK] Event ingestion lag          healthy  : pipeline lag 2 min (normal); event volume from iOS clients is down -- matches warehouse
+      [OK] Two-source agreement         healthy  : Kafka stream and BigQuery warehouse agree within 0.3% -- not a pure pipeline story
+      [OK] Logging-layer deploys        healthy  : no deploy to analytics/logging layer in 48h; upstream app IS sending events
+      -> Instrument HEALTHY. Proceed to hypotheses.
+
+  [A] ASSEMBLE HYPOTHESES  (internal + external; prioritize by P x cost)
+      rank | category             | hypothesis
+      -----|----------------------|------------------------------------------
+      #   1 | internal_eng         | iOS mobile release v4.2.1 introduced a crash  <-- ROOT CAUSE
+      #   2 | internal_data        | Logging pipeline partial failure dropping events
+      #   3 | external_seasonal    | Day-of-week or seasonal trough
+      #   4 | external_competitor  | Competitor launched a feature, users migrating
+      (4 hypotheses -- a single hypothesis is trap #3)
+
+  [G] GENERATE QUERIES + [N] NARROW  (segment to localize)
+      Segment by platform:
+        slice                 | baseline     | current      | delta   | note
+        ----------------------|--------------|--------------|---------|-------------
+        iOS                    |    1,100,000 |      900,000 | -18.2 % | LOCALIZED
+        Web                    |      300,000 |      294,000 | -2.0  % | 
+        Android                |      600,000 |      606,000 | +1.0  % | 
+
+      -> LOCALIZED to iOS (-18.2%).
+         This slice explains the aggregate move -- investigate here.
+
+  [N] ROOT CAUSE MATCH  (localized slice x binary world event)
+      mechanism  : iOS build v4.2.1 crash
+      world event: mobile release v4.2.1 shipped at 17:00 UTC
+      evidence   : release timestamp 17:00 UTC matches DAU step-change to the minute; crash rate for v4.2.1 = 4.1% vs v4.2.0 = 0.3%
+      severity   : P1  |  impact: ~200,000 users affected
+
+  [O] OWN THE RECOMMENDATION  -> ROLLBACK
+      action     : ROLLBACK iOS build v4.2.1 to v4.2.0 immediately; freeze iOS DAU in exec decks for the affected window; schedule postmortem on staged rollout + crash gates
+      next check : T+24h: confirm crash-free DAU on rollback cohort matches holdout
+
+  [S] STATE UNCERTAINTY
+      if rollback does not recover DAU within 2h, broaden to acquisition/calendar
+
+  [check] DIAGNOSE complete for scenario 1:  OK
+
+========================================================================
+  SCENARIO 2: Revenue per user declining  (rev_decline)
+========================================================================
+  [D] DEFINE THE SIGNAL
+      prompt        : Ad revenue per DAU (ARPU) is down 7% over the last 2 weeks -- DAU is flat
+      primary metric: ARPU (ad revenue per DAU / day)
+      magnitude     : -7.0%  ($2.85 -> $2.65 $/user)
+      timeline      : gradual decline over 14 days since feed re-rank rollout
+      decomposition : Revenue = DAU x ARPU. DAU flat -> the move is
+                      IN ARPU = ad impressions x fill x CPM. Check each.
+
+  [I] CHECK THE INSTRUMENT  (always first; ~30-40% of drops are data bugs)
+      [OK] Revenue source agreement     healthy  : ad-platform revenue API and internal revenue warehouse agree within 0.1%
+      [OK] Attribution model change     healthy  : no change to revenue attribution or ad-impression counting logic in 30d
+      -> Instrument HEALTHY. Proceed to hypotheses.
+
+  [A] ASSEMBLE HYPOTHESES  (internal + external; prioritize by P x cost)
+      rank | category             | hypothesis
+      -----|----------------------|------------------------------------------
+      #   1 | internal_algo        | Feed re-rank shifted time to low-ad-inventory content  <-- ROOT CAUSE
+      #   2 | internal_data        | User mix shifted to low-ARPU geography
+      #   3 | external_platform    | Ad provider fill rate or CPM dropped
+      #   4 | external_seasonal    | Seasonal ad-spend decline (end of quarter)
+      (4 hypotheses -- a single hypothesis is trap #3)
+
+  [G] GENERATE QUERIES + [N] NARROW  (segment to localize)
+      Segment by ad_metric:
+        slice                 | baseline     | current      | delta   | note
+        ----------------------|--------------|--------------|---------|-------------
+        Ad impressions (M/day) |         12.0 |         10.6 | -12.0 % | LOCALIZED
+        Main feed              |           42 |           39 | -8.0  % | 
+        Ad CTR                 |         1.80 |         1.80 | 0.0   % | 
+        Stories                |           15 |           15 | +3.0  % | 
+        Time-in-app (min)      |         28.0 |         30.2 | +8.0  % | 
+        Short-form video feed  |           28 |           33 | +18.0 % | 
+
+      -> LOCALIZED to Ad impressions (M/day) (-12.0%).
+         This slice explains the aggregate move -- investigate here.
+
+  [N] ROOT CAUSE MATCH  (localized slice x binary world event)
+      mechanism  : Feed re-rank over-weighted short-form video (70% lower ad density)
+      world event: feed re-rank model v3 rolled out 14 days ago
+      evidence   : time-in-app +8% but ad impressions -12%; video feed time +18% with -22% ad impressions; CTR flat so quality unchanged -- it is a SUPPRESSION, not degradation
+      severity   : P2  |  ~$400,000/day at risk
+
+  [O] OWN THE RECOMMENDATION  -> THROTTLE + GUARDRAIL
+      action     : THROTTLE feed re-rank video weight by 50%; add ARPU guardrail at -2% redline; extend observation 7 days; do NOT ship full rollout until ARPU recovers within tolerance
+      next check : T+7d: ARPU recovery to within -1% of baseline AND ad-impression volume stabilizes
+
+  [S] STATE UNCERTAINTY
+      7-day ARPU is noisy; if it does not recover, kill the re-rank and redesign with a constrained objective (maximize session revenue subject to time-on-site floor)
+
+  [check] DIAGNOSE complete for scenario 2:  OK
+
+========================================================================
+  SCENARIO 3: New feature A/B test  (ab_break)
+========================================================================
+  [D] DEFINE THE SIGNAL
+      prompt        : New checkout redesign A/B shows +15% conversion (p=0.001) -- ship it?
+      primary metric: checkout conversion rate (treatment lift)
+      magnitude     : +15.0%  (0 -> 15 % lift)
+      timeline      : 14-day experiment, day-14 readout
+      decomposition : The +15% lift is the QUESTION, not the answer.
+                      Validity checks (SRM) gate the readout.
+
+  [I] CHECK THE INSTRUMENT  (always first; ~30-40% of drops are data bugs)
+      [OK] Experiment assignment log    healthy  : assignment events flowing; exposure logging intact; bucket IDs well-formed
+      [X] SRM chi-square (overall)     broken   : configured 50/50; observed 56100/43900; chi2=1488.4 >> 10.828 -> SRM FAIL (red light)
+      -> SRM FAIL: the experiment is INVALID. Stop reading the +15%.
+         Do NOT present the treatment effect. Debug assignment first.
+
+  [A] ASSEMBLE HYPOTHESES  (internal + external; prioritize by P x cost)
+      rank | category             | hypothesis
+      -----|----------------------|------------------------------------------
+      #   1 | internal_eng         | Mobile SDK applied eligibility filter AFTER bucket assignment  <-- ROOT CAUSE
+      #   2 | internal_eng         | Redirect in treatment path drops users
+      #   3 | internal_product     | Treatment-induced dropout (slow/broken checkout)
+      #   4 | internal_eng         | Assignment hash collision or seed bug
+      (4 hypotheses -- a single hypothesis is trap #3)
+
+  [G] GENERATE QUERIES + [N] NARROW  (segment to localize)
+      SRM chi-square by platform slice:
+        slice   | obs_c  | obs_t  | ratio  | chi2     | verdict
+        --------|--------|--------|--------|----------|------------------
+        Overall |  56100 |  43900 |  56.1% |   1488.4 | SRM FAIL (red light)
+        Mobile  |  36000 |  24000 |  60.0% |   2400.0 | SRM FAIL (red light) <-- LOCALIZED
+        Web     |  20100 |  19900 |  50.2% |      1.0 | SRM clean
+
+      -> Mobile drives the SRM (chi2=2400). Web is clean (chi2=1.0).
+         The +15% lift is an artifact of biased mobile assignment.
+
+  [N] ROOT CAUSE MATCH  (localized slice x binary world event)
+      mechanism  : Mobile SDK eligibility filter ran AFTER bucket assignment
+      world event: mobile checkout SDK v2.3 deployed with the experiment
+      evidence   : mobile shows 60/40 split (chi2=2400); web is clean 50.25/49.75 (chi2=1.0); the +15% conversion lift is an artifact of biased assignment, NOT a real effect
+      severity   : invalid
+
+  [O] OWN THE RECOMMENDATION  -> INVALIDATE + RE-RUN
+      action     : INVALIDATE the test -- do NOT present the +15% as a win; fix bucketing (apply eligibility BEFORE assignment); add automated SRM gating to the experiment platform; re-run for 14 days
+      next check : T+0: check whether any product decision was already made on the invalid readout
+
+  [S] STATE UNCERTAINTY
+      the true treatment effect is UNKNOWN until a clean re-run; the +15% could be real, zero, or negative -- biased assignment makes it uninterpretable
+
+  [check] DIAGNOSE complete for scenario 3:  OK
+
+========================================================================
+  SCENARIO 4: Payment service returning 500s  (p0_outage)
+========================================================================
+  [D] DEFINE THE SIGNAL
+      prompt        : Payment 500 error rate jumped from 0.1% to 8.5% at 14:32 UTC -- it is a P0
+      primary metric: payment HTTP 500 error rate
+      magnitude     : +8400.0%  (0 -> 8 % errors)
+      timeline      : step change at 14:32 UTC
+      decomposition : Error rate up 8400%. Customer harm is happening
+                      NOW -- contain first, diagnose second.
+
+  [I] CHECK THE INSTRUMENT  (always first; ~30-40% of drops are data bugs)
+      [!] Service health (logs)        degraded : 500s confirmed in application logs AND distributed traces; not a logging artifact
+      [OK] On-call alerting             healthy  : PagerDuty fired correctly at 14:33 UTC; latency SLO breach confirmed
+      -> Instrument HEALTHY. Proceed to hypotheses.
+
+  [A] ASSEMBLE HYPOTHESES  (internal + external; prioritize by P x cost)
+      rank | category             | hypothesis
+      -----|----------------------|------------------------------------------
+      #   1 | external_provider    | Stripe EU endpoint degradation (external provider)  <-- ROOT CAUSE
+      #   2 | internal_eng         | Connection pool exhaustion from retry amplification
+      #   3 | internal_eng         | Recent deploy introduced a regression
+      #   4 | internal_infra       | Database saturation or connection limits
+      (4 hypotheses -- a single hypothesis is trap #3)
+
+  [G] GENERATE QUERIES + [N] NARROW  (segment to localize)
+      Segment by region_x_provider:
+        slice                 | baseline     | current      | delta   | note
+        ----------------------|--------------|--------------|---------|-------------
+        EU + Stripe            |      400,000 |      464,000 | +16.0 % | LOCALIZED
+        EU + PayPal            |      300,000 |      300,300 | +0.1  % | 
+        APAC + PayPal          |      500,000 |      502,500 | +0.5  % | 
+        US + Stripe            |      800,000 |      816,000 | +2.0  % | 
+
+      -> LOCALIZED to EU + Stripe (+16.0%).
+         This slice explains the aggregate move -- investigate here.
+
+  [N] ROOT CAUSE MATCH  (localized slice x binary world event)
+      mechanism  : Stripe EU endpoint degradation + retry amplification
+      world event: Stripe EU status page: elevated 500s from 14:30 UTC
+      evidence   : EU+Stripe error 16%; US+Stripe 2%; EU+PayPal 0.1%; retry storm saturating connection pools is a second-order effect worsening the primary outage
+      severity   : P0  |  impact: ~170,000 users affected  |  ~$2,100,000/day at risk
+
+  [O] OWN THE RECOMMENDATION  -> CIRCUIT-BREAK + FAILOVER
+      action     : CIRCUIT-BREAK Stripe EU; failover EU payments to PayPal; shed non-critical retries to stop amplification; fail closed for unsafe operations; communicate customer impact every 15 min; P0 incident commander assigned
+      next check : T+15min: Stripe status update + EU error rate after failover
+
+  [S] STATE UNCERTAINTY
+      ETA depends on Stripe; if failover saturates PayPal capacity, shed low-priority transactions and queue for retry
+
+  [check] DIAGNOSE complete for scenario 4:  OK
+
+========================================================================
+  SECTION 6: the decision flow  (interactive branching per scenario)
+========================================================================
+Each scenario has 4 decision stages: instrument -> segment -> root_cause
+-> recommendation. The CORRECT path follows DIAGNOSE; traps register
+mistakes. This is the structure scenario_problems.html makes clickable.
+
+  --- Scenario 1: DAU dropped 10% ---
+    [instrument]
+      + Check the data pipeline / instrument first
+        -> pipeline lag 2min (normal); two-source agrees; logging layer clean -> INSTRUMENT HEALTHY
+      x Build a hypothesis tree immediately (trap: skip_pipeline)
+        -> you skipped the instrument check -- ~30-40% of drops are pipeline bugs
+      x Segment DAU by platform right now (trap: queries_before_hypotheses)
+        -> segmenting before confirming the signal is real risks explaining noise
+    [segment]
+      + Segment by platform (iOS / Android / Web)
+        -> iOS -18.2%, Android +1.0%, Web -2.0% -> LOCALIZED TO iOS
+      x Segment by geography (country / region) (trap: single_segment)
+        -> geo is flat across regions -- this slice does not localize the drop
+      x Segment by user cohort (new vs returning) (trap: single_segment)
+        -> both new and returning are down within iOS -- cohort does not localize first
+    [root_cause]
+      + iOS mobile release v4.2.1 introduced a crash
+        -> release at 17:00 UTC matches step-change; crash rate 0.3%->4.1% for v4.2.1
+      x Competitor launched a feature, users migrated (trap: single_hypothesis)
+        -> competitor launches are gradual, not a 17:00 step change; iOS-only is odd for that
+      x Day-of-week or seasonal trough (trap: single_hypothesis)
+        -> DoW-adjusted; flat before 17:00 the same day -- not a seasonal pattern
+    [recommendation]
+      + Rollback v4.2.1; comms; postmortem on crash gates
+        -> P1; ~200k users affected (10% DAU); ETA 2h; freeze iOS DAU metric for affected window
+      x Monitor for 24h before acting (trap: root_cause_only)
+        -> a crashing build loses users every hour -- monitoring without action extends harm
+      x Wait for more data to be sure (trap: ignore_uncertainty)
+        -> the evidence is time-aligned and localized; waiting ignores uncertainty about scope
+
+  --- Scenario 2: Revenue per user declining ---
+    [instrument]
+      + Check revenue pipeline / attribution first
+        -> ad-platform API and revenue warehouse agree within 0.1%; no attribution change -> HEALTHY
+      x Blame the feed re-rank immediately (trap: single_hypothesis)
+        -> you jumped to a single hypothesis before confirming the data or building a tree
+    [segment]
+      + Segment by content inventory type (video / feed / stories)
+        -> video time +18% but ad impressions -22%; main feed time -8% -> SUPPRESSION in video
+      x Segment by geography (trap: single_segment)
+        -> ARPU drop is global, not geo-specific -- mix shift ruled out
+    [root_cause]
+      + Feed re-rank shifted time to low-ad-inventory content
+        -> time-in-app +8% but ad impressions -12%; CTR flat -> SUPPRESSION TRAP, not degradation
+      x Ad provider fill rate or CPM dropped (trap: single_hypothesis)
+        -> fill rate and CPM are flat -- the impressions are just fewer, not unfilled
+    [recommendation]
+      + Throttle re-rank; add ARPU guardrail at -2%; iterate 7d
+        -> P2; -$400k/day impact; extend to confirm ARPU recovery is durable
+      x Kill the re-rank entirely and revert (trap: root_cause_only)
+        -> the engagement lift is real -- killing loses the upside; throttle first, then decide
+
+  --- Scenario 3: New feature A/B test ---
+    [instrument]
+      + Run the SRM chi-square check FIRST
+        -> configured 50/50; observed 56100/43900; chi2=1488.4 >> 10.828 -> SRM FAIL
+      x Ship the +15% conversion lift immediately (trap: skip_pipeline)
+        -> you shipped on a broken experiment without checking assignment integrity
+    [segment]
+      + Segment SRM by platform (mobile vs web)
+        -> mobile 60/40 (chi2=2400); web 50.25/49.75 (chi2=1.0) -> LOCALIZED TO MOBILE
+      x Segment by geography (trap: single_segment)
+        -> SRM is not geo-driven; it is platform-driven -- wrong dimension
+    [root_cause]
+      + Mobile SDK applied eligibility filter AFTER bucketing
+        -> eligibility-after-assignment drops ineligible treatment users -> biased 60/40 split
+      x Redirect in the treatment path drops users (trap: single_hypothesis)
+        -> redirects would show in web too; this is mobile-SDK-specific
+    [recommendation]
+      + Invalidate the test; fix bucketing; re-run 14d
+        -> the +15% is an artifact; true effect UNKNOWN until clean re-run; add SRM gating
+      x Reweight the arms and present the adjusted lift (trap: root_cause_only)
+        -> reweighting a broken assignment does not fix causality -- re-run
+
+  --- Scenario 4: Payment service returning 500s ---
+    [instrument]
+      + Confirm service health: error rate, latency, on-call
+        -> 500s in logs AND traces; p95 latency 200ms->2400ms; PagerDuty fired -> CONFIRMED P0
+      x Check for a recent deploy first (trap: root_cause_theory)
+        -> no deploy in 6h -- root-cause theorizing before containment extends the outage
+    [segment]
+      + Segment by region x payment provider
+        -> EU+Stripe 16%; US+Stripe 2%; EU+PayPal 0.1% -> LOCALIZED TO EU+STRIPE
+      x Segment by API endpoint (trap: single_segment)
+        -> endpoint view is noisy; region x provider isolates the blast radius faster
+    [root_cause]
+      + Stripe EU endpoint degradation + retry amplification
+        -> Stripe EU status page: elevated 500s from 14:30 UTC; retries saturating pools
+      x Database saturation (trap: single_hypothesis)
+        -> DB CPU 45%, healthy -- saturation is a second-order effect, not the cause
+    [recommendation]
+      + Circuit-break Stripe EU; failover to PayPal; shed retries
+        -> P0; ~170k failed tx/day; ~$2.1M/day at risk; comms every 15 min
+      x Restart all payment services (trap: root_cause_only)
+        -> blind restarts erase evidence and do not contain the blast radius
+
+
+========================================================================
+  SECTION 7: the five+ interview traps  (and the fix)
+========================================================================
+  trap                       | failure mode                                      | fix
+  ---------------------------|---------------------------------------------------|------------------------------------------
+  skip_pipeline               | Skipping the instrument / pipeline check before investigating causes | ALWAYS check data integrity first -- ~30-40% of drops are pipeline bugs
+  queries_before_hypotheses   | Jumping to queries / segmentation before forming a hypothesis tree | Build the hypothesis tree FIRST, then explain WHY each segmentation tests it
+  single_hypothesis           | Proposing only one hypothesis and betting everything on it | List 3-5 hypotheses (internal + external); prioritize by P x falsification cost
+  root_cause_only             | Stopping at root cause without a recommendation, impact sizing, or next check | Own the action: rollback / investigate / monitor + impact + time-boxed next check
+  ignore_uncertainty          | Presenting a conclusion without stating what you still do NOT know | Name the open questions and time-box the next check ('T+2h we will know X')
+  root_cause_theory           | Spending 10 min on root-cause theory before containing user harm (P0s) | P0 rule: stabilize impact FIRST, contain blast radius, THEN diagnose
+  single_segment              | Trying only one segmentation dimension and missing the localizing slice | Segment systematically: platform -> geo -> cohort -> time; pick by scenario type
+
+  The top 5 from the framework: skip_pipeline, queries_before_hypotheses,
+  single_hypothesis, root_cause_only, ignore_uncertainty. A 6/10 hits 2-3;
+  a 9/10 hits none. P0 scenarios add root_cause_theory (containment first).
+
+========================================================================
+  SECTION 8: signal scoring  (how well did you follow DIAGNOSE?)
+========================================================================
+Each diagnostic path scores 0..10. Each correct DIAGNOSE step = +2:
+
+  step             | what 'correct' means
+  -----------------|----------------------------------------------------
+  instrument       | checked data pipeline / SRM / service health FIRST
+  segment          | chose the dimension that localizes the drop
+  root cause       | matched the localized slice to a binary world event
+  recommendation   | owned an action + impact sizing + next check
+  uncertainty      | stated what you still do NOT know + time-boxed it
+
+  Worked score examples:
+    10/10 path: 10/10  (all 5 steps correct)
+    6/10 path: 6/10  (instrument+segment+root cause,
+               but stopped before recommendation + uncertainty)
+    2/10 path: 2/10  (skipped instrument, guessed root cause)
+
+  The scoring is the interview rubric in miniature.
+
+========================================================================
+  GOLD  (pinned for scenario_problems.html)
+========================================================================
+Values the HTML recomputes live in JS and gold-checks against.
+
+  SRM chi-square per slice (scenario 3):
+    Mobile  : obs_c=36000 obs_t=24000 ratio_c=0.5 -> chi2=2400.0000 (SRM FAIL (red light))
+    Web     : obs_c=20100 obs_t=19900 ratio_c=0.5 -> chi2=1.0000 (SRM clean)
+    Overall : obs_c=56100 obs_t=43900 ratio_c=0.5 -> chi2=1488.4000 (SRM FAIL (red light))
+
+  SRM critical threshold (df=1, alpha=0.001): 10.828
+
+  DAU drop localization (scenario 1, platform slices):
+    iOS     : 1100000 -> 900000 = -18.2% (localized=YES)
+    Android : 600000 -> 606000 = +1.0% (localized=no)
+    Web     : 300000 -> 294000 = -2.0% (localized=no)
+
+  total DAU drop = 200,000; iOS drop = 200,000; iOS share of drop = 100.0%
+
+  Revenue impact (scenario 2):
+    ARPU drop = $2.85 - $2.65 = $0.20/user/day
+    daily revenue loss = 2,000,000 DAU x $0.20 = $400,000/day
+
+  Recommendation verbs (recommend() per scenario):
+    scenario 1 (dau_drop    ): ROLLBACK
+    scenario 2 (rev_decline ): THROTTLE + GUARDRAIL
+    scenario 3 (ab_break    ): INVALIDATE + RE-RUN
+    scenario 4 (p0_outage   ): CIRCUIT-BREAK + FAILOVER
+
+  Signal score examples:
+    perfect               : 10/10
+    skipped instrument    : 8/10
+    weak                  : 2/10
+
+[check] GOLD reproduces from the in-memory DB + engines:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

@@ -1,0 +1,328 @@
+sql_foundations.py - JOINs, GROUP BY, HAVING, subqueries, set ops, CTEs.
+stdlib only (sqlite3). Run: python3 sql_foundations.py
+
+==========================================================================
+  SECTION 0: the tables we are joining
+==========================================================================
+  Three small tables. Note the asymmetry that drives every demo:
+    * users Dave(4) and Eve(5) have NO orders
+    * order 106 references user_id=9, who does NOT exist (orphan)
+
+  users  (5 rows)
+  +----+-------+---------+
+  | id | name  | country |
+  +----+-------+---------+
+  | 1  | Alice | US      |
+  | 2  | Bob   | UK      |
+  | 3  | Carol | US      |
+  | 4  | Dave  | CA      |
+  | 5  | Eve   | US      |
+  +----+-------+---------+
+  orders  (7 rows)
+  +-----+---------+--------+
+  | id  | user_id | amount |
+  +-----+---------+--------+
+  | 101 | 1       | 30     |
+  | 102 | 1       | 70     |
+  | 103 | 2       | 50     |
+  | 104 | 3       | 20     |
+  | 105 | 3       | 40     |
+  | 106 | 9       | 90     |
+  | 107 | 2       | 80     |
+  +-----+---------+--------+
+  employees (self-join tree)  (4 rows)
+  +----+-------+------------+
+  | id | name  | manager_id |
+  +----+-------+------------+
+  | 1  | Alice |            |
+  | 2  | Bob   | 1          |
+  | 3  | Carol | 1          |
+  | 4  | Dave  | 2          |
+  +----+-------+------------+
+
+==========================================================================
+  SECTION 1: JOIN types - the row-survival rules
+==========================================================================
+  Same two tables, five join families. Watch which rows survive and
+  where NULLs appear. Venn reading:
+    LEFT-ONLY  = users with no orders            {Dave, Eve}
+    INTERSECT  = users who have matching orders  {Alice, Bob, Carol}
+    RIGHT-ONLY = orders with no matching user    {order 106}
+
+  INNER JOIN  (intersection only)  (6 rows)
+  +-----+-------+-----+--------+
+  | uid | name  | oid | amount |
+  +-----+-------+-----+--------+
+  | 1   | Alice | 101 | 30     |
+  | 1   | Alice | 102 | 70     |
+  | 2   | Bob   | 103 | 50     |
+  | 2   | Bob   | 107 | 80     |
+  | 3   | Carol | 104 | 20     |
+  | 3   | Carol | 105 | 40     |
+  +-----+-------+-----+--------+
+  Venn: only INTERSECT lit. Unmatched users (Dave,Eve) and the
+        orphan order (106) are DROPPED.
+
+  LEFT JOIN   (all left rows; NULL-fill right)  (8 rows)
+  +-----+-------+-----+--------+
+  | uid | name  | oid | amount |
+  +-----+-------+-----+--------+
+  | 1   | Alice | 101 | 30     |
+  | 1   | Alice | 102 | 70     |
+  | 2   | Bob   | 103 | 50     |
+  | 2   | Bob   | 107 | 80     |
+  | 3   | Carol | 104 | 20     |
+  | 3   | Carol | 105 | 40     |
+  | 4   | Dave  |     |        |
+  | 5   | Eve   |     |        |
+  +-----+-------+-----+--------+
+  Venn: LEFT-ONLY + INTERSECT lit. Dave and Eve survive with
+        oid/amount = NULL. The orphan order is still dropped.
+
+  RIGHT JOIN  (via LEFT + swapped table order - the recommended way)  (7 rows)
+  +-----+-----+-------+--------+
+  | oid | uid | name  | amount |
+  +-----+-----+-------+--------+
+  | 101 | 1   | Alice | 30     |
+  | 102 | 1   | Alice | 70     |
+  | 103 | 2   | Bob   | 50     |
+  | 104 | 3   | Carol | 20     |
+  | 105 | 3   | Carol | 40     |
+  | 106 | 9   |       | 90     |
+  | 107 | 2   | Bob   | 80     |
+  +-----+-----+-------+--------+
+  Venn: INTERSECT + RIGHT-ONLY lit. Every order survives; order 106
+        now appears with name = NULL. (Never write RIGHT JOIN - just
+        swap the tables and use LEFT JOIN, as done here.)
+
+  FULL OUTER JOIN  (everything; NULLs on both sides)  (9 rows)
+  +-----+-------+-----+--------+
+  | uid | name  | oid | amount |
+  +-----+-------+-----+--------+
+  | 1   | Alice | 101 | 30     |
+  | 1   | Alice | 102 | 70     |
+  | 2   | Bob   | 103 | 50     |
+  | 2   | Bob   | 107 | 80     |
+  | 3   | Carol | 104 | 20     |
+  | 3   | Carol | 105 | 40     |
+  | 4   | Dave  |     |        |
+  | 5   | Eve   |     |        |
+  |     |       | 106 | 90     |
+  +-----+-------+-----+--------+
+  Venn: all three regions lit. Both unmatched sides appear: Dave/Eve
+        (right cols NULL) AND order 106 (left cols NULL).
+
+  CROSS JOIN  (cartesian product: every left x every right)
+    5 users x 7 orders = 35 rows. No ON condition.
+
+  CROSS JOIN (first 6 of 35 rows shown)  (6 rows)
+  +-----+-------+-----+--------+
+  | uid | name  | oid | amount |
+  +-----+-------+-----+--------+
+  | 1   | Alice | 101 | 30     |
+  | 1   | Alice | 102 | 70     |
+  | 1   | Alice | 103 | 50     |
+  | 1   | Alice | 104 | 20     |
+  | 1   | Alice | 105 | 40     |
+  | 1   | Alice | 106 | 90     |
+  +-----+-------+-----+--------+
+  SELF JOIN  (employees <-> their manager)  (4 rows)
+  +----------+---------+
+  | employee | manager |
+  +----------+---------+
+  | Alice    |         |
+  | Bob      | Alice   |
+  | Carol    | Alice   |
+  | Dave     | Bob     |
+  +----------+---------+
+  A table joined to itself (aliased e and m). LEFT JOIN keeps Alice,
+  the root, with manager = NULL. The basis of referral/chain queries.
+
+  Row-count comparison across join families (the Venn at a glance):
+
+  +-------+------------+------------------------------------+
+  | JOIN  | rows       | what survives                      |
+  +-------+------------+------------------------------------+
+  | CROSS | 5 x 7 = 35 | every combination (no ON)          |
+  | FULL  | 9          | 8 (LEFT) + orphan order 106        |
+  | LEFT  | 8          | all 5 users (Dave,Eve NULL-filled) |
+  | RIGHT | 7          | all 7 orders (106 NULL-filled)     |
+  | INNER | 6          | matched rows only                  |
+  +-------+------------+------------------------------------+
+
+==========================================================================
+  SECTION 2: GROUP BY + HAVING (aggregate filtering)
+==========================================================================
+  Execution order: FROM > JOIN > WHERE > GROUP BY > HAVING > SELECT
+  > ORDER BY > LIMIT. WHERE filters ROWS before grouping; HAVING
+  filters GROUPS after aggregation. Mixing them up = wrong totals.
+
+  GROUP BY: per-user order count and spend (LEFT JOIN keeps all users)  (5 rows)
+  +-------+----------+-------+
+  | name  | n_orders | total |
+  +-------+----------+-------+
+  | Bob   | 2        | 130   |
+  | Alice | 2        | 100   |
+  | Carol | 2        | 60    |
+  | Dave  | 0        | 0     |
+  | Eve   | 0        | 0     |
+  +-------+----------+-------+
+  COUNT(o.id) counts matched orders (0 for Dave/Eve); COALESCE turns
+  the NULL SUM into 0. Note COUNT(*) would wrongly read 1 for users
+  with no orders (it counts the NULL-filled row itself).
+
+  HAVING SUM(amount) > 70  (filter on the aggregate, not the row)  (2 rows)
+  +-------+----------+-------+
+  | name  | n_orders | total |
+  +-------+----------+-------+
+  | Bob   | 2        | 130   |
+  | Alice | 2        | 100   |
+  +-------+----------+-------+
+  Only Bob (130) and Alice (100) survive. Carol's 60 is filtered OUT
+  after grouping - this could never be expressed in WHERE.
+
+  WHERE country='US' BEFORE, HAVING SUM>50 AFTER  (both together)  (2 rows)
+  +-------+----------+-------+
+  | name  | n_orders | total |
+  +-------+----------+-------+
+  | Alice | 2        | 100   |
+  | Carol | 2        | 60    |
+  +-------+----------+-------+
+  WHERE shrinks the input to US users (Alice, Carol, Eve) BEFORE
+  grouping. HAVING then keeps only groups spending > 50: Alice and
+  Carol. Eve's group (0) is dropped. Right filter, right stage.
+
+
+==========================================================================
+  SECTION 3: subqueries - scalar, correlated, EXISTS
+==========================================================================
+  Average order amount = 54.2857 (= 380/7). Used by the scalar
+  subquery below.
+
+  SCALAR subquery: orders priced above the average  (3 rows)
+  +-----+---------+--------+
+  | id  | user_id | amount |
+  +-----+---------+--------+
+  | 102 | 1       | 70     |
+  | 106 | 9       | 90     |
+  | 107 | 2       | 80     |
+  +-----+---------+--------+
+  The subquery returns ONE value (the average); the outer query uses
+  it as a constant. Runs once.
+
+  CORRELATED subquery: each user's biggest order (re-runs per row)  (5 rows)
+  +-------+-----------+
+  | name  | max_order |
+  +-------+-----------+
+  | Alice | 70        |
+  | Bob   | 80        |
+  | Carol | 40        |
+  | Dave  |           |
+  | Eve   |           |
+  +-------+-----------+
+  The inner query references the OUTER u.id, so it re-executes for
+  every user -> O(users x orders). In production rewrite this as a
+  JOIN or window function (see Section 5 CTE pattern).
+
+  EXISTS: users who placed >= 1 order  (3 rows)
+  +-------+
+  | name  |
+  +-------+
+  | Alice |
+  | Bob   |
+  | Carol |
+  +-------+
+  NOT EXISTS: users who NEVER ordered  (anti-join)  (2 rows)
+  +------+
+  | name |
+  +------+
+  | Dave |
+  | Eve  |
+  +------+
+  EXISTS short-circuits at the first match; NOT EXISTS is the safe
+  anti-join (unlike NOT IN, which returns NOTHING if the subquery
+  contains a NULL). Prefer LEFT JOIN + IS NULL / NOT EXISTS.
+
+
+==========================================================================
+  SECTION 4: set operations - UNION, INTERSECT, EXCEPT
+==========================================================================
+  Combine row-sets by VALUE (not by join key). All SELECTs must
+  return the same number/column-types. UNION dedupes; UNION ALL
+  keeps duplicates and is faster when you know they are distinct.
+
+  UNION: every user_id seen anywhere (users UNION order user_ids)  (6 rows)
+  +-----+
+  | uid |
+  +-----+
+  | 1   |
+  | 2   |
+  | 3   |
+  | 4   |
+  | 5   |
+  | 9   |
+  +-----+
+  users ids {1,2,3,4,5} UNION order user_ids {1,1,2,2,3,3,9},
+  de-duplicated -> {1,2,3,4,5,9}. The orphan user_id 9 appears.
+
+  INTERSECT: user_ids present in BOTH tables  (3 rows)
+  +----+
+  | id |
+  +----+
+  | 1  |
+  | 2  |
+  | 3  |
+  +----+
+  Users that actually placed orders: {1,2,3}.
+
+  EXCEPT: users who never ordered (set-based anti-join)  (2 rows)
+  +----+
+  | id |
+  +----+
+  | 4  |
+  | 5  |
+  +----+
+  {4,5} = Dave, Eve. Same answer as NOT EXISTS / LEFT JOIN + IS NULL
+  - pick whichever reads cleanest.
+
+
+==========================================================================
+  SECTION 5: CTEs (WITH) - named, testable, composable steps
+==========================================================================
+  A CTE is a named subquery you can reference like a table. Chain
+  several to build cohort/ranking pipelines top-down. Each step is
+  independently testable; modern optimizers treat CTEs and inline
+  subqueries identically, so prefer CTEs for readability.
+
+  CTE chain: per-user totals -> RANK() -> ordered leaderboard  (5 rows)
+  +-------+----------+-------+-----+
+  | name  | n_orders | total | rnk |
+  +-------+----------+-------+-----+
+  | Bob   | 2        | 130   | 1   |
+  | Alice | 2        | 100   | 2   |
+  | Carol | 2        | 60    | 3   |
+  | Dave  | 0        | 0     | 4   |
+  | Eve   | 0        | 0     | 4   |
+  +-------+----------+-------+-----+
+  Step 1 per_user  : LEFT JOIN + GROUP BY -> one row per user with
+                      totals (NULL-safe via COALESCE).
+  Step 2 ranked    : window RANK() over totals (ties share a rank:
+                      Dave and Eve both get rnk=4).
+  Step 3 final     : project + order. This is the exact shape of a
+                      cohort-retention query (4 CTEs, each testable).
+
+
+==========================================================================
+  GOLD CHECK: SQL output == independent Python recompute
+==========================================================================
+  INNER JOIN: rows=6 (py 6), total=290 (py 290)  -> OK
+  GROUP BY per-user totals match python for all 5 users -> OK
+  AVG=54.2857 (py 54.2857); orders above avg=3 (py 3)  -> OK
+  Anti-join (NOT EXISTS == LEFT JOIN+IS NULL == EXCEPT) = ['Dave', 'Eve']  -> OK
+
+  [check] SQL output matches independent Python recompute on all  four checks: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================
+  [check] OK

@@ -1,0 +1,182 @@
+# experiment_design.py - A/B experiment design simulation
+# Pure Python stdlib only (math, statistics). Numbers below feed
+# EXPERIMENT_DESIGN.md and experiment_design.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Sample size & power analysis (two-proportion z-test)
+==========================================================================
+Formula (per arm):  n = (z_a/2 + z_b)^2 * [p1(1-p1) + p2(1-p2)] / (p2-p1)^2
+
+  alpha (two-sided) = 0.05    ->  z_a/2 = 1.95996
+  power             = 0.8    ->  z_b   = 0.84162
+  baseline p1       = 0.0800   (8.0% conversion)
+  MDE (absolute)    = 0.0050   (+0.50 pp)
+  target  p2        = 0.0850   (8.50% conversion)
+
+  z_a/2 + z_b       = 2.80159   (squared = 7.8489)
+  p1(1-p1)+p2(1-p2) = 0.151375
+  (p2-p1)^2         = 0.00002500
+
+=> n per arm       = 47,524.97   (round up to 47,525)
+=> total (both)    = 95,050
+=> duration        = 47,525 / 13,000 per day = 4 days per arm
+
+=> At 8% baseline, a +0.5pp MDE needs ~47.5k users PER ARM at 80% power.
+   If duration exceeds the business window, reach for CUPED / stratification
+   BEFORE lowering power or raising alpha. Never weaken the test for speed.
+
+[check] z_a/2 == 1.95996? OK
+[check] z_b == 0.84162? OK
+[check] n_per_arm rounds to 47,525? OK
+
+==========================================================================
+  SECTION 2: p-value computation (two-sided two-proportion z-test)
+==========================================================================
+Observed result:  control 5,400/50,000   treatment 5,750/50,000
+
+  p_control    = 5400/50000 = 0.10800  (10.80%)
+  p_treatment  = 5750/50000 = 0.11500  (11.50%)
+  pooled p     = 0.11150
+  SE (pooled)  = 0.001991
+
+  z = (p2 - p1) / SE = (0.11500 - 0.10800) / 0.001991 = 3.5164
+  p-value (two-sided) = 2 * (1 - Phi(|z|)) = 0.000437
+
+  vs alpha = 0.05:  0.000437 < 0.05  ->  REJECT H0 (significant)
+  relative lift = +6.48%   absolute lift = +0.70 pp
+
+=> A z of ~3.5 (p ~ 0.0004) is strong evidence the treatment moved the
+   metric. But significance != business value: a +0.7pp lift on a 50k/arm
+   sample is detectable; whether it clears the ship-bar MDE is a separate call.
+
+[check] z == 3.5164? OK
+[check] p-value == 0.000437? OK
+[check] relative lift == 6.48%? OK
+
+==========================================================================
+  SECTION 3: Confidence intervals for treatment effect (Wald)
+==========================================================================
+Wald 95% CI for the difference p_treatment - p_control (unpooled SE):
+
+  point estimate (p2 - p1) = 0.00700  (+0.700 pp)
+  SE (unpooled)            = 0.001991
+  margin (z * SE)          = 0.003901
+  95% CI                   = [0.00310, 0.01090]
+                           = [+0.310 pp, +1.090 pp]
+
+  CI crosses zero?         NO (significant)
+  CI lower bound >= MDE?   NO (below ship bar)
+
+  CI band (pp):        0     point     upper
+  [+0.310, +1.090] pp         
+  #######################             
+
+=> The CI [0.30, 1.10] pp excludes zero (confirms Section 2 significance),
+   but its LOWER bound (0.30 pp) is below the +0.5pp MDE ship bar. The effect
+   is statistically real but we are NOT 95% sure it clears the business bar.
+
+[check] CI lower == 0.003099? OK
+[check] CI upper == 0.010901? OK
+[check] CI excludes zero? OK
+
+==========================================================================
+  SECTION 4: Multiple testing correction (Bonferroni)
+==========================================================================
+Family of k=5 tests (1 primary + 4 guardrails/secondary).
+
+  raw alpha          = 0.05
+  Bonferroni alpha   = alpha / k = 0.05/5 = 0.0100
+
+  #  metric       role          p_ctrl    p_trt    p-value   @0.05   @Bonf
+  1  conversion   primary       10.80%   11.50%    0.00044     YES     YES
+  2  click_rate   guardrail     16.00%   16.20%    0.38956      no      no
+  3  retention    secondary     30.00%   31.20%    0.00004     YES     YES
+  4  checkout     guardrail     10.80%   10.76%    0.83841      no      no
+  5  signup       secondary     60.00%   61.00%    0.00122     YES     YES
+
+  significant @ raw 0.05:  3/5
+  significant @ Bonferroni: 3/5
+  expected false positives @ 0.05 without correction: k*alpha = 0.25
+
+=> Without correction, running k=5 tests at alpha=0.05 inflates the family-wise
+   error rate to ~0.23; expect ~0 false positive by construction.
+   Bonferroni (alpha/k) controls the family-wise error for primary + guardrails.
+   Use Benjamini-Hochberg FDR <= 0.10 for secondary metric panels instead.
+
+[check] primary p-value == 0.000437? OK
+[check] Bonferroni alpha == 0.01? OK
+[check] exactly 3 metrics pass Bonferroni? OK
+
+==========================================================================
+  SECTION 5: Effect size (Cohen's h for proportions, Cohen's d for continuous)
+==========================================================================
+Statistical significance depends on n; effect size does NOT. Report both.
+
+Cohen's h for two proportions  h = 2*[arcsin(sqrt(p2)) - arcsin(sqrt(p1))]:
+  arcsin(sqrt(0.1080)) = 0.33486
+  arcsin(sqrt(0.1150)) = 0.34598
+  h = 0.0222
+  interpretation: negligible (<0.20)
+
+  Cohen's h bands:  negligible <0.20 | small 0.20-0.50 | medium 0.50-0.80 | large >=0.80
+
+Cohen's d worked example (revenue/user, $):
+  mean_control = $4.20   mean_treatment = $4.35   sd_pooled = $3.10
+  d = (m_trt - m_ctrl) / sd = (4.35 - 4.20) / 3.10 = 0.0484
+  interpretation: negligible (<0.20)
+
+=> A p-value can be tiny on a huge sample yet describe a useless effect.
+   Effect size answers 'does it MATTER?', p-value answers 'is it REAL?'.
+   Always pair them -- especially when arguing for a rollout decision.
+
+[check] Cohen's h == 0.0222? OK
+[check] Cohen's d == 0.0484? OK
+
+==========================================================================
+  SECTION 6: SRM (Sample Ratio Mismatch) chi-square diagnostic
+==========================================================================
+Chi-square goodness-of-fit on observed vs expected assignment counts (df=1).
+
+  Case A (healthy):  observed (50050, 49950)  expected (50000, 50000)
+    chi2 = 0.1000   p-value = 0.7518   ->  SRM OK (keep running)
+
+  Case B (mismatch): observed (52000, 48000)  expected (50000, 50000)
+    chi2 = 160.0000   p-value = 0.00000000   ->  SRM FIRES (halt)
+
+=> Case B fires SRM at p < 0.001. HALT, do NOT rebalance. Trace the logging
+   chain (bot filter, latency dropout, salt collision, crash on first load),
+   fix the bug, then RESTART enrollment. Every metric on a mismatched experiment
+   is biased -- you cannot trust a z-test if the assignment itself is broken.
+
+[check] healthy chi2 == 0.1000? OK
+[check] healthy p-value >= 0.001 (no SRM)? OK
+[check] mismatch chi2 == 160.0000? OK
+[check] mismatch p-value < 0.001 (SRM fires)? OK
+
+==========================================================================
+  SECTION 7: GOLD values (pinned for experiment_design.html)
+==========================================================================
+  check                      py recompute         GOLD   match
+  z_alpha2                        1.95996      1.95996      OK
+  z_beta                          0.84162      0.84162      OK
+  n_per_arm                      47524.97     47524.97      OK
+  n_per_arm_rounded                 47525        47525      OK
+  z_stat_primary                   3.5164       3.5164      OK
+  pvalue_primary                 0.000437     0.000437      OK
+  rel_lift_pct                       6.48         6.48      OK
+  abs_lift_pp                       0.700        0.700      OK
+  ci_lower                       0.003099     0.003099      OK
+  ci_upper                       0.010901     0.010901      OK
+  cohens_h                         0.0222       0.0222      OK
+  cohens_d                         0.0484       0.0484      OK
+  bonferroni_alpha                 0.0100       0.0100      OK
+  srm_ok_chi2                      0.1000       0.1000      OK
+  srm_ok_pvalue                    0.7518       0.7518      OK
+  srm_bad_chi2                   160.0000     160.0000      OK
+  srm_bad_pvalue               0.00000000   0.00000000      OK
+
+[check] ALL GOLD values reproduce from the experiment-design formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

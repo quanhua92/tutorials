@@ -1,0 +1,227 @@
+# data_quality.py - Data quality monitoring simulation
+# Pure Python stdlib only. Numbers below feed DATA_QUALITY.md
+# and data_quality.html (gold-checked).
+
+==========================================================================
+  SECTION 1: Validation rules (null / range / format / enum / referential)
+==========================================================================
+Contract assertions run against users (100 rows) + orders (200 rows).
+Each check records bad/total + a status: FAIL (hard breach), WARN, PASS.
+
+  target             rule               bad  total  metric                     status
+  users.email        not_null             6    100  6.0% null                  FAIL
+  users.age          range[0,120]         3    100  3 out of range             FAIL
+  users.email        format               2     94  2 malformed / 94 non-null  WARN
+  users.country      whitelist            2    100  2 not in whitelist         WARN
+  orders.amount      not_null             3    200  1.5% null                  WARN
+  orders.amount      range[0,10000]       2    200  2 negative                 FAIL
+  orders.status      enum                 1    200  1 invalid                  FAIL
+  orders.user_id     referential          4    200  4 orphans                  FAIL
+  orders.id          not_null             0    200  0 null                     PASS
+  users.id           unique               0    100  0 duplicates               PASS
+
+=> The dirty dataset fails on hard constraints (age range, negative
+   amounts, status enum, referential integrity, key-column nulls).
+   Referential orphans are the P0 here: 4 orders reference no user, so
+   any revenue JOIN silently drops those rows from dashboards.
+
+[check] 10 checks ran? OK
+[check] referential orphans == 4? OK
+[check] email null rate == 6.0%? OK
+
+==========================================================================
+  SECTION 2: Freshness SLA checks (tiered by business criticality)
+==========================================================================
+Event-time lag = NOW - MAX(event_timestamp). Tier 0 breach => page;
+Tier 1 breach => Slack; Tier 2 breach => log only.
+
+  table                tier            lag     sla(s)  status
+  revenue_daily        Tier 0         300s       900s  PASS
+  experiment_assign    Tier 0        7200s       900s  FAIL (page)
+  mobile_events        Tier 1        9000s     14400s  PASS
+  ops_dashboard_fact   Tier 1       21600s     14400s  FAIL (slack)
+  weekly_summary       Tier 2       79200s     86400s  PASS
+  ad_hoc_export        Tier 2      216000s     86400s  WARN (log)
+
+=> Freshness is the FIRST triage question. A stale Tier 0 table (here
+   experiment_assign, 2h lag vs 15min SLA) pages before you even look
+   at null rates or volume -- nothing downstream can be trusted until
+   the pipeline is fresh.
+
+[check] 6 freshness checks ran? OK
+[check] experiment_assign breached (Tier 0)? OK
+[check] ad_hoc_export is WARN-only (Tier 2)? OK
+
+==========================================================================
+  SECTION 3: Z-score anomaly detection (daily row count)
+==========================================================================
+z_i = (x_i - mean) / std. Flag when |z| > 3.0.
+
+  day       count |  z (full series) |     z (baseline)
+  day1      1000 |         -0.231 |           0.00
+  day2      1020 |         -0.212 |           1.72
+  day3       980 |         -0.250 |          -1.72
+  day4      1010 |         -0.221 |           0.86
+  day5       990 |         -0.240 |          -0.86
+  day6      1005 |         -0.226 |           0.43
+  day7       995 |         -0.235 |          -0.43
+  day8      1015 |         -0.216 |           1.29
+  day9       985 |         -0.245 |          -1.29
+  day10     1000 |         -0.231 |           0.00
+  day11     1008 |         -0.223 |           0.69
+  day12      992 |         -0.238 |          -0.69
+  day13      400 |         -0.800 |         -51.51 *
+  day14     5000 |          3.567 * |         343.42 *
+
+  full series:   mean=1242.857  std=1053.427  -> 1 anomaly (|z|>3)
+  baseline-trained: mean=1000.000  std=11.648  -> 2 anomalies (|z|>3)
+
+=> Full-series z-score MISSES the drop (day 13, z=-0.800): the spike
+   (5000) inflates mean+std so much that the 400-drop looks normal.
+   Train z-score on a CLEAN baseline window and both anomalies leap
+   out (z=-51.5 for the drop). Lesson: never let anomalies pollute the
+   statistics you detect them with.
+
+[check] full-series flags only the spike? OK
+[check] baseline-trained flags drop + spike? OK
+
+==========================================================================
+  SECTION 4: IQR anomaly detection (robust single pass)
+==========================================================================
+Sorted: [400, 980, 985, 990, 992, 995, 1000, 1000, 1005, 1008, 1010, 1015, 1020, 5000]
+
+  Q1 = 990.0   Q3 = 1010.0   IQR = 20.0
+  Lower fence = Q1 - 1.5*IQR = 960.0
+  Upper fence = Q3 + 1.5*IQR = 1040.0
+
+  day       count  verdict
+  day1      1000  ok
+  day2      1020  ok
+  day3       980  ok
+  day4      1010  ok
+  day5       990  ok
+  day6      1005  ok
+  day7       995  ok
+  day8      1015  ok
+  day9       985  ok
+  day10     1000  ok
+  day11     1008  ok
+  day12      992  ok
+  day13      400  ANOMALY (drop)
+  day14     5000  ANOMALY (spike)
+
+=> IQR catches BOTH anomalies in one pass (drop + spike) without a
+   training window, because the median and quartiles are ROBUST to
+   outliers -- the huge spike barely moves them. IQR wins for
+   thousands of tables where you cannot hand-curate a clean baseline.
+
+[check] IQR flags exactly the drop + spike? OK
+[check] upper fence == 1040? OK
+
+==========================================================================
+  SECTION 5: EWMA null-rate monitoring (adaptive baseline)
+==========================================================================
+baseline_t = a*rate_t + (1-a)*baseline_{t-1}; forecast_t = baseline_{t-1};
+alert if residual = rate_t - forecast_t > 3.0 * sigma (one-sided).
+
+  day     rate%   forecast   residual  alert
+  day1      2.0      2.000      0.000  
+  day2      2.1      2.000      0.100  
+  day3      1.9      2.030     -0.130  
+  day4      2.0      1.991      0.009  
+  day5      2.2      1.994      0.206  
+  day6      1.8      2.056     -0.256  
+  day7      2.0      1.979      0.021  
+  day8     60.0      1.985     58.015  ALERT (null spike)
+  day9      2.1     19.390    -17.290  
+  day10     2.0     14.203    -12.203  
+
+  sigma (normal residuals) = 0.150   3*sigma band = 0.450
+
+=> The day-8 spike (60% vs forecast 1.985) is the causal anomaly:
+   residual 58.015 dwarfs the band 0.450.
+   email-null rate from ~2% to 60% on a Friday night. One-sided
+   alerting (spikes only) avoids firing on the EWMA 'echo' as the
+   baseline lags back down -- which is also why a sustain period
+   (alert only after N consecutive failures) cuts false positives.
+
+[check] single alert on day 8? OK
+[check] day-8 residual > 3*sigma? OK
+
+==========================================================================
+  SECTION 6: Completeness scoring (cell-level non-null rates)
+==========================================================================
+compliance(column) = non_null / total. Table completeness = non-null
+cells / total cells across all columns.
+
+  table    column       total   nonnull   complete%
+  users    id             100       100     100.00%
+  users    email          100        94      94.00%
+  users    age            100       100     100.00%
+  users    country        100       100     100.00%
+  orders   id             200       200     100.00%
+  orders   user_id        200       200     100.00%
+  orders   amount         200       197      98.50%
+  orders   status         200       200     100.00%
+
+  users  completeness = 394/400 = 98.50%
+  orders completeness = 797/800 = 99.62%
+  OVERALL completeness = 1191/1200 = 99.25%
+
+=> Completeness is necessary but NOT sufficient: a column can be 100%%
+   non-null and still full of wrong values (out-of-range ages, invalid
+   enums, orphans). Completeness + validity together = trustworthy data.
+
+[check] users completeness == 98.5%? OK
+[check] overall completeness == 99.25%? OK
+
+==========================================================================
+  SECTION 7: Quality scorecard (validity + freshness + completeness + volume)
+==========================================================================
+  score = 100 * (pass + 0.5*warn) / total   (WARN counts half)
+
+  dimension           pass   warn   fail      score
+  validity               2      3      5      35.0%
+  freshness              3      1      2      58.3%
+  completeness           -      -      -     99.25%
+  volume             12/14   days     ok      85.7%
+  --------------------------------------------------
+  OVERALL QUALITY                                       69.6%   [NEEDS ATTENTION]
+
+=> One score per dimension + one rollup gives leadership a single
+   view; drilling into validity shows the P0 referential orphans,
+   into freshness shows the breached Tier 0 table. Score = 100 only
+   when every contract holds AND every monitor is green.
+
+[check] validity score == 35.0%? OK
+[check] overall == 69.6% (NEEDS ATTENTION)? OK
+
+==========================================================================
+  SECTION 8: GOLD values (pinned for data_quality.html)
+==========================================================================
+  check                          py recompute       GOLD    match
+  validity_total                           10         10       OK
+  validity_fail                             5          5       OK
+  validity_score_pct                     35.0       35.0       OK
+  freshness_total                           6          6       OK
+  freshness_fail                            2          2       OK
+  freshness_score_pct                    58.3       58.3       OK
+  completeness_overall_pct              99.25      99.25       OK
+  volume_anomaly_count                      2          2       OK
+  volume_score_pct                       85.7       85.7       OK
+  zscore_mean_full                   1242.857   1242.857       OK
+  zscore_std_full                    1053.427   1053.427       OK
+  zscore_anomaly_full                       1          1       OK
+  zscore_anomaly_baseline                   2          2       OK
+  iqr_q1                                990.0      990.0       OK
+  iqr_fence_high                       1040.0     1040.0       OK
+  ewma_spike_day                            8          8       OK
+  ewma_residual_day8                   58.015     58.015       OK
+  ewma_sigma                            0.150      0.150       OK
+  overall_quality_score                  69.6       69.6       OK
+
+[check] ALL GOLD values reproduce from the data-quality formulas? OK
+
+==========================================================================
+  ALL SECTIONS COMPLETE
+==========================================================================

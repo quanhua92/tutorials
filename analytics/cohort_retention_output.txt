@@ -1,0 +1,257 @@
+cohort_retention.py - ground truth for COHORT_RETENTION.md.
+Simulated monthly signup cohorts; retention heatmaps, curves, fit,
+churn, segmentation. Fixed seed -> fully reproducible.
+
+[check] built DB: 7990 users, 22134 activity rows
+[check] SQL D1 == Python D1 for all 7 cohorts:  OK
+
+========================================================================
+  SECTION 1: the simulation  (monthly cohorts + 3-segment model)
+========================================================================
+Seven monthly signup cohorts (2025-01 .. 2025-07). Every user is
+assigned to BOUNCE / CASUAL / CORE; each measurement day is a
+Bernoulli draw against the segment's retention probability. Fixed
+seed (SEED=42) -> fully reproducible.
+
+  cohorts            : 7
+  total users        : 7990
+  analysis date      : 2025-07-20  (right-censor cutoff)
+  measurement days   : [0, 1, 3, 7, 14, 30, 45, 60, 75, 90]
+  heatmap horizons   : [1, 7, 30, 60, 90]   (D1 / D7 / D30 / D60 / D90)
+
+  segment | retention probability P(active on day t)  [t>=1]
+  ------- | ----------------------------------------------
+  bounce  | 0                       (signed up, never returned)
+  casual  | exp(-0.25 * t)          (~gone by D14)
+  core    | 0.45 + 0.45*exp(-0.05t) (decays, then PLATEAUS ~45%)
+
+  cohort   |  size | organic% | ios% | maturity | mature-to
+  ---------|-------|----------|------|----------|-----------
+  2025-01 |   980 |    58.0 | 49.8 |      200 | D1, D7, D30, D60, D90
+  2025-02 |  1120 |    57.3 | 46.6 |      169 | D1, D7, D30, D60, D90
+  2025-03 |  1340 |    56.9 | 47.7 |      141 | D1, D7, D30, D60, D90
+  2025-04 |  1080 |    59.8 | 48.7 |      110 | D1, D7, D30, D60, D90
+  2025-05 |  1450 |    57.2 | 47.4 |       80 | D1, D7, D30, D60
+  2025-06 |  1260 |    55.9 | 46.7 |       49 | D1, D7, D30
+  2025-07 |   760 |    56.1 | 46.1 |       19 | D1, D7
+
+  maturity = days between signup (1st of month) and the analysis
+  date. A cohort can only have D{N} if maturity >= N -- otherwise the
+  cell is RIGHT-CENSORED (not zero, just not yet observable). That
+  is what carves the retention triangle below.
+
+========================================================================
+  SECTION 2: multi-horizon retention SQL  (D1..D90 in ONE pass)
+========================================================================
+The production query: one LEFT JOIN of events onto the user anchor,
+then MAX(CASE WHEN day_offset = N THEN 1 ELSE 0 END) per horizon --
+a linear scan + group-by instead of a quadratic self-join. AVG of
+the 0/1 flags is the retention fraction.
+
+  cohort   |  D1   |  D7   |  D30  |  D60  |  D90
+  ---------|-------|-------|-------|-------|-------
+  2025-01 |  41.1 |  23.4 |  14.5 |  11.9 |  11.6
+  2025-02 |  39.2 |  23.3 |  14.3 |  12.9 |  12.4
+  2025-03 |  44.0 |  25.5 |  16.0 |  12.8 |  13.7
+  2025-04 |  40.9 |  25.1 |  14.8 |  11.9 |  13.0
+  2025-05 |  42.3 |  26.1 |  16.5 |  14.0 |   0.0
+  2025-06 |  49.7 |  29.5 |  19.5 |   0.0 |   0.0
+  2025-07 |  48.8 |  30.4 |   0.0 |   0.0 |   0.0
+
+  NB: the low D60/D90 for 2025-06 / 2025-07 is NOT real churn --
+  those cohorts are too young to have a D60/D90. Including them in
+  the denominator is the classic math artifact. Section 3 censors
+
+========================================================================
+  SECTION 3: the retention heatmap  (cohort x horizon, censored)
+========================================================================
+Rows = signup cohort, columns = time since signup, cells = %% of the
+cohort still active. Censored cells (cohort younger than the offset)
+are shown as '  ---  '. The missing lower-right corner is the
+retention triangle.
+
+  cohort   |  D1     D7     D30    D60    D90
+  ---------|----------------------------------
+  2025-01 |  41.1%  23.4%  14.5%  11.9%  11.6%
+  2025-02 |  39.2%  23.3%  14.3%  12.9%  12.4%
+  2025-03 |  44.0%  25.5%  16.0%  12.8%  13.7%
+  2025-04 |  40.9%  25.1%  14.8%  11.9%  13.0%
+  2025-05 |  42.3%  26.1%  16.5%  14.0%   --- 
+  2025-06 |  49.7%  29.5%  19.5%   ---    --- 
+  2025-07 |  48.8%  30.4%   ---    ---    --- 
+
+  Intensity map (cell shading scales with retention):
+
+  cohort   |  D1        D7        D30       D60       D90
+  ---------|--------------------------------------------------
+  2025-01 | [#####......] [###........] [##.........] [#..........] [#..........]
+  2025-02 | [####.......] [###........] [##.........] [#..........] [#..........]
+  2025-03 | [#####......] [###........] [##.........] [#..........] [##.........]
+  2025-04 | [#####......] [###........] [##.........] [#..........] [#..........]
+  2025-05 | [#####......] [###........] [##.........] [##.........] [-----------]
+  2025-06 | [#####......] [###........] [##.........] [-----------] [-----------]
+  2025-07 | [#####......] [###........] [-----------] [-----------] [-----------]
+
+  How to read it:
+    * DOWN a column (vertical)  : same lifecycle stage, different
+      cohorts. Tests whether product/acquisition quality is improving.
+    * ACROSS a row  (horizontal): one cohort's decay curve. Tests
+      long-term stickiness / product-market fit.
+    * Diagonal streak  -> product regression or worse acquisition.
+    * Vertical red col -> measurement bug or a seasonal event.
+
+========================================================================
+  SECTION 4: the retention curve  (2025-01 cohort, oldest/most mature)
+========================================================================
+2025-01 has 200 days of maturity, so the
+full D0..D90 curve is observable. This is the survival function.
+
+  day  | retention |          curve (0..100%)
+  -----|-----------|-----------------------------------------
+  D0   |    100.0% | ########################################
+  D1   |     41.1% | ################........................
+  D3   |     32.3% | #############...........................
+  D7   |     23.4% | #########...............................
+  D14  |     17.2% | #######.................................
+  D30  |     14.5% | ######..................................
+  D45  |     12.3% | #####...................................
+  D60  |     11.9% | #####...................................
+  D75  |     11.6% | #####...................................
+  D90  |     11.6% | #####...................................
+
+  D1  = 41.1%   (activation quality; first-impression value)
+  D7  = 23.4%   (habit formation; investor-comparable)
+  D30 = 14.5%   (long-term value; tracks LTV in subscriptions)
+  D90 = 11.6%   (the loyal CORE plateau)
+
+  CURVE SHAPE: steep D1->D7 drop (the bounce + casual users leave),
+  then a flattening tail (the core minority plateaus). This 'bend' is
+  the signature of a healthy consumer-social product and is exactly
+  what a pure-exponential fit CANNOT capture (Section 5).
+
+========================================================================
+  SECTION 5: curve fitting  (exponential decay  R(t) = A * exp(-k t))
+========================================================================
+Fit R(t) = A * exp(-k*t) by log-linear least squares (linear
+regression of ln R on t). Single free decay rate k -> one half-life.
+Closed form from the normal equations; no numpy needed.
+
+  A (anchor)         =  27.25%   (fitted D0 intercept)
+  k (decay rate)     = 0.0122 /day
+  half-life          =  56.59 days   (ln 2 / k)
+  R^2 (log scale)    = 0.7195
+
+  day  |  actual  |  fitted  |  error
+  -----|----------|----------|----------
+  D1   |    41.1% |    26.9% |   -14.2pp
+  D3   |    32.3% |    26.3% |    -6.1pp
+  D7   |    23.4% |    25.0% |    +1.6pp
+  D14  |    17.2% |    23.0% |    +5.7pp
+  D30  |    14.5% |    18.9% |    +4.4pp
+  D45  |    12.3% |    15.7% |    +3.4pp
+  D60  |    11.9% |    13.1% |    +1.1pp
+  D75  |    11.6% |    10.9% |    -0.8pp
+  D90  |    11.6% |     9.1% |    -2.6pp
+
+  WHY IT FITS POORLY AT THE TAIL: a single exponential must decay to
+  zero, but the real curve PLATEAUS at the core floor (~12%). So the
+  fit UNDER-estimates D90 (9.1% predicted vs
+  11.6% actual). Better models: a power law, or a
+  mixture (A_fast*exp(-k1 t) + A_slow*exp(-k2 t)) that lets the loyal
+  tail survive. Half-life is still a handy single-number summary.
+
+========================================================================
+  SECTION 6: churn analysis  (2025-01 cohort)
+========================================================================
+Cumulative churn by D{N} = 1 - R(N). Period drop-off between two
+horizons = (R(a) - R(b)) / R(a) -- the share of whoever was still
+around at D{a} who had left by D{b}.
+
+  from -> to  |  R(a)   R(b)  | drop-off | cumul churn at D{b}
+  ------------|---------------|----------|----------------------
+  D0  -> D1    | 100.0%  41.1% |   58.9%  |  58.9%
+  D1  -> D7    |  41.1%  23.4% |   43.2%  |  76.6%
+  D7  -> D30   |  23.4%  14.5% |   38.0%  |  85.5%
+  D30 -> D60   |  14.5%  11.9% |   17.6%  |  88.1%
+  D60 -> D90   |  11.9%  11.6% |    2.6%  |  88.4%
+
+  The D0->D1 drop-off is the bounce wall (~58% leave on day one).
+  Cumulative churn then climbs slowly: most of the damage is done
+  early. After D30 the curve is nearly flat -- whoever is left is
+  the core. NOTE: missing D30 is dormancy, not permanent exit; a
+  user absent at D30 can resurrect at D45/D90 (cheaper to win back
+  than to acquire fresh, often 3-5x).
+
+========================================================================
+  SECTION 7: segmentation  (2025-01 cohort, channel x platform)
+========================================================================
+Same cohort, split by acquisition channel and platform. Headline
+retention is a BLEND -- always decompose it before diagnosing.
+
+  segment        |  size |  D1     D7     D30
+  ---------------|-------|----------------------
+  organic        |   568 |  44.0%  24.8%  17.1%
+  paid           |   412 |  37.1%  21.4%  10.9%
+  ios            |   488 |  44.1%  25.4%  15.4%
+  android        |   492 |  38.2%  21.3%  13.6%
+
+  organic D30 = 17.1%  vs  paid D30 = 10.9%   (delta +6.2pp)
+  ios D30     = 15.4%  vs  android D30 = 13.6%   (delta +1.8pp)
+
+  Paid trails organic -- if headline D7 drops, check whether paid
+  MIX rose before blaming the product. iOS runs a few pp above
+  android across categories (demographics + app quality selection).
+  This is acquisition-mix / platform delta in one table.
+
+========================================================================
+  SECTION 8: benchmarks + curve-shape diagnostics (2026 medians)
+========================================================================
+  product type        |  D1     D7     D30   | key driver
+  ---------------------|----------------------|---------------------
+  Consumer Social (org) | 40-50  25-35  15-25  | network density
+  B2B SaaS (SMB)       | 50-65  35-50  25-40  | workflow integration
+  B2B SaaS (Enterprise) |    65     55     45  | deep integrations
+  Mobile Gaming (midcore) | 35-45  18-28  10-18  | progression pacing
+  Marketplace (2-sided) | 30-40  20-30  12-20  | liquidity
+  Productivity Tools   | 45-60  30-45  20-35  | daily habit
+  Streaming Media      | 55-70  40-55  30-45  | content catalog
+
+  2026 shifts: SMB SaaS NRR < 100%; consumer D30 compressed 10-15%;
+  streaming monthly churn ~5.5%. Never cite pre-2024 numbers raw.
+
+  Curve-shape read:
+    steep D1->D7 drop, flat tail  -> onboarding problem (not core)
+    gradual linear decay           -> low engagement frequency
+    power-law                       -> utility apps (normal)
+    S-curve                         -> free-trial conversion gate
+
+========================================================================
+  GOLD  (pinned for cohort_retention.html)
+========================================================================
+Headline values the HTML recomputes live and gold-checks against.
+
+  COHORT_RETENTION  (retained count, retention %):
+    2025-01: D1=403/980=41.1%, D7=229/980=23.4%, D30=142/980=14.5%, D60=117/980=11.9%, D90=114/980=11.6%
+    2025-02: D1=439/1120=39.2%, D7=261/1120=23.3%, D30=160/1120=14.3%, D60=145/1120=12.9%, D90=139/1120=12.4%
+    2025-03: D1=589/1340=44.0%, D7=342/1340=25.5%, D30=215/1340=16.0%, D60=171/1340=12.8%, D90=183/1340=13.7%
+    2025-04: D1=442/1080=40.9%, D7=271/1080=25.1%, D30=160/1080=14.8%, D60=128/1080=11.9%, D90=140/1080=13.0%
+    2025-05: D1=613/1450=42.3%, D7=378/1450=26.1%, D30=239/1450=16.5%, D60=203/1450=14.0%, D90=censored
+    2025-06: D1=626/1260=49.7%, D7=372/1260=29.5%, D30=246/1260=19.5%, D60=censored, D90=censored
+    2025-07: D1=371/760=48.8%, D7=231/760=30.4%, D30=censored, D60=censored, D90=censored
+
+  JAN_CURVE: D0=100.0%, D1=41.1%, D3=32.3%, D7=23.4%, D14=17.2%, D30=14.5%, D45=12.3%, D60=11.9%, D75=11.6%, D90=11.6%
+
+  FIT (R(t)=A*exp(-k*t), Jan cohort):
+    A=27.25%  k=0.0122  half_life=56.59  R2=0.7195
+
+  SEGMENTS (Jan):
+    organic  D1=44.0% D7=24.8% D30=17.1%
+    paid     D1=37.1% D7=21.4% D30=10.9%
+    ios      D1=44.1% D7=25.4% D30=15.4%
+    android  D1=38.2% D7=21.3% D30=13.6%
+
+[check] GOLD reproduces from the simulated DB + analytics:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

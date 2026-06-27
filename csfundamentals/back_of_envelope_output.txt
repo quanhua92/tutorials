@@ -1,0 +1,233 @@
+back_of_envelope.py - reference estimation engine.
+stdlib only; deterministic; no random seed.
+Feeds BACK_OF_ENVELOPE.md and back_of_envelope.html.
+
+==========================================================================
+  SECTION A: Power-of-2 reference table (binary units)
+==========================================================================
+
+  Storage/memory use BINARY multiples (2^n). The trap: drive vendors
+  and networks use DECIMAL (1 GB = 1e9 B, 1 Gbps = 1e9 bps), so a
+  '1 TB' disk holds ~931 GiB.
+
+  power   exp   unit                                 value
+  --------------------------------------------------------
+  2^10    10    KiB / Kbit                           1,024
+  2^20    20    MiB / Mbit                       1,048,576
+  2^30    30    GiB / Gbit                   1,073,741,824
+  2^40    40    TiB / Tbit               1,099,511,627,776
+  2^50    50    PiB / Pbit           1,125,899,906,842,624
+  2^60    60    EiB / Ebit        1,152,921,504,606,846,976
+
+  Binary vs decimal gap (why your 1 TB drive shows 931 GB):
+    1 TB disk      -> 0.9 GiB usable
+    100 GB disk    -> 93.1 GiB usable
+
+[check] power-of-2 table: 2^30 = 1,073,741,824: OK
+
+==========================================================================
+  SECTION B: Latency numbers (L1 cache vs disk vs network)
+==========================================================================
+
+  Six orders of magnitude separate L1 (~1 ns) from cross-region RTT
+  (~200 ms). Memorize the anchors: DRAM=100ns, SSD=100us, RTT=100ms.
+  The 'if 1ns = 1s' column makes the gaps visceral.
+
+  operation                            latency       if 1ns=1s
+  ------------------------------------------------------------
+  L1 cache reference                      1 ns             1 s
+  L2 cache reference                      4 ns             4 s
+  L3 cache reference                     10 ns            10 s
+  Mutex lock/unlock                      25 ns            25 s
+  Main memory (DRAM)                    100 ns         1.7 min
+  SSD random read (4 KB)                100 us          27.8 h
+  Intra-DC RTT (same DC)                500 us        5.8 days
+  SSD sequential read (1 MB)              1 ms       11.6 days
+  HDD random seek                        10 ms      115.7 days
+  Cross-region RTT (US-EU)              100 ms       3.2 years
+  Cross-region RTT (US-Asia)            200 ms       6.3 years
+
+  Key jumps:
+    DRAM -> SSD random:    1000x slower   (100x)
+    SSD -> intra-DC RTT:   5x slower (5x)
+    intra-DC -> US-Asia:   400x slower (400x)
+
+  Insight: intra-DC network (500us) is FASTER than a 1MB SSD seq read
+  (1ms). A distributed in-memory cache can beat a local SSD cache for
+  latency-sensitive paths.
+
+[check] latency anchors DRAM=100ns SSD=100us RTT=100ms: OK
+
+==========================================================================
+  SECTION C: Throughput - average QPS and peak QPS
+==========================================================================
+
+  Formula:  avg_qps = DAU * actions/user/day / 86400
+            peak_qps = avg_qps * peak_multiplier  (3 = consumer, 5-10 = B2B)
+
+  system                                 DAU r/user/d w/user/d  avg R/s  peak R/s  avg W/s
+  ----------------------------------------------------------------------------------------
+  Twitter (consumer social)      200,000,000       10      0.1   23,148    69,444      231
+  WhatsApp (messaging)         1,000,000,000        0       40        0         0  462,963
+  B2B SaaS dashboard               1,000,000        5        1       58       289       12
+
+  WALKTHROUGH: Twitter (consumer social), 200,000,000 DAU
+    reads/day      = 200,000,000 x 10 = 2,000,000,000
+    avg read QPS   = 2,000,000,000 / 86400 = 23,148.1
+    peak read QPS  = 23,148.1 x 3 = 69,444.4
+    avg write QPS  = 231.5   peak = 694.4
+    read:write     = 10/0.1 = 100:1  (reads dominate)
+
+  WHY peak x3: consumer traffic concentrates in a ~8h daytime window.
+  Spreading 24h of activity over 8h -> 24/8 = 3x concentration. B2B apps
+  concentrate into business hours -> 5-10x. State the multiplier aloud.
+
+[check] peak QPS = avg QPS x 3 for consumer apps: OK
+
+==========================================================================
+  SECTION D: Storage estimation (bytes/day -> bytes/year)
+==========================================================================
+
+  Formula:  daily_raw = writes/day * record_size
+            daily_total = daily_raw * replication * index_overhead
+            5-year = daily_total * 1825 days
+
+  Twitter text (20,000,000 tweets/day x 1024 B, RF=3):
+
+    daily raw           = 20,000,000 x 1024 = 19.1 GB
+    daily w/ RF=3        = 57.2 GB
+    5-year raw          = 34 TB
+    5-year w/ RF=3       = 102 TB
+
+  Twitter MEDIA (20% of tweets carry a 300 KB photo):
+
+    daily media raw    = 1.12 TB  (vs 19.1 GB text)
+    5-year media w/ RF = 5.98 PB
+    media:text ratio   = 60x  (media dominates)
+
+  The three storage multipliers:
+    replication  x3   all durable distributed storage (Kafka/HDFS/S3/PG replicas)
+    index        x1.5-2  relational DB B-tree indexes (3-4 indexes ~= table size)
+    encoding     x2-4  video platforms (5 resolution tiers)
+
+  Storage-tier selection by raw capacity:
+    < 1 TB      -> single DB instance
+    1-100 TB    -> S3 for blobs + DB for structured
+    100 TB-1 PB -> tiered hot/warm/cold retention
+    > 1 PB      -> distributed FS (HDFS/Colossus), multi-DC
+
+[check] 5-year Twitter text w/ RF = 102 TB: OK
+
+==========================================================================
+  SECTION E: Bandwidth estimation (throughput x payload x 8)
+==========================================================================
+
+  Formula:  bandwidth_bps = ops/sec * payload_bytes * 8  (bits)
+            usable MB/s   = bps / 8 / 1e6   (network is DECIMAL)
+
+  NIC capacity (actual TCP throughput ~ line rate):
+    1 Gbps NIC         = 1 Gbps = 125 MB/s
+    10 Gbps NIC        = 10 Gbps = 1250 MB/s
+    25 Gbps (c5n)      = 25 Gbps = 3125 MB/s
+
+  Twitter READ egress (peak 69,444 reads/s x 1024 B):
+    egress = 69,444 x 1024 x 8 = 568.9 Mbps = 0.57 Gbps
+    fits 1 Gbps NIC? YES
+
+  Kafka replication (500,000 msgs/s x 1024 B x RF=3):
+    bandwidth = 500,000 x 1024 x 3 x 8 = 12.29 Gbps = 1,536 MB/s
+    needs network-optimized NIC (25 Gbps c5n); a 1 Gbps NIC saturates at 8%
+
+  Candidates forget network. Always compute writes/sec x record x RF and
+  compare to NIC throughput. If it exceeds ~50% line rate, upgrade NIC.
+
+[check] Kafka RF=3 replication = 12.3 Gbps: OK
+
+==========================================================================
+  SECTION F: Connection count (the connection-tier problem)
+==========================================================================
+
+  For persistent-connection systems (chat, realtime), the binding resource
+  is FILE DESCRIPTORS and kernel connection state, NOT CPU or disk.
+
+  servers = concurrent_connections / connections_per_server
+
+  scenario                     connections    per server   servers
+  ----------------------------------------------------------------
+  WhatsApp 1B conns          1,000,000,000default (65K fd)    15,385
+  WhatsApp 1B conns          1,000,000,000 tuned (1M fd)     1,000
+
+  Tuning 65K -> 1M connections/server cuts the fleet 15x
+  (15,385 -> 1,000 servers). This forces a DEDICATED connection tier:
+    - connection tier: stateless TCP/WS gateways, NO DB calls
+    - Go preferred: goroutine ~8 KB vs Java thread ~1 MB stack
+    - routing index: Redis hash user_id -> connection_server_id
+
+[check] 1B conns / 65K per server = 15,385 servers: OK
+
+==========================================================================
+  SECTION G: Cache size + required hit rate
+==========================================================================
+
+  required_hit_rate = (peak_qps - db_capacity) / peak_qps
+
+  Twitter: peak read QPS = 69,444, Postgres complex = 5,000 QPS
+    hit_rate = (69,444 - 5,000) / 69,444 = 0.9280
+             = 92.8%   (must cache 92.8% of reads)
+    DB load after cache = peak x (1 - hit_rate) = 5,000 QPS
+
+  Below 5K QPS caching adds complexity without solving a bottleneck.
+  Above 300K ops/s a single Redis node is the ceiling -> Redis Cluster.
+
+  Cache memory sizing (100,000,000 keys x 1024 B + 15% metadata):
+    raw        = 95.4 GB
+    w/ overhead = 110 GB
+    @ 256 GB/node = 1 node(s)
+
+[check] required hit rate for 5K-DB / 69,444-peak = 92.8%: OK
+
+==========================================================================
+  SECTION H: Daily volume -> architecture trigger
+==========================================================================
+
+  avg_qps = daily_requests / 86,400.  peak = avg x 3.
+
+    daily requests   avg QPS   peak QPS   architecture
+  ----------------------------------------------------------------------
+           100,000      ~1.2       ~3.5   single server, no caching
+         1,000,000       ~12        ~35   single app + single DB
+        10,000,000      ~116       ~347   LB + 2-3 app servers, read replica
+       100,000,000     ~1.2K      ~3.5K   Redis caching, DB read replicas, ~5 apps
+     1,000,000,000    ~11.6K     ~34.7K   Redis mandatory, 3-5 replicas, ~30 apps
+    10,000,000,000     ~116K      ~347K   multi-tier cache, sharding, ~350 apps
+
+  The 5K QPS Postgres-complex threshold is the single most important
+  line: above it, caching is no longer optional.
+
+[check] 100M req/day -> ~1.2K avg QPS -> Redis tier: OK
+
+==========================================================================
+  SECTION I: GOLD values - pinned for back_of_envelope.html
+==========================================================================
+
+  Twitter (DAU=200,000,000 R=10/d W=0.1/d rec=1024B peak=3x RF=3):
+    avg read QPS  = 23148.1481   (round 23148)
+    peak read QPS = 69444.4444   (round 69444)
+    avg write QPS = 231.4815   (round 231)
+    read:write    = 100.0
+    daily raw     = 20,480,000,000.0 B  (19.1 GiB)
+    5yr w/ RF     = 112,128,000,000,000 B  (102.0 TiB)
+    cache hit%    = 92.8
+    read egress   = 0.57 Gbps
+
+  Kafka (500K msgs/s x 1KB x RF=3):  12.3 Gbps
+
+  Connections (1B / 65K, 1B / 1M):  15385, 1000
+
+  all GOLD asserts passed
+
+[check] GOLD values pinned for .html JS recompute: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

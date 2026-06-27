@@ -1,0 +1,261 @@
+========================================================================
+=== Blue-Green Deployment — two full fleets, atomic LB flip
+========================================================================
+  Two IDENTICAL production environments run side by side. At any
+  moment exactly one (the 'active' color) serves 100% of traffic;
+  the other is idle. Deploy = stand up the idle color with the new
+  version, health-check it with ZERO real traffic, then atomically
+  flip the load balancer's selector label. Rollback = flip back.
+
+  fleet size     = 500 replicas per color
+  traffic        = 1000 req/s, 100% to the active color
+  cost overhead  = 2x during the swap window
+  mixed versions = NONE (only one color is live at a time)
+
+  INITIAL  (blue live, green idle, both on v1.0)
+    active = blue
+    blue   = v1.0  (100% traffic)
+    green  = v1.0  (0% traffic)
+
+  STEP 1 — deploy v2.0 to GREEN (idle), run smoke + readiness probes
+            against a shadow endpoint. ZERO real traffic reaches it.
+           (green now on v2.0, still 0% traffic)
+    active = blue
+    blue   = v1.0  (100% traffic)
+    green  = v2.0  (0% traffic)
+
+  STEP 2 — flip LB selector: blue -> green (atomic, ~1s)
+           (100% traffic now on v2.0)
+    active = green
+    blue   = v1.0  (0% traffic)
+    green  = v2.0  (100% traffic)
+
+  STEP 3 — keep BLUE warm (idle) for the rollback window, then
+            tear it down after the soak period (e.g. 1 hour).
+
+  ROLLBACK (v2.0 misbehaves) — flip selector back to BLUE (~1s).
+           (100% traffic back on v1.0)
+    active = blue
+    blue   = v1.0  (100% traffic)
+    green  = v2.0  (0% traffic)
+
+  BAD-DEPLOY IMPACT (v2.0 fails 100% of its traffic):
+    exposure         = 100% of traffic
+    detection + flip = 61s
+    failed requests  = 61,000
+    downtime-equiv   = 61s   (fastest rollback of any strategy)
+
+  rollback restores 100% to blue?        [check] OK
+  blue-green never mixes versions?        [check] OK
+  flip window = 60s detect + 1s flip?     [check] OK
+
+  [check] OK   (blue-green: atomic flip, ~1s rollback, 2x cost)
+
+  GOTCHA: schema must be bi-directionally compatible AT the flip
+  instant. v2 cannot DROP a column v1 still reads, and v1 cannot
+  DROP a column v2 writes. Use expand-contract across releases.
+  GOTCHA: shared cache poisoning — key the cache by version
+  (v2:user:123) or run separate clusters during the swap.
+
+========================================================================
+=== Canary Deployment — 1% -> 10% -> 50% -> 100% with hash bucketing
+========================================================================
+  Route a small slice of traffic to the new version; watch real
+  production metrics (error rate, p99 latency, business conversion);
+  only advance if the canary is statistically clean. The cohort is
+  chosen by a DETERMINISTIC hash so a given user is always in or
+  always out — no sticky-session bias, no flapping between versions.
+
+  bucket rule: in_canary = bucket(flag, user_id) < rollout_pct
+  flag = 'checkout_v2'
+  rollout schedule = [1, 10, 50, 100]  (%, advanced gate by gate)
+
+  per-user buckets (deterministic, never change):
+    u_1001  bucket =  78  hash = 0x1bd635ae
+    u_1002  bucket =  59  hash = 0x1ad6341b
+    u_1003  bucket =  40  hash = 0x19d63288
+    u_1004  bucket =  73  hash = 0x20d63d8d
+    u_1005  bucket =  54  hash = 0x1fd63bfa
+    u_1006  bucket =  35  hash = 0x1ed63a67
+    u_1007  bucket =  16  hash = 0x1dd638d4
+    u_1008  bucket =  45  hash = 0x14d62aa9
+    u_1009  bucket =  26  hash = 0x13d62916
+    u_1010  bucket =  88  hash = 0x16d3ef38
+
+  progressive rollout — cohort size and exposed users per gate:
+    rollout =   1%   exposed = 0/10 users   (bucket < 1)
+    rollout =  10%   exposed = 0/10 users   (bucket < 10)
+    rollout =  50%   exposed = 5/10 users   (bucket < 50)
+    rollout = 100%   exposed = 10/10 users   (bucket < 100)
+
+  at 100% rollout, 10/10 users see v2.0
+
+  CANARY ANALYSIS (Netflix Kayenta style):
+    metric          baseline (v1)   canary (v2)   verdict
+    error rate      0.1%            0.1%          OK
+    p99 latency     120ms           118ms         OK
+    conversion      3.20%           3.18%         OK (p=0.42)
+    -> Mann-Whitney U p-value > 0.05 on every metric -> ADVANCE
+
+  BAD CANARY (conversion drops):
+    conversion      3.20%           2.10%         DEGRADED (p<0.01)
+    -> auto-rollback: route 0% to canary (~5s), no human needed
+
+  BAD-DEPLOY IMPACT (v2 fails 100%, caught at the 1% gate):
+    exposure         = 1% of traffic
+    detection + reroute = 35s
+    failed requests  = 350
+    downtime-equiv   = 0.35s   (blast radius = 1%)
+
+  bucketing is deterministic (stable across calls)? [check] OK
+  100% rollout exposes every user?                 [check] OK
+  canary blast radius < blue-green?                [check] OK
+
+  [check] OK   (canary: deterministic cohorts, ~5s rollback, 1% blast)
+
+  GOTCHA: assign cohorts by USER ID, not by session. Sticky sessions
+  skew the canary toward returning users and hide new-user bugs.
+  GOTCHA: business metrics (conversion) matter most and are omitted
+  most often — error rate can be flat while revenue quietly drops.
+
+========================================================================
+=== Rolling Update — batch replacement with health checks
+========================================================================
+  Replace pods in batches: spin up new ones up to maxSurge, wait for
+  readiness, then terminate the old ones down to maxUnavailable.
+  Zero extra fleet cost, but the LONGEST mixed-version window of any
+  strategy. Kubernetes default. Rollback is SLOW — you must redeploy
+  the old version back through the same batches.
+
+  fleet            = 500 replicas
+  maxSurge         = 25%   (up to 625 pods during rollout)
+  maxUnavailable   = 0   (never below desired count)
+  wave duration    = 300s (spin up + readiness + drain)
+
+  batch size       = 125 pods/wave (25%)
+  waves to finish  = 4
+
+  rollout (v1 -> v2):
+    wave  action                  v1 pods  v2 pods  surge   elapsed
+    start initial state               500        0      0        0s
+    wave 1  replace 125                  375      125      0      300s   health OK
+    wave 2  replace 125                  250      250      0      600s   health OK
+    wave 3  replace 125                  125      375      0      900s   health OK
+    wave 4  replace 125                    0      500      0     1200s   health OK
+
+  mixed-version window = 1200s (20 min) — both v1 and v2 serve simultaneously
+  zero extra cost, but every request must tolerate both versions.
+
+  ROLLBACK (v2 is bad): you cannot 'flip' — you must redeploy v1
+  back through the same 4 waves. ~600s.
+
+  BAD-DEPLOY IMPACT (v2 fails, first batch already live when caught):
+    exposure         = 25% of traffic (first surge batch)
+    detection + rollback = 690s  (slow — batches must reverse)
+    failed requests  = 172,500
+    downtime-equiv   = 172.5s   (WORST of any strategy — slow rollback)
+
+  batch size = 125 (25% of 500)?          [check] OK
+  4 waves reach 500 v2 pods, 0 v1?        [check] OK
+  rolling has the slowest rollback?        [check] OK
+
+  [check] OK   (rolling: zero cost, longest mixed window, slow rollback)
+
+  GOTCHA: the migration must be FORWARD-compatible — old code (the
+  rollback target) and new code read the SAME schema for the whole
+  20-minute window. DROP COLUMN in this release
+  breaks rollback. Use expand-contract across releases.
+  GOTCHA: readiness probe must check DB + cache, not just HTTP 200.
+
+========================================================================
+=== Feature Flags — deploy code, toggle activation at runtime
+========================================================================
+  Ship the new code to EVERY instance with the flag OFF. Activation
+  is a runtime config change — NO deploy, NO pod restart. This
+  DECOUPLES deploy (ship the bits) from release (turn it on).
+  Rollback = disable the flag (~100ms). Negligible infra cost.
+
+  bucket rule: in_cohort = bucket(flag, user) < rollout_pct
+  flag = 'checkout_v2'
+  progressive = internal -> beta -> [1, 10, 50, 100] -> full launch
+
+  deploy state: ALL 500 replicas run v2.0 code; flag checkout_v2 = OFF
+  -> 0% of users see the new checkout (code present, dormant)
+
+  flag lifecycle (runtime toggles, no deploys between steps):
+    set checkout_v2 =   1%   ->   0/10 users active   (no deploy)
+    set checkout_v2 =  10%   ->   0/10 users active   (no deploy)
+    set checkout_v2 =  50%   ->   5/10 users active   (no deploy)
+    set checkout_v2 = 100%   ->   10/10 users active   (no deploy)
+
+  INSTANT ROLLBACK (bug detected at 1%):
+    set checkout_v2 = 0%   ->   0/10 users active
+    propagation: ~100ms (config cache invalidate)
+
+  BAD-DEPLOY IMPACT (bug caught at the 1% gate):
+    exposure         = 1% of traffic
+    detection + disable = 15.10s
+    failed requests  = 151
+    downtime-equiv   = 0.151s   (lowest of any strategy)
+
+  flag rollback faster than canary reroute?  [check] OK
+  flags have the fastest rollback (ms)?       [check] OK
+  deploy decoupled from release?              [check] OK
+
+  [check] OK   (flags: instant rollback, deploy != release, ~0 cost)
+
+  GOTCHA: every flag needs a REMOVAL DATE at creation. Flags older
+  than 90 days without an owner should block builds. Permanent config
+  (pool sizes, timeouts) belongs in env vars, NOT feature flags.
+  GOTCHA: for all-or-nothing protocol flips across services, deploy
+  both with old behavior, then enable the flag in the CALLER only
+  after both are healthy — coordinated via the flag, not a deploy.
+
+========================================================================
+=== Rollback + Impact Comparison — one bad v2, four strategies
+========================================================================
+  The SAME defective v2 (fails 100% of the traffic it receives) is
+  shipped under each strategy. The only difference is HOW FAST the
+  blast is contained. 'downtime-equiv' = failed_requests / RPS = the
+  number of seconds of a full outage with equivalent user impact.
+
+  traffic model: 1000 req/s, v2 fail rate = 100%
+
+  strategy          exposure  detect+s rollback+s      failed   down-eqv
+  ----------------------------------------------------------------------
+  Blue-Green           100%        60          1      61,000     61.00s
+  Canary                 1%        30          5         350      0.35s
+  Rolling               25%        90        600     172,500    172.50s
+  Feature Flags          1%        15        0.1         151      0.15s
+
+  BEST  = Feature Flags  151 failed  (0.15s down-eqv)
+  WORST = Rolling        172,500 failed (172.5s down-eqv)
+  ratio = 1,142x  (worst / best)
+
+  STRATEGY SELECTION (when to use which):
+    stateless + critical path + schema pre-applied -> BLUE-GREEN
+    high-risk change / ML model / new feature      -> CANARY
+    cost-sensitive + backward-compatible           -> ROLLING
+    product launch / A-B test / kill switch        -> FEATURE FLAGS
+
+  DATABASE MIGRATION (the hidden constraint):
+    RENAME COLUMN  -> ALWAYS breaking; expand-contract across releases
+    ADD NOT NULL   -> add DEFAULT NULL, batch backfill, add constraint
+    DROP COLUMN    -> gap of one release after code stops using it
+    CREATE INDEX   -> CONCURRENTLY (no write lock)
+    expand-contract: (1) add nullable + dual-write -> (2) batch backfill
+                     -> (3) switch reads -> (4) drop old, NEXT release
+
+  feature flags have the lowest impact?  [check] OK
+  rolling has the highest impact?        [check] OK
+  worst/best ratio > 1000x?              [check] OK
+
+  [check] OK   (impact spans 4 orders of magnitude across strategies)
+
+  THE ONE IDEA: deploying code and releasing a feature are DIFFERENT
+  events. Feature flags make that explicit — you can deploy daily and
+  release on your own schedule, with a millisecond kill switch.
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

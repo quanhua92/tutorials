@@ -1,0 +1,185 @@
+========================================================================
+=== Race Condition — read-modify-write lost updates
+========================================================================
+
+  'counter += 1' is NOT one instruction. It compiles to three:
+    LOAD   register <- counter      (read shared state)
+    ADD    register <- register + 1  (compute on private copy)
+    STORE  counter   <- register     (write back)
+
+  Two threads each do counter += 1 once. counter starts at 0.
+  Expected final value: 2.
+
+  BAD interleaving (A and B both LOAD before either STOREs):
+
+  step  thread  instruction                          rA  rB  counter
+  ----  ------  ---------------------------------   ---  ---  -------
+     1       A  LOAD  rA = counter                     0    0        0
+     2       B  LOAD  rB = counter (stale!)            0    0        0
+     3       A  ADD   rA = rA + 1                      1    0        0
+     4       B  ADD   rB = rB + 1                      1    1        0
+     5       A  STORE counter = rA                     1    1        1
+     6       B  STORE counter = rB (clobbers A)        1    1        1
+
+  expected = 2   actual = 1   LOST UPDATES = 1
+  [check] OK   (interleaving demonstrably loses 1 update)
+
+  GOOD interleaving (A completes all 3 instructions before B starts):
+
+  step  thread  instruction                          rA  rB  counter
+  ----  ------  ---------------------------------   ---  ---  -------
+     1       A  LOAD  rA = counter                     0    0        0
+     2       A  ADD   rA = rA + 1                      1    0        0
+     3       A  STORE counter = rA                     1    0        1
+     4       B  LOAD  rB = counter                     1    1        1
+     5       B  ADD   rB = rB + 1                      1    2        1
+     6       B  STORE counter = rB                     1    2        2
+
+  expected = 2   actual = 2   [check] OK
+
+  --- real CPython threads, 4 threads x 50_000 increments ---
+  (read-modify-write window widened via time.sleep(0) GIL yield)
+
+   run    counter      lost     pct
+   ---    -------      ----     ---
+     1      50502    149498  74.75%
+     2      52084    147916  73.96%
+     3      50223    149777  74.89%
+     4      50056    149944  74.97%
+     5      51747    148253  74.13%
+
+  expected per run = 200000   total lost across 5 runs = 745388
+  [check] OK   (real threads lose updates without synchronization)
+
+========================================================================
+=== Mutex / Lock — mutual exclusion eliminates the race
+========================================================================
+  4 threads x 50,000 increments, guarded by threading.Lock()
+  (same widened window as Section 1, but serialized by the lock)
+  counter = 200,000 / 200,000
+  elapsed = 613 ms
+  [check] OK   (mutex -> exact count, no lost updates)
+
+  same workload WITHOUT lock: counter = 50,081   lost = 149,919
+  [check] OK   (no lock -> lost updates)
+
+========================================================================
+=== Counting Semaphore — bounded access to a resource pool
+========================================================================
+  Semaphore(3) guarding a pool of 3 slots
+  10 threads each hold a slot for 8 ms
+  peak concurrent access = 3   pool violations = 0
+  [check] OK   (counting semaphore never exceeds 3)
+
+  --- deterministic step-based simulation (10 threads arrive 1/step, hold 3 steps) ---
+  step  active   (max=3)
+  ----  ------
+     0       1
+     1       2
+     2       3
+     3       3
+     4       3
+     5       3
+     6       3
+     7       3
+     8       3
+     9       3
+    10       2
+    11       1
+  ... (3 more steps)
+  peak = 3   [check] OK   (deterministic sim also bounded)
+
+========================================================================
+=== Deadlock — circular wait in a resource allocation graph
+========================================================================
+
+  Resource allocation graph (bipartite):
+    Assignment edge:  Resource -> Thread  (resource held by thread)
+    Request edge:     Thread -> Resource  (thread waiting for resource)
+    A cycle in this graph == DEADLOCK.
+
+    T1 holds R1, wants R2     T2 holds R2, wants R1
+
+         +--- R1 <--)
+         |        |
+         v        |
+        T1 --) R2 <-+
+              |
+              v
+             T2 --) R1  (held by T1)
+
+  edges: [('R1', 'T1'), ('R2', 'T2'), ('T1', 'R2'), ('T2', 'R1')]
+  cycle detected: R1 -> T1 -> R2 -> T2 -> R1
+  [check] OK   (cycle in RAG == deadlock)
+
+  --- real threads: 2 threads, 2 locks, opposite acquisition order ---
+  T1: holds A=True, trying B... got B=False
+  T2: holds B=True, trying A... got A=False
+  both threads alive and stuck after 0.3s: True
+  [check] OK   (circular wait — both blocked forever)
+
+========================================================================
+=== Deadlock Prevention — fixed lock ordering breaks the cycle
+========================================================================
+  both threads acquire locks in the SAME order (A, then B)
+  T1 done: True   T2 done: True
+  [check] OK   (lock ordering -> no circular wait)
+  RAG with single holder: [('R1', 'T1'), ('R2', 'T1')]
+  cycle: (none)
+  [check] OK   (no cycle when one thread holds both)
+
+========================================================================
+=== Reader-Writer — many readers OR one writer (exclusive)
+========================================================================
+  8 readers + 2 writers, readers-preference RWLock
+  peak concurrent readers = 8
+  exclusivity violations  = 0
+  [check] OK   (readers overlap, writers exclusive)
+
+  --- deterministic event trace (RWLock guarantees no overlap) ---
+  step  event  active_readers  writer_active
+  ----  -----  --------------  -------------
+     0    R+1               1          False
+     1    R+2               2          False
+     2    R+3               3          False
+     3    R-1               2          False
+     4    R-2               1          False
+     5    R-3               0          False
+     6    W+1               0           True
+     7    W-1               0          False
+     8    R+4               1          False
+     9    R+5               2          False
+    10    R-4               1          False
+    11    R-5               0          False
+  peak readers = 3   violations = 0   [check] OK   (readers overlap, writer exclusive)
+
+========================================================================
+=== Dining Philosophers — deadlock by naive locking, fix by hierarchy
+========================================================================
+
+  5 philosophers sit at a round table with 5 forks.
+  Each philosopher needs BOTH adjacent forks to eat.
+  Fork i is between philosopher i and philosopher (i+1) mod 5.
+
+       P0 -- F0 -- P1 -- F1 -- P2 -- F2 -- P3 -- F3 -- P4 -- F4 -- P0
+
+  NAIVE: each picks up LEFT then RIGHT, barrier-synchronized
+    Barrier 1: all philosophers start together
+    Each picks up their LEFT fork (fork 0..4)
+    Barrier 2: ALL hold their left fork -> each tries RIGHT
+    Pi holds Fi, waits for F(i+1 mod 5)
+    -> circular wait: P0->F0, P1->F1, P2->F2, P3->F3, P4->F4
+    philosophers who ate: 0 / 5
+    all threads alive and stuck after 0.3s: True
+  [check] OK   (circular wait -> every philosopher stuck forever)
+
+  FIX: resource hierarchy — always acquire lower-numbered fork first
+    P0..P3: left(fork i) then right(fork i+1)
+    P4: right(fork 0) then left(fork 4)  <- reversed, breaks cycle
+    philosophers who ate: 100 / 100 rounds
+    per-philosopher: P0=20 P1=20 P2=20 P3=20 P4=20
+  [check] OK   (hierarchy breaks the cycle, everyone eats)
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

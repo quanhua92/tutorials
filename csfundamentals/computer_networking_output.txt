@@ -1,0 +1,133 @@
+========================================================================
+=== TCP 3-Way Handshake — SYN / SYN-ACK / ACK
+========================================================================
+  client_isn = 1000   server_isn = 5000
+
+  #   direction            flags     seq    ack   note
+  --  -------------------  --------  ----   ----  ----------------------
+  1   client -> server     SYN       1000   0    synchronize, client_isn
+  2   server -> client     SYN-ACK   5000   1001 synchronize + acknowledge
+  3   client -> server     ACK       1001   5001 finalize handshake
+
+  client final: client[ESTABLISHED] snd_nxt=1001 rcv_nxt=5001
+  server final: server[ESTABLISHED] snd_nxt=5001 rcv_nxt=1001
+
+  both endpoints ESTABLISHED, seq numbers advanced   [check] OK
+
+  --- 4-way teardown (FIN / ACK / FIN / ACK) ---
+
+  #   direction            flags     note
+  --  -------------------  --------  ----------------------
+  1   client -> server     FIN       active close (no more data)
+  2   server -> client     ACK       acknowledge client FIN
+  3   server -> client     FIN       passive close
+  4   client -> server     ACK       final ack, then 2*MSL wait
+
+  client final: client[CLOSED] snd_nxt=1002 rcv_nxt=5002
+  server final: server[CLOSED] snd_nxt=5002 rcv_nxt=1002
+  4 messages exchanged, connection gracefully closed   [check] OK
+
+========================================================================
+=== TCP Congestion Control — Reno (slow start / avoidance / fast recovery)
+========================================================================
+  initial ssthresh = 16 MSS   losses @ RTT {9: dup_ack, 16: timeout}
+
+  RTT  state                cwnd  ssthresh  event
+  ---  -------------------  ----  --------  ---------
+    1  slow_start              1        16  -
+    2  slow_start              2        16  -
+    3  slow_start              4        16  -
+    4  slow_start              8        16  -
+    5  congestion_avoidance    16        16  -
+    6  congestion_avoidance    17        16  -
+    7  congestion_avoidance    18        16  -
+    8  congestion_avoidance    19        16  -
+    9  congestion_avoidance    20        16  dup_ack
+       ^^^ dup_ack: ssthresh <- 16, cwnd <- 20
+   10  congestion_avoidance    10        10  -
+   11  congestion_avoidance    11        10  -
+   12  congestion_avoidance    12        10  -
+   13  congestion_avoidance    13        10  -
+   14  congestion_avoidance    14        10  -
+   15  congestion_avoidance    15        10  -
+   16  congestion_avoidance    16        10  timeout
+       ^^^ timeout: ssthresh <- 10, cwnd <- 16
+   17  slow_start              1         8  -
+   18  slow_start              2         8  -
+   19  slow_start              4         8  -
+   20  congestion_avoidance     8         8  -
+   21  congestion_avoidance     9         8  -
+   22  congestion_avoidance    10         8  -
+   23  congestion_avoidance    11         8  -
+   24  congestion_avoidance    12         8  -
+
+  peak cwnd       = 20 MSS
+  rounds in slow start / congestion avoidance = 7 / 17
+  cwnd sequence (start of each RTT):
+  [1, 2, 4, 8, 16, 17, 18, 19, 20, 10, 11, 12, 13, 14, 15, 16, 1, 2, 4, 8, 9, 10, 11, 12]
+
+  slow start exponential [1,2,4,8]: True
+  dup-ACK halves cwnd (20 -> 10): True
+  timeout resets cwnd to 1: True
+  [check] OK   (Reno AIMD verified)
+
+========================================================================
+=== DNS Resolution — recursive query chain (stub -> root -> TLD -> auth)
+========================================================================
+  resolving: www.example.com
+  browser cache: empty   OS cache: empty
+
+  #   querier               server                 query            result
+  --  -------------------   -------------------    --------------   -----------------------------
+  1   stub_resolver          recursive_resolver     A (recursive)   please resolve fully
+  2   recursive_resolver     root_server            NS (referral)   referral -> com. TLD servers
+  3   recursive_resolver     tld_server             NS (referral)   referral -> example.com. authoritative servers
+  4   recursive_resolver     authoritative_server   A               referral -> ns.example.com
+  5   recursive_resolver     stub_resolver          A (answer)      93.184.216.34 TTL=3600
+
+  resolved IP = 93.184.216.34   TTL = 3600s
+  resolution hops = 6
+  path: browser_cache:MISS -> os_cache:MISS -> recursive_resolver -> root_server -> tld_server -> authoritative_server
+
+  --- second lookup (answer now cached) ---
+  resolved IP = 93.184.216.34   hops = 1   path = ['browser_cache']
+
+  first  lookup: full miss, 6 hops -> 93.184.216.34
+  second lookup: cache hit, 1 hop  -> 93.184.216.34
+  [check] OK   (caching eliminates the recursive walk)
+
+========================================================================
+=== HTTP/1.1 vs HTTP/2 vs HTTP/3 — multiplexing, header compression
+========================================================================
+  fetch: 1 HTML + 12 resources (each 1 RTT to fetch)
+
+  version   transport              setup fetch total  notes
+  -------   ---------              ----- ----- -----  -----
+  HTTP/1.1  TCP + TLS 1.2              3     2     5  6 conns, HOL blocking
+  HTTP/2    TCP + TLS 1.3              2     1     3  multiplexed
+  HTTP/3    QUIC (UDP) + TLS 1.3       1     1     2  multiplexed
+
+  totals: HTTP/1.1=5 RTT, HTTP/2=3 RTT, HTTP/3=2 RTT
+  each version strictly faster than the previous: True
+  [check] OK   (HTTP/1.1 5 > HTTP/2 3 > HTTP/3 2)
+
+  --- header compression (HPACK / QPACK) ---
+  raw header size (HTTP/1.1) = 547 bytes
+  HTTP/2  HPACK              = 121 bytes  (22.1% of raw)
+  HTTP/3  QPACK              = 121 bytes  (22.1% of raw)
+  [check] OK   (compression shrinks headers)
+
+  --- feature comparison ---
+  feature                  HTTP/1.1       HTTP/2         HTTP/3        
+  ------                   -------        ------         ------        
+  transport                TCP            TCP            QUIC (UDP)    
+  multiplexing             no             yes            yes           
+  head-of-line block       per-conn       TCP-level      none          
+  header format            text           binary+HPACK   binary+QPACK  
+  server push              no             yes            no (removed)  
+  mandatory TLS            no             no (in prac.)  yes (TLS 1.3) 
+  0-RTT resume             no             no             yes           
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

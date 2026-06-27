@@ -1,0 +1,165 @@
+========================================================================
+=== Idempotency Key + Dedup Table — PENDING/DONE state machine
+========================================================================
+  Every POST carries a client-generated Idempotency-Key (UUID v4).
+  The server scopes it per tenant and atomically reserves it before
+  doing any side effect. Four outcomes are possible on reserve:
+    CREATED       -> you won the race; execute, then set DONE
+    PENDING       -> another worker is mid-flight; return 409 Conflict
+    DONE          -> return the cached response (NO re-execution)
+    HASH_MISMATCH -> same key, different body; return 422 (key reuse)
+
+  schema (row in idempotency_keys):
+    scoped_key   (PK) = {tenant}:{idempotency_key}
+    request_hash      = SHA-256(canonical(body))
+    state             = PENDING | DONE
+    response          = {status, body}  (stored when DONE)
+    expires_at        = created_at + 86400s (24h TTL)
+
+  Idempotency-Key = 9b3f1c2a-uuid-v4-key
+  request body    = {'amount': 4250, 'currency': 'USD', 'customer': 'cus_42'}
+  request_hash    = bf0d7a9898967ee1  (first 16)
+
+  Request 1 reserve -> CREATED
+    executed charge -> ch_0001  (state now DONE)
+
+  Request 2 reserve -> DONE   (same key, same body)
+    returned cached ch_0001  (NO re-execution)
+
+  Request 3 reserve -> CREATED   (first caller reserves PENDING)
+  Request 4 reserve -> PENDING   (concurrent caller, same key)
+    concurrent caller gets PENDING -> returns 409 Conflict
+
+  Request 5: key reused-key-7f3a first used with body amount=4250
+             then reused with body amount=9999 (different payload)
+    reserve -> HASH_MISMATCH -> returns 422 (one key, two bodies is a bug)
+
+  req 2 served from cache (no PSP call)?  [check] OK
+  concurrent reserve returns PENDING?     [check] OK
+  key-reuse with new body rejected?       [check] OK
+
+  PSP executions for 5 logical requests = 2
+  (req 2 returned a cached response; only 2 side effects happened)
+
+  [check] OK   (dedup table: CREATED/PENDING/DONE/HASH_MISMATCH all correct)
+
+========================================================================
+=== At-Least-Once vs Exactly-Once Delivery
+========================================================================
+  A message broker guarantees AT-LEAST-ONCE: each message may arrive
+  1+ times. Exactly-once DELIVERY is provably impossible (Two Generals
+  / FLP). The dominant production pattern is AT-LEAST-ONCE delivery +
+  an IDEMPOTENT consumer that dedups by event id = exactly-once EFFECT.
+
+  delivery log (9 deliveries, 5 unique events):
+    ['evt_001', 'evt_001', 'evt_002', 'evt_003', 'evt_003', 'evt_003', 'evt_004', 'evt_005', 'evt_005']
+
+  NAIVE consumer (no dedup):
+    effects produced = 9
+    duplicates        = 4  (evt_001, evt_003 x2, evt_005)
+    -> double email, double inventory decrement, double booking
+
+  IDEMPOTENT consumer (dedup by event id):
+    seen set          = ['evt_001', 'evt_002', 'evt_003', 'evt_004', 'evt_005']
+    effects produced  = 5
+    duplicates        = 0
+    -> exactly-once EFFECT on top of at-least-once delivery
+
+  naive consumer triple-processes evt_003?   [check] OK
+  idempotent consumer processes evt_003 once? [check] OK
+  dedup effect count == unique events?        [check] OK
+
+  SUMMARY: 9 deliveries -> naive 9 effects, idempotent 5 effects
+  (the consumer owns idempotency, NOT the broker)
+
+  [check] OK   (at-least-once + idempotent consumer == exactly-once effect)
+
+========================================================================
+=== Retry with Dedup — response dropped AFTER execution
+========================================================================
+  The hard case: the server executes the side effect, but the HTTP
+  response is lost (network partition, GC pause, timeout). The client
+  cannot tell executed-but-response-lost from never-received, so it
+  retries. WITHOUT an idempotency key every retry re-executes.
+
+  operations + retry patterns:
+    create_order       attempts = ['drop', 'drop', 'ok']
+    send_email         attempts = ['ok']
+    update_inventory   attempts = ['drop', 'ok']
+  total attempts = 6
+  backoff schedule = [0.5, 1.0, 2.0, 4.0]s (exponential, capped)
+
+  WITHOUT idempotency (every attempt that reaches the server executes):
+    attempts    = 6
+    executions  = 6   (duplicate side effects: 3)
+
+  WITH idempotency (first attempt reserves+executes; retries see DONE):
+    attempts    = 6
+    executions  = 3   (one per logical operation)
+
+  without-dedup executes every attempt?    [check] OK
+  with-dedup executes once per operation?  [check] OK
+  dedup strictly reduces executions?       [check] OK
+
+  dedup saved 3 duplicate executions across 3 operations
+
+  [check] OK   (idempotency key turns unsafe retries into safe ones)
+
+========================================================================
+=== Payment Double-Charge Prevention
+========================================================================
+  The textbook failure: a user clicks 'Pay', the PSP charges their card,
+  but the response never makes it back (timeout). The user clicks again.
+  charge = {'amount': 4250, 'currency': 'USD', 'customer': 'cus_42'}  ($42.50)
+  attempts = ['drop', 'ok']   (1st: charged, response lost; 2nd: retry)
+
+  WITHOUT Idempotency-Key (every retry charges the card again):
+    ledger = ['ch_0001:$42.50', 'ch_0002:$42.50']
+    total charged = $85.00   *** DOUBLE CHARGE ***
+
+  WITH Idempotency-Key (retry returns the cached charge):
+    ledger = ['ch_0001:$42.50']
+    total charged = $42.50   (safe)
+
+  without-dedup double-charges?  [check] OK
+  with-dedup charges exactly once? [check] OK
+  dedup saved one $42.50 charge?     [check] OK
+
+  PSP executions: without-dedup = 2, with-dedup = 1
+  customer overcharged without the key = $42.50
+
+  [check] OK   (idempotency key is the ONLY correct fix for double charge)
+
+========================================================================
+=== Request Fingerprinting — SHA-256 key-reuse detection
+========================================================================
+  The request_hash column catches a subtle bug: a client reuses an
+  idempotency key with a DIFFERENT body. Stripe returns 409/422 in this
+  case rather than silently honoring the new payload. The hash is over
+  the CANONICAL JSON (sorted keys, no whitespace) so key order and
+  spacing cannot fool it.
+
+  body A = {'amount': 4250, 'currency': 'USD', 'customer': 'cus_42'}
+  body B = {currency, amount, customer} (same values, reordered keys)
+  body C = {'amount': 9999, 'currency': 'USD', 'customer': 'cus_42'}  (amount changed 4250 -> 9999)
+
+  canonical(A) = {"amount":4250,"currency":"USD","customer":"cus_42"}
+  canonical(B) = {"amount":4250,"currency":"USD","customer":"cus_42"}
+  canonical(C) = {"amount":9999,"currency":"USD","customer":"cus_42"}
+
+  SHA-256(A) = bf0d7a9898967ee147d1077ccaa1fe83cf398dae06dbee72a63f2b97249929fd
+  SHA-256(B) = bf0d7a9898967ee147d1077ccaa1fe83cf398dae06dbee72a63f2b97249929fd
+  SHA-256(C) = e4d40c1e8f21731cdbc059668581c94f2a1d908af46d7d0dfb8b00298e7fcda5
+
+  reordered keys hash identically?       [check] OK
+  changed amount produces different hash? [check] OK
+  digest is 64 hex chars (256 bits)?     [check] OK
+
+  store: key fingerprint-demo-key used with A, then reused with C
+  reserve(C) -> HASH_MISMATCH  (422 — one key must map to one payload)
+
+  [check] OK   (canonical SHA-256 fingerprint detects key reuse)
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

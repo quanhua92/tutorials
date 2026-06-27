@@ -1,0 +1,297 @@
+========================================================================
+=== Region Topology & Latency Model — great-circle distance -> RTT
+========================================================================
+  The speed of light in fiber (~200 km/ms, 0.67c) is the HARD lower
+  bound on cross-region latency. Real paths are not straight and
+  routers add hops, so we model an effective 150 km/ms.
+  Round-trip = 2 * distance / speed. This reproduces the canonical
+  60-150ms cross-region band that every multi-region design lives with.
+
+  regions:
+    us_east       us-east-1        Virginia    (lat  38.13, lon  -77.51)
+    eu_west       eu-west-1        Ireland     (lat  53.35, lon   -6.26)
+    ap_northeast  ap-northeast-1   Tokyo       (lat  35.68, lon  139.69)
+    us_west       us-west-2        Oregon      (lat  45.84, lon -119.74)
+    ap_southeast  ap-southeast-1   Singapore   (lat   1.35, lon  103.82)
+
+  intra-region RTT = 1ms (Multi-AZ, same region)
+
+  pairwise RTT matrix (ms, symmetric):
+                 us-east-1       eu-west-1  ap-northeast-1       us-west-2  ap-southeast-1
+  us-east-1                1              74             146              47             208
+  eu-west-1               74               1             128              98             149
+  ap-northeast-1              146             128               1             106              71
+  us-west-2               47              98             106               1             177
+  ap-southeast-1              208             149              71             177               1
+
+  headline cross-region RTTs:
+    us-east-1 <-> eu-west-1          5,530 km   RTT  74ms   (transatlantic)
+    us-east-1 <-> ap-northeast-1    10,959 km   RTT 146ms   (transpacific)
+    eu-west-1 <-> ap-northeast-1     9,585 km   RTT 128ms   (europe-asia)
+    us-west-2 <-> ap-southeast-1    13,254 km   RTT 177ms   (pacific-rim (longest))
+
+  core routes in canonical 60-150ms band?  [check] OK
+  longest trans-Pacific route > 150ms?     [check] OK
+  intra-region RTT = 1ms?            [check] OK
+  RTT matrix symmetric?                   [check] OK
+
+  [check] OK   (great-circle -> RTT reproduces the 60-150ms cross-region band)
+
+  GOTCHA: Multi-AZ is NOT multi-region. Multi-AZ = same region, ~1-5ms
+  (HA within a region). Multi-region = 60-150ms (DR across region failure).
+  Confusing them is a junior mistake in a senior interview.
+  GOTCHA: great-circle is a LOWER bound. Real fiber follows coastlines
+  and political routes; expect measured RTT to exceed this by 10-30%.
+
+========================================================================
+=== Active-Passive Replication — one primary, async lag, RPO = lag
+========================================================================
+  One region (us-east-1) is PRIMARY: it accepts 100% of reads and
+  writes. The secondary (eu-west-1) is a WARM REPLICA: it receives
+  replicated data continuously but serves no production traffic.
+  Failover = promote the secondary and repoint DNS at it.
+
+  primary     = us-east-1   (100% read + write)
+  secondary   = eu-west-1   (warm replica, 0% traffic)
+  replication = ASYNC (74ms cross-region)
+  normal lag  = 5s under normal load
+  peak lag    = 60s under peak write pressure
+
+  READ-YOUR-OWN-WRITES PROBLEM (the invisible UX bug):
+    T=0   user posts a comment  -> write to PRIMARY (us-east-1)
+    T=0+ user refreshes         -> LB sends read to REPLICA (eu-west-1)
+    T=0  replica is 5s behind -> comment NOT YET THERE
+    user thinks the site is broken, posts AGAIN -> duplicate.
+
+    fix: route reads to PRIMARY for a session window after a write
+         (typically 30-60s), then return to replica reads.
+
+  RECOVERY POINT OBJECTIVE (RPO = data lost on failover):
+    normal load  lag =   5s   writes lost on failover =   5,000   (RPS x lag)
+    peak load    lag =  60s   writes lost on failover =  60,000   (RPS x lag)
+
+  -> Lag COMPOUNDS under write pressure, exactly when failure is most
+     likely. The RPO you test at 50% load is NOT the RPO at peak.
+
+  RECOVERY TIME OBJECTIVE (active-passive RTO):
+    detection   = 5s x 3 misses        = 15s
+    fencing     = revoke old primary creds    = 2s
+    promotion   = secondary -> primary        = 5s
+    DNS TTL     = client cache expiry         = 60s
+    TOTAL RTO                              ~  = 82s
+
+  normal-load RPO = 5,000 writes lost?   [check] OK
+  active-passive RTO = 82s?            [check] OK
+  peak lag > normal lag?                 [check] OK
+
+  [check] OK   (active-passive: ~minutes RTO, RPO = async lag, 2x cost)
+
+  GOTCHA: DNS failover is NOT instant. A 60s TTL means some clients
+  hit the dead primary for up to 60s AFTER the DNS change. JVM apps
+  with aggressive DNS caching can hold the stale record for minutes.
+  GOTCHA: split-brain. If the primary is SLOW (not dead) and the
+  secondary is promoted, two primaries briefly accept writes. FENCING
+  (revoke the old primary's DB creds BEFORE promotion) is mandatory.
+
+========================================================================
+=== Active-Active + Conflict Resolution — LWW (silent loss) vs CRDT
+========================================================================
+  Both regions accept writes simultaneously. Zero-RTO failover (the
+  healthy region already serves traffic) and lower write latency for
+  global users. The hard problem: if two regions write the SAME record
+  at the same time, which wins when they sync?
+
+  LAST-WRITE-WINS by wall clock (Cassandra/DynamoDB default):
+    us-east writes key 'user:42:email' = 'a@x.com'
+       true time   = 1000ms
+       us-east clock correct -> stamps wall = 1000ms
+    eu-west writes key 'user:42:email' = 'b@y.com'
+       true time   = 1010ms  (10ms LATER, causally newer)
+       eu-west clock 50ms BEHIND -> stamps wall = 960ms
+    LWW merge: max(1000, 960) = 1000
+    -> WINNER  = 'a@x.com' (us-east, OLDER)
+    -> LOSER   = 'b@y.com' (eu-west, causally NEWER)  *** SILENTLY LOST ***
+
+    The causally-newer write lost because eu-west's clock was behind.
+    This is nearly impossible to detect or debug in production. Wall
+    clocks drift across servers by tens of ms; LWW trusts them anyway.
+
+  CRDT — G-Counter (Conflict-free Replicated Data Type):
+    A grow-only counter is a vector: one slot per node. Each node only
+    ever INCREMENTS its own slot. Merge = element-wise MAX. Addition is
+    commutative + associative, so concurrent increments ALWAYS reconcile.
+
+    us-east local state = [3, 0]   (3 own increments)
+    eu-west local state = [0, 2]   (2 own increments)
+    merge = [max(3,0), max(0,2)] = [3, 2]
+    total = 5   (CORRECT: 3 + 2 = 5, no write lost)
+
+    CRDTs work for counters, sets, flags. They do NOT work for arbitrary
+    business logic ("deduct inventory only if qty > 0" has a precondition
+    and cannot be made into a CRDT).
+
+  CONFLICT-RESOLUTION STRATEGY COMPARISON:
+    strategy                  correct?    lost writes   use for
+    --------------------------------------------------------------------
+    LWW (wall clock)          NO          1 of 2        nothing that tolerates silent loss
+    CRDT (G-Counter)          YES         0             counters, sets, flags
+    geo partitioning          YES         0             any data (conflicts prevented)
+
+  LWW silently lost the causally-newer write? [check] OK
+  CRDT G-Counter merge total = 5?            [check] OK
+  CRDT merge idempotent (re-merge stable)?   [check] OK
+
+  [check] OK   (LWW loses writes; CRDT/geo-partitioning preserve them)
+
+  GOTCHA: "active-active + async + LWW" ends interviews at E5+.
+  Always specify conflict AVOIDANCE (geo partitioning) or a data type
+  that tolerates LWW (counters, session tokens).
+  GOTCHA: vector clocks fix causality tracking but concurrent writes
+  are STILL lost under LWW — they just become detectable, not avoided.
+
+========================================================================
+=== Latency-Based Routing (geoDNS) — send each user to the nearest region
+========================================================================
+  geoDNS (Route 53 latency-based routing, Cloudflare, Edgio) resolves
+  the user's DNS query to the region with the LOWEST RTT from their
+  edge, NOT the geographically closest. Compare against the naive
+  single-region hub (us-east-1).
+
+  clients: 6 population centers   hub: us-east-1
+
+  client       -> nearest region            geoDNS    -> hub (us-east)    saved
+  ----------------------------------------------------------------------
+  new_york     us-east-1                       6ms                6ms        0ms
+  los_angeles  us-west-2                      18ms               49ms       31ms
+  london       eu-west-1                       6ms               80ms       74ms
+  osaka        ap-northeast-1                  5ms              150ms      145ms
+  jakarta      ap-southeast-1                 12ms              219ms      207ms
+  sydney       ap-southeast-1                 84ms              209ms      125ms
+
+  average RTT, single-region hub  = 118.8ms
+  average RTT, geoDNS (nearest)   = 21.8ms
+  latency reduction               = 81.6%
+
+  geoDNS cuts average RTT > 70%?        [check] OK
+  geoDNS average lower than hub?        [check] OK
+  nearest-region selection deterministic? [check] OK
+
+  [check] OK   (geoDNS cuts avg client RTT by 82%)
+
+  GOTCHA: geoDNS picks lowest RTT, not fewest miles. Fiber topology
+  means a city geographically farther can have lower latency (e.g. a
+  city peered at the same IXP as the region).
+  GOTCHA: DNS TTL caps failover speed. A 60s TTL responsive enough for
+  failover adds ~60s of propagation; lower TTL raises DNS query volume.
+
+========================================================================
+=== Data Residency — GDPR requires PARTITIONING, not replication
+========================================================================
+  GDPR requires that personal data of EU residents be stored and
+  processed IN the EU (or a country with adequacy status). This is a
+  LEGAL constraint, not a performance optimization. Replicating EU
+  user data to a US region VIOLATES GDPR, even if it improves latency.
+
+  The production answer is CELL ARCHITECTURE: a self-contained stack
+  (app + DB + cache + queue) per cell, with users assigned to a cell at
+  registration. EU-cell data never leaves EU infrastructure.
+
+  user -> home-cell assignment (set at registration, immutable):
+    u_eu_001   Germany    -> eu_cell   [OK]
+    u_eu_002   France     -> eu_cell   [OK]
+    u_us_001   USA        -> us_cell   [OK]
+    u_us_002   USA        -> us_cell   [OK]
+    u_ap_001   Japan      -> ap_cell   [OK]
+
+  TRAP: "we satisfy GDPR by replicating EU data to an EU region."
+    -> WRONG. Replication COPIES data; the ORIGINAL still lives in the
+       US region, which is the violation. The data must be PARTITIONED
+       to the EU cell (born there, never leaves). Replication across
+       cells is a read-availability mechanism, not a compliance tool.
+
+  CROSS-CELL OPERATIONS (e.g. a US merchant paying an EU supplier):
+    go through an explicit cross-cell coordinator with exactly-once
+    guarantees enforced by idempotency keys. Never a direct DB link.
+
+  BLAST RADIUS (cell architecture, 10 cells, 900M users):
+    users per cell          = 90M
+    a single cell failure   = 10% of users affected
+    (vs a region failure in 2-region active-active = 100%)
+
+  all users partitioned to a compliant cell?  [check] OK
+  cell blast radius < 100% (bounded)?         [check] OK
+  replication != compliance (must partition)?  [check] OK
+
+  [check] OK   (residency = partition into compliant cells, not copy)
+
+  GOTCHA: CCPA (California), PIPL (China), and LGPD (Brazil) each add
+  their own residency rules. Design the cell boundary BEFORE choosing
+  the replication strategy.
+  GOTCHA: cell architecture multiplies operational surface area: N
+  databases, N deployments, N metric sets. Heavy automation
+  (Terraform, centralized monitoring) is a prerequisite, not optional.
+
+========================================================================
+=== Regional Failover — health checks, fencing, promotion, DNS
+========================================================================
+  us-east-1 (primary) fails at T=0. We trace the failover timeline.
+  health check every 5s; 3 consecutive misses required to declare
+  the region dead (avoids flapping on transient packet loss). Then
+  FENCE the old primary (revoke its DB creds so it cannot accept
+  writes if it recovers mid-failover = split-brain prevention), then
+  PROMOTE the secondary, then propagate DNS.
+
+  ACTIVE-PASSIVE failover timeline (secondary must be promoted):
+    T+  5s   health check #1 FAIL (5s interval)
+    T+ 10s   health check #2 FAIL (5s interval)
+    T+ 15s   health check #3 FAIL (5s interval)
+    T+ 15s   region declared DEAD (3 misses)
+    T+ 17s   FENCE: revoke old primary DB creds (2s) -- split-brain prevention
+    T+ 22s   PROMOTE eu-west-1 to primary + DNS update (5s)
+    T+22..T+ 82s   DNS TTL expiry; last clients switch (~60s)
+    -> RTO (last client switched) = 82s
+    -> user-visible outage        = 22s (detection + fence + promotion)
+
+  ACTIVE-ACTIVE failover timeline (healthy region already primary):
+    detection + fencing = 17s (same health-check logic, still must fence the dead region)
+    promotion           = 0s (ALREADY primary; no promotion step)
+    -> user-visible outage      = 17s
+       (healthy region serves traffic THROUGHOUT the failure;
+        only the dead region's in-flight requests drop)
+
+  RPO (data lost) comparison:
+    active-passive, async, normal lag = 5s   -> 5,000 writes lost
+    active-passive, async, peak lag   = 60s  -> 60,000 writes lost
+    active-active,  sync replication  = 0s   -> 0 writes lost
+       (sync adds 74ms to every write; CAP: zero RPO + zero availability during partition is impossible)
+
+  TOPOLOGY COMPARISON (the decision matrix):
+    topology                     RTO       RPO    cost    complexitySLA
+    ----------------------------------------------------------------
+    active-passive               82s        5s      2x           low   99.9%
+    active-warm                 ~77s        5s    1.5x        medium   99.99%
+    active-active               ~17s      0-5s      2x     very high   99.999%
+    cell-based                  ~17s        0s     10x       highest   99.999%
+
+  DECISION RULES:
+    RTO > 5 min acceptable, RPO > 0 OK, small team -> ACTIVE-PASSIVE
+    RTO 1-3 min, cost-sensitive, 50% standby OK     -> ACTIVE-WARM
+    RTO seconds, global users, expertise + budget   -> ACTIVE-ACTIVE
+    blast-radius isolation + residency compliance   -> CELL-BASED
+
+  active-passive full RTO = 82s?            [check] OK
+  active-active promotion = 0s?             [check] OK
+  active-active RTO < active-passive RTO?   [check] OK
+
+  [check] OK   (failover: detect + fence + promote + DNS; AA > AP)
+
+  GOTCHA: an untested failover is not a failover -- it is a hope.
+  Run chaos drills (Chaos Kong, AWS FIS) quarterly under PRODUCTION
+  load. A 2-minute staging failover can take 15 minutes in prod
+  (cold caches, slow auto-scaling, connection-pool warmup).
+  THE ONE IDEA: every multi-region tradeoff is a bet on what
+  'correct' means when two regions disagree. State it explicitly:
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

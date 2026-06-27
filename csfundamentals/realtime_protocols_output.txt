@@ -1,0 +1,277 @@
+========================================================================
+=== WebSocket — full-duplex over a single TCP connection
+========================================================================
+  The ONLY browser-native bidirectional option. The client opens
+  a normal HTTP/1.1 GET with an Upgrade: websocket header; the
+  server replies 101 Switching Protocols; from then on the TCP
+  connection carries bidirectional frames (NOT HTTP). A 2-14 byte
+  frame header per message makes it the lowest-overhead browser
+  option once the one-time handshake is paid.
+
+  one-time handshake = 800 bytes
+  per-message frame  = 6 bytes (masked client frame; range 2-14)
+  direction          = bidirectional (full-duplex)
+  steady latency     = 50ms (1 RTT, persistent)
+
+  connection lifecycle:
+    1. [client -> server] GET /ws/chat HTTP/1.1\nUpgrade: websocket\nSec-WebSocket-Key: dGhlIHNhbXBsZQ==\n...
+    2. [server -> client] HTTP/1.1 101 Switching Protocols\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+    3. [both          ] data frames (text/binary), 2-14 byte header each
+    4. [both          ] ping/pong heartbeat every 30s (detect dead TCP)
+    5. [either        ] close frame + ack (clean teardown handshake)
+
+  session (60s @ 10/s = 600 events):
+    payload          = 60,000 bytes (600 x 100B)
+    framing overhead = 4,400 bytes (handshake + 600 frames)
+    overhead ratio   = 7.3% of payload
+
+  TYPICAL USE: chat, multiplayer games, collaborative editors
+  (Figma/Google Docs cursors), live trading dashboards, WebRTC
+  signaling. Anywhere the CLIENT also sends data continuously.
+
+  WebSocket is bidirectional (full-duplex)? [check] OK
+  WebSocket has the lowest browser per-msg overhead? [check] OK
+  WebSocket steady latency = 1 RTT (persistent)? [check] OK
+
+  [check] OK   (WebSocket: full-duplex, ~6B frames, 1-RTT latency after handshake)
+
+  GOTCHA: the client->server frames are MASKED (4-byte key XOR'd
+  into the payload) to defeat proxy-cache poisoning of
+  intermediaries. Server->client frames are unmasked (2B header).
+  GOTCHA: a TCP connection can silently die (NAT timeout after
+  inactivity). Send a WebSocket ping every ~30s and drop the
+  connection if no pong returns within a timeout.
+  GOTCHA: not serverless-friendly. The gateway must be a
+  long-lived process. On serverless, use a managed service
+  (AWS API Gateway WebSocket, Ably, Pusher).
+
+========================================================================
+=== SSE (Server-Sent Events) — server-push, one-way, HTTP-native
+========================================================================
+  The server opens ONE persistent HTTP response with the MIME
+  type text/event-stream and pushes text frames down it forever.
+  The browser's EventSource API auto-reconnects on disconnect and
+  replays missed events via the Last-Event-ID header. Strictly
+  server -> client: if the client must SEND, it uses a separate
+  POST (an SSE/REST hybrid).
+
+  one-time handshake = 400 bytes
+  per-event frame    = 50 bytes (id:/event:/data: + blank line)
+  direction          = server -> client (unidirectional)
+  steady latency     = 50ms (1 RTT, persistent)
+
+  sample event frame (text/event-stream):
+    id: 42
+    event: price-tick
+    data: {"sym":"AAPL","px":178.34}   (the payload)
+    <blank line>   <- the event terminator (\\n\\n)
+
+  connection lifecycle:
+    1. [client -> server] GET /events  Accept: text/event-stream
+    2. [server -> client] HTTP/1.1 200 OK  Content-Type: text/event-stream
+    3. [server -> client] event frames streamed until disconnect, then
+    4. [client        ] EventSource auto-reconnects (retries with backoff,
+    5. [client -> server] resumes via Last-Event-ID: 42 header)
+
+  session (60s @ 10/s = 600 events):
+    payload          = 60,000 bytes
+    framing overhead = 30,400 bytes
+    overhead ratio   = 50.7% of payload
+
+  TYPICAL USE: live news/social feeds, stock tickers, token
+  streaming (ChatGPT-style LLM output), push notifications,
+  dashboards. Anything server-push-only where the client never
+  streams data back.
+
+  SSE is server -> client only?           [check] OK
+  SSE has built-in auto-reconnect (3-step lifecycle)? [check] OK
+  SSE per-msg overhead > WebSocket (text framing)? [check] OK
+
+  [check] OK   (SSE: unidirectional push, ~50B frames, auto-reconnect)
+
+  GOTCHA: under HTTP/1.1 browsers cap at 6 persistent connections
+  PER ORIGIN, and each SSE stream eats one slot. HTTP/2 multiplex-
+  ing removes this limit (many SSE streams share one TCP).
+  GOTCHA: SSE is text-only (UTF-8). Binary needs base64 (33% bloat)
+  or a separate channel.
+  GOTCHA: not serverless-friendly (long-lived response). Use a
+  managed SSE/Pub-Sub service (Ably, Pusher) on serverless.
+
+========================================================================
+=== Long Polling — request -> hold -> response (no persistent conn)
+========================================================================
+  The client issues a normal HTTP GET. Instead of answering
+  immediately, the server HOLDS the request open until either
+  (a) data is available, which it returns at once, or (b) a
+  timeout (~30s) elapses, after which it returns an empty 304 and
+  the client immediately re-GETs. Every message costs a FULL HTTP
+  handshake. Stateless, proxy-friendly, works through anything.
+
+  per-message cost   = 800 bytes (full req+resp headers; handshake repeats)
+  direction          = client -> server -> client (request/response)
+  steady latency     = 100ms (RTT + reconnect gap)
+  burst latency (10 events) = 275ms (events drain one per cycle)
+
+  connection lifecycle (repeats forever):
+    1. [client -> server] GET /poll?since=41  (hold me open)
+    2. [server        ] no data yet -> sleep (do not reply)
+    3. [server -> client] event arrives -> 200 OK with the payload
+    4. [client        ] immediately re-issue GET /poll?since=42  (repeat)
+
+  session (60s @ 10/s = 600 events):
+    payload          = 60,000 bytes
+    framing overhead = 480,000 bytes
+    overhead ratio   = 800.0% of payload  (WORST by far)
+
+  SCALE PENALTY: there is no persistent connection, so connection
+  churn is proportional to event rate. At 100,000
+  clients polling once/sec, the fleet handles ~100,000 HTTP
+  handshakes/sec (near an nginx box's limit), vs 65,000
+  idle persistent connections on a WebSocket/SSE/gRPC gateway.
+
+  TYPICAL USE: legacy fallback when WebSocket/SSE are blocked by
+  corporate proxies, low-frequency updates (<1/min), or serverless
+  platforms that cannot hold a persistent process.
+
+  long polling repeats the handshake every message? [check] OK
+  long polling has the highest per-msg overhead? [check] OK
+  long polling burst latency > WebSocket steady latency? [check] OK
+
+  [check] OK   (long polling: ~800B/msg, reconnect churn, proxy-friendly fallback)
+
+  GOTCHA: the reconnect gap means bursty traffic queues — a burst
+  of 10 events takes 275ms avg to
+  drain vs 50ms on a persistent connection.
+  WebSocket/SSE/gRPC multiplex all of them at once.
+  GOTCHA: only 6 concurrent HTTP/1.1 connections per origin, and
+  long polling occupies one continuously. Tab-heavy users stall.
+  GOTCHA: each cycle is a fresh request — no built-in event replay.
+  The client must track a cursor (since=N) and tolerate gaps.
+
+========================================================================
+=== gRPC Streaming — bidirectional over HTTP/2, Protocol Buffers
+========================================================================
+  gRPC runs on a single long-lived HTTP/2 connection and
+  multiplexes many concurrent RPCs over it. Each message is a
+  length-prefixed protobuf: 1 byte compressed-flag + 4 bytes
+  big-endian length + the binary payload. Three streaming modes
+  map to one HTTP/2 stream each: server-streaming, client-
+  streaming, and bidirectional-streaming.
+
+  one-time handshake = 100 bytes (HTTP/2 preface + SETTINGS)
+  per-message frame  = 5 bytes (1B flag + 4B length prefix)
+  direction          = bidirectional (full-duplex streams)
+  steady latency     = 50ms (1 RTT, multiplexed)
+
+  streaming modes (each is one RPC method signature):
+    server-streaming     one request  -> stream of responses    e.g. live price feed, large result set
+    client-streaming     stream of requests -> one response     e.g. upload, batch ingest, telemetry
+    bidirectional        stream <-> stream (both send anytime)  e.g. chat, sub-pub, interactive control plane
+
+  connection lifecycle (one HTTP/2 conn serves ALL RPCs):
+    1. [client -> server] HTTP/2 connection preface + SETTINGS (one-time)
+    2. [both          ] HEADERS frame: :path + :method + grpc encoding
+    3. [both          ] DATA frames: 5B length-prefix + protobuf payload
+    4. [server -> client] trailers: grpc-status (0 = OK) / GOAWAY teardown
+
+  session (60s @ 10/s = 600 events):
+    payload          = 60,000 bytes
+    framing overhead = 3,100 bytes
+    overhead ratio   = 5.2% of payload  (LOWEST)
+
+  TYPICAL USE: microservice-to-microservice streaming (service
+  mesh, control plane, observability pipelines), polyglot backends
+  with a shared .proto contract. The inter-service winner.
+
+  gRPC has the lowest session overhead of all four? [check] OK
+  gRPC is bidirectional (bidi streaming)? [check] OK
+  gRPC message prefix = 5 bytes (1B flag + 4B length)? [check] OK
+
+  [check] OK   (gRPC: ~5B/msg, HTTP/2 multiplexed, inter-service standard)
+
+  GOTCHA: NOT browser-native. Browsers cannot speak HTTP/2 trailers
+  or the gRPC framing; you need grpc-web + an Envoy proxy, or a
+  REST/Connect-JSON gateway. For browser-to-server realtime, use
+  WebSocket or SSE instead.
+  GOTCHA: protobuf is a strict schema. Adding a field is forward/
+  backward-compatible, but changing a field TYPE or number is
+  breaking. Evolve the contract carefully.
+  GOTCHA: HTTP/2 multiplexing means one slow stream can head-of-
+  line-block others on the same TCP connection under packet loss
+  (the problem WebTransport/QUIC was designed to solve).
+
+========================================================================
+=== Comparison — latency, overhead, scalability, decision tree
+========================================================================
+  The same 60-second, 10-events/sec session replayed under all
+  four protocols. The differences collapse to four axes: direction,
+  per-message overhead, steady/burst latency, and how the
+  connection is held. The session overhead ratio spans two orders
+  of magnitude between the best (gRPC) and worst (long polling).
+
+  traffic model: 600 events, 100B payload each = 60,000B useful
+
+  protocol      direction                  handshake  per/msg    session   ratio   lat  burst
+  -------------------------------------------------------------------------------------------
+  WebSocket     bidirectional (full-duplex)       800        6      4,400    7.3%   50ms    50ms
+  SSE           server -> client (unidirectional)       400       50     30,400   50.7%   50ms    50ms
+  Long Polling  client -> server -> client (request/response)       800      800    480,000  800.0%  100ms   275ms
+  gRPC Stream   bidirectional (full-duplex streams)       100        5      3,100    5.2%   50ms    50ms
+
+  LOWEST overhead = gRPC Stream   3,100 bytes (5.2% of payload)
+  HIGHEST overhead= Long Polling  480,000 bytes (800.0% of payload)
+  ratio           = 155x  (highest / lowest session overhead)
+
+  BURST LATENCY (10 events in one burst, average delivery):
+    WebSocket        50ms
+    SSE              50ms
+    Long Polling    275ms  <- queues one per cycle
+    gRPC Stream      50ms
+
+  DECISION TREE (pick the protocol by requirements):
+    browser + client also streams (chat/game/cursors)  -> WEBSOCKET
+    browser + server-push only (feeds/tokens/notifs)   -> SSE
+    browser + restricted proxy / serverless / legacy   -> LONG POLLING
+    microservice <-> microservice (typed, streaming)   -> GRPC
+    need sub-10ms + packet-loss tolerance (2025+)      -> WEBTRANSPORT
+
+  SCALABILITY (persistent connections per gateway):
+    ~65,000 concurrent TCP conns/server (default Linux,
+       tunable to ~1,000,000)
+    Discord: ~7,500,000 WebSocket conns across
+       ~160 gateway servers (with Redis/Kafka fan-out)
+    Slack: >1,000,000,000 WebSocket messages/day
+    long polling: 100,000 clients x 1 poll/s =
+       ~100,000 HTTP handshakes/sec (connection churn)
+
+  RECONNECTION STORM (gateway crash -> all clients reconnect):
+    exponential backoff with jitter spreads the thundering herd.
+    delay = min(base * 2^attempt + jitter(0..1s), 8000ms)
+    base = 100ms, deterministic backoff schedule:
+      attempt 0: backoff =   100ms   cumulative =    100ms
+      attempt 1: backoff =   200ms   cumulative =    300ms
+      attempt 2: backoff =   400ms   cumulative =    700ms
+      attempt 3: backoff =   800ms   cumulative =   1500ms
+      attempt 4: backoff =  1600ms   cumulative =   3100ms
+      attempt 5: backoff =  3200ms   cumulative =   6300ms
+      attempt 6: backoff =  6400ms   cumulative =  12700ms
+      attempt 7: backoff =  8000ms   cumulative =  20700ms
+    SSE has BUILT-IN retry (EventSource retry: field + Last-Event-ID);
+    WebSocket/gRPC require client-side backoff implementation.
+
+  gRPC has the lowest session overhead?     [check] OK
+  long polling has the highest overhead?    [check] OK
+  worst/best session-overhead ratio > 100x? [check] OK
+  backoff schedule 100ms -> 8000ms cap?  [check] OK
+
+  [check] OK   (overhead spans ~155x across protocols)
+
+  THE ONE IDEA: pick the protocol by DIRECTION and FREQUENCY first.
+  Bidirectional and high-frequency -> WebSocket (browser) or gRPC
+  (service). Server-push-only -> SSE. Restricted or serverless ->
+  long polling. Everything else is optimization of overhead that
+  only matters once you have chosen the right directionality.
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

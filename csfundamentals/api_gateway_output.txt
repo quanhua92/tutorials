@@ -1,0 +1,179 @@
+========================================================================
+=== Section 1 — Path-Based Request Routing
+===     longest-prefix match -> backend service
+========================================================================
+  ROUTING TABLE (sorted by specificity)
+    prefix               service        host               auth  grpc
+    /api/products/*      catalog-svc    10.0.2.10:8082     yes   no
+    /api/orders/*        orders-svc     10.0.3.10:8083     yes   no
+    /api/public/*        static-svc     10.0.9.10:8089     no    no
+    /api/users/*         users-svc      10.0.1.10:8081     yes   yes
+    /health              gateway-self   127.0.0.1:9000     no    no
+
+  RESOLUTION
+    /api/users/123           -> users-svc (10.0.1.10:8081)
+    /api/users/123/orders    -> users-svc (10.0.1.10:8081)
+    /api/products/sku-77     -> catalog-svc (10.0.2.10:8082)
+    /api/public/landing      -> static-svc (10.0.9.10:8089)
+    /health                  -> gateway-self (127.0.0.1:9000)
+    /api/unknown/x           -> 404 No matching route
+
+  longest-prefix wins (/api/users/* beats /api/*)? [check] OK
+  unmatched path returns None (-> 404)? [check] OK
+
+  [check] OK   (path-based routing with longest-prefix match)
+========================================================================
+=== Section 2 — Middleware Chain
+===     auth -> rate limit -> logging -> routing
+========================================================================
+  chain order: strip_headers -> auth -> rate_limit -> logging -> routing
+  rate limit : 5 req / 60s per (tenant,user,service)
+
+  REQUEST A — valid authed request (note injected X-User-Id attack):
+    GET /api/users/123  Authorization: Bearer tok_alice
+    [strip_headers] removed client ['X-User-Id']
+    [auth        ] verified user:alice
+    [rate_limit  ] key=acme:user:alice:users remaining=5 allow
+    [logging     ] trace_id=trace_0001 emit access log
+    [routing     ] -> users-svc (10.0.1.10:8081)
+    -> 200  body={'user_id': '123', 'name': 'user-123', 'tenant': 'acme'}
+  X-User-Id 'hacker-injected' stripped (not echoed)? [check] OK
+
+  REQUEST B — missing Authorization (short-circuit at auth):
+    [auth        ] missing/unknown token
+    -> 401  {'error': 'unauthorized'}
+  stopped at auth with 401 (chain did not reach routing)? [check] OK
+
+  REQUEST C — expired token (short-circuit at auth):
+    [auth        ] token expired (exp=1699999999)
+    -> 401  {'error': 'token expired'}
+  expired token rejected at auth (401)? [check] OK
+
+  REQUEST D — burst of 8 from one user (limit=5):
+    statuses = [200, 200, 200, 200, 200, 429, 429, 429]
+    allowed=5  denied(429)=3
+  exactly 5 allowed then 429s? [check] OK
+
+  REQUEST E — public route (skips auth + rate limit):
+    [auth        ] public route, skipped
+    [rate_limit  ] skipped (public)
+    [logging     ] trace_id=trace_0001 emit access log
+    [routing     ] -> static-svc (10.0.9.10:8089)
+    -> 200  {'asset': '/api/public/landing', 'cached': True}
+  public route skipped auth and returned 200? [check] OK
+
+  ACCESS LOG (last entry)
+    1700000000 GET /api/users/123 -> 200 trace=trace_0001
+
+  [check] OK   (middleware chain: short-circuit + header stripping + rate gate)
+========================================================================
+=== Section 3 — Protocol Translation (HTTP/REST -> gRPC)
+========================================================================
+  The gateway speaks HTTP to clients and gRPC to backends.
+  google.api.http annotations map verbs + path templates to RPC methods.
+
+  GET     /api/users/123
+    -> gRPC: users.UserService/GetUser
+       msg : {'user_id': '123'}
+
+  GET     /api/users
+    -> gRPC: users.UserService/ListUsers
+       msg : {'page_size': '20', 'page_token': 'abc'}
+
+  POST    /api/users
+    -> gRPC: users.UserService/CreateUser
+       msg : {'name': 'Dana', 'email': 'dana@x.io'}
+
+  DELETE  /api/users/456
+    -> gRPC: users.UserService/DeleteUser
+       msg : {'user_id': '456'}
+
+  GET     /api/products/sku-9
+    -> gRPC: catalog.ProductService/GetProduct
+       msg : {'product_id': 'sku-9'}
+
+  gRPC -> HTTP response translation:
+    grpc code=0 (OK) message={'user_id': '123', 'name': 'user-123'}
+    -> HTTP 200 body={'user_id': '123', 'name': 'user-123'}
+
+  gRPC NOT_FOUND(5) -> HTTP 404? [check] OK
+  GET /api/users/123 -> users.UserService/GetUser? [check] OK
+  query params mapped to proto fields (limit->page_size)? [check] OK
+  POST body passed through as the gRPC message? [check] OK
+
+  [check] OK   (HTTP<->gRPC translation: verbs, path params, body, codes)
+========================================================================
+=== Section 4 — Response Caching (hashed key + TTL)
+========================================================================
+  cache TTL = 30s    key = sha256(method#path#query)[:16]
+  GET responses cached; mutating verbs (POST/PUT/DELETE) bypass + invalidate
+
+  WARM-UP SEQUENCE (4 identical GETs at t=FIXED_NOW):
+    req #1  MISS  key=cec4d309f9ea93a7  body={'sku': '42', 'price': 4299, 'stock': 120}
+    req #2  HIT   key=cec4d309f9ea93a7  body={'sku': '42', 'price': 4299, 'stock': 120}
+    req #3  HIT   key=cec4d309f9ea93a7  body={'sku': '42', 'price': 4299, 'stock': 120}
+    req #4  HIT   key=cec4d309f9ea93a7  body={'sku': '42', 'price': 4299, 'stock': 120}
+    hits=3  misses=1
+  warm-up gave 3 hits / 1 miss? [check] OK
+
+  EXPIRY (same request at t=FIXED_NOW+TTL+1 -> MISS):
+    MISS  key=cec4d309f9ea93a7  (entry expired, re-fetched)
+
+  QUERY VARIANCE changes the key (different canonical query):
+    ?a=1&b=2  key=19b14f1fefcbea71
+    ?b=2&a=1  key=19b14f1fefcbea71  (reordered -> identical key)
+    ?a=1      key=620be29df035984b  (different query -> different key)
+
+  GOLD cache key for GET /api/products/42 (empty query):
+    raw  = 'GET#/api/products/42#'
+    key  = cec4d309f9ea93a7
+
+  summary: hits=3 misses=2 evictions=1 hit_rate=60.0%
+  reordered query yields identical key? [check] OK
+  different query yields different key? [check] OK
+
+  [check] OK   (TTL cache: hit/miss/evict, canonical keyed, deterministic)
+========================================================================
+=== Section 5 — Circuit Breaker
+===     CLOSED -> OPEN -> HALF_OPEN -> CLOSED
+========================================================================
+  failure_threshold = 5   cooldown = 30s
+
+  PHASE 1 — trip the breaker with a failure burst:
+    failure #1  -> state=CLOSED
+    failure #2  -> state=CLOSED
+    failure #3  -> state=CLOSED
+    failure #4  -> state=CLOSED
+    failure #5  -> state=OPEN
+  OPEN after 5 consecutive failures? [check] OK
+
+  PHASE 2 — OPEN fast-fails (no backend call) until cooldown elapses:
+    allow(t+5s)  -> False  (fast-fail 503, no backend hit)
+  OPEN rejects within cooldown? [check] OK
+
+  PHASE 3 — after cooldown, HALF_OPEN lets ONE probe through:
+    allow(t+30s) -> True  state=HALF_OPEN
+  half-open admits exactly one probe? [check] OK
+  second probe in HALF_OPEN blocked? [check] OK
+
+  PHASE 4 — probe SUCCEEDS -> back to CLOSED:
+    on_success  -> state=CLOSED  failures=0
+  successful probe closes the circuit? [check] OK
+
+  PHASE 5 — probe FAILS -> straight back to OPEN:
+    probe fail  -> state=OPEN
+  failed probe reopens immediately? [check] OK
+
+  STATE HISTORY:
+    t=1700000000  [OPEN     ] 5 failures -> OPEN
+    t=1700000005  [OPEN     ] OPEN: fast-fail (503)
+    t=1700000030  [HALF_OPEN] cooldown elapsed -> HALF_OPEN (probe)
+    t=1700000030  [HALF_OPEN] HALF_OPEN: probe already in flight
+    t=1700000030  [CLOSED   ] probe succeeded -> CLOSED
+    t=1700000031  [OPEN     ] probe failed -> OPEN
+
+  [check] OK   (circuit breaker protects a failing downstream)
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

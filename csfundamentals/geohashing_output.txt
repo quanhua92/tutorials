@@ -1,0 +1,159 @@
+geohashing.py - reference simulation.
+All numbers below feed GEOHASHING.md.
+python stdlib only; deterministic; no network, no clock.
+
+
+========================================================================
+  SECTION A: encoding - interleave lat/lng bits, then base32
+========================================================================
+Every bit halves ONE axis: longitude bits occupy even positions
+(bit 0,2,4,...), latitude bits the odd ones. After 5 bits we have
+one of 32 boxes -> one BASE32 char. Repeating gives N nested boxes.
+
+Worked example: encode(42.6, -5.6) at precision 5.
+
+  pos  axis   bit   | char
+  ---  -----  ----  | ----
+    0  lng       0   
+    1  lat       1   
+    2  lng       1   
+    3  lat       0   
+    4  lng       1   -> 'e'
+    5  lat       1   
+    6  lng       1   
+    7  lat       1   
+    8  lng       1   
+    9  lat       1   -> 'z'
+   10  lng       1   
+   11  lat       1   
+   12  lng       0   
+   13  lat       0   
+   14  lng       0   -> 's'
+   15  lat       0   
+   16  lng       0   
+   17  lat       1   
+   18  lng       0   
+   19  lat       0   -> '4'
+   20  lng       0   
+   21  lat       0   
+   22  lng       0   
+   23  lat       1   
+   24  lng       0   -> '2'
+
+  bitstream = 0110111111110000010000010
+  grouped   = 01101 11111 11000 00100 00010
+
+  encode(42.6, -5.6, 5) = 'ezs42'
+  [check] matches the canonical geohash.org / Wikipedia example 'ezs42'?  OK
+
+Read it: the first char 'e' = bits 01101, which already pins the
+point to a 5000 km box. Each later char subdivides the previous box
+into 32. 'ezs42' is a ~5 km box near the Spain coast.
+
+========================================================================
+  SECTION B: decoding - a geohash names a CELL, not a point
+========================================================================
+decode('ezs42') unwinds the bits back into lat/lng bounds:
+
+  lng range = [-5.62500, -5.58105]   width  = 0.04395 deg
+  lat range = [42.58301, 42.62695]   height = 0.04395 deg
+  centre    = (lat 42.60498, lng -5.60303)
+
+Every point inside this box encodes to 'ezs42'. decode returns the
+BOX; the centre is just the canonical representative point.
+
+[check] original point (42.6, -5.6) inside decode('ezs42') box?  OK
+[check] re-encode(centre) == 'ezs42'?  got 'ezs42'  ->  OK
+
+========================================================================
+  SECTION C: precision vs cell size - each char cuts area to 1/32
+========================================================================
+longitude bits = ceil(5p/2), latitude bits = floor(5p/2) because
+the FIRST bit is longitude. So odd precisions are SQUARE-ish and
+even precisions are twice as wide as tall. Each added character
+multiplies area by exactly 1/32 (2^5 finer boxes).
+
+  prec  lat bits lng bits    lat span   lng span             cell (km)   area (km^2)  what it pins
+  ----  ------- -------  ---------- ----------  --------------------  ------------  --------------
+     1        2       3         45        45  5009.40 x 5009.40 km     2.509e+07  continent
+     2        5       5      5.625     11.25   626.17 x 1252.35 km     7.842e+05  country
+     3        7       8     1.4062    1.4062    156.54 x 156.54 km     2.451e+04  state
+     4       10      10    0.17578   0.35156      19.57 x 39.14 km         765.8  metro region
+     5       12      13   0.043945  0.043945        4.89 x 4.89 km         23.93  neighbourhood
+     6       15      15  0.0054932  0.010986      611.5 x 1223.0 m        0.7479  city block
+     7       17      18  0.0013733 0.0013733       152.9 x 152.9 m       0.02337  street
+     8       20      20  0.00017166 0.00034332         19.1 x 38.2 m     0.0007303  building
+     9       22      23  4.2915e-05 4.2915e-05           4.8 x 4.8 m     2.282e-05  footprint
+    10       25      25  5.3644e-06 1.0729e-05           0.6 x 1.2 m     7.132e-07  
+    11       27      28  1.3411e-06 1.3411e-06           0.1 x 0.1 m     2.229e-08  
+    12       30      30  1.6764e-07 3.3528e-07           0.0 x 0.0 m     6.965e-10  
+
+[check] precision 6 cell ~= 0.611 km x 1.223 km (Yelp's default for local search)
+[check] precision 8 cell ~= 19.1 m x 38.2 m (delivery-pin level)
+[check] p5 area / p6 area = 32.00x (== 32, invariant 3)
+[check] 9-cell query at p6 covers ~1.83 km x 3.67 km
+
+========================================================================
+  SECTION D: neighbour cells - the 9-cell query
+========================================================================
+San Francisco (37.7749, -122.4194) at precision 5 -> '9q8yy'
+
+The 3x3 grid of centre + 8 neighbours (the cells a proximity query
+MUST read to be correct at boundaries):
+
+    9q8zj   9q8zn   9q8zp
+    9q8yv   9q8yy   9q8yz
+    9q8yt   9q8yw   9q8yx
+
+[check] 9 cells are all DISTINCT?  True  (9 unique)
+[check] shortest shared prefix centre<->neighbour = 3 chars (precision 5).
+        -> a neighbour diverges at char 4, so `LIKE '9q8y%'` would MISS it.
+        -> this is the Z-order discontinuity: adjacency does NOT
+           imply a long shared prefix. Hence 9 explicit cells.
+
+So `WHERE geohash5 IN (?,?,?,  ?, centre, ?,  ?,?,?)` with these 9
+strings is a correct proximity filter at ~p6 cell scale. One SQL
+range/IN scan, no Haversine on the full table.
+
+========================================================================
+  SECTION E: prefix matching, and why the 9-cell fix is mandatory
+========================================================================
+Two points ~1 cm apart, straddling the edge between a cell and its
+east neighbour:
+
+  centre cell '9q8yy', east neighbour '9q8yz'
+  shared edge longitude = -122.3876953
+  point W (just inside centre): (37.770996, -122.3876954) -> '9q8yyu'
+  point E (just inside east)  : (37.770996, -122.3876952) -> '9q8yzh'
+
+  shared prefix length = 4 chars (precision is 6)
+
+[check] point E lands in the east neighbour '9q8yz'?  OK
+[check] a prefix query on '9q8yyu' would MISS point E?  OK - boundary problem
+
+This is the Z-order boundary problem: adjacent points can have a
+geohash that diverges at the LAST character. The mandatory fix is to
+query centre + 8 neighbours (9 cells) and let Haversine refine. SQL:
+  WHERE geohash6 IN (centre, n, s, e, w, ne, nw, se, sw)
+For a radius > 2x the cell size, enumerate every intersecting cell
+
+========================================================================
+  GOLD CHECK: encode/decode/neighbours match pinned ground truth
+========================================================================
+[check] encode(42.6, -5.6, 5) = 'ezs42'  (expect 'ezs42')  ->  OK
+[check] encode(37.7749, -122.4194, 5) = '9q8yy'  (expect '9q8yy')  ->  OK
+[check] decode('9q8yy') cell contains SF (37.7749, -122.4194)?  OK
+[check] neighbours('9q8yy') -> 9 DISTINCT cells?  True
+        grid = ['9q8zj', '9q8zn', '9q8zp', '9q8yv', '9q8yy', '9q8yz', '9q8yt', '9q8yw', '9q8yx']
+[check] precision-6 cell = 0.611 x 1.223 km (expect ~0.61 x 1.22)?  OK
+
+[pin] encode(42.6,-5.6,5)      = 'ezs42'
+[pin] encode(37.7749,-122.4194,5) = '9q8yy'
+[pin] neighbours('9q8yy') east  = '9q8yz'
+[pin] precision-6 cell km       = 0.611 x 1.223
+
+[check] all gold pins reproduced:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

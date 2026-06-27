@@ -1,0 +1,203 @@
+========================================================================
+=== OAuth 2.0 Authorization Code + PKCE
+===     client -> auth server -> resource server
+========================================================================
+  ACTORS
+    Resource Owner : user:alice
+    Client         : app-client-001
+    Auth Server    : https://auth.example.com
+    Resource Server: https://api.example.com
+
+  Step 1 — Client -> Authorization Server (browser redirect):
+    GET /authorize?response_type=code
+      &client_id=app-client-001
+      &redirect_uri=https://app.example.com/callback
+      &scope=profile+email
+      &code_challenge=UlmB1zwDcf5pUkdZ3xsL0u29k2t7qIT0wASTsF6hfx4
+      &code_challenge_method=S256
+      &state=xyz123csrf
+
+  Step 2 — Resource Owner authenticates + grants consent
+           (Auth Server verifies credentials, shows consent screen)
+
+  Step 3 — Auth Server -> Client (302 redirect with code):
+    Location: https://app.example.com/callback?code=auth_code_001&state=xyz123csrf
+    [auth code is short-lived (~600s), one-time use]
+
+  Step 4 — Client -> Auth Server (back-channel token request):
+    POST /token
+      grant_type=authorization_code
+      code=auth_code_001
+      redirect_uri=https://app.example.com/callback
+      client_id=app-client-001
+      code_verifier=aB3dE6fH9jK2mN5pQ8sT0uV3wX6yZ1aB4cD7eF0gH3iJ6kL9mN2oP5qR8sT0
+
+  Step 5 — Auth Server validates PKCE + code, issues tokens:
+    PKCE check: SHA256(code_verifier) == stored challenge
+      recomputed  = UlmB1zwDcf5pUkdZ3xsL0u29k2t7qIT0wASTsF6hfx4
+      stored      = UlmB1zwDcf5pUkdZ3xsL0u29k2t7qIT0wASTsF6hfx4
+      match?        True
+    access_token  = eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJqdGlfMDAyIiwic2NvcGUiOiJwcm9maWxlIGVtYWlsIiwic3ViIjoidXNlcjphbGljZSJ9.xi3NEv4ZFs76uzStQBgWrixGDv-MU7Sw-1WILJiVo0w
+    refresh_token = rt_003
+    expires_in    = 900s (15 min)
+    scope         = profile email
+
+  Step 6 — Client -> Resource Server (API call with Bearer token):
+    GET /api/profile
+      Authorization: Bearer eyJhbGciOiJIUzI1NiIsImtpZCI6Imtl...
+
+  Step 7 — Resource Server validates JWT locally (no DB hit):
+    -> verify signature (HS256)
+    -> verify exp > now (1700000900 > 1700000000)
+    -> verify aud == https://api.example.com
+    -> verify scope contains 'profile'
+    RESPONSE: {'user': 'user:alice', 'resource': 'user profile', 'ok': True}
+
+  Replay check: re-using auth code rejected? [check] OK
+  PKCE check: stolen code + wrong verifier rejected? [check] OK
+
+  [check] OK   (authorization code + PKCE flow complete)
+
+========================================================================
+=== JWT Structure — header.payload.signature
+========================================================================
+  header   = {'alg': 'HS256', 'typ': 'JWT', 'kid': 'key-1'}
+    b64url = eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0
+
+  payload  = {'iss': 'https://auth.example.com', 'sub': 'user:alice', 'aud': 'https://api.example.com', 'role': 'admin', 'scope': 'profile email', 'iat': 1700000000, 'exp': 1700000900, 'jti': 'jti_abc123'}
+    b64url = eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJqdGlfYWJjMTIzIiwicm9sZSI6ImFkbWluIiwic2NvcGUiOiJwcm9maWxlIGVtYWlsIiwic3ViIjoidXNlcjphbGljZSJ9
+
+  signing_input = base64url(header) + '.' + base64url(payload)
+  signature     = HMAC-SHA256(signing_input, secret)
+    sig         = Zku2IAWQ_2saGNApqxbGe9OK1h8D-JnbJN3_vzBM9TU
+
+  JWT = eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJqdGlfYWJjMTIzIiwicm9sZSI6ImFkbWluIiwic2NvcGUiOiJwcm9maWxlIGVtYWlsIiwic3ViIjoidXNlcjphbGljZSJ9.Zku2IAWQ_2saGNApqxbGe9OK1h8D-JnbJN3_vzBM9TU
+
+  --- decode + verify ---
+  decoded header  = {'alg': 'HS256', 'kid': 'key-1', 'typ': 'JWT'}
+  decoded payload = {'aud': 'https://api.example.com', 'exp': 1700000900, 'iat': 1700000000, 'iss': 'https://auth.example.com', 'jti': 'jti_abc123', 'role': 'admin', 'scope': 'profile email', 'sub': 'user:alice'}
+
+  structure: 3 dot-separated parts? [check] OK
+  signature verifies + claims intact? [check] OK
+
+  Tamper test: flip 'admin'->'super' in payload (no re-sign):
+    signature now invalid, rejected? [check] OK
+
+  Claim reference:
+    iss  = issuer (who minted the token)
+    sub  = subject (the user id)
+    aud  = audience (intended recipient service)
+    exp  = expiry (epoch seconds) — ALWAYS validate
+    iat  = issued-at
+    jti  = unique token id (for replay/blocklist)
+    scope= space-delimited permissions
+
+  [check] OK   (JWT build/decode/tamper all behave correctly)
+
+========================================================================
+=== Refresh Token Rotation + Reuse Detection
+========================================================================
+  Rotation: every refresh mints a NEW token; old one is marked 'used'.
+  Reuse detection: a 'used' token appearing again => theft => revoke
+  the whole family (chain of tokens from the original login).
+
+  Step 1 — login issues refresh token:
+    issued rt_001
+
+  Step 2 — client uses rt_001 to refresh -> server rotates:
+    state after rotation:
+        rt_001  family=rt_001      status=used      parent=None
+        rt_003  family=rt_001      status=active    parent=rt_001
+    rt_001 used, rt_003 active? [check] OK
+
+  Step 3 — client uses rt_002 to refresh -> server rotates again:
+    state after 2nd rotation:
+        rt_001  family=rt_001      status=used      parent=None
+        rt_003  family=rt_001      status=used      parent=rt_001
+        rt_005  family=rt_001      status=active    parent=rt_003
+    family chain rt_001 -> rt_002 -> rt_003 intact? [check] OK
+
+  Step 4 — ATTACK: thief replays the already-used rt_001:
+           (legit client still holds rt_003; both used rt_001's value)
+    -> REUSE DETECTED on rt_001; family rt_001 revoked
+
+    state after reuse detected (entire family revoked):
+        rt_001  family=rt_001      status=revoked   parent=None
+        rt_003  family=rt_001      status=revoked   parent=rt_001
+        rt_005  family=rt_001      status=revoked   parent=rt_003
+    every token in family rt_001 now 'revoked'? [check] OK
+
+  Step 5 — the STILL-VALID rt_003 is now dead too (forced re-login):
+    rt_003 rejected (family revoked)? [check] OK
+
+  [check] OK   (rotation + reuse detection force full re-auth on theft)
+
+========================================================================
+=== Session vs Token (stateful vs stateless)
+========================================================================
+  SESSION-BASED (server holds state; cookie carries an opaque id)
+    session_id = sess_a1b2c3d4e5f6  (~32 byte opaque cookie value)
+    server store entry = {'user': 'user:alice', 'role': 'admin', 'created_at': 1700000000, 'ttl': 900}
+    store lookups over 5 requests = 5  (one per request)
+    revocation = delete the key -> instant, global
+    after delete, request returns empty? [check] OK
+
+  TOKEN-BASED (JWT; client holds signed claims; server is stateless)
+    JWT = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJ0b2tfMDAxIiwicm9sZSI6ImFkbWluIiwic3ViIjoidXNlcjphbGljZSJ9.0xF_tHNtoUzdRv6MfVNU2cIqCBHqNOh2_PikpHgEUOg
+    size = 281 bytes (claims travel with the client)
+    store lookups over 5 requests = 0  (zero — stateless)
+    blocklist 'tok_001' -> token now denied? [check] OK
+
+  COMPARISON
+    property                 session              jwt
+    --------                 -------              ---
+    server state             yes (Redis/DB)       no (stateless)
+    per-request lookup       1 store hit          0 (local verify)
+    revoke instantly         yes (delete)         no (TTL/blocklist)
+    payload size             ~32 B (opaque id)    281 B (claims)
+    scales across services   shared store         any service verifies
+    logout everywhere        trivial              hard (hybrid needed)
+
+  Production answer: HYBRID — JWT for cross-service identity,
+  plus a central session record for global logout / revocation.
+
+  [check] OK   (session=stateful+easy-revoke, token=stateless+hard-revoke)
+
+========================================================================
+=== MFA Flow — TOTP (RFC 6238, time-based one-time password)
+========================================================================
+  ENROLLMENT (user registers an authenticator app)
+    shared secret (base32) = MNZWM5LOMRQW2ZLOORQWY4ZNORXXI4BNONSWG4TFOQWTEMBSGQ
+    otpauth URL = otpauth://totp/App:user:alice?secret=MNZWM5LOMRQW2ZLOORQWY4ZNORXXI4BNONSWG4TFOQWTEMBSGQ
+                  &issuer=App&algorithm=SHA1&digits=6&period=30
+
+  CHALLENGE at login (after password check passes)
+    now (epoch)    = 1700000000
+    time step      = 30s
+    TOTP counter   = 1700000000 // 30 = 56666666
+    previous code  = 789826  (t-30s)
+    current  code  = 624452  (t)
+    next     code  = 110075  (t+30s)
+
+  VERIFY
+    correct code accepted?                [check] OK
+    previous-step code accepted (window)? [check] OK
+    wrong code rejected?                  [check] OK
+
+  FULL LOGIN SEQUENCE (password + TOTP -> tokens)
+    1. password verified (Argon2id, constant-time compare)
+    2. MFA challenge issued; user submits 624452
+    3. TOTP verified -> issue access + refresh tokens
+       access_token  = eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJqdGlfMDAxIiwic2NvcGUiOiJwcm9maWxlIGVtYWlsIiwic3ViIjoidXNlcjphbGljZSJ9.9SfQaN9mYbzV06ouu9Lw6I_4etwgw_RIJiMrRZCz0bs
+       refresh_token = rt_002
+    4. login complete; MFA raised the bar against credential theft
+
+  [check] OK   (TOTP enroll/challenge/verify + login gating complete)
+
+  NOTE: TOTP is strong vs DB breaches but WEAK vs phishing
+        (real-time relay). WebAuthn/passkeys are phishing-resistant
+        by design (domain binding) — preferred MFA for 2024+.
+
+========================================================================
+ALL CHECKS PASSED
+========================================================================

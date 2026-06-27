@@ -1,0 +1,187 @@
+========================================================================
+=== OWASP API Security Top 10 — vulnerable vs hardened endpoints
+========================================================================
+  The 2023 edition is the current API-specific standard. The five
+  simulations below show the attack, then the fix, for the highest-
+  impact risks (API1, API2, API3, API4, API5).
+
+  API1 — Broken Object Level Authorization (BOLA)  [#1 risk]
+    Attack:  user:alice calls GET /api/documents/doc_002
+             (changes the id to reach Bob's document)
+    VULNERABLE endpoint -> returns Bob's doc? [check] OK (leak!)
+    HARDENED   endpoint -> ownership check blocks? [check] OK
+    Fix: ALWAYS check resource.owner == current_user on every data
+         access; centralize in middleware; use UUIDs (still check).
+
+  API2 — Broken Authentication
+    Attack: credential stuffing / brute force with no lockout.
+    VULNERABLE: 4 guesses, no lockout -> cracked? [check] OK (cracked!)
+             attempts recorded = 4 (no ceiling)
+    HARDENED: lockout after 5 fails -> real password rejected? [check] OK
+    Fix: lockout after N fails, MFA, constant-time compare, short TTL.
+
+  API3 — Broken Object Property Level Authorization (BOPLA)
+    Attack: GET /api/me returns the whole user object verbatim.
+    VULNERABLE: returns 6 fields incl. secrets? [check] OK (leak!)
+             leaked = ['api_key', 'email', 'id', 'is_admin', 'password_hash', 'role']
+    HARDENED:   whitelist -> returns ['email', 'id', 'role']? [check] OK
+    Fix: explicit response whitelist; additionalProperties:false;
+         never serialize internal fields (hashes, keys, flags).
+
+  API4 — Unrestricted Resource Consumption
+    Attack: unlimited requests -> unbounded cost (critical for LLM
+             APIs: no prompt-size limit = unbounded token spend).
+    Fix: rate limiting + input-size caps + per-user cost budgets.
+    (Full simulation + 429 handling in Section 5 — Rate Limiting.)
+
+  API5 — Broken Function Level Authorization (BFLA)
+    Attack: regular user POSTs to /api/admin/promote with role hint.
+    VULNERABLE: trusts client-supplied role -> admin granted? [check] OK (escalation!)
+    HARDENED:   server-side session role check -> denied? [check] OK
+    Fix: deny-by-default; role from the session, not the request;
+         separate admin paths; per-endpoint permission matrix.
+
+  [check] OK   (OWASP API1/2/3/5 attacks reproduced + hardened)
+
+  NOTE: API7 (SSRF) and API10 (unsafe consumption of 3rd-party APIs)
+        are especially dangerous for LLM backends with tool-use /
+        function-calling: an agent fetching attacker-supplied URLs
+        is server-side request forgery by construction.
+
+========================================================================
+=== JWT Validation — signature, expiry, claims, alg confusion
+========================================================================
+  reference token = eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2FwaS5leGFtcGxlLmNvbSIsImV4cCI6MTcwMDAwMDkwMCwiaWF0IjoxNzAwMDAwMDAwLCJpc3MiOiJodHRwczovL2F1dGguZXhhbXBsZS5jb20iLCJqdGkiOiJqdGlfc2VjXzAwMSIsInJvbGUiOiJ2aWV3ZXIiLCJzY29wZSI6InJlYWQ6ZG9jdW1lbnRzIiwic3ViIjoidXNlcjphbGljZSJ9.ZYqvmeYJR_4z3H9cIvckA_gaX2cVL0XD9dabEpmwqg8
+
+  1. STRUCTURE + SIGNATURE
+    valid token                                    [check] OK
+    tampered payload (viewer->admin, no re-sign)   [check] REJECTED (bad signature)
+
+  2. EXPIRY (exp)
+    expired token (exp < now)                      [check] REJECTED (expired)
+
+  3. CLAIMS (iss / aud)
+    wrong audience (confused deputy)               [check] REJECTED (bad audience (confused deputy))
+    wrong issuer                                   [check] REJECTED (bad issuer)
+
+  4. ALGORITHM CONFUSION (CVE-2016-10555)
+     Attack: set alg='none' (or HS256 using the RSA public key as
+     the HMAC secret). If the verifier trusts the alg header, the
+     forged token passes. Defense: hardcode allowed_algs.
+     forged 'alg:none' token rejected by default? [check] OK
+     naive verifier that trusted 'none' -> forge passes? [check] OK (vulnerable!)
+     Fix: hardcode algorithms=['HS256'] (or ['RS256']); NEVER trust
+          the alg header. This is THE classic JWT pitfall.
+
+  [check] OK   (signature/exp/claims/alg-confusion all enforced)
+
+  Validation checklist (EVERY request):
+    [ ] signature (constant-time, key from JWK set matched by kid)
+    [ ] alg is in a hardcoded allowlist (never from the header)
+    [ ] exp > now
+    [ ] nbf <= now (if present)
+    [ ] iss == trusted issuer
+    [ ] aud == THIS service (confused-deputy defense)
+    [ ] jti not in revocation set (for high-value ops)
+
+========================================================================
+=== Input Sanitization — SQLi, XSS, mass assignment
+========================================================================
+  3.1 SQL INJECTION
+    malicious input = "alice@example.com' OR '1'='1"
+    VULNERABLE (string concat):
+      SELECT id, email FROM users WHERE email = 'alice@example.com' OR '1'='1'
+      -> tautology appended? [check] OK (injectable!)
+    SAFE (parameterized):
+      SELECT id, email FROM users WHERE email = %s
+      params = ("alice@example.com' OR '1'='1",)
+      -> input is data, not code?  [check] OK
+
+  3.2 XSS (stored / reflected)
+    raw input    = <script>alert("steal-session")</script>
+    escaped      = &lt;script&gt;alert(&quot;steal-session&quot;)&lt;/script&gt;
+    raw contains <script>?      [check] OK (XSS!)
+    escaped neutralizes tag?    [check] OK
+    Layers: output-escape (html.escape), CSP header,
+            HttpOnly+SameSite cookies, input allowlist validation.
+
+  3.3 MASS ASSIGNMENT (API3 root cause)
+    Attacker POSTs extra fields the server never intended to accept.
+    VULNERABLE: is_admin persisted?  [check] OK (escalated!)
+    SAFE:       whitelist = ['content', 'title', 'visibility']? [check] OK
+    Fix: explicit input whitelist (Pydantic model /
+         additionalProperties:false); never bind raw request body.
+
+  [check] OK   (SQLi/XSS/mass-assignment all demonstrated + defended)
+
+========================================================================
+=== CORS Policy Enforcement — origin allowlist + credentials rule
+========================================================================
+  allowed origins = ['https://admin.example.com', 'https://app.example.com']
+  CORS is NOT a security feature: it relaxes the same-origin policy.
+  The browser enforces it; curl / mobile apps ignore it entirely.
+
+    legit SPA, cookies     origin=https://app.example.com
+      -> 200  ACAO=https://app.example.com  creds=True  [ALLOWED]
+      legit origin reflected exactly? [check] OK
+    preflight legit        origin=https://app.example.com
+      -> 204  ACAO=https://app.example.com  creds=True  [ALLOWED]
+      preflight answers methods?      [check] OK
+    evil origin            origin=https://evil.example.com
+      -> 403  ACAO=(none)  creds=False  [BLOCKED]
+      evil origin blocked, no reflect? [check] OK
+    reflected-Origin bug   origin=https://evil.example.com
+      -> 403  ACAO=(none)  creds=True  [BLOCKED]
+
+  Rules:
+    1. NEVER 'Access-Control-Allow-Origin: *' + Allow-Credentials: true
+       (browsers reject it; a proxy that strips+reflects is the bug).
+    2. NEVER reflect the Origin header without an allowlist check.
+    3. Reflect the EXACT allowed origin, not a pattern, not '*'.
+    4. Enumerate only the methods/headers you actually need.
+    5. JWT in Authorization header -> CSRF-proof; no cookies needed.
+
+  [check] OK   (CORS allowlist + credentials rule enforced)
+
+========================================================================
+=== Rate Limiting — token bucket, sliding window, 429 handling
+========================================================================
+  5.1 TOKEN BUCKET (burst up to capacity, then steady refill)
+     capacity=10, refill=1 token/sec
+     15 concurrent requests at t=1700000000:
+       allowed = 10  (drained the bucket to 0)
+       denied  = 5  (bucket empty -> 429)
+     burst capped at capacity? [check] OK
+
+     after 10s the bucket refills (1 token/s -> 10 tokens):
+       next 10 requests at t=1700000000+10: allowed=10
+       refill to capacity?       [check] OK
+
+  5.2 SLIDING WINDOW COUNTER (no 2x burst at window boundary)
+     limit=100/min, window=60s
+     100 req filled window t=1700000000.
+     At t+61s (1s into next window):
+       fixed-window (naive) would allow = 100
+       sliding-window counter allows    = 35
+       2x-boundary burst prevented?     [check] OK
+
+  5.3 429 RESPONSE (server) + BACKOFF (client)
+     server returns 429 with Retry-After: 60
+     server returns X-RateLimit-Remaining: 0
+     client backoff (s) = [2, 4, 8, 16, 32]
+     Rule: NEVER retry immediately; honor Retry-After; exponential
+     backoff with jitter; cap at 60s; circuit-break on repeat 429.
+
+  [check] OK   (token bucket + sliding window + 429 backoff complete)
+
+  Per-dimension keys (defense in depth):
+    rl:ip:{ip}:{endpoint}        anonymous public API
+    rl:user:{uid}:{endpoint}     authenticated fair-usage
+    rl:tenant:{tid}:{endpoint}   multi-tenant SaaS ceiling
+    rl:global:{endpoint}         hard service-wide ceiling
+  Distributed: Redis + atomic Lua script (single INCR across all pods).
+
+========================================================================
+ALL CHECKS PASSED
+elapsed: 0.3 ms
+========================================================================

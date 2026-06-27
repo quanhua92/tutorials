@@ -1,0 +1,436 @@
+<!doctype html>
+<!--
+  react_state_hooks.html — Phase 3 react bundle #3.
+  GROUND TRUTH: a single-file React 19 playground proving useState + the re-render
+  model end-to-end. Companion: REACT_STATE_HOOKS.md (guide). Rendered-ground-truth: NO .js.
+
+  The lesson: a component's local variables DON'T survive a re-render and changing
+  one NEVER asks React to paint again. useState fixes both: it gives the component
+  a piece of PRIVATE MEMORY that persists across renders, and the setter it returns
+  TELLS React "re-render me with this new value" (it does NOT mutate the variable in
+  place). Clicking a button calls setCount(...); React schedules a re-render; the new
+  render returns a fresh JSX snapshot with the new count; React paints that snapshot.
+
+  This file reuses the EXACT React-19-via-CDN mechanism of react_via_cdn.html:
+    1. React 19.2.7 (esm.sh, ?dev)         — runtime: useState, createElement, version
+    2. react-dom@19.2.7/client (esm.sh)     — createRoot (the React 19 mount API)
+    3. Babel Standalone 8.0.3 (jsDelivr)    — compiles JSX into React.createElement(...)
+  React 19 dropped UMD builds, so we import() the ESM and assign it to window.
+  Babel 8 defaults to the 'automatic' runtime (jsx-runtime imports), which can't
+  resolve inside eval — so we force {runtime:'classic'} -> React.createElement.
+
+  HOW THE GOLD-CHECK STAYS HONEST + `just check` STAYS GREEN:
+    The repo's `just check` extracts EVERY inline script element and runs
+    `node --check` on the concatenation. JSX is NOT valid plain JS, so we NEVER put
+    JSX in a script element. Instead the JSX lives in a textarea (RCDATA keeps the
+    tags literal; .value returns the exact source) and we compile it at runtime with
+    Babel.transform(). The ONLY inline script element is therefore valid classic JS:
+      - dynamic import() of React 19 ESM   (import() is legal in classic scripts)
+      - compile/render runner
+      - the gold-check                      (real DOM assertions after real clicks)
+    All pass `node --check`. The JSX never lives in a script element.
+
+  GOLD VALUE (the falsifiable anchor): after compile + createRoot().render(<Counter/>),
+  React renders a Counter whose count starts at 0. The gold-check then PROGRAMMATICALLY
+  CLICKS the "+1" button 5 times (dispatches 5 real click events) and asserts the
+  RENDERED count text === "5". This proves the re-render model end-to-end:
+  each click -> setCount(c => c+1) -> React re-renders -> the live DOM count updates.
+  It then clicks the "+3" (functional x3) button ONCE and asserts count === "8",
+  proving the functional updater: three queued setCount(c=>c+1) calls => +3 (a direct
+  setCount(count+1) written three times would only yield +1, because state is a snapshot).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>State &amp; Hooks (useState) — frontend bundle</title>
+
+  <!-- ============================================================
+       (3 of 3) BABEL STANDALONE — compiles JSX -> React.createElement.
+       A normal classic script element in head: defines the global `Babel`,
+       with Babel.transform(code, {presets:[['react',{runtime:'classic'}]]}).
+       Pinned @8.0.3 (same pin as react_via_cdn). Verified jsDelivr HTTP 200.
+  ============================================================ -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- the house CHROME only (dark palette, indigo #6366f1). NOT the lesson. -->
+  <style>
+    :root {
+      --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#6366f1; --accent-soft:#312e81; --line:#30363d;
+      --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px; font-weight:700;
+      border:1px solid currentColor; max-width:760px; }
+    main { padding:22px; max-width:1000px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    h3 { font-size:13px; color:var(--ink); margin:14px 0 6px; }
+    .note { color:var(--muted); font-size:13px; margin-top:6px; }
+    p.note:first-child, .panel > .note:first-child { margin-top:0; }
+    code { background:rgba(99,102,241,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin-top:8px; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    .num { color:var(--accent); }
+    .stage { border:1px dashed var(--accent); padding:18px; border-radius:8px; background:#0b0f14; }
+    .step { color:var(--accent); font-weight:700; }
+    .loop { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-top:6px; }
+    .loop .arr { color:var(--muted); }
+
+    /* the editable JSX source — styled to look like a code panel */
+    .codearea { width:100%; min-height:230px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink); font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+
+    /* React renders into #root; style whatever it produces so it reads as a card */
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted); font-size:13px; }
+    #root .card { font-family: ui-sans-serif, system-ui, sans-serif;
+      background:linear-gradient(135deg,#312e81,#4338ca); border:1px solid #6366f1;
+      border-radius:10px; padding:18px 20px; color:#fff; max-width:380px; }
+    #root .card h1 { margin:0 0 10px; font-size:24px; }
+    #root .card h1 [data-count] { color:#fde68a; font-variant-numeric:tabular-nums; }
+    #root .card .sub { margin:0 0 14px; font-size:13px; opacity:.9; }
+    #root .card button { background:#fff; color:#4338ca; border:0; border-radius:6px;
+      padding:7px 12px; font:inherit; font-weight:700; cursor:pointer; margin:4px 6px 0 0; font-size:12.5px; }
+    #root .card button:hover { background:#e0e7ff; }
+
+    .pillbtn { background:var(--accent); color:#fff; border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    .read { color:var(--muted); font-size:12.5px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>useState &amp; the re-render model</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/react/REACT_STATE_HOOKS.md">guide (.md)</a>
+      <a href="../index.html">← all frontend</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>State: a component's private memory</h2>
+      <div class="note" style="margin-top:0">
+        A plain local variable fails two ways: it is <b>reset on every render</b>, and
+        mutating it <b>never asks React to paint</b>. <code>useState</code> fixes both. It
+        returns a pair <code>[value, setValue]</code>: <code>value</code> is React's
+        memory for this component instance (it survives re-renders), and
+        <code>setValue</code> <b>tells React "re-render me with this new value"</b> — it
+        does NOT mutate the variable in place. The render loop:
+        <span class="step">render</span> <span class="arr">&rarr;</span>
+        <span class="step">user clicks</span> <span class="arr">&rarr;</span>
+        <span class="step">setX(next)</span> <span class="arr">&rarr;</span>
+        <span class="step">React re-renders</span> <span class="arr">&rarr;</span>
+        <span class="step">fresh JSX snapshot</span> <span class="arr">&rarr;</span>
+        <span class="step">paint</span>.
+      </div>
+      <table>
+        <tr><th>piece</th><th>role</th><th>what it does</th></tr>
+        <tr>
+          <td><code>useState(0)</code></td>
+          <td>declare state</td>
+          <td>gives this instance a memory slot; first render returns <code>0</code></td>
+        </tr>
+        <tr>
+          <td><code>count</code> (1st of the pair)</td>
+          <td>the snapshot</td>
+          <td>the value <i>for this render</i>; it never changes mid-render, even after <code>setCount</code></td>
+        </tr>
+        <tr>
+          <td><code>setCount</code> (2nd of the pair)</td>
+          <td>request a re-render</td>
+          <td>queues a new value; React re-renders and hands the <i>next</i> render the new value</td>
+        </tr>
+        <tr>
+          <td><code>setCount(c =&gt; c+1)</code></td>
+          <td>functional update</td>
+          <td>computes from the <b>pending</b> state; safe to call several times in one handler (they queue up)</td>
+        </tr>
+      </table>
+      <p class="note">
+        React 19.2.7 (esm.sh) + Babel classic — the same CDN setup as
+        <a href="https://github.com/quanhua92/tutorials/blob/main/frontend/react/react_via_cdn.html" style="color:var(--accent)">react_via_cdn</a>.
+        Edit the JSX below and hit <b>compile &amp; render</b>.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>1 · the Counter you write (edit me)</h2>
+      <!--
+        The JSX source lives in a textarea, NOT a text/babel script element.
+        RCDATA keeps <Counter/> literal; .value returns the exact JSX. This keeps
+        the repo's `just check` green: the only script element is valid plain JS.
+      -->
+      <textarea id="jsx-source" class="codearea" spellcheck="false">function Counter() {
+  const [count, setCount] = React.useState(0);
+  const [on, setOn] = React.useState(false);
+
+  return (
+    <div className="card">
+      <h1>Count: <span data-count>{count}</span></h1>
+      <p className="sub" data-toggle>Toggle is <b>{on ? 'ON' : 'OFF'}</b></p>
+
+      {/* functional update: safe to fire several times in one handler */}
+      <button data-testid="inc" onClick={() => setCount(c => c + 1)}>
+        +1  (functional)
+      </button>
+
+      <button data-testid="inc3" onClick={() => {
+        setCount(c => c + 1);
+        setCount(c => c + 1);
+        setCount(c => c + 1);
+      }}>
+        +3  (functional x3 = +3)
+      </button>
+
+      {/* a SECOND, independent piece of state */}
+      <button data-testid="toggle" onClick={() => setOn(o => !o)}>
+        flip toggle
+      </button>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<Counter/>);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <section class="panel">
+      <h2>2 · Babel compiles JSX into an element tree</h2>
+      <p class="note" style="margin-top:0">
+        <code>&lt;Counter/&gt;</code> becomes <code>React.createElement(Counter)</code> — a
+        plain object describing the node. React walks that tree and produces real DOM.
+        Each <code>setCount</code>/<code>setOn</code> asks React to call
+        <code>Counter</code> again and paint a new snapshot.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:var(--muted)">// (hit “compile &amp; render” to see Babel’s output here)</span></pre>
+    </section>
+
+    <section class="panel">
+      <h2>3 · live React state (the re-render model, proven)</h2>
+      <p class="note" style="margin-top:0">
+        Click the buttons in the card — that is live React state. The <b>gold-check</b>
+        proves it end-to-end: it programmatically clicks <code>+1</code> <b>5</b> times
+        (real <code>click()</code> events) and asserts the rendered count is <code>"5"</code>;
+        then it clicks <code>+3</code> once and asserts <code>"8"</code>. The number you see
+        below IS the gold value — it changed because React re-rendered on each click.
+      </p>
+      <div class="stage">
+        <div id="root"></div>
+      </div>
+      <p class="read">
+        rendered count: <span class="num" id="count-read">—</span>
+        &nbsp;·&nbsp; toggle: <span class="num" id="toggle-read">—</span>
+        &nbsp;·&nbsp; gold clicks: 5 × <code>+1</code>, then 1 × <code>+3</code> → expect count <code>8</code>
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>intent → pattern (the cheat sheet, live)</h2>
+      <table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>add 1 from the previous value</td>
+          <td><code>setCount(c =&gt; c + 1)</code></td>
+          <td>functional update uses the <b>pending</b> state; survives batching</td>
+        </tr>
+        <tr>
+          <td>set to a brand-new value</td>
+          <td><code>setName('Robin')</code></td>
+          <td>next value doesn't depend on the old one</td>
+        </tr>
+        <tr>
+          <td>flip a boolean (toggle)</td>
+          <td><code>setOn(o =&gt; !o)</code></td>
+          <td>negate the pending value</td>
+        </tr>
+        <tr>
+          <td>reset to initial</td>
+          <td><code>setCount(0)</code></td>
+          <td>or remount with a new <code>key</code> to wipe all state at once</td>
+        </tr>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (the ONLY inline JS — all valid classic JS)
+    //  `node --check` passes: import() is legal in classic scripts, the rest is
+    //  plain DOM. The JSX is never in a script element; it is read from #jsx-source.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var toggleRead  = document.getElementById("toggle-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- gold scenario (pinned) ---------------------------------------
+      // N real click() events on the +1 button, then ONE click on the +3 button.
+      var N_CLICKS = 5;       // 5 x setCount(c => c+1)
+      var EXPECT_AFTER_PLUS1 = "5";   // count starts at 0
+      var EXPECT_AFTER_PLUS3 = "8";   // then +3 (functional x3) => 8
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) -> expose globals ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;          // runtime: createElement, useState, version
+        window.createRoot = mods[1].createRoot;  // React 19 mount API
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile the JSX from the <textarea> and run it -------------
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();                    // fresh mount each compile
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);                       // indirect eval = global scope
+          runGoldCheck();                            // click N times, assert the DOM
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK (click N times, assert rendered count) ----------
+      // React + Babel load ASYNC, so we poll via rAF before ever reporting FAIL.
+      var MAX_FRAMES = 160;
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render the Counter…");
+        waitForRender(0);
+      }
+
+      // wait until the +1 button exists in the DOM (React has mounted Counter)
+      function waitForRender(frame) {
+        var inc = root.querySelector('[data-testid="inc"]');
+        if (inc) { clickPlusOne(inc); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForRender(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the Counter in time");
+      }
+
+      // dispatch N real click events on the +1 button, then assert count === "5"
+      function clickPlusOne(inc) {
+        for (var i = 0; i < N_CLICKS; i++) inc.click();
+        pollCount(EXPECT_AFTER_PLUS1, 0, function () {
+          // then one click on the +3 (functional x3) button => count === "8"
+          var inc3 = root.querySelector('[data-testid="inc3"]');
+          if (!inc3) { failGoldCheck("+3 button not found"); return; }
+          inc3.click();
+          pollCount(EXPECT_AFTER_PLUS3, 0, passGoldCheck);
+        });
+      }
+
+      // poll the rendered [data-count] text until it equals `expect` (or timeout)
+      function pollCount(expect, frame, done) {
+        readLive();
+        var el = root.querySelector("[data-count]");
+        var txt = el ? el.textContent : "";
+        if (txt === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollCount(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("after clicks, expected count '" + expect + "' but DOM shows '" + txt + "'");
+      }
+
+      function readLive() {
+        var c = root.querySelector("[data-count]");
+        var t = root.querySelector("[data-toggle]");
+        countRead.textContent  = c ? c.textContent : "—";
+        toggleRead.textContent = t ? (t.textContent || "").replace(/^Toggle is\s*/, "") : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent =
+          "[check] " + N_CLICKS + "× click +1 → count \"" + EXPECT_AFTER_PLUS1 +
+          "\", then +3 → \"" + EXPECT_AFTER_PLUS3 + "\": OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up the playground ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      // keep the live readouts fresh while the user clicks the card by hand
+      setInterval(readLive, 250);
+
+      // ---- boot: once React + Babel are ready, render + run the gold-check ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+# frontend/Justfile — the canonical run/check/sweep interface.
+# Bundles live in phase subfolders (foundations/, tailwind/, react/,
+# metaframeworks/, astro/, tanstack-start/). The existing tanstack-{query,router}/
+# are old walkthroughs and are EXCLUDED from the sweep.
+
+# scan only the concept-bundle phase subfolders
+phases := "foundations tailwind react metaframeworks astro tanstack-start"
+
+# locate a bundle's directory by stem (e.g. `just check box_model`)
+[private]
+find-dir stem:
+  @for d in {{phases}}; do \
+    [ -f "$d/{{stem}}.html" ] && { echo "$d"; exit 0; }; \
+  done; echo "NOTFOUND"; exit 1
+
+# open a bundle's .html in the default browser
+open stem:
+  #!/usr/bin/env bash
+  dir="$(just --justfile '{{justfile()}}' find-dir {{stem}})"
+  [ "$dir" = "NOTFOUND" ] && { echo "no bundle '{{stem}}'"; exit 1; }
+  echo "opening $dir/{{stem}}.html"
+  {{ if os() == "macos" { "open" } else { "xdg-open" } }} "$dir/{{stem}}.html"
+
+# run the .js (if present) and capture output
+out stem:
+  #!/usr/bin/env bash
+  dir="$(just --justfile '{{justfile()}}' find-dir {{stem}})"
+  [ "$dir" = "NOTFOUND" ] && { echo "no bundle '{{stem}}'"; exit 1; }
+  if [ -f "$dir/{{stem}}.js" ]; then \
+    node "$dir/{{stem}}.js" > "$dir/{{stem}}_output.txt" 2>/dev/null && echo "captured $dir/{{stem}}_output.txt"; \
+  else echo "no .js for {{stem}} (rendered-ground-truth only)"; fi
+
+# verify ONE bundle: .js runs clean (if present) + .html <script> is valid JS + gold-check present
+check stem:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  dir="$(just --justfile '{{justfile()}}' find-dir {{stem}})"
+  if [ "$dir" = "NOTFOUND" ]; then echo "no bundle '{{stem}}'"; exit 1; fi
+  echo "===== {{stem}} ($dir) ====="
+  ok=1
+  # 1. .js runs clean (if present)
+  if [ -f "$dir/{{stem}}.js" ]; then \
+    node "$dir/{{stem}}.js" > /tmp/{{stem}}.out 2>/tmp/{{stem}}.err && echo "  js: ran" || { echo "  js: FAILED"; cat /tmp/{{stem}}.err; ok=0; }; \
+    grep -c "\[check\]" /tmp/{{stem}}.out | xargs -I{} echo "  checks printed: {}"; \
+    test -s "$dir/{{stem}}_output.txt" && echo "  output.txt: present" || { echo "  output.txt: MISSING"; ok=0; }; \
+  else echo "  js: none (rendered-ground-truth)"; fi
+  # 2. .html <script> is syntactically valid JS
+  if [ -f "$dir/{{stem}}.html" ]; then \
+    python3 -c "import re,sys; h=open('$dir/{{stem}}.html').read(); \
+      s=re.findall(r'<script[^>]*>(.*?)</script>', h, re.S); \
+      open('/tmp/{{stem}}.html.js','w').write('\n'.join(s)) if s else sys.exit('no script')" \
+      && node --check /tmp/{{stem}}.html.js && echo "  html JS: OK" || { echo "  html JS: FAIL"; ok=0; }; \
+    grep -q "\[check" "$dir/{{stem}}.html" && echo "  gold-check: present" || { echo "  gold-check: MISSING"; ok=0; }; \
+  else echo "  html: MISSING"; ok=0; fi
+  [ "$ok" = "1" ] && echo "  -> {{stem}}: OK" || { echo "  -> {{stem}}: FAIL"; exit 1; }
+
+# verify EVERY bundle across all phase subfolders
+sweep:
+  #!/usr/bin/env bash
+  set +e
+  total=0; failed=0
+  for d in {{phases}}; do
+    [ -d "$d" ] || continue
+    for html in "$d"/*.html; do
+      [ -f "$html" ] || continue
+      stem=$(basename "$html" .html)
+      total=$((total+1))
+      if ! just --justfile '{{justfile()}}' check "$stem" > /tmp/sweep_$$ 2>&1; then
+        cat /tmp/sweep_$$; failed=$((failed+1)); fi
+    done
+  done
+  echo "----- sweep: $((total-failed))/$total bundles OK -----"
+  [ "$failed" = "0" ] || exit 1
+
+# list every bundle stem
+list:
+  @for d in {{phases}}; do [ -d "$d" ] || continue; \
+    for f in "$d"/*.html; do [ -f "$f" ] || continue; \
+    echo "$d/$(basename "$f" .html)"; done; done

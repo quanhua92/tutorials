@@ -1,0 +1,160 @@
+data_pipelines.py - reference simulation.
+All numbers below feed DATA_PIPELINES.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: ETL -- extract, transform, load
+========================================================================
+Raw events from the source:
+  {'id': 1, 'user': 'alice', 'amount': '120.5', 'currency': 'usd', 'ts': '2026-01-01'}
+  {'id': 2, 'user': 'bob', 'amount': '-5', 'currency': 'usd', 'ts': '2026-01-01'}
+  {'id': 3, 'user': 'alice', 'amount': '30', 'currency': 'eur', 'ts': '2026-01-02'}
+  {'id': 4, 'user': 'carol', 'amount': '200', 'currency': 'usd', 'ts': '2026-01-02'}
+  {'id': 5, 'user': 'bob', 'amount': 'not-a-number', 'currency': 'usd', 'ts': '2026-01-03'}
+  {'id': 6, 'user': 'carol', 'amount': '50', 'currency': 'eur', 'ts': '2026-01-03'}
+
+Extract pulled 6 raw records.
+Transform produced 4 valid + 2 quarantined:
+
+  valid (loaded to warehouse):
+    id=1  user=alice amount_usd=120.5   (usd)
+    id=3  user=alice amount_usd=33.0    (eur)
+    id=4  user=carol amount_usd=200.0   (usd)
+    id=6  user=carol amount_usd=55.0    (eur)
+  quarantined (data-quality rejects):
+    id=2  user=bob   ERROR: amount negative: -5.0
+    id=5  user=bob   ERROR: amount not numeric: 'not-a-number'
+
+Transform rules applied:
+  1. amount must parse to a non-negative float
+  2. currency must be in the FX table {usd:1.0, eur:1.10}
+  3. amount_usd = amount * FX[currency]  (normalization)
+
+Load wrote 4 rows to the curated 'payments' table.
+[check] ETL produced 4 valid + 2 quarantined (id 2 negative, id 5 non-numeric)?  OK
+
+========================================================================
+  SECTION B: DAG orchestration -- topological order + fan-out
+========================================================================
+Pipeline DAG (task: [upstream deps]):
+
+  extract_orders     <- -
+  extract_customers  <- -
+  stg_orders         <- ['extract_orders']
+  stg_customers      <- ['extract_customers']
+  fct_revenue        <- ['stg_orders']
+  dim_customer       <- ['stg_customers', 'stg_orders']
+  mrr_daily          <- ['fct_revenue', 'dim_customer']
+
+Topological order, GROUPED BY LEVEL (each level runs in parallel):
+
+  level 0: ['extract_customers', 'extract_orders']   (parallel fan-out)
+  level 1: ['stg_customers', 'stg_orders']   (parallel fan-out)
+  level 2: ['dim_customer', 'fct_revenue']   (parallel fan-out)
+  level 3: ['mrr_daily']   (single)
+
+Critical path (longest dependency chain):
+  extract_orders -> stg_orders -> fct_revenue -> mrr_daily
+  (4 hops -- this bounds the minimum wall-clock time of the DAG)
+
+Cycle check: {'a':['b'],'b':['a']} -> topo order = REJECTED (cycle)
+  (orchestrator REFUSES a cyclic graph -- pipelines must be acyclic)
+
+GOLD (pinned for data_pipelines.html):
+  topo levels = [['extract_customers', 'extract_orders'], ['stg_customers', 'stg_orders'], ['dim_customer', 'fct_revenue'], ['mrr_daily']]
+[check] DAG has 4 levels and mrr_daily runs last?  OK
+
+========================================================================
+  SECTION C: Backpressure -- slow consumer throttles the producer
+========================================================================
+Bounded buffer capacity = 3 ; consumer drains 1/tick ; producer pushes up to 3+1/tick.
+
+  tick | buffer | produced | drained | stalls (backpressure)
+  -----+--------+----------+---------+------------------------
+  0    | 2      | 3        | 1       | 
+  1    | 2      | 1        | 1       | 
+  2    | 2      | 1        | 1       | 
+  3    | 2      | 1        | 1       | 
+  4    | 2      | 1        | 1       | 
+  5    | 2      | 1        | 1       | 
+  6    | 2      | 1        | 1       | 
+  7    | 2      | 1        | 1       | 
+  8    | 1      | 0        | 1       | 
+  9    | 0      | 0        | 1       | 
+
+Producer accepted 10 events over 10 ticks with 7 stall ticks.
+
+WHY IT MATTERS: without a bound, a 100k-eps producer feeding a 1k-eps
+consumer would buffer 99k events/sec in RAM -> OOM. Backpressure makes
+the producer WAIT so memory stays bounded (the buffer size, not the
+arrival rate, bounds in-flight data). Kafka expresses this as
+consumer.pause(); Spark as rate-limiting; reactive streams as
+request(n) upstream demand signaling.
+
+GOLD (pinned for data_pipelines.html):
+  backpressure stalls = 7 (cap 3, rate 1)
+[check] producer stalled at least once under load?  OK
+
+========================================================================
+  SECTION D: Delivery semantics -- at-most / at-least / exactly-once
+========================================================================
+5 input events (ids 1..5). A transient crash is injected at ids [2, 4]; the consumer retries them.
+
+  mode          | delivered | sink writes | duplicates | lost
+  --------------+-----------+--------------+------------+-----
+  at-most-once  | 3         | 3            | 0          | 2
+  at-least-once | 5         | 7            | 2          | 0
+  exactly-once  | 5         | 5            | 0          | 0
+
+WHAT EACH ROW PROVES:
+  at-most-once  : ack-before-process -> the crashed records (2,4) are
+                  LOST on the crash. No duplicate, but data is missing.
+  at-least-once : process-then-commit. The crashed records (2,4) are
+                  retried and WRITTEN AGAIN -> 2 duplicates in the sink.
+  exactly-once  : idempotent sink (dedupe by event id) + atomic
+                  offset commit. Retries rewrite the SAME key -> 0
+                  duplicates AND 0 losses.
+
+GOLD (pinned for data_pipelines.html):
+  exactly-once: delivered=[1, 2, 3, 4, 5], sink_writes=5, duplicates=0
+[check] exactly-once yields 0 duplicates + 0 losses (vs the others)?  OK
+
+========================================================================
+  SECTION E: Batch vs streaming -- the latency/throughput tradeoff
+========================================================================
+8 events arrive (1 per tick). Compare processing styles.
+
+  setup=2 ticks (per-batch OR per-record fixed cost), proc=1 tick/record.
+
+  metric            batch (size 4)     streaming
+  ----------------------------------------------
+  batches/run                    2             8
+  throughput                 0.667         0.333
+  avg latency                 7.00          3.00
+  max latency                 7.00          3.00
+
+WHAT THE NUMBERS SAY:
+  * BATCH amortizes the setup (2.0 ticks) over 4 records -> total
+    compute 2 batches*2 + 8*1 = 12 ticks -> throughput
+    0.667/tick (HIGHER).
+    BUT every record waits for the 4-record window to fill -> max
+    latency 7.00 ticks (window 4 + bulk proc 3).
+  * STREAMING pays setup on EVERY record -> total compute
+    8*(2+1) = 24 ticks -> throughput 0.333/tick
+    (LOWER). BUT no window wait -> max latency 3.00
+    ticks (just setup 2 + proc 1).
+
+RULE OF THUMB:
+  - latency budget in seconds  -> streaming (Kafka + Flink / Kinesis)
+  - latency budget in minutes+ -> batch   (Airflow + Spark + dbt)
+  - hybrid: stream for real-time views, batch for full recomputation
+    (Lambda); or unify both as stream replay (Kappa).
+
+GOLD (pinned for data_pipelines.html):
+  batch throughput = 0.667  (> stream 0.333)
+  stream max latency = 3.00  (< batch 7.00)
+[check] batch wins throughput, streaming wins latency?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

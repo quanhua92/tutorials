@@ -1,0 +1,327 @@
+distributed_systems.py - fundamentals. All numbers below feed
+DISTRIBUTED_SYSTEMS.md. Python stdlib only (math for reliability/drift).
+
+
+==========================================================================
+  SECTION A: the system model - failures & the quorum thresholds
+==========================================================================
+Every distributed algorithm assumes a SYSTEM MODEL: which failures
+can occur and what the network/timing guarantees are. Name the model
+wrong and the algorithm is silently incorrect.
+
+The failure hierarchy (each level ADDS a harder failure mode):
+
+  | level | failure     | what the faulty node does              |
+  |-------|-------------|----------------------------------------|
+  |   1   | crash       | HALTS. Stops talking. May recover later|
+  |   2   | omission    | DROPS messages (send or receive). Still|
+  |       |             | 'alive' but silent on some messages    |
+  |   3   | byzantine   | ARBITRARY. Wrong data, conflicting data|
+  |       |             | to different peers, collusion, forgery |
+
+Crash is a SPECIAL CASE of omission (a crashed node omits EVERYTHING),
+and omission is a special case of byzantine. Tolerating a harder class
+needs MORE replicas and MORE message rounds.
+
+THE QUORUM THRESHOLDS (why the numbers are what they are):
+
+  Crash-fault tolerance (CFT): N = 2f + 1. With f crashed, 2f+1 - f =
+  f+1 nodes remain - still a MAJORITY of the original 2f+1, so a quorum
+  can always be formed. Equivalently: any two majorities OVERLAP in
+  >= 1 non-crashed node -> decisions cannot diverge.
+
+  Byzantine-fault tolerance (BFT): N = 3f + 1. With f traitors, f
+  crashers, and the rest honest, the honest nodes (>= 2f+1) must form a
+  quorum LARGER than the f traitors can sway, AND two honest quorums
+  must overlap in >= f+1 honest nodes. 3f+1 is the tight bound.
+
+  | f  | CFT N=2f+1 | BFT N=3f+1 | CFT majority | BFT honest quorum |
+  |----|------------|------------|--------------|-------------------|
+  | 0  | 1          | 1          | 1            | 1                 |
+  | 1  | 3          | 4          | 2            | 3                 |
+  | 2  | 5          | 7          | 3            | 5                 |
+  | 3  | 7          | 10         | 4            | 7                 |
+
+Overlap proof (CFT, N=5): two majorities of 3 in 5 nodes share
+  >= 2*3 - 5 = 1 node. That shared node voted for only
+  one value/leader -> at most one decision per term. This is the single
+  fact that makes majority quorums safe.
+
+[check] CFT=2f+1, BFT=3f+1, two majorities overlap in >=1 node: OK
+
+==========================================================================
+  SECTION B: synchronous vs asynchronous - timing assumptions & FLP
+==========================================================================
+A system model is INCOMPLETE without a TIMING assumption. The delay of
+messages (and processing) is either bounded and known, or not:
+
+  | model        | message delay         | can detect crashes? | consensus? |
+  |--------------|------------------------|---------------------|------------|
+  | synchronous  | BOUNDED, known Delta   | YES (timeout)       | possible   |
+  | asynchronous | UNBOUNDED              | NO (slow == dead)   | IMPOSSIBLE |
+  | partial sync | bounded EVENTUALLY     | eventually          | possible   |
+
+SYNCHRONOUS: if a message doesn't arrive within Delta, the sender KNOWS
+the receiver crashed (or the network partitioned). Timeouts = perfect
+failure detectors. Nice, but UNREALISTIC: real networks have no hard
+delay bound (GC pauses, route flaps, congestion).
+
+ASYNCHRONOUS: delay is unbounded. A message that hasn't arrived might
+still arrive in 10 ms or 10 minutes. You CANNOT distinguish 'slow' from
+'dead'. This is the INTERNET.
+
+THE FLP IMPOSSIBILITY (Fischer-Lynch-Paterson 1985): in a fully
+asynchronous system, NO deterministic protocol can solve consensus even
+if ONLY ONE node may crash. Proof sketch: there is an execution where the
+system stays forever in a 'bivalent' state (could still decide 0 or 1) by
+delaying one critical message. So you cannot GUARANTEE termination.
+
+HOW REAL SYSTEMS ESCAPE FLP (they all do - etcd, Cassandra, Spanner):
+
+  - PARTIAL SYNCHRONY (Dwork-Lynch-Stockmeyer 1988): assume delays are
+    unbounded for a while but EVENTUALLY a bound holds. Consensus then
+    terminates after GST (Global Stabilization Time). This is what Raft/
+    Paxos actually assume.
+
+  - RANDOMIZATION: protocols that flip coins can terminate with
+    probability 1 (Ben-Or 1983) even under asynchrony.
+
+  - FAILURE DETECTORS (Chandra-Toueg 1996): an oracle that eventually
+    suspects crashed nodes. With a 'perfect' detector, consensus is
+    solvable; real detectors (timeouts, phi-accrual) approximate it.
+
+Practical note: a timeout is a GUESS, not a proof. If you set the
+failure timeout to T_best=10 ms (the fast case), a node that
+is merely SLOW (e.g. 2000 ms GC pause) is wrongly declared
+dead -> false positive -> spurious leader election. Set it to
+2000 ms and real crashes take 2000 ms to notice ->
+slow failover. There is no perfect timeout; this is why adaptive /
+phi-accrual detectors exist. (See failure_detection.py.)
+
+[check] async => slow indistinguishable from dead => FLP applies: OK
+
+==========================================================================
+  SECTION C: time & clocks - drift & Lamport logical clocks
+==========================================================================
+PHYSICAL CLOCKS DRIFT. Two quartz clocks gain/lose at a rate up to rho
+(a few parts per million, ppm). Over an interval T they can diverge by
+
+  rho = 25 ppm,  T =    1 h  ->  max skew 2*rho*T = 0.18 s
+  rho = 25 ppm,  T =   24 h  ->  max skew 2*rho*T = 4.32 s
+  rho = 25 ppm,  T =  720 h  ->  max skew 2*rho*T = 129.60 s
+
+So even 'good' clocks drift ~13 seconds/month apart. You CANNOT use
+raw wall-clock readings to order events across machines. Two responses:
+
+  (1) SYNC THE CLOCKS to a bounded skew eps (Cristian/NTP). Then you get
+      a usable real-time order but with eps uncertainty. (See
+      clock_sync_ntp.py.) Cristian: client asks time server, corrects for
+      half the RTT; NTP layers this with statistics and strata.
+
+  (2) IGNORE WALL-CLOCKS ENTIRELY and order events by CAUSALITY using a
+      LOGICAL clock. This is Lamport's 1978 insight.
+
+HAPPENS-BEFORE (->), Lamport's relation:
+
+  a -> b  if  (a,b in same process and a precedes b),  OR
+           if  a is a SEND and b is the matching RECEIVE,  OR
+           by transitivity (a->c and c->b => a->b).
+  If neither a->b nor b->a, the events are CONCURRENT: a || b.
+
+LAMPORT CLOCK RULE (one integer L per process):
+
+  local/send : L[i] = L[i] + 1
+  receive(m) : L[i] = max(L[i], L_m) + 1     (L_m = timestamp carried by m)
+  PROPERTY   : a -> b  =>  L[a] < L[b]   (but NOT the converse!)
+
+Lamport clocks preserve happens-before but CANNOT tell you two events
+are concurrent - they just give a consistent TOTAL order (ties broken by
+process id). The trace used here (a,b,c,d,y are a causal chain; x is an
+independent concurrent event):
+
+  P0: a(local)  b(send m1->P1)
+  P1:            c(recv m1)  d(send m2->P2)
+  P2:   x(local)                         y(recv m2)
+
+  | event | proc | kind | L |
+  |-------|------|------|---|
+  | a     | P0   | local | 1 |
+  | b     | P0   | send | 2 |
+  | c     | P1   | recv | 3 |
+  | x     | P2   | local | 1 |
+  | d     | P1   | send | 4 |
+  | y     | P2   | recv | 5 |
+
+The causal chain a->b->c->d->y gets L = 1,2,3,4,5 (strictly increasing,
+as happens-before demands: a->b => L[a]<L[b]). But the independent event x
+also gets L=1 - IDENTICAL to a - even though a and x are CONCURRENT. Worse,
+x (L=1) sorts BEFORE d (L=4) in the total order, yet x || d (no causal
+link). Lamport guarantees a->b => L[a]<L[b] but NOT the converse; a single
+scalar cannot reveal concurrency. That is exactly what vector clocks fix.
+
+[check] causal chain a<b<c<d<y has strictly increasing Lamport clocks: OK
+
+==========================================================================
+  SECTION D: vector clocks - detecting causality AND concurrency
+==========================================================================
+A VECTOR clock fixes Lamport's blind spot. Each process keeps a vector
+V of N integers (one entry per process). The rule:
+
+  local/send : V[i] = V[i] + 1
+  receive(m) : V[k] = max(V[k], V_m[k]) for ALL k,  then  V[i]++
+  PROPERTY   : a -> b  <=>  V[a] <= V[b] componentwise AND V[a] != V[b]
+              otherwise a || b  (CONCURRENT - no causal order)
+
+On the SAME trace (a,b,c,d,y chain; x concurrent):
+
+  | event | proc | kind |   vector V    |
+  |-------|------|------|---------------|
+  | a     | P0   | local | [1,0,0]       |
+  | b     | P0   | send | [2,0,0]       |
+  | c     | P1   | recv | [2,1,0]       |
+  | x     | P2   | local | [0,0,1]       |
+  | d     | P1   | send | [2,2,0]       |
+  | y     | P2   | recv | [2,2,2]       |
+
+Now compare the causality the two clocks can see. The key pairs:
+
+  | pair    | V[a]         | V[b]         | relation      |
+  |---------|--------------|--------------|---------------|
+  | a , b   | [1,0,0]      | [2,0,0]      | happens-before |
+  | a , c   | [1,0,0]      | [2,1,0]      | happens-before |
+  | c , y   | [2,1,0]      | [2,2,2]      | happens-before |
+  | x , a   | [0,0,1]      | [1,0,0]      | concurrent (||) |
+  | x , y   | [0,0,1]      | [2,2,2]      | happens-before |
+  | a , y   | [1,0,0]      | [2,2,2]      | happens-before |
+
+So x is CONCURRENT with a,b,c,d (vector clock reveals it!), while
+a->b->c->d->y is a genuine causal chain. Lamport could only say
+'L increases' - it gave x the same L=1 as a, hiding that x is causally
+independent of the whole chain. Dynamo/Riak use version vectors (a
+close cousin) precisely to detect concurrent writes and surface them as
+conflicts instead of silently dropping one.
+
+[check] vector clock finds x || a (concurrent) and x -> y: OK
+
+==========================================================================
+  SECTION E: fault tolerance - reliability math & replication
+==========================================================================
+How much more reliable does REPLICATION make a system? Use the standard
+exponential-failure model: a node fails at rate lambda = 1/MTBF, so its
+reliability (prob of being up at time t) is R(t) = e^(-lambda*t).
+
+Single node: MTBF = 1,000,000 h  ->  lambda = 1.00e-06 /h
+
+  | t (1 year = 8760 h) | R_single = e^(-lambda*t) |
+  |----------------------|--------------------------|
+  |  1 yr  ( 8760 h)      | 0.991278               |
+  |  3 yr  (26280 h)      | 0.974062               |
+  |  5 yr  (43800 h)      | 0.957145               |
+  | 10 yr  (87600 h)      | 0.916127               |
+
+After 1 year a single node is up with prob 0.99128 (~0.87% chance
+it has failed once). Replication makes the SYSTEM reliability = prob that
+at least 1 of r replicas is up = 1 - (1 - R)^r (assuming independent
+failures):
+
+  | replicas r | R_system after 1 yr = 1-(1-R)^r | downtime reduction |
+  |------------|--------------------------------|--------------------|
+  | 1          | 0.9912782570                 | baseline           |
+  | 2          | 0.9999239312                 | ~1x better         |
+  | 3          | 0.9999993365                 | ~1x better         |
+  | 5          | 0.9999999999                 | ~1x better         |
+
+Three replicas lift 1-year reliability from 0.99128 to 0.9999993365 -
+the chance ALL three fail simultaneously is (1-R)^3, vanishingly small.
+This is the math behind 'replication factor 3' in Kafka / Cassandra /
+Raft: tolerate 1 fault (2f+1 with f=1 needs N=3) while making total data
+loss astronomically unlikely.
+
+CAVEATS: this assumes INDEPENDENT failures. Correlated failures (a rack
+PDU dies, a whole AZ loses power, a bad deploy) break the model - which is
+why we spread replicas across failure domains (racks/AZs) and demand f+1
+survivors, not f+1 machines in the same rack.
+
+[check] r=3 system reliability 0.9999993 > single 0.99128: OK
+
+==========================================================================
+  GOLD CHECK: byzantine generals - 3f+1, OM algorithm, loyal decision
+==========================================================================
+CAPSTONE: the Byzantine Generals Problem (Lamport-Shostak-Pease 1982).
+Several generals must AGREE on a common plan (attack/retreat) by exchanging
+messages, but the commander (or some lieutenants) may be TRAITORS sending
+conflicting orders. Goal: all LOYAL lieutenants decide the SAME order.
+
+THE THRESHOLD: agreement is possible iff the number of traitors f satisfies
+  N >= 3f + 1
+
+  | f traitors | min N = 3f+1 | honest >= | tolerate? |
+  |------------|--------------|-----------|-----------|
+  | 0          | 1            | 1         | YES |
+  | 1          | 4            | 3         | YES |
+  | 2          | 7            | 5         | YES |
+  | 3          | 10           | 7         | YES |
+
+WHY 3f+1 (not 2f+1): with f traitors, the loyal majority quorum must be
+> f to outvote them, AND any two such quorums must overlap in > f loyal
+nodes (else traitors could make two groups disagree). That forces N = 3f+1.
+Crash tolerance needs only 2f+1 because a crashed node merely STOPS - it
+cannot actively forge conflicting votes.
+
+THE OM ALGORITHM (Oral Messages), the canonical BFT protocol:
+
+  OM(0): commander sends its order to every lieutenant; lieutenants use
+         the value received (or a default if none).
+  OM(m): commander sends its order; each lieutenant then recursively runs
+         OM(m-1) as the NEW commander forwarding what it heard, over the
+         remaining lieutenants. Finally each loyal lieutenant takes the
+         MAJORITY of all values it collected.
+
+OM(m) tolerates f traitors iff m >= f (so it runs f+1 rounds). Message
+complexity is steep - it grows like O(N^(f+1)):
+
+  | f | rounds m=f | min N | OM messages |
+  |---|------------|-------|-------------|
+  | 0 | 0          | 1     | 0           |
+  | 1 | 1          | 4     | 9           |
+  | 2 | 2          | 7     | 156         |
+  | 3 | 3          | 10    | 3609        |
+
+WORKED EXAMPLE (f=1, N=4, commander C is the traitor):
+
+  commander C sends DIFFERENT orders to the 3 loyal lieutenants:
+    C -> L1: 'attack'
+    C -> L2: 'attack'
+    C -> L3: 'retreat'      <- the lie
+  OM(1): each lieutenant forwards what it heard from C to the other two.
+  What L1 collects after the exchange:
+    from C directly    : attack
+    from L2 (C->L2)    : attack
+    from L3 (C->L3)    : retreat
+    majority('attack') : ATTACK   <- loyal decision
+
+  Similarly L2 and L3 each compute majority(attack, attack, retreat) =
+  ATTACK. ALL THREE LOYAL LIEUTENANTS DECIDE IDENTICALLY -> agreement.
+  The traitor commander could not break it: with N=4=3*1+1 the loyal
+  majority (3) always outvotes the 1 traitor.
+
+  Contrast N=3, f=1 (one short of 3f+1): C->L1 'attack', C->L2 'retreat'.
+  L1 hears {attack, retreat} -> tie; L2 hears {retreat, attack} -> tie.
+  They CANNOT agree. 3f+1 is TIGHT: lose one node and BFT fails.
+
+GOLD scalars (for a compact .html check):
+  n_cft(1)        = 3
+  n_bft(1)        = 4
+  majority_cft(5) = 3
+  om_messages(4,1)= 9
+  om_messages(7,2)= 156
+  lamport_trace   = [1, 2, 3, 1, 4, 5]
+  vector_x_vs_a   = concurrent
+  vector_x_vs_y   = a->b
+  bft_threshold   = N >= 3f+1
+
+[check] 3f+1 threshold, OM message counts, Lamport+vector traces all hold: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

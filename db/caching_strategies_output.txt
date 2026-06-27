@@ -1,0 +1,236 @@
+caching_strategies.py - reference overview. All numbers below feed CACHING_STRATEGIES.md.
+stdlib only. Run: python3 caching_strategies.py
+
+========================================================================
+  SECTION A: the multi-tier cache and the policy menu
+========================================================================
+Caching is a 10-100x read multiplier at 1-5% of DB cost. Each tier out
+from the app adds latency but widens scope. Pick eviction by access
+pattern; pick write strategy by consistency requirement.
+
+Tier What                        Examples                      Latency               
+-------------------------------------------------------------------------------------
+L1   Process-level in-memory     Caffeine, Guava Cache         ~microseconds         
+L2   Distributed cache           Redis, Memcached              ~1 ms network RTT     
+L3   CDN edge cache              CloudFront, Cloudflare, Fastly~5-50 ms (PoP proximity)
+L4   Browser cache               (every browser)               0 ms (no network)     
+
+Tier Scope
+-------------------------------------------------------------------------------------
+L1   hundreds of hot objects per instance
+L2   millions of objects, shared cluster-wide
+L3   billions of objects, global
+L4   hundreds of MB per user
+
+Tier Caveat
+-------------------------------------------------------------------------------------
+L1   invalidation is LOCAL to one instance
+L2   network + cluster management overhead
+L3   can't cache dynamic/user-specific content
+L4   controlled by Cache-Control headers only
+
+--- Eviction policy menu ---
+Policy      Evicts                                        Redis flag
+--------------------------------------------------------------------------------------------
+LRU         item not accessed for the longest time        allkeys-lru
+LFU         item with the lowest access frequency (count decays)allkeys-lfu
+FIFO        oldest INSERTED item regardless of access     (not native; approximated)
+ARC         adapts the LRU/LFU split online from hit-rate feedback(ZFS, DS8000 internal)
+TTL         item after a fixed expiration regardless of accessSET key val EX seconds
+noeviction  nothing - returns an ERROR when full          noeviction
+
+Policy      Best for
+--------------------------------------------------------------------------------------------
+LRU         general web, sessions, social feeds
+LFU         skewed media (popular stays popular)
+FIFO        queue-like caches, rotating logs
+ARC         unknown/mixed access patterns
+TTL         API responses, auth tokens, rate-limit windows
+noeviction  when data loss is unacceptable (persistent queues)
+
+Policy      Avoid when
+--------------------------------------------------------------------------------------------
+LRU         bursty scans (one scan evicts the hot set)
+LFU         new items (start at freq 0, evicted at once)
+FIFO        most production caching (ignores recency)
+ARC         (rarely available outside ZFS/IBM DS8000)
+TTL         when freshness doesn't matter (pure overhead)
+noeviction  high write-rate (OOMs immediately)
+
+--- Write strategy menu ---
+Strategy                  Write path                                    Latency
+------------------------------------------------------------------------------------------------
+cache-aside (lazy)        write DB only; optionally invalidate cache keymiss = 3 hops
+write-through             write cache AND DB synchronously, then ack    write latency doubles
+write-behind (write-back) write cache, ack IMMEDIATELY; flush to DB asynclowest write latency
+read-through              (write handled separately)                    miss = cache-side load
+refresh-ahead             (write handled separately)                    zero extra read latency
+
+Strategy                  Consistency / risk
+------------------------------------------------------------------------------------------------
+cache-aside (lazy)        milliseconds of staleness; cache miss spike; stale until TTL
+write-through             strong (reads see latest write); fills cache with data never read
+write-behind (write-back) eventual (until flush lands); DATA LOSS if node dies before flush
+read-through              always warm after first access; cold-start: first read of a key always misses
+refresh-ahead             fresh if access is predictable; refreshes items that won't be read again
+
+========================================================================
+  SECTION B: eviction policies on a real access stream
+========================================================================
+Same workload, three policies of the same size (ARC self-tunes to the
+winner; described below). Two workloads: (1) a TEMPORAL locality stream
+where recent keys get re-read, and (2) a SKEWED stream where a few hot keys dominate.
+
+Workload 1 - temporal (80% reads to 20 hot keys), cache cap = 25
+policy     hits  misses    hit rate
+------------------------------------
+LRU        1361     639      0.6805
+LFU        1592     408      0.7960
+FIFO       1180     820      0.5900
+
+[check] LRU (0.6805) > FIFO (0.5900) on temporal stream: OK
+  (FIFO ignores re-accesses, so a cold key inserted before a hot-key re-read
+   can evict the hot key. LRU's move_to_end keeps the hot set resident.)
+
+Workload 2 - SCAN POLLUTION: a one-shot sweep of 60 keys through a 30-slot
+cache, followed by re-reads of the 10 hot keys. LRU evicts the hot set during
+the sweep; LFU protects the high-frequency hot keys.
+policy     hits  misses    hit rate
+------------------------------------
+LRU          80      80      0.5000
+LFU          90      70      0.5625
+FIFO         80      80      0.5000
+
+[check] LFU (0.5625) > LRU (0.5000) on scan-pollution: OK
+  (the 60-key sweep is 60 one-shot misses; LRU evicts every hot key to make
+   room, so the post-sweep hot reads all miss. LFU keeps the high-count hot set.)
+
+ARC adapts the LRU/LFU boundary from hit-rate feedback. It keeps a recent
+list AND a frequent list; a hit in the recent list promotes that key to the
+frequent list. On workload 1 it behaves like LRU; on workload 2 like LFU.
+That self-tuning is why ZFS uses ARC for its ARC (Adaptive Replacement Cache).
+
+========================================================================
+  SECTION C: write strategies - latency vs consistency vs safety
+========================================================================
+Every write strategy picks a point on the latency/consistency/safety
+triangle. There is no free lunch.
+
+cache-aside (lazy)
+  read : check cache -> miss -> read DB -> fill cache -> return
+  write: write DB only; optionally invalidate cache key
+  -> miss = 3 hops; milliseconds of staleness; RISK: cache miss spike; stale until TTL
+
+write-through
+  read : cache always warm (filled on every write)
+  write: write cache AND DB synchronously, then ack
+  -> write latency doubles; strong (reads see latest write); RISK: fills cache with data never read
+
+write-behind (write-back)
+  read : cache may be the only copy for a while
+  write: write cache, ack IMMEDIATELY; flush to DB async
+  -> lowest write latency; eventual (until flush lands); RISK: DATA LOSS if node dies before flush
+
+read-through
+  read : cache miss -> cache itself loads from DB
+  write: (write handled separately)
+  -> miss = cache-side load; always warm after first access; RISK: cold-start: first read of a key always misses
+
+refresh-ahead
+  read : proactively refresh near-TTL items before expiry
+  write: (write handled separately)
+  -> zero extra read latency; fresh if access is predictable; RISK: refreshes items that won't be read again
+
+--- write-behind: the data-loss window ---
+Write-behind acks the client before the DB write. If the cache node dies
+in the window between ack and flush, that write is LOST. Window = flush
+interval. Compute writes-at-risk for a given QPS and flush interval:
+
+flush interval    writes/sec    writes at risk (window)   
+----------------------------------------------------------
+1                 1000          1,000                     
+5                 1000          5,000                     
+10                1000          10,000                    
+30                1000          30,000                    
+60                1000          60,000                    
+
+At 1000 wps a 10-sec flush window risks 10,000 unflushed writes. Never use
+write-behind for financial transactions; fine for counters, leaderboards,
+shopping carts where eventual persistence is acceptable.
+
+--- cache-aside: the miss penalty is 3 network hops ---
+miss = (1) read cache -> miss, (2) read DB, (3) write cache. If 1000 reqs
+miss the SAME key at once, that's 1000 DB reads - the STAMPEDE. See Section D.
+
+[check] cold cache: first read of 'hotkey' = miss (1 DB read): OK
+
+========================================================================
+  SECTION D: cache stampede + coherence (invalidation)
+========================================================================
+A stampede (thundering herd) happens when a hot key expires and every
+request misses at once. The fix is to make sure only ONE request rebuilds
+the cache; the rest wait or get a slightly-stale value.
+
+--- 1000 simultaneous misses on one expiring key ---
+  naive          : 1000 DB reads (one per miss)
+  mutex lock     : 1 DB read  (only the lock holder)
+  PER (beta=1)   : ~1 DB read  (first refresher warms it; no lock, scales out)
+
+[check] naive 1000 vs mutex 1 DB reads: OK
+
+--- PER (Probabilistic Early Expiration) refresh probability ---
+Each request, near TTL expiry, independently refreshes with probability
+p = exp(-beta * time_remaining / TTL). At expiry (time_remaining=0) p=1;
+far from expiry p~0. This spreads refreshes across requests with no lock.
+
+time_remaining/TTL    p (beta=1)    p (beta=3)    
+--------------------------------------------------
+1.00                  0.3679        0.0498        
+0.75                  0.4724        0.1054        
+0.50                  0.6065        0.2231        
+0.25                  0.7788        0.4724        
+0.10                  0.9048        0.7408        
+0.00                  1.0000        1.0000        
+
+[check] p at expiry=0 -> 1.0; p at full TTL=1.0 -> 0.3679 (<0.5): OK
+
+--- cache coherence: four invalidation strategies ---
+Strategy          How                                             Pro / Con
+------------------------------------------------------------------------------------------------
+TTL-based         let items expire after N seconds                simple, no coordination / stale up to TTL seconds
+event-driven      DB change publishes invalidation event (Kafka/CDC)fresh within seconds / lost event = permanently stale
+write-through     update DB + cache atomically on every write     strong consistency / write latency doubles
+versioned keys    key includes a version: user:123:v7; bump on updateold keys expire naturally / must store/serve current version
+
+The dirty secret (Phil Karlton): there is no perfect strategy. Every
+approach trades latency, consistency, and complexity. Pick by your
+freshness SLA: TTL for 'seconds of staleness OK', event-driven for
+'must-be-fresh', write-through for 'must-never-be-stale'.
+
+--- sizing L2: how hit rate maps to DB load reduction ---
+total reads = 100,000/sec
+
+L2 hit rate     reads hitting DB      DB load reduction
+----------------------------------------------------------
+0.50            50,000                2x
+0.80            20,000                5x
+0.90            10,000                10x
+0.95            5,000                 20x
+0.99            1,000                 100x
+
+[check] 95% hit rate -> 5,000 DB reads/sec (20x reduction): OK
+
+========================================================================
+  GOLD CHECK: every computed number is self-consistent
+========================================================================
+checks passed:
+  [check] LRU > FIFO on temporal locality (recency matters): OK
+  [check] LFU > LRU on scan pollution (frequency protects hot set): OK
+  [check] PER p(0)=1.0, p(1.0)<0.5 (monotone increasing near expiry): OK
+  [check] stampede: naive=1000 DB reads, mutex=1: OK
+  [check] 95% hit rate -> 5000 DB reads/sec (20x reduction): OK
+[check] caching_strategies.py self-consistent:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

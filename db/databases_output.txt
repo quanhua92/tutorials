@@ -1,0 +1,185 @@
+databases.py - reference overview. All numbers below feed DATABASES.md.
+stdlib only. Run: python3 databases.py
+
+========================================================================
+  SECTION A: the five database families
+========================================================================
+Pick a family by matching the WORKLOAD to its strengths. There is no
+'best' database - only the right tool for an access pattern.
+
+Family              Data model                                Examples                          
+------------------------------------------------------------------------------------------------
+Relational          tables of typed rows; schema-first; SQL   PostgreSQL, MySQL, Oracle, SQLite 
+Document (NoSQL)    self-describing JSON/BSON docs; flexible schemaMongoDB, CouchDB, DynamoDB        
+Columnar            columns stored contiguously, not rows     ClickHouse, BigQuery, Redshift, Snowflake
+Graph               nodes + edges as first-class pointers     Neo4j, Dgraph, TigerGraph         
+Time-series         append-only events keyed by timestamp     InfluxDB, TimescaleDB, Prometheus 
+Key-value (NoSQL)   opaque blob keyed by id; O(1) get/put     Redis, Memcached, Riak, etcd      
+
+Family              Strengths
+------------------------------------------------------------------------
+Relational          ACID transactions, ad-hoc SQL, mature tooling
+Document (NoSQL)    evolving schemas, nested data, horizontal scale
+Columnar            fast aggregates over few columns, high compression
+Graph               multi-hop traversal in O(hops) not O(JOIN^hops)
+Time-series         huge write rates, cheap downsample/retention
+Key-value (NoSQL)   microsecond reads, extreme QPS, simple
+
+Family              Weak for
+------------------------------------------------------------------------
+Relational          rigid schema, horizontal scaling is hard
+Document (NoSQL)    no joins across docs, weaker transactions
+Columnar            slow point lookups, poor single-row updates
+Graph               sharding is hard, not for tabular analytics
+Time-series         not general-purpose; updates/deletes are rare
+Key-value (NoSQL)   no queries, no range scans (KV is blob-only)
+
+Decision shortcut: if you need ACID + SQL + joins -> relational. If
+you need 100K+ writes/sec -> LSM-tree (Cassandra/RocksDB). If you need
+SUM over billions of rows on a few columns -> columnar. If you need
+multi-hop relationships -> graph. If you need microsecond point reads
+-> key-value (Redis). See DATABASES.md Section 1 for the decision tree.
+
+========================================================================
+  SECTION B: ACID - what each letter guarantees, and a WAL demo
+========================================================================
+ACID is the contract a transaction gives you. Each letter is delivered
+by a concrete mechanism, and exists to prevent a concrete failure.
+
+Letter        Guarantee                             Mechanism
+------------------------------------------------------------------------
+Atomicity     a txn is all-or-nothing               WAL + rollback of uncommitted txns on recovery (ARIES undo)
+Consistency   txn moves DB from one valid state to anotherconstraints + triggers checked at commit; reject violators
+Isolation     concurrent txns don't observe each other's uncommitted writes2PL / MVCC snapshots / SSI; isolation levels tune the trade-off
+Durability    a committed txn survives a crash/power lossWAL fsync before COMMIT returns; redo on recovery (ARIES redo)
+
+Letter        Failure it prevents
+------------------------------------------------------------------------
+Atomicity     partial transfer: debit without credit
+Consistency   account balance going negative
+Isolation     lost update: two txns read 0, both write 1, counter stuck at 1
+Durability    ATM says 'deposited' then a power cut loses it
+
+--- Atomicity + Durability demo: a crash between commits ---
+WAL records written (10 total):
+  [0] ('BEGIN', 'T1')
+  [1] ('WRITE', 'T1', 'x', 100)
+  [2] ('COMMIT', 'T1')
+  [3] ('BEGIN', 'T2')
+  [4] ('WRITE', 'T2', 'x', 200)
+  [5] ('BEGIN', 'T3')
+  [6] ('WRITE', 'T3', 'y', 7)
+  [7] ('COMMIT', 'T3')
+  [8] ('BEGIN', 'T4')
+  [9] ('WRITE', 'T4', 'z', 9)
+
+no crash  -> data = {'x': 100, 'y': 7}
+crash after record 8 (T2,T4 never committed) -> data = {'x': 100, 'y': 7}
+  committed txns surviving = ['T1', 'T3']
+[check] T1 + T3 (committed) survived; T2 + T4 (in-flight) dropped: OK
+crash after record 7 (T3's COMMIT lost, its WRITE undone) -> data = {'x': 100}
+[check] T3's write existed in WAL but without a commit it is undone: OK
+
+--- Isolation demo: the lost-update anomaly vs 2PL ---
+Counter starts at 0. Two txns each try to increment it by 1. Correct
+final value is 2. Under READ_UNCOMMITTED (no locking) a lost update
+drops one increment; under 2PL (lock the row) both increments land.
+
+  no locking (READ_UNCOMMITTED) schedule -> final counter = 1  (LOST UPDATE)
+  2PL (lock-read-write-unlock) schedule -> final counter = 2  (CORRECT)
+[check] no-lock gives 1 (lost update), 2PL gives 2 (correct): OK
+
+--- Consistency demo: a CHECK constraint rejects a bad write ---
+  starting balance = 50; invariant balance >= 0
+  proposed txn: balance - 100 = -50 -> REJECTED (violates constraint)
+  decision: ABORT; balance stays 50; DB remains consistent
+[check] constraint-violating txn is aborted, balance unchanged: OK
+
+========================================================================
+  SECTION C: indexing - turn O(N) scans into O(log N) or O(1) jumps
+========================================================================
+An index is a side-structure that maps a key to its row. Three families:
+  B+tree  - sorted; great for ranges and ORDER BY. O(log_fanout N) lookup.
+  Hash    - unordered; O(1) exact-match only, no ranges.
+  (no idx)- a full table scan is O(N_pages). Cheapest if you read most rows.
+
+Using fanout = 256 (4 KB page, 8 B key + 8 B ptr, ~256 children/node)
+
+      N rows     pages (full scan)     B+tree point lookup     hash point lookup
+--------------------------------------------------------------------------------
+       1,000                    50                       2                     1
+      10,000                   500                       2                     1
+     100,000                 5,000                       3                     1
+   1,000,000                50,000                       3                     1
+  10,000,000               500,000                       3                     1
+ 100,000,000             5,000,000                       4                     1
+
+The gap widens with N: at 100M rows a full scan reads 5,000,000 pages;
+a B+tree lookup reads 4. That ~1,000,000x is why every OLTP database
+indexes primary and hot foreign keys.
+
+[check] 1M rows -> 3 levels; 100M rows -> 4 levels: OK
+
+--- When an index actually helps: selectivity ---
+The planner uses an index only when it filters OUT most rows. The metric
+is selectivity = fraction of rows a predicate returns. Lower is better.
+
+predicate                         distinct   selectivity               verdict
+------------------------------------------------------------------------------
+user_id = 12345 (PK)            10,000,000      0.000000    use index (unique)
+country = 'US'                         250      0.004000       maybe (depends)
+status = 'active'                        4      0.250000      seq scan cheaper
+created_at range, 1 day                  -      0.002740     use index (range)
+
+[check] PK selectivity 0.0000001 < 0.01 (use idx); 4-value enum 0.250 > 0.1 (skip idx): OK
+
+========================================================================
+  SECTION D: query optimization - the planner picks the cheapest plan
+========================================================================
+You write declarative SQL. The planner enumerates physical plans, estimates each one's COST (predicted I/O + CPU), and runs the cheapest.
+Cost units are arbitrary but consistent - the planner only needs a
+correct RANKING, not absolute time. Defaults (PostgreSQL):
+  seq_page_cost=1.0  random_page_cost=4.0  cpu_tuple=0.01
+
+table: N = 1,000,000 rows, 50,000 pages (200 B/row)
+WHERE clause on a near-unique column (distinct = 1,000,000)
+
+plan                 selectivity    rows fetched        cost
+------------------------------------------------------------
+seq scan                1.000000       1,000,000    60000.00
+index scan              0.000001               2       16.01
+
+planner picks: INDEX SCAN
+  (index saves 59983.99 cost units = 100.0% cheaper than seq scan)
+[check] index scan (16.01) < seq scan (60000.00): OK
+
+--- same table, but WHERE status = 'active' (only 4 distinct values) ---
+plan                 selectivity    rows fetched        cost
+------------------------------------------------------------
+seq scan                1.000000       1,000,000    60000.00
+index scan              0.250000         250,000  1002512.00
+
+planner picks: SEQ SCAN
+  (the index would fetch 250,000 rows via RANDOM I/O - far slower than
+   one sequential sweep. This is why you don't index low-cardinality
+   columns that aren't part of a composite.)
+[check] seq scan (60000.00) < index scan (1002512.00): OK
+
+--- break-even: at what selectivity does the index stop winning? ---
+index wins while selectivity < 0.0150 (~1.50% of rows)
+[check] at crossover sel=0.0150: index 60000.00 == seq 60000.00 (within 1e-6): OK
+
+========================================================================
+  GOLD CHECK: every computed number is self-consistent
+========================================================================
+checks passed:
+  [check] B+tree height: 1 row=1, 1M=3, 100M=4 (fanout 256): OK
+  [check] selectivity_eq(10)=0.1, selectivity_range(10,20,0,100)=0.1: OK
+  [check] WAL recovery keeps committed 'A', drops uncommitted 'B': OK
+  [check] lost-update schedule -> 1; 2PL schedule -> 2: OK
+  [check] index wins for PK selectivity, loses for 4-value enum: OK
+[check] databases.py self-consistent:  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

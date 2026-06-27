@@ -1,0 +1,266 @@
+architectural_patterns.py - structure decisions. All numbers below feed
+ARCHITECTURAL_PATTERNS.md. Python stdlib only (no third-party deps).
+
+
+==========================================================================
+  SECTION A: the deployment spectrum - monolith -> serverless
+==========================================================================
+Architecture is a slider, not a binary. Moving RIGHT trades
+INDEPENDENT-SCALABILITY and FAULT-ISOLATION for OPERATIONAL-COMPLEXITY
+and NETWORK-LATENCY. You move right only when the cost of the monolith
+exceeds the cost of the distributed operations.
+
+  | topology     | deploy unit  | owns DB        | scales by            |
+  |--------------|--------------|----------------|----------------------|
+  | monolith     | 1            | shared         | cloning the whole app |
+  | soa          | ~10          | shared (often) | cloning coarse services |
+  | microservices | ~100s        | per-service    | cloning the one hot service |
+  | serverless   | 1 function   | managed        | the cloud (auto, per call) |
+
+MONOLITH: one process, one database, one deploy. The fastest way to
+deliver a working system. Every call is an in-process function call
+(nanoseconds). The single failure mode is the deploy - but that deploy
+can break EVERYTHING (blast radius = whole system). Scales only by
+cloning the entire unit, so the slowest feature caps every other.
+
+SOA: services communicating through an enterprise service bus (ESB),
+often with heavyweight protocols (SOAP/XML). The precursor to
+microservices - coarse-grained, frequently still sharing a database.
+The ESB became a bottleneck and a single point of ownership, which is
+why microservices replaced it with dumb pipes (REST/gRPC) and smart
+endpoints.
+
+MICROSERVICES: small, independently-deployable services, EACH owning
+its own database, over lightweight protocols. The win is independent
+deploy + scale + fault isolation (one service's crash does not take
+down the others). The cost is the HARDEST problem in distributed
+systems now multiplied across every service boundary: the network is
+unreliable, debugging a request that hops 8 services needs distributed
+tracing, and a 'distributed monolith' (services that must deploy
+together / share a DB) has ALL the costs and NONE of the benefits.
+
+SERVERLESS / FaaS: the cloud runs your function per invocation. No
+servers, auto-scales to zero, bills per call. The cost is cold-start
+latency (50-2000ms when the runtime is spun up), hard execution-time
+limits (e.g. 15min), and deep vendor lock-in. Ideal for sporadic /
+bursty workloads (webhooks, scheduled jobs), bad for steady hot paths.
+
+THE DATABASE BOUNDARY IS THE SERVICE BOUNDARY. Sharing a database
+couples services at the storage layer - a schema change by one team
+breaks another. Database-per-service is what makes microservices
+actually independent; without it you have a distributed monolith.
+
+The latency tax of distribution (per intra-system call):
+
+  | call path                       | latency    | vs in-process |
+  |----------------------------------|------------|---------------|
+  | monolith (in-process call)       | 0.001   ms |          1x     |
+  | microservices (gRPC, same DC)    | 1.000   ms |       1000x     |
+  | microservices + mesh sidecar     | 2.000   ms |       2000x     |
+  | serverless cold start            | 500.000 ms |     500000x     |
+
+A monolith function call is ~1 us. The SAME logical call as a gRPC
+round-trip is ~1 ms (1000x). With a sidecar on both ends, ~2 ms. A
+serverless cold start can be 500 ms (500000x). This is why you do NOT
+split a service for a call that happens 10000x per request - the
+network latency dominates. Split at BOUNDS that change at different
+rates (write model vs read model; billing vs catalog), not at every
+function.
+
+[check] cold start > 250000x in-process call => distribution has a latency tax: OK
+
+==========================================================================
+  SECTION B: service mesh & the sidecar pattern
+==========================================================================
+Every microservice re-implements the SAME cross-cutting concerns:
+mutual TLS, retries with backoff, circuit breaking, load balancing,
+distributed tracing, metrics. A SERVICE MESH moves this into a sidecar
+proxy (Envoy/Linkerd) that sits next to every service - so the logic is
+written ONCE, uniformly, language-agnostically.
+
+  | plane         | what it is                 | in the data path? |
+  |---------------|----------------------------|------------------|
+  | data plane    | sidecar proxy per pod      | YES (every call) |
+  | control plane | config/cert/policy brain    | NO (config push) |
+
+THE SIDECAR: a second container in the same pod, sharing the network
+namespace. Your service talks to localhost; the sidecar intercepts,
+adds mTLS + retry + circuit-break, and forwards. App code sees no
+mesh - it just calls localhost. The mesh is transparent infrastructure.
+
+THE CONTROL PLANE (Istiod / Consul): does NOT touch requests. It
+watches the service registry, computes routes/certs/policies, and
+PUSHES them to the data plane via xDS APIs. Because it is out of the
+data path, control-plane latency never affects a request.
+
+The cost: each sidecar costs ~64 MB RAM (Envoy baseline).
+For N services with R replicas each, the mesh overhead is:
+
+  | services N | replicas each | pods = N*R | sidecar RAM (GB) |
+  |------------|---------------|------------|------------------|
+  | 5          | 3             | 15         | 0.9              |
+  | 20         | 3             | 60         | 3.8              |
+  | 50         | 3             | 150        | 9.4              |
+  | 100        | 3             | 300        | 18.8              |
+
+Below ~10-20 services the mesh is mostly overhead you pay for little
+benefit (you could hand-roll mTLS for 5 services). Above ~20 services
+the mesh pays for itself: uniform mTLS, zero-trust by default, and
+observability across every hop without touching app code. The forcing
+function for adopting a mesh is SERVICE COUNT + SECURITY POSTURE, not
+cool tech.
+
+Network topology: the LOGICAL call graph can be O(N^2) (any service
+may call any other), but the DATA PLANE stays O(N) - one sidecar per
+pod. The control plane computes the routes; you never wire N^2 links.
+
+  | services N | possible links N*(N-1)/2 | sidecar proxies = N |
+  |------------|--------------------------|----------------------|
+  | 5          | 10                       | 5                    |
+  | 20         | 190                      | 20                   |
+  | 50         | 1225                     | 50                   |
+  | 100        | 4950                     | 100                  |
+
+[check] sidecar overhead scales linearly with pods; mesh worth it past ~20 svc: OK
+
+==========================================================================
+  SECTION C: event-driven architecture - temporal decoupling + fan-out
+==========================================================================
+A request/response call couples caller and callee in TIME: the caller
+BLOCKS until the callee replies. An EVENT decouples them: the producer
+writes to a broker (Kafka) and returns immediately; consumers react
+LATER. The broker is the BUFFER that absorbs bursts and the BUS that
+enables fan-out.
+
+  | style          | coupling      | caller blocks? | failure mode        |
+  |----------------|---------------|----------------|---------------------|
+  | request/resp   | spatial+temporal| YES          | caller fails if callee down |
+  | event-driven   | temporal decoupled| NO         | broker buffers; consumer lag |
+
+THE WIN: (1) the producer is never blocked by a slow consumer (the
+queue absorbs the burst), and (2) ONE event fans out to N consumers
+without the producer knowing any of them exist (open/closed).
+
+FAN-OUT: one 'post.created' event triggers feed insertion, push
+notification, search indexing, analytics - all independent consumers.
+Each runs at its own pace in its own consumer group; the slowest does
+NOT block the others (the broker retains the event).
+
+  | event triggers | consumers K | broker writes | parallelism = partitions |
+  |----------------|-------------|---------------|--------------------------|
+  | 1 post.created | 1           | 1 writes      | up to 1 concurrent       |
+  | 1 post.created | 4           | 4 writes      | up to 4 concurrent       |
+  | 1 post.created | 10          | 10 writes      | up to 10 concurrent       |
+  | 1 post.created | 50          | 50 writes      | up to 50 concurrent       |
+
+THE COST: harder debugging (no stack trace across a broker boundary -
+you need correlation IDs + distributed tracing), and EVENTUAL
+consistency (a consumer may lag seconds behind the producer). A
+notification fired 6 hours late is WORSE than none - consumers must
+respect message expiry / time-to-live.
+
+CHOICE: use events for ASYNC, fan-out, burst-absorbing work (feeds,
+notifications, analytics, audit). Use request/response for SYNCHRONOUS
+dependencies the caller cannot proceed without (a payment authorization
+before confirming an order). Mixing both via the OUTBOX pattern is the
+production standard: write the record + the outbox event in ONE local
+transaction; a CDC relay (Debezium) reliably publishes the event.
+
+[check] 1 event -> K consumers; broker buffers bursts; eventual consistency: OK
+
+==========================================================================
+  SECTION D: CQRS - split write (normalized) from read (denormalized)
+==========================================================================
+Most systems are read-heavy (10:1 to 100:1 read:write). A single
+normalized database serves writes well but struggles under read load: a
+complex join across the feed is slow, and you cannot add read replicas
+forever (each adds cost for a linear gain). CQRS splits the two:
+
+  | model   | store              | optimized for | consistency     |
+  |---------|--------------------|---------------|-----------------|
+  | WRITE   | PostgreSQL (normal)| low write contention | strong   |
+  | READ    | Elasticsearch/Redis(denormal)| query speed | eventual|
+
+A CDC stream (Debezium -> Kafka) keeps the read model in sync. The
+write commits to Postgres; the read model catches up 50-500ms later.
+You trade that 50-500ms of STALENESS for 10x-100x read throughput
+WITHOUT sharding the primary - the read model absorbs the query load.
+
+The economics (cache first, replicate second):
+
+  | option              | QPS added | cost $/mo | $ per 1K QPS |
+  |---------------------|-----------|-----------|--------------|
+  | Redis cache node    | 100,000 |     500   |     5.00    |
+  | 4th read replica    |   5,000 |   5,000   |  1000.00    |
+
+Redis at $500/mo absorbs 100,000 read QPS; a 4th read replica at
+$5000/mo adds only 5,000 QPS. Cache first, replicate second.
+CQRS pushes this further: the read model is a PURPOSE-BUILT store for
+each query shape, not a generic replica of the write schema.
+
+The read-lag reality: 50-500ms between write commit and read model
+update. This is FINE for a feed (you don't notice a 200ms-old post).
+It is UNACCEPTABLE for 'read your own writes': a user who updates their
+profile and immediately reloads expects to SEE the change. The fix is
+session pinning (serve that user's reads from the write model for a
+short window) or read-after-write consistency at the cost of latency.
+
+[check] Redis >10x cheaper per QPS than a replica; CQRS read lag 50-500ms: OK
+
+==========================================================================
+  GOLD CHECK: weighted tradeoff analyzer - the right pattern per profile
+==========================================================================
+CAPSTONE: the tradeoff matrix. Each topology is scored 1-5 on six axes
+(5 = best). A WEIGHT PROFILE encodes the forcing function - how much
+each axis matters for a given business stage. The winner is the
+highest weighted sum. Derive the profile (the forcing function) FIRST;
+the pattern then follows.
+
+The scores (consensus tradeoffs):
+
+  | pattern       | dev velocity | ops simple | latency | scalability | fault isolation | tech flex |
+  |---------------|------|------|------|------|------|------|
+  | monolith      | 5 | 5 | 5 | 2 | 1 | 1 |
+  | soa           | 3 | 3 | 3 | 3 | 3 | 3 |
+  | microservices | 2 | 1 | 3 | 5 | 5 | 5 |
+  | serverless    | 4 | 4 | 2 | 5 | 4 | 2 |
+
+The four weight profiles (the forcing function, made numeric):
+
+  | profile                                    | winner         | score |
+  |--------------------------------------------|----------------|-------|
+  | MVP / startup (ship fast, small team)      | monolith       |    44 |
+  | Hyperscale (independent scale + blast radius) | microservices  |    49 |
+  | Cost-sensitive (minimize infra & ops)      | monolith       |    40 |
+  | Polyglot org (many teams, many stacks)     | microservices  |    46 |
+
+WORKED EXAMPLE (MVP profile): a 3-person startup should ship a
+MONOLITH. The forcing function is dev_velocity + ops_simple: you have
+no SRE team, no traffic, and your job is to find product-market fit,
+not to operate Kubernetes. Premature microservices here is a classic
+over-engineering failure - 'I'd start with a single Postgres and
+revisit at 10x scale'.
+
+WORKED EXAMPLE (Hyperscale profile): at 1B users, the forcing function
+is scalability + fault_isolation. The billing service crashes must NOT
+take down the feed; the hot read path must scale independently of the
+write path. MICROSERVICES (+ CQRS on the read path) is now the right
+answer - the operational cost is justified by the independent scale.
+
+GOLD scalars (for a compact .html check):
+  score(monolith, MVP)      = 44
+  score(microservices, MVP) = 30
+  score(monolith, hyperscale)= 31
+  score(microservices, hyperscale)= 49
+  winner(MVP)       = monolith
+  winner(hyperscale)= microservices
+  cold_start_ms     = 500
+  grpc_hop_ms       = 1
+  cqrs_lag_min_ms   = 50
+  cqrs_lag_max_ms   = 500
+
+[check] weighted scores + per-profile winners all match the tradeoff matrix: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

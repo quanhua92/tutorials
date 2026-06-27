@@ -1,0 +1,197 @@
+========================================================================
+SECTION A - Embeddings: TF-IDF as a proxy representation
+========================================================================
+
+A real embedding model (OpenAI, BGE, E5) maps text to a dense float
+vector in a learned latent space. TF-IDF is the mathematically exact
+proxy that needs no model and is fully reproducible here. The SAME
+cosine metric applies to both.
+
+Corpus: 5 documents, vocabulary size = 21 dims
+
+  idf(term) = log(N / df):
+  term           df      idf
+  --------------------------
+  and             1    1.609
+  are             1    1.609
+  cat             1    1.609
+  cats            1    1.609
+  databases       1    1.609
+  dog             1    1.609
+  dogs            1    1.609
+  embeddings      1    1.609
+  learning        1    1.609
+  log             1    1.609
+  machine         1    1.609
+  mat             1    1.609
+  models          1    1.609
+  on              2    0.916
+  pets            1    1.609
+  sat             2    0.916
+  store           1    1.609
+  the             2    0.916
+  use             1    1.609
+  vector          1    1.609
+  vectors         1    1.609
+
+Document 0 TF-IDF vector (nonzero terms):
+  cat             1.609
+  mat             1.609
+  on              0.916
+  sat             0.916
+  the             1.833
+  norm(doc0) = 3.197
+
+A document with zero vector norm means it has no terms that carry
+idf weight above zero (all-stopword docs). Here every doc has signal.
+
+========================================================================
+SECTION B - Similarity metrics: cosine, dot product, euclidean
+========================================================================
+
+Three metrics; every vector DB supports all three. For L2-normalized
+vectors (norm=1), cosine == dot product exactly -- so most text systems
+use the faster dot product with no quality loss.
+
+  A = [1.0, 2.0, 3.0]
+  B = [4.0, 5.0, 6.0]
+
+  dot(A,B)    = sum(a_i*b_i)            = 32.0
+  ||A||       = sqrt(sum(a_i^2))        = 3.7417
+  ||B||                                 = 8.7750
+  cosine(A,B) = dot / (||A||*||B||)      = 0.9746
+  euclid(A,B) = sqrt(sum((a_i-b_i)^2))   = 5.1962
+
+Identity check: euclidean^2 = ||A||^2 + ||B||^2 - 2*dot(A,B)
+  L2^2 = 27.000   ||A||^2+||B||^2-2dot = 27.000   match=True
+
+After L2-normalization (||A||=||B||=1):
+  cosine(nA,nB) = 0.9746
+  dot(nA,nB)    = 0.9746   <-- identical (within float eps)
+
+Pairwise cosine between corpus documents (TF-IDF vectors):
+          d0  d1  d2  d3  d4
+  d0    1.00  0.49  0.00  0.00  0.00
+  d1    0.49  1.00  0.00  0.00  0.00
+  d2    0.00  0.00  1.00  0.00  0.00
+  d3    0.00  0.00  0.00  1.00  0.00
+  d4    0.00  0.00  0.00  0.00  1.00
+
+  d0 & d1 ('cat/dog sat on mat/log') share structure -> high cosine.
+  d0 & d4 share almost no terms -> low cosine. This is semantic search.
+
+========================================================================
+SECTION C - ANN algorithms: brute force vs LSH vs HNSW
+========================================================================
+
+Exact (brute force) is O(n) per query. ANN trades a little recall for
+speed: LSH hashes similar vectors into the same bucket; HNSW walks a
+multi-layer proximity graph. We measure recall@k against brute force.
+
+Dataset: 16 points in 6 dims, 4 clusters (deterministic seed).
+
+Query = point[0] + small noise. k = 3.
+
+Brute force (exact ground truth, 100% recall, n distance comps):
+  top-3 = [0, 3, 1]   dists = [0.246, 0.526, 0.540]
+  distance computations = 16
+
+LSH (6 random hyperplanes, Hamming<=1 bucket expansion):
+  top-3 = [0, 3, 1]   dists = [0.246, 0.526, 0.540]
+  distance computations = 8   recall@3 = 1.00
+  (6 buckets; bucket sizes: [1, 1, 2, 2, 2, 8])
+
+HNSW (M=4, efSearch=8, mL=1/ln(4)=0.721):
+  layer assignment: [0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+  top-3 = [0, 3, 1]   dists = [0.246, 0.526, 0.540]
+  distance computations = 9   recall@3 = 1.00
+
+Comparison:
+  algorithm       dists    recall@3
+  ---------------------------------
+  brute force        16        1.00
+  LSH                 8        1.00
+  HNSW                9        1.00
+
+HNSW visits far fewer points than brute force while keeping recall
+high; LSH is faster to build but recall depends heavily on the number
+of planes / Hamming expansion. This is why HNSW is the 2025-2026
+production default in Qdrant, Weaviate, Milvus, pgvector, Faiss.
+
+========================================================================
+SECTION D - Indexing strategies: flat, IVF, product quantization
+========================================================================
+
+FLAT = brute force (100% recall, O(n)). IVF = k-means partitions,
+probe nprobe of them. PQ = compress vectors via subvector codebooks.
+
+Ground truth top-3 (flat, exact): [3, 0, 1]
+
+IVF (nlist=4 partitions via k-means):
+  cell sizes: [4, 4, 4, 4]
+  nprobe=1 -> top-3=[3, 0, 1] recall=1.00 (4 dist comps)
+  nprobe=2 -> top-3=[3, 0, 1] recall=1.00 (8 dist comps)
+  (nprobe=nlist collapses to brute force: 100% recall.)
+
+PQ (m=3 subvectors, ksub=4 centroids each):
+  codes: [[0, 2, 2], [2, 1, 2], [2, 2, 2], [2, 2, 2], [0, 2, 1], [0, 2, 1], [0, 2, 1], [3, 2, 1], [2, 0, 3], [2, 3, 3], [2, 0, 3], [2, 3, 3], [1, 2, 3], [1, 1, 3], [1, 1, 0], [1, 1, 3]]
+  original size = 16*6 dims*4 bytes = 384 bytes
+  PQ size       = 16*3 bytes       = 48 bytes
+  compression ratio = 8.0x
+  mean reconstruction error (L2) = 0.380
+  PQ top-3 = [2, 3, 1]   recall@3 = 0.67
+
+PQ trades recall for massive memory savings (32-256x). Pair with IVF
+(IVF-PQ) for >10M vectors where memory is the bottleneck.
+
+========================================================================
+SECTION E - Qdrant collection model + killer gotchas
+========================================================================
+
+A Qdrant collection holds points. Each point = (id, vector, payload).
+search(query_vector, k, filter) returns the k nearest matching points.
+
+Collection 'demo' (2D-projected for printing, real dims=4):
+  id=1  vec=[-0.32, -0.94, -0.67, 0.93]  payload={'cluster': 'A'}
+  id=2  vec=[-0.59, -1.0, 0.06, 0.99]  payload={'cluster': 'A'}
+  id=3  vec=[-0.5, -0.99, -0.34, 0.89]  payload={'cluster': 'A'}
+  id=4  vec=[0.49, 0.58, 0.58, 0.91]  payload={'cluster': 'B'}
+  id=5  vec=[0.56, 0.15, 0.63, 0.72]  payload={'cluster': 'B'}
+  id=6  vec=[0.33, 0.38, 0.49, 1.17]  payload={'cluster': 'B'}
+
+search(query=point1, k=3)  -- no filter:
+  id=1  cosine=1.000  payload={'cluster': 'A'}
+  id=3  cosine=0.968  payload={'cluster': 'A'}
+  id=2  cosine=0.869  payload={'cluster': 'A'}
+
+search(query, k=3, filter={cluster:'B'})  -- PAYLOAD FILTER (post-filter):
+  id=6  cosine=0.146  payload={'cluster': 'B'}
+  id=5  cosine=-0.042  payload={'cluster': 'B'}
+  id=4  cosine=-0.122  payload={'cluster': 'B'}
+
+Memory estimation (the interview math):
+  1M vectors, 1024 dims:
+    raw float32          = 4.10 GB
+    HNSW edges (M=16)    = 0.06 GB
+    scalar quant (uint8) = 1.02 GB  (4x compression)
+    PQ (m=64)            = 64 MB   (64x compression)
+
+Killer gotchas
+--------------
+  1. NEVER MIX embedding models in one index. Vectors from different
+     models live in different latent spaces -> cosine is meaningless.
+     Upgrading a model requires re-embedding the ENTIRE corpus.
+  2. For L2-NORMALIZED vectors, cosine == dot product. Use the faster
+     dot-product index; results are identical.
+  3. POST-FILTER can return < k results when the filter is selective
+     (< 1% match). Pre-filter or use Qdrant's filterable HNSW.
+  4. CURSE OF DIMENSIONALITY: above ~2048 dims, distances converge and
+     ANN quality degrades. Use PCA or lower-dim embedding models.
+  5. HNSW memory scales with BOTH n and M. 10M vectors -> 60+ GB RAM.
+     Use scalar/PQ quantization to cut this 4-32x.
+  6. RRF (hybrid search): score(d) = sum_r 1/(k + rank_r(d)), k=60.
+     No training, robust to scale differences, handles missing docs.
+
+========================================================================
+[check] metrics / tfidf / brute / LSH / HNSW / IVF / PQ ... OK
+========================================================================

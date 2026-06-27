@@ -1,0 +1,169 @@
+cdn.py - reference simulation.
+All numbers below feed CDN.md.
+stdlib only; deterministic.
+
+========================================================================
+  SECTION A: Cache hierarchy -- edge, regional, origin shield
+========================================================================
+Three cache tiers in front of the origin. Each tier serves a fixed
+fraction of the requests that REACH it (i.e. the misses from above):
+
+  tier             latency   serves
+  --------------------------------------------
+  edge POP            10 ms     80% of what reaches it
+  regional cache      30 ms     75% of what reaches it
+  origin shield       80 ms     80% of what reaches it
+  origin             200 ms   the rest (final miss)
+
+Cumulative hit rate = 1 - (1-0.80)(1-0.75)(1-0.80) = 99.00%
+Origin sees only 1.00% of user requests (~1 in 100).
+
+WHY HIERARCHY: each tier only needs to cache what the tier above it
+MISSED. Edge handles the hot 80% from RAM; regional + shield mop up
+most of the rest, so the origin is shielded from bursty traffic and
+the thundering herd.
+
+GOLD (pinned for cdn.html):
+  cumulative hit rate = 99.00%   (edge 80% -> +15% -> +4% = ~99%)
+[check] 3-tier hierarchy reaches ~99% cumulative hit rate?  OK
+
+========================================================================
+  SECTION B: Latency -- edge hit vs origin miss
+========================================================================
+Per-request outcome (probability-weighted by each tier's hit rate):
+
+  served at          latency   probability
+  --------------------------------------------
+  edge POP            10 ms    80.00%
+  regional cache      30 ms    15.00%
+  origin shield       80 ms     4.00%
+  origin             200 ms     1.00%
+
+Expected latency per request = 17.70 ms
+Direct-to-origin (no CDN)    = 200.00 ms
+
+Speedup = origin / expected  = 11.30x
+
+For a pure EDGE HIT (the common case, ~80% of requests):
+  edge 10 ms vs origin 200 ms = 20.0x faster.
+
+This is the whole value proposition of a CDN: move bytes close to the
+user so the round trip is measured in single-digit-to-tens of ms, not
+cross-continent hundreds.
+
+GOLD (pinned for cdn.html):
+  expected latency = 17.70 ms ; direct origin = 200 ms
+[check] CDN cuts expected latency below direct-origin?  OK
+
+========================================================================
+  SECTION C: Cache key -- why including a cookie destroys hit rate
+========================================================================
+Working set = 1000 distinct objects ; cache capacity = 1000 slots.
+
+Key = (host, path)                  -> 1000 variants, hit rate = 100%
+Key += Accept-Language (50 langs)   ->   50000 variants, hit rate = 2.00%
+Key += session cookie (5000 sessions) -> 5000000 variants, hit rate = 0.02%
+Key += User-Agent (100000 UAs)      -> 100000000 variants, hit rate = 0.00%
+
+WHAT THIS PROVES: a cache key must include ONLY what determines the
+response content. Adding a high-cardinality field (a tracking cookie,
+a raw User-Agent, a random nonce) makes every request look unique ->
+the cache stores a million near-duplicates and serves almost nothing
+from cache.
+
+RULES:
+  * strip cookies on /static/* paths
+  * normalize query strings (whitelist only params that change the
+    response)
+  * Vary only on Accept-Encoding (2 variants: gzip, br), NEVER on
+    User-Agent
+  * include in the key ONLY what determines the response content
+
+GOLD (pinned for cdn.html):
+  clean key hit rate = 100% ; with session cookie = 0.02%
+[check] clean key ~100% but cookie-key collapses below 5%?  OK
+
+========================================================================
+  SECTION D: Origin shield -- request coalescing kills the thundering herd
+========================================================================
+A viral URL: all 300 edge POPs miss on the SAME object at once.
+
+  WITHOUT shield coalescing: 300 edge misses -> 300 origin hits  (origin hammered)
+  WITH shield coalescing:    300 edge misses -> 1 origin hit   (shield fans out the response)
+
+HOW IT WORKS: the shield is a single choke point. When the first edge
+miss arrives, the shield fires ONE origin request and holds the rest;
+when the response returns, it serves all waiting edges from cache. The origin sees a 300x reduction in load during a burst.
+
+This is why a well-tuned CDN has an origin shield even when the edge
+tier already has a high hit rate: it protects the origin from the
+correlated misses a single hot URL can cause.
+
+GOLD (pinned for cdn.html):
+  coalescing reduces 300 simultaneous misses to 1 origin fetch
+[check] coalescing collapses 300 misses -> 1 origin hit?  OK
+
+========================================================================
+  SECTION E: Hit rate -> origin offload -> bandwidth cost
+========================================================================
+Origin offload ratio = hit rate (the origin serves only the misses).
+
+  hit rate   origin offload   origin serves
+  ------------------------------------------------
+     50%          50%            50.0%
+     75%          75%            25.0%
+     90%          90%            10.0%
+     95%          95%             5.0%
+     99%          99%             1.0%
+
+Bandwidth cost at 10,000,000 GB/month egress (origin $0.09/GB, CDN $0.02/GB):
+
+  hit rate   CDN cost       origin cost     total          vs no-CDN
+  ----------------------------------------------------------------------
+     50%       $     100,000   $     450,000   $     550,000   $     350,000 saved
+     90%       $     180,000   $      90,000   $     270,000   $     630,000 saved
+     99%       $     198,000   $       9,000   $     207,000   $     693,000 saved
+
+Without a CDN: $900,000/month (10,000,000 GB @ $0.09/GB).
+At 99% hit rate: $207,000/month -> $693,000 saved (77%).
+
+The economics: even though the CDN charges per byte, its price/GB is
+far below origin egress, and it serves ~99% of bytes. The origin bill
+shrinks to a rounding error.
+
+GOLD (pinned for cdn.html):
+  99% hit rate -> $207,000/mo vs $900,000/mo without CDN
+[check] CDN 99% hit rate is cheaper than no-CDN?  OK
+
+========================================================================
+  SECTION F: TTL strategies -- freshness vs hit rate
+========================================================================
+Each strategy picks a different point on the freshness/hit-rate axis:
+
+  strategy                TTL        stale?                hit rate
+  ----------------------------------------------------------------------------
+  versioned URLs          365d       never (new URL on every deploy)    99%
+  short TTL + SWR         60s        up to 60s + stale-while-revalidate window    90%
+  CDN-only s-maxage       300s       up to 5 min at CDN, 30s in browser    95%
+  explicit purge          3600s      until purge or TTL expiry    85%
+  no-store                0s         never cached anywhere      0%
+
+THE PATTERN: versioned URLs win on BOTH axes. A content hash in the
+filename (/app.a3f7c9.js) means the URL changes only when the content
+changes, so you can set a 1-YEAR immutable TTL. 'Invalidation' becomes
+free: you deploy a new file with a new hash, and the old cached copy
+simply ages out because nobody requests it anymore. This is the
+production default for build-pipeline assets.
+
+For content that genuinely changes (HTML, API responses), use a SHORT
+TTL + stale-while-revalidate: serve stale instantly, refresh in the
+background. Acceptable staleness up to the SWR window; hit rate stays
+high because most requests are served before the refresh completes.
+
+GOLD (pinned for cdn.html):
+  versioned URLs: TTL 365d, hit rate 99%
+[check] versioned URLs give 1yr TTL + ~99% hit rate?  OK
+
+========================================================================
+  DONE - all sections printed
+========================================================================

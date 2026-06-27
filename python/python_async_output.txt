@@ -1,0 +1,127 @@
+python_async.py — Phase 9 bonus bundle #55.
+Every value below is computed by this file; the .md guide pastes it
+verbatim. Nothing is hand-computed.
+Python 3.13.5 on this machine.
+
+======================================================================
+SECTION A — A TOY event loop: one thread rotates ready tasks at yield points
+======================================================================
+Before asyncio, here is the WHOLE idea in 25 lines. A coroutine is a
+generator: every `yield` is a 'I can wait — run someone else' point. A
+LOOP pops a ready task, runs it until it yields, then re-queues it. With
+ONE thread, only ONE task executes at a time — the loop just rotates
+which one. asyncio does exactly this, with `await` instead of `yield`.
+
+toy loop switch log = ['A:0', 'B:0', 'C:0', 'A:1', 'B:1', 'C:1', 'A:2']
+(A runs one step, yields, B runs one step, yields, C runs one step,
+ yields, then back to A ... strictly round-robin at each yield. A has
+ 3 steps vs B/C's 2, so A runs its final step alone after they finish.)
+
+[check] tasks interleaved: A0 then B0 (not A0,A1,A2): OK
+[check] round-robin order A0 B0 C0 A1 B1 C1 A2: OK
+[check] A (most steps) yielded last, after B and C were exhausted: OK
+
+======================================================================
+SECTION B — async/await: native coroutines and await delegation
+======================================================================
+`async def` makes a native coroutine. `await expr` DELEGATES to expr:
+it runs the awaited coroutine to its next suspension (or completion),
+yielding control to the loop in between. A chain `await f()` ->
+`await g()` -> `await asyncio.sleep(x)` is ONE control flow; the loop
+sees a single suspension at the deepest await.
+
+await chain top -> middle -> leaf -> asyncio.sleep -> 'middle(leaf-value)'
+[check] the deepest return propagated up the await chain: OK
+awaiting a coroutine with no suspension returns instantly: 'instant'
+[check] await on a non-suspending coroutine returns its value directly: OK
+
+top() with NO await -> type=coroutine, body did NOT run
+[check] calling (not awaiting) a coroutine returns a coroutine object, not its value: OK
+
+======================================================================
+SECTION C — Task scheduling: create_task and the task lifecycle
+======================================================================
+asyncio.create_task(coro) wraps a coroutine in a Task and schedules it
+SOON — without awaiting. A Task moves through states. Saving the return
+value is mandatory: the loop holds only a WEAK reference, so an unheld
+task can be garbage-collected mid-flight.
+
+  created: t_quick.done()=False
+  mid: t_quick.done()=True t_slow.done()=False
+  joined: quick=quick@0.02s slow=slow@0.08s
+
+[check] at creation neither task was done yet: OK
+[check] quick finished before slow (shorter delay, concurrent): OK
+[check] both tasks were done after being awaited: OK
+named tasks introspect to: ['alpha', 'beta']
+[check] Task.get_name() returns the explicitly assigned name: OK
+
+======================================================================
+SECTION D — gather vs wait: two ways to run many tasks
+======================================================================
+gather(*aws) runs everything concurrently and returns results in
+SUBMISSION order. wait(aws) returns two SETS (done, pending) and lets
+you choose the return condition — first complete, first exception, or all.
+Use gather for 'give me all results'; use wait for 'react as they finish'.
+
+gather -> ['third', 'first', 'second']   (results in SUBMISSION order, not finish order)
+[check] gather preserves submission order despite different finish times: OK
+wait(FIRST_COMPLETED) -> done=['b'] pending=2
+[check] wait FIRST_COMPLETED returned only the fastest task ('b'): OK
+wait(FIRST_EXCEPTION) -> done_count=1 exc=ValueError
+[check] wait FIRST_EXCEPTION fires as soon as a task raises (ValueError): OK
+
+======================================================================
+SECTION E — Semaphore: limit how many tasks run at once (rate limiting)
+======================================================================
+asyncio.Semaphore(n) admits at most n holders at a time. `async with sem:`
+acquires on entry, releases on exit — the classic rate-limiter. A
+BoundedSemaphore adds a safety check: releasing more than you acquired
+raises ValueError (catches double-release bugs).
+
+Semaphore(2) over 6 workers -> 6 finished, limit=2
+[check] all 6 workers completed under the semaphore: OK
+6 tasks x 0.05s with Semaphore(2) -> 0.154s (ceil(6/2)*0.05 = 0.15s)
+[check] Semaphore(2) serialized 6 tasks into ~3 waves (>= 0.14s): OK
+[check] Semaphore(2) still overlapped waves (< 0.28s, not fully serial): OK
+BoundedSemaphore over-release -> ValueError-on-over-release
+[check] BoundedSemaphore raised ValueError on a double release: OK
+
+======================================================================
+SECTION F — Async generators: streaming with async for
+======================================================================
+An `async def` that uses `yield` is an async generator. Each `yield`
+can be preceded by an `await`, so it produces values over time (e.g.
+streamed tokens). Consume with `async for`, or collect with an async
+comprehension. This is the primitive behind streaming LLM responses.
+
+async for over async generator -> [0, 1, 2, 3, 4]
+[check] async for consumed 0..4 from the async generator: OK
+async comprehension (filter even) -> [0, 2, 4]
+[check] async comprehension filtered to even values [0,2,4]: OK
+re-iterating an exhausted async generator -> [1]
+[check] async generators are single-use (second iteration produced nothing): OK
+
+======================================================================
+SECTION G — Async context managers: async with (__aenter__/__aexit__)
+======================================================================
+`async with` runs async setup before the block and async teardown
+after — even if the block raises. Implement __aenter__/__aexit__, or
+use @asynccontextmanager to wrap an async generator. The teardown
+ALWAYS runs (the whole point), in reverse order for nested `async with`.
+
+    [AsyncDB __aenter__: connected]
+    [AsyncDB __aexit__: closed]
+db.open inside block=True, after block=False
+[check] __aenter__ ran before the block (open=True inside): OK
+[check] __aexit__ ran after the block (open=False after): OK
+body raised -> events=['enter', 'body', 'exit', 'caught']
+[check] teardown (__aexit__) ran even though the body raised: OK
+@asynccontextmanager -> ['setup', 'inside', 'teardown']
+[check] asynccontextmanager ran setup before and teardown after yield: OK
+nested async with -> ['enter-outer', 'enter-inner', 'body', 'exit-inner', 'exit-outer']
+[check] nested async with tore down in reverse order (outer exits last): OK
+
+======================================================================
+SECTION DONE — all sections printed
+======================================================================

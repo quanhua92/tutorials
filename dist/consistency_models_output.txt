@@ -1,0 +1,248 @@
+consistency_models.py - reference impl. All numbers below feed
+CONSISTENCY_MODELS.md. Pure Python stdlib only.
+
+
+==========================================================================
+  SECTION A: the consistency hierarchy - what each model prevents
+==========================================================================
+A consistency model is the CONTRACT about what a read returns. They nest:
+
+  linearizable  >  sequential  >  causal  >  read-your-writes  >  eventual
+  (strongest, most coordination)             (weakest, most available)
+
+Each stronger model prevents EVERY anomaly the weaker one prevents, plus
+more. Stronger = safer but slower (coordination round-trips) and less
+available under partition.
+
+  | model            | rank | stale read? | avail. under partition? | prevents          |
+  |------------------|------|-------------|-------------------------|-------------------|
+  | linearizable     |    5 | PREVENTED   | no (CP)                 | stale read + lost update |
+  | sequential       |    4 | PREVENTED   | no (CP)                 | stale read + lost update |
+  | causal           |    3 | allowed     | YES                     | convergence only |
+  | read-your-writes |    2 | allowed     | YES                     | convergence only |
+  | eventual         |    1 | allowed     | YES                     | convergence only |
+
+STALE READ is the dividing line: linearizable/sequential PREVENT it; causal
+and weaker ALLOW it (a read may return an old value). Linearizable adds a
+REAL-TIME guarantee on top of sequential (once a write completes, every
+later read sees it); sequential only guarantees program order.
+
+AVAILABILITY under partition is the other axis: only the strong (CP) models
+block the minority; causal and weaker stay AVAILABLE (AP) - which is why
+causal is called 'the strongest ALWAYS-AVAILABLE model'.
+
+[check] hierarchy strictly ordered, linearizable prevents stale, eventual doesn't: OK
+
+==========================================================================
+  SECTION B: strong vs eventual - a concrete read-after-write trace
+==========================================================================
+Concrete scenario: 3 replicas {A,B,C} hold key x. Initial x=0 everywhere.
+
+Timeline (wall-clock, t in ms):
+
+  t=0   x=0 on all replicas
+  t=10  client W1 writes x=1   (write begins)
+  t=20  write x=1 committed at the leader
+  t=25  client R1 reads x
+  t=30  replica C still has x=0 (async replication lag)
+
+What does R1 see at t=25, depending on the model and which replica serves it?
+
+  | model           | read served by A/B (has x=1) | served by C (x=0) | verdict        |
+  |-----------------|------------------------------|-------------------|----------------|
+  | linearizable    | x=1                          | x=1 (must consult) | CORRECT        |
+  | eventual        | x=1                          | x=0               | STALE (allowed)|
+
+Under LINEARIZABILITY the read at t=25 MUST return x=1: the write completed at
+t=20, and real-time says t=25 > t=20, so every later read sees it. A linearizable
+read cannot be served from a stale replica alone - it consults a quorum/leader.
+Under EVENTUAL consistency, a read served by the lagging replica C returns x=0 -
+a STALE read. This is ALLOWED (the model only promises eventual convergence),
+but it is a real anomaly a user can observe.
+
+This is exactly 'read-after-write' inconsistency: the user wrote x=1, then read
+x and got the OLD value 0. RYW (Section D) and linearizability prevent it;
+
+plain eventual consistency does not.
+
+COST: a linearizable read on N=3 replicas needs >= quorum=2 acks
+(a round-trip to a majority), so it is SLOWER than a 1-replica eventual read.
+That latency is the price of 'no stale reads'. PACELC names this: when there is
+no partition, you still trade Latency vs Consistency on every single request.
+
+[check] linearizable read returns x=1 (post-completion); eventual may return x=0: OK
+
+==========================================================================
+  SECTION C: causal consistency - the strongest always-available model
+==========================================================================
+CAUSAL consistency guarantees: if operation a HAPPENS-BEFORE b (a -> b), then
+every client observes a before b. CONCURRENT operations (a || b) may be seen in
+different orders by different clients - and that is fine, because there is no
+causal dependency to violate.
+
+Why it matters: causal is the STRONGEST model that stays AVAILABLE under a
+partition. (Linearizable/sequential are NOT available under partition - they
+need coordination.) So if you must keep serving writes during a split but still
+want replies to appear after the messages they answer, causal is your ceiling.
+
+Concrete example (a comment thread):
+
+  m1: Alice posts 'Hello'                        (P1 writes m1)
+  m2: Bob   replies 'Hi Alice'  (m2 causally->m1) (P2 writes m2, depends on m1)
+  m3: Carol posts 'Nice weather' (m3 || m2)       (P3 writes m3, independent)
+
+Under CAUSAL consistency, every reader sees m1 before m2 (causal dep), but m2
+and m3 may appear in EITHER order (they are concurrent - no dependency):
+
+  reader X sees: m1, m2, m3
+  reader Y sees: m1, m3, m2     <- both LEGAL (m2||m3)
+
+Under LINEARIZABILITY all readers see one identical total order. Under
+EVENTUAL (without causal) a reader could even see m2 (Bob's 'Hi Alice') BEFORE
+m1 (Alice's 'Hello') - a reply before the message it answers. That breaks the
+
+product even though the data eventually converges.
+
+Mechanism: track causality with VECTOR CLOCKS / version vectors (see
+vector_clocks.py). A write carries the versions it read-from; a replica delays
+applying a write until its causal dependencies are present. This is how
+COPS / Bolt-on Causal and (effectively) chat systems work.
+
+[check] m2 causally depends on m1; m2 and m3 are concurrent: OK
+
+==========================================================================
+  SECTION D: session guarantees - read-your-writes & monotonic reads
+==========================================================================
+SESSION guarantees (Terry et al 1994, Bayou) sit BETWEEN causal and eventual.
+They bound what a SINGLE client's session can see, without paying for global
+coordination. The two most-used:
+
+  READ-YOUR-WRITES (RYW): if a client writes x=v, every later read of x by the
+    SAME client returns v (or newer). You always see your own actions.
+
+  MONOTONIC READS: once a client reads x=v, it never later reads an OLDER
+    value of x. Time never runs backwards for that client.
+
+Scenario: a user edits their profile name to 'Quan' then reloads the page.
+
+  write:  name = 'Quan'   (at t=10, accepted by replica A)
+  read at t=12 served by replica B (async lag, still has old 'Bob')
+
+  | guarantee        | what the reload shows | ok?                |
+  |------------------|-----------------------|---------------------|
+  | none (plain ev.) | 'Bob' (stale)         | VIOLATION (confusing)|
+  | read-your-writes | 'Quan'                | OK - sees own write  |
+  | monotonic reads  | (n/a here)            | prevents regressions |
+
+How RYW is implemented WITHOUT global linearizability:
+
+  - STICKY SESSIONS: route the client's reads to the same replica that took
+    its write (a load-balancer cookie / IP hash). Cheap, but fails on failover.
+
+  - WRITE-THROUGH CACHE: the client caches its own writes; reads check the
+    cache first. Survives replica changes.
+
+  - VERSION STICKING: the read carries the write's version; the store delays
+    the read until a replica has >= that version.
+
+Monotonic reads is similar: remember the highest version seen and refuse to
+read from a replica behind it. Both are PER-SESSION, so they cost nothing
+globally - this is why social feeds use them (you see your own post, your feed
+never jumps backwards) without paying for linearizability on every like.
+
+Monotonic-reads violation (what it prevents):
+  t=1  read x from replica A -> sees version 5
+  t=2  read x from replica C -> sees version 3   <- went BACKWARDS in time
+  Monotonic reads forces t=2 to wait for version >= 5. Prevented.
+
+[check] RYW => reload shows own write; monotonic reads => no backwards reads: OK
+
+==========================================================================
+  SECTION E: quorum systems - the R+W>N tunable dial
+==========================================================================
+In an AP store (Dynamo/Cassandra) with N replicas, each request picks how many
+replicas must acknowledge: W for a write, R for a read. The KEY identity:
+
+   a read is guaranteed to see the latest committed write   <=>   R + W > N
+
+WHY: the read contacts R replicas and the write contacted W. If R + W > N then
+those two sets must OVERLAP in at least one replica (pigeonhole), and that
+overlap replica holds the fresh value. The intersection size is:
+
+   |R_set ∩ W_set| >= R + W - N      (>= 1 exactly when R + W > N)
+
+Worked overlap table for N=3 replicas {A,B,C}, write to W=2 of them:
+
+  | read R | R+W | >N? | can read miss the write? | verdict        |
+  |--------|-----|-----|--------------------------|----------------|
+  | 1      | 3   | no  | YES - could read only C  | may be stale   |
+  | 2      | 4   | YES | NO - every R-set hits {A,B} | STRONG read    |
+  | 3      | 5   | YES | NO - every R-set hits {A,B} | STRONG read    |
+
+With W=2, R=2: R+W=4>3 -> STRONG (intersection >= 1). A read of 2 replicas
+out of 3 MUST include A or B (the write set), so it sees the fresh value.
+With W=2, R=1: R+W=3, NOT > 3 -> the single read replica could be C, which
+missed the write -> stale. This is Cassandra's default-ish trade space.
+
+The full tunable dial (N=3), from fastest/stalest to slowest/freshest:
+
+  | config      | W | R | R+W | strong? | latency       | use when                  |
+  |-------------|---|---|-----|---------|---------------|---------------------------|
+  | one/one     | 1 | 1 |  2  | no      | lowest (1 RTT) | counters, fast stale reads |
+  | write-all   | 3 | 1 |  4  | YES     | higher (2+ RTT) | bank-balance reads |
+  | quorum      | 2 | 2 |  4  | YES     | higher (2+ RTT) | bank-balance reads |
+  | read-all    | 1 | 3 |  4  | YES     | higher (2+ RTT) | profile/registry reads |
+  | all/all     | 3 | 3 |  6  | YES     | higher (2+ RTT) | profile/registry reads |
+
+Quorum majority grows with N. For N=5: quorum = floor(5/2)+1 = 3.
+  W=R=3 (both quorum) -> 3+3=6 > 5 -> STRONG. This is the Dynamo/Cassandra
+  'QUORUM reads/writes' default that gives strong-ish consistency on N=3 or N=5.
+
+[check] strong read iff R+W>N; N=5 quorum=3, 3+3=6>5 strong: OK
+
+==========================================================================
+  GOLD CHECK: CAP recap + data-type -> consistency model mapping
+==========================================================================
+CAP (Brewer 2000 / Gilbert-Lynch 2002): during a partition you must drop
+Consistency (CP) or Availability (AP). PACELC (Abadi 2010) adds: even with
+NO partition you still trade Latency vs Consistency every request.
+
+  | family | partitioned (CAP) | else (PACELC)  | example systems            |
+  |--------|-------------------|----------------|----------------------------|
+  | CP/EC  | drop A (block)    | drop L (quorum)| etcd, ZooKeeper, Spanner   |
+  | AP/EL  | drop C (diverge)  | drop C (async) | Cassandra, DynamoDB, Riak  |
+
+Which model to pick? Map each DATA TYPE to the weakest model its product
+promise allows (the CAP/PACELC 'right tool' philosophy):
+
+  | data type                   | model chosen    | why                                  |
+  |------------------------------|-----------------|--------------------------------------|
+  | bank balance / inventory    | LINEARIZABLE    | over-sell / split-brain is fatal     |
+  | leader election / lock      | LINEARIZABLE    | two leaders = data corruption        |
+  | DM thread / comment replies | CAUSAL          | reply must follow its parent message |
+  | user's own profile edit     | READ-YOUR-WRITES| user must see own write immediately  |
+  | like / view / follower count| EVENTUAL        | temp undercount ok; availability wins|
+  | distributed shopping cart   | EVENTUAL + CRDT | concurrent adds must merge, not drop |
+
+RULE OF THUMB: start with the WEAKEST model you can defend to product, and
+escalate ONLY where an anomaly would cause real harm. Stronger models cost
+latency (quorum round-trips) and availability (CP blocks the minority).
+
+GOLD scalars (for a compact .html check):
+  models_count        = 5
+  strongest           = linearizable
+  weakest             = eventual
+  strongest_available = causal   (strongest model that survives a partition)
+  stale_read_divider  = linearizable/sequential PREVENT; causal+ ALLOW
+  quorum(3)           = 2
+  quorum(5)           = 3
+  strong_read_rule    = R + W > N
+  strong_N3_W2_R2     = YES (2+2=4>3)
+  strong_N3_W1_R1     = no (1+1=2<3)
+  intersection(N3,W2) = R+2-3
+
+[check] hierarchy, CAP families, R+W>N strong rule all hold: OK
+
+==========================================================================
+  DONE - all sections printed
+==========================================================================

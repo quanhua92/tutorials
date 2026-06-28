@@ -186,6 +186,15 @@ this rule block under HARD RULES:
   .../{SECTION}/{stem}{EXT}) — NOT relative links. Back-link to ./index.html
   (the {SECTION} dashboard, NOT ../index.html). Extract the <script> and run
   `node --check` (must pass) before reporting.
+- **RUNTIME CHECK (not just syntax):** `node --check` only validates syntax — it
+  does NOT execute the code. After `node --check` passes, verify the script runs
+  without runtime errors by either (a) opening in a browser and checking the
+  console for errors, or (b) running the DOM-mock smoke test from SKILL.md §15.2.
+  Common runtime bugs that `node --check` misses: wrong argument count (extra
+  unused param shifts all args), accessing properties of undefined (reading
+  `.value` from a DOM element that returns empty string, then using it as a
+  key/array index), calling a function that was never defined. If any runtime
+  error occurs, fix it before reporting.
 ```
 
 > Relative links in `.html`/`.md` headers are a documented bug class — they must

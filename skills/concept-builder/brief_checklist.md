@@ -156,6 +156,7 @@ Don't rewrite from scratch unless the whole bundle is wrong.
 | `_output.txt` differs on re-run | nondeterminism (see §3) | re-spawn citing the DETERMINISM hard rules |
 | `[check]` count is 0 | worker skipped invariants | re-spawn, emphasize "add a `check(...)` for every invariant" |
 | gold-check `[check: FAIL]` in `.html` | JS formula drifted from runnable | re-spawn: copy the runnable's formula verbatim into JS |
+| `.html` runtime crash (white screen, console TypeError) but `node --check` passes | **`node --check` is syntax-only** — does NOT execute code. Runtime errors (undefined access, wrong arg count, null deref) slip through. | run the DOM-mock smoke test (SKILL.md §15.2); fix the flagged files; see known false positives table |
 | `node --check` fails on `.html` `<script>` | unbalanced brace / JS typo | usually a 1-line fix; re-spawn with the error |
 | ASan/UBSan reports issues (cpp) | a real bug — **UB** (use-after-free, OOB, overflow, leak) | re-spawn — correctness failure, not a nit; fix the UB |
 | Numbers in `.md` ≠ `_output.txt` | worker hand-typed a table | regenerate via capture, paste verbatim under callouts |
@@ -177,6 +178,10 @@ Don't rewrite from scratch unless the whole bundle is wrong.
       line per entry.
 - [ ] For the interactive flavor, opened 1–2 `.html` in a browser; `[check: OK]`
       badge is green.
+- [ ] **Runtime smoke test passed** — ran the DOM-mock smoke test
+      (`node /tmp/html_runtime_check.js {SECTION}`, see SKILL.md §15.2) on all
+      `.html` files. Any runtime failures investigated: real bugs fixed, false
+      positives (dynamically-populated `<select>`, mock gaps) documented.
 - [ ] Re-spawned any failures (max 4 again).
 - [ ] Ticked the boxes in `TODO.md`; updated its Progress table.
 - [ ] **Style drift:** if new bundles raised the bar (e.g. added a `## Sources`

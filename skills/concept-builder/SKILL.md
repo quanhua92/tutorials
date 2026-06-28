@@ -377,13 +377,19 @@ for name in {batch_stems}; do
   {lint} "$name" >/dev/null 2>&1 && echo "  lint: OK" || echo "  lint: FAIL"
   test -s "${name}_output.txt" && echo "  output.txt: present" || echo "  output.txt: MISSING"
   test -s "${name}_reference.txt" && echo "  reference.txt: present" || echo "  reference.txt: MISSING"
-  # interactive flavor: node --check the extracted <script>
+  # interactive flavor: node --check the extracted <script> (syntax only)
+  # THEN run the runtime smoke test (§15.2) — node --check is NOT enough
 done
 ```
 
 Then spot-check 2–3 `.md` callouts vs `_output.txt` byte-for-byte. For the
 interactive flavor, open 1–2 `.html` in a browser and confirm `[check: OK]` is
 green. The full failure→fix dispatch table is in `brief_checklist.md` §4.
+
+> **`node --check` is syntax-only — it does NOT catch runtime errors.** See
+> §15.2 for the DOM-mock runtime smoke test that actually executes each
+> `<script>` and catches undefined access, wrong argument counts, null
+> dereferences, and other runtime crashes that syntax validation misses.
 
 ---
 
@@ -396,6 +402,7 @@ green. The full failure→fix dispatch table is in `brief_checklist.md` §4.
 | `_output.txt` differs on re-run | nondeterminism (§10) | re-spawn citing the DETERMINISM rules |
 | `[check]` count is 0 | worker skipped invariants | re-spawn: "add a `check(...)` for every invariant" |
 | gold-check `[check: FAIL]` | JS formula drifted from runnable | re-spawn: copy runnable formula verbatim into JS |
+| `.html` crashes at runtime (white screen, console error) but `node --check` passes | **`node --check` only validates syntax** — it does NOT execute the code. Runtime errors (undefined access, wrong arg count, null dereference) slip through. | run the §15.2 DOM-mock smoke test; fix the flagged files |
 | Numbers in `.md` ≠ `_output.txt` | worker hand-typed a table | regenerate, paste verbatim under callouts |
 | No `_reference.txt` / `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional; require >=2 URLs with "Verifies:" lines |
 | No pitfalls table | junior tutorial | re-spawn, cite the three-layer depth rule |
@@ -464,7 +471,130 @@ this skill). Copy it into any project that uses the concept-builder workflow.
 
 ---
 
-## 16. Project bootstrap from scratch (new learning repo)
+## 15.2 HTML runtime smoke test (non-negotiable — `node --check` is NOT enough)
+
+`node --check` validates **syntax** only — it catches missing braces and bad
+tokens. It does **NOT** execute the code, so it cannot catch:
+
+- **Undefined variable access** (`x.toFixed()` where `x` is `undefined`)
+- **Wrong argument counts** (`drawAxes(vmax, label, ticks)` called with 2 args
+  instead of 3 — `ticks` is `undefined`, crashes on `.length`)
+- **Null dereferences** (accessing `.options` on an element that doesn't have it)
+- **Missing function definitions** (calling a function that was never declared)
+
+These bugs ship silently — the `.html` opens to a white screen with a console
+error. Users hit them in production.
+
+### The DOM-mock runtime smoke test
+
+Extract each `.html`'s `<script>`, wrap it in a `vm.Context` with a minimal DOM
+mock, and **execute it**. Any runtime crash surfaces as a caught exception with
+a line number.
+
+```bash
+# Save as /tmp/html_runtime_check.js and run:
+# node /tmp/html_runtime_check.js {SECTION}
+```
+
+```javascript
+#!/usr/bin/env node
+const fs = require('fs'), path = require('path'), vm = require('vm');
+
+const dir = process.argv[2] || '.';
+const files = fs.readdirSync(dir)
+  .filter(f => f.endsWith('.html') && f !== 'index.html').sort();
+
+const ctxStub = new Proxy({}, { get(_,p) {
+  if (p === 'measureText') return () => ({width:10});
+  if (p === 'getImageData') return () => ({data:new Uint8Array(4)});
+  if (p === 'createImageData') return () => ({data:new Uint8Array(4)});
+  if (p === 'createLinearGradient') return () => ({addColorStop(){}});
+  return typeof p === 'string' ? () => {} : undefined;
+}});
+
+const fakeEl = new Proxy({}, {
+  get(_, p) {
+    if (p === 'innerHTML' || p === 'textContent' || p === 'value') return '';
+    if (p === 'style' || p === 'dataset') return {};
+    if (p === 'classList') return {add(){},remove(){},toggle(){},contains(){return false;}};
+    if (p === 'querySelector') return () => fakeEl;
+    if (p === 'querySelectorAll') return () => [];
+    if (p === 'closest') return () => fakeEl;
+    if (p === 'getContext') return () => ctxStub;
+    if (p === 'getBoundingClientRect') return () => ({width:800,height:400,left:0,top:0});
+    if (p === 'getAttribute') return () => null;
+    if (p === 'checked') return true;
+    if (p === 'selectedIndex') return 0;
+    if (p === 'options') return [{value:'',text:''}];
+    if (p === 'width' || p === 'height') return 800;
+    return () => {};
+  },
+  set() { return true; },
+});
+
+let pass = 0, fail = 0;
+for (const file of files) {
+  const html = fs.readFileSync(path.join(dir, file), 'utf8');
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  if (!m) continue;
+  const sandbox = {
+    console:{log(){}}, Math, Date, JSON, parseInt, parseFloat, isNaN, isFinite,
+    String, Number, Boolean, Array, Object, RegExp, Error, Symbol,
+    setTimeout(){}, setInterval(){}, requestAnimationFrame(){},
+    localStorage:{getItem(){return null;},setItem(){}},
+    location:{pathname:'/'+file,hash:'',search:'',replace(){}},
+    document:{
+      getElementById(){return fakeEl;}, querySelector(){return fakeEl;},
+      querySelectorAll(){return[];}, createElement(){return fakeEl;},
+      createElementNS(){return fakeEl;}, createTextNode(){return fakeEl;},
+      getElementsByClassName(){return[];}, getElementsByTagName(){return[];},
+      addEventListener(){}, body:fakeEl, documentElement:fakeEl,
+    },
+    window:{addEventListener(){}},
+    TextEncoder:function(){this.encode=function(s){return{data:Buffer.from(s||'')};};},
+    TextDecoder:function(){this.decode=function(){return'';};},
+  };
+  sandbox.self = sandbox; sandbox.window.document = sandbox.document;
+  try {
+    vm.createContext(sandbox);
+    vm.runInContext(m[1], sandbox, {filename:file, timeout:3000});
+    console.log(`  ${file}: RUNTIME OK`); pass++;
+  } catch(e) {
+    console.log(`  ${file}: RUNTIME FAIL — ${e.message}`);
+    fail++;
+  }
+}
+console.log(`\n${pass} passed, ${fail} failed out of ${files.length}`);
+process.exit(fail > 0 ? 1 : 0);
+```
+
+### Known false positives
+
+The DOM mock is minimal. Some failures are **mock limitations, not real bugs**:
+
+| Symptom | Why it's a false positive | Verify in browser |
+|---|---|---|
+| `Cannot read properties of undefined (reading 'params')` | `<select>` options are populated dynamically by JS — empty in mock | Open in browser: `<select>` auto-selects first `<option>`, `.value` returns it |
+| `Cannot read properties of undefined (reading 'toFixed')` after reading an `<input>` | Mock returns `value:''`, `parseInt('')` = `NaN` | Open in browser: `<input value="500">` returns `"500"`, `parseInt("500")` = 500 |
+| `TextEncoder is not defined` / `getElementsByClassName` | Mock gaps — add to sandbox if needed | Works in real browser |
+
+**When a runtime failure appears:** check whether the code reads a DOM value
+that the mock can't provide. If so, it's a false positive. If the error is in
+pure JS logic (wrong function args, accessing undefined array element, calling
+non-existent function), it's a **real bug** — fix it before shipping.
+
+### The real bug this catches (from production)
+
+```javascript
+// BROKEN — ships with node --check passing, crashes in browser:
+function drawAxes(svg, vmax, ylabel, yticks) { ... yticks.length ... }
+//                        ^^^ UNUSED — shifts all args by 1
+drawAxes(85, "tok/s / user", [0,20,40,60,80]);
+//        ^ vmax   ^ ylabel  ^ undefined → yticks.length = CRASH
+```
+
+`node --check` says this is valid JavaScript (it IS syntactically valid). Only
+the runtime smoke test catches it.
 
 To start a brand-new project with this discipline:
 

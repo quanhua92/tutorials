@@ -1,0 +1,481 @@
+<!doctype html>
+<!--
+  virtual_lists.html — React deep dive: virtualized lists (windowing).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving a
+  from-scratch virtual list renders only the VISIBLE slice of a 1,000-row
+  list. Companion: VIRTUAL_LISTS.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: a normal `items.map()` mounts one DOM node per item — 1,000 rows
+  means 1,000 nodes, and the browser crawls. Virtualization (windowing) renders
+  only what's inside the scroll viewport: ~12 nodes for a 1,000-row list, ~12
+  nodes for a 1,000,000-row list. The DOM count is O(viewport), NOT O(data).
+
+  The core algorithm is pure arithmetic on scrollTop:
+    startIndex   = floor(scrollTop / itemHeight)
+    visibleCount = ceil(viewportHeight / itemHeight) + overscanBuffer
+    endIndex     = startIndex + visibleCount
+    offsetY      = startIndex * itemHeight   (a full-height spacer sells the scrollbar)
+  A tall inner div (height = total * itemHeight) makes the scrollbar honest; the
+  visible rows are absolutely positioned at top = i * itemHeight inside it.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<VirtualList/>), the gold-check
+  (1) asserts the inner container holds ~12 DOM nodes — NOT 1,000 — proving only
+  the visible window is mounted; (2) asserts the first mounted item is "Item #1";
+  (3) programmatically sets viewport.scrollTop = 7200 and waits for React's
+  onScroll → setScrollTop re-render; (4) asserts "Item #201" is now mounted (the
+  window slid); (5) re-counts DOM nodes and asserts the count is STILL ~12, not
+  1,000 — the window moved, it did not grow. This proves O(viewport) rendering.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Virtual Lists (Windowing) — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Virtual Lists &mdash; windowing: render only what you see</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/VIRTUAL_LISTS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/VIRTUAL_LISTS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Contrast with
+    <a href="../frontend/react/react_effects_lists.html">frontend/react: effects &amp; lists</a> —
+    normal <code>.map()</code> renders <b>everything</b>; virtualization renders only what's visible.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">the windowing idea: O(viewport), not O(data)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A plain <code>items.map()</code> mounts one DOM node per item — 1,000 rows → 1,000 nodes,
+        and the browser re-layouts all of them on every scroll. <b class="text-[#e6edf3]">Virtualization</b>
+        renders only the slice inside the scroll viewport. The scrollbar is faked with a full-height
+        spacer (height = <code>total × itemHeight</code>); the visible rows are absolutely positioned
+        inside it. As you scroll, <code>onScroll → setScrollTop</code> recomputes the slice and React
+        mounts/unmounts just the rows entering or leaving the window.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>variable</th><th>formula</th><th>example (scrollTop = 1200px)</th></tr>
+        <tr>
+          <td><code>startIndex</code></td>
+          <td><code>floor(scrollTop / itemHeight)</code></td>
+          <td>floor(1200 / 40) = <b class="text-[#e6edf3]">30</b></td>
+        </tr>
+        <tr>
+          <td><code>visibleCount</code></td>
+          <td><code>ceil(viewportHeight / itemHeight) + overscan</code></td>
+          <td>ceil(400 / 40) + 2 = <b class="text-[#e6edf3]">12</b></td>
+        </tr>
+        <tr>
+          <td><code>endIndex</code></td>
+          <td><code>min(startIndex + visibleCount, total)</code></td>
+          <td>min(30 + 12, 10000) = <b class="text-[#e6edf3]">42</b></td>
+        </tr>
+        <tr>
+          <td><code>offsetY</code> (spacer)</td>
+          <td><code>startIndex × itemHeight</code> (= the inner div's full height sells the scrollbar)</td>
+          <td>30 × 40 = <b class="text-[#e6edf3]">1200px</b></td>
+        </tr>
+        <tr>
+          <td><code>row top</code></td>
+          <td><code>i × itemHeight</code> (absolute position inside spacer)</td>
+          <td>row #35 → top = 1400px</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the virtual list you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var TOTAL = 1000;
+var ITEM_HEIGHT = 36;
+var VIEWPORT_HEIGHT = 288; // 8 rows visible (288 / 36)
+
+function VirtualList() {
+  var [scrollTop, setScrollTop] = React.useState(0);
+
+  // --- the windowing math (recomputed on every scroll) ---
+  var startIndex = Math.floor(scrollTop / ITEM_HEIGHT);
+  var visibleCount = Math.ceil(VIEWPORT_HEIGHT / ITEM_HEIGHT) + 2; // +2 overscan buffer
+  var endIndex = Math.min(startIndex + visibleCount, TOTAL);
+  var renderedCount = endIndex - startIndex;
+
+  // --- build ONLY the visible slice (never all 1000) ---
+  var items = [];
+  for (var i = startIndex; i &lt; endIndex; i++) {
+    items.push(
+      &lt;div
+        key={i}
+        data-testid={"item-" + i}
+        className="flex items-center px-4 text-sm text-[#e6edf3] border-b border-[#30363d] bg-[#0d1117]"
+        style={{
+          height: ITEM_HEIGHT + "px",
+          position: "absolute",
+          top: i * ITEM_HEIGHT + "px",
+          left: 0,
+          right: 0
+        }}
+      &gt;
+        Item #{i + 1} of {TOTAL}
+      &lt;/div&gt;
+    );
+  }
+
+  return (
+    &lt;div className="max-w-md mx-auto p-4 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-base font-bold text-[#61dafb] mb-3"&gt;
+        Virtual List ({TOTAL.toLocaleString()} rows)
+      &lt;/h2&gt;
+
+      &lt;div
+        data-testid="viewport"
+        onScroll={function (e) { setScrollTop(e.target.scrollTop); }}
+        style={{
+          height: VIEWPORT_HEIGHT + "px",
+          overflowY: "auto",
+          position: "relative",
+          border: "1px solid #30363d",
+          borderRadius: "8px",
+          background: "#0d1117"
+        }}
+      &gt;
+        {/* full-height spacer → scrollbar is honest about all 1000 rows */}
+        &lt;div
+          data-testid="inner"
+          style={{ height: TOTAL * ITEM_HEIGHT + "px", position: "relative" }}
+        &gt;
+          {items}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div className="flex flex-wrap gap-3 mt-3 text-xs text-[#8b949e]"&gt;
+        &lt;span data-testid="rendered-count" className="text-[#61dafb]"&gt;
+          Rendered: {renderedCount} / {TOTAL}
+        &lt;/span&gt;
+        &lt;span&gt;
+          · scrollTop {scrollTop}px · start {startIndex} · end {endIndex}
+        &lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById("root")).render(&lt;VirtualList/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;VirtualList/&gt;</code> becomes <code>React.createElement(VirtualList)</code>.
+        The loop only pushes <code>visibleCount</code> elements — the other 988 rows never become
+        DOM nodes. On scroll, <code>setScrollTop</code> changes <code>startIndex</code> and React
+        reconciles the new short list.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (windowing, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        There are <b class="text-[#e6edf3]">1,000</b> rows of data, but only ~12 are ever in the DOM.
+        Scroll the box (or let the <b class="text-[#e6edf3]">gold-check</b> scroll it for you): the
+        <b class="text-[#e6edf3]"> DOM nodes</b> badge stays ~12 while <b class="text-[#e6edf3]">Rendered</b>
+        reflects the active window — that gap is the whole point.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        DOM nodes (live): <span id="count-read" class="text-[#61dafb]">—</span> / 1000
+        · gold: count~12 → assert #1 → scroll → assert #201 → re-count~12
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>render 10k rows without lag</td>
+          <td>slice to the visible window; absolute-position each row</td>
+          <td>~12 DOM nodes regardless of <code>total</code></td>
+        </tr>
+        <tr>
+          <td>compute the visible range</td>
+          <td><code>start=floor(scrollTop/h)</code>; <code>count=ceil(vp/h)+buffer</code></td>
+          <td>O(1) arithmetic — no scan over data</td>
+        </tr>
+        <tr>
+          <td>fake the full scroll height</td>
+          <td>inner spacer div: <code>height = total × itemHeight</code></td>
+          <td>scrollbar looks right; browser owns momentum/inertia</td>
+        </tr>
+        <tr>
+          <td>paint a row in its slot</td>
+          <td><code>position:absolute; top: i × itemHeight</code></td>
+          <td>no layout shift; each row lands at its exact offset</td>
+        </tr>
+        <tr>
+          <td>hide blank flash on fast scroll</td>
+          <td>overscan: render ±2 rows beyond the viewport edges</td>
+          <td>covers the gap while React commits the new slice</td>
+        </tr>
+        <tr>
+          <td>variable row heights</td>
+          <td>measure + cache each row's height; recompute cumulative offsets</td>
+          <td>needs a measurement pass — reach for a library here</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+      var SCROLL_TO = 7200;            // 7200 / 36 = 200 → first visible row is #201
+      var HARD_CAP = 50;               // any window this big = no virtualization
+
+      function itemNodeCount() {
+        var inner = root.querySelector('[data-testid="inner"]');
+        return inner ? inner.querySelectorAll('[data-testid^="item-"]').length : 0;
+      }
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for VirtualList to render…");
+        waitForViewport(0);
+      }
+
+      function waitForViewport(frame) {
+        var vp = root.querySelector('[data-testid="viewport"]');
+        if (vp) { step1_assertDomSmall(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForViewport(frame + 1); });
+          return;
+        }
+        failGoldCheck("VirtualList did not render the viewport in time");
+      }
+
+      // Step 1: only ~12 nodes mounted, NOT 1000 → windowing is active
+      function step1_assertDomSmall() {
+        readLive();
+        var nodes = itemNodeCount();
+        if (nodes > 0 && nodes < HARD_CAP) { step2_assertFirstItem(); return; }
+        if (frameGuard()) { requestAnimationFrame(function () { step1_assertDomSmall(); }); return; }
+        failGoldCheck("expected ~" + HARD_CAP + " DOM items, got " + nodes + " (1000 = no virtualization)");
+      }
+
+      // Step 2: the first mounted row is "Item #1"
+      function step2_assertFirstItem() {
+        var first = root.querySelector('[data-testid="item-0"]');
+        if (first && /Item #1\b/.test(first.textContent)) { step3_scroll(); return; }
+        failGoldCheck("expected first visible item 'Item #1' but saw: " + (first ? first.textContent : "none"));
+      }
+
+      // Step 3: programmatically scroll, then wait for React to re-render the window
+      function step3_scroll() {
+        var vp = root.querySelector('[data-testid="viewport"]');
+        vp.scrollTop = SCROLL_TO;     // fires onScroll → setScrollTop(7200)
+        pollScrolled(0);
+      }
+
+      function pollScrolled(frame) {
+        readLive();
+        var row = root.querySelector('[data-testid="item-200"]');
+        if (row && /Item #201\b/.test(row.textContent)) { step4_assertCountStable(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollScrolled(frame + 1); });
+          return;
+        }
+        failGoldCheck("after scroll, expected 'Item #201' visible but the window never slid");
+      }
+
+      // Step 4: DOM node count is STILL small (the window moved, it did not grow)
+      function step4_assertCountStable() {
+        readLive();
+        var nodes = itemNodeCount();
+        if (nodes > 0 && nodes < HARD_CAP) { passGoldCheck(nodes); return; }
+        failGoldCheck("after scroll, DOM grew to " + nodes + " (window should stay ~12, not accumulate)");
+      }
+
+      // ---- helpers ----
+      var _fg = 0;
+      function frameGuard() { return _fg++ < MAX_FRAMES; }
+
+      function readLive() {
+        countRead.textContent = itemNodeCount();
+      }
+
+      function passGoldCheck(nodes) {
+        readLive();
+        badge.textContent = "[check] " + nodes + " DOM nodes for 1000 rows; scroll → window slid, count stable. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

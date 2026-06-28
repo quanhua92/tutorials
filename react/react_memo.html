@@ -1,0 +1,444 @@
+<!doctype html>
+<!--
+  react_memo.html — Phase 1 performance bundle (STYLE ANCHOR: use_reducer.html).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving React.memo
+  end-to-end. Companion: REACT_MEMO.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: by default, when a parent re-renders, React re-renders EVERY child —
+  even children whose props did not change. React.memo wraps a component so React
+  first shallow-compares the old props vs the new props; if every prop is
+  referentially equal (Object.is), React SKIPS the re-render and reuses the last
+  output. memo is a performance optimization, NOT a correctness mechanism.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: memo, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<MemoParent/>), the gold-check
+  reads the initial child render count (=1), clicks "other+1" (unrelated state)
+  and asserts the child render count is STILL 1 (memo skipped), clicks "count+1"
+  (changes child props) and asserts the count rose to 2, then clicks "other+1"
+  again and asserts the count is STILL 2. This proves React.memo's shallow
+  prop comparison end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>React.memo — the prop-guarded re-render skip</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">React.memo &mdash; the prop-guarded re-render skip</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/REACT_MEMO.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/REACT_MEMO.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Pairs with <a href="./use_memo_callback.html">./use_memo_callback.html</a>:
+    <b>useMemo/useCallback keep props stable — React.memo checks if props changed.</b>
+    The three work as a trio; memo alone is defeated by fresh function/object refs.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">parent re-render → child re-render (unless memoized)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        When a parent re-renders, React re-renders <b class="text-[#e6edf3]">every</b> child by
+        default — even children whose props did not change. <code>React.memo(Component)</code>
+        wraps a component so React first runs a <b class="text-[#e6edf3]">shallow prop comparison</b>
+        (<code>Object.is</code> per prop); if every prop is referentially equal, React
+        <b class="text-[#e6edf3]">skips the re-render</b> and reuses the last rendered output.
+        memo is a <b class="text-[#e6edf3]">performance</b> optimization, never a correctness
+        mechanism — the un-memoized app renders identically, just slower.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>React.memo(C)</code></td>
+          <td>higher-order component returning a memoized version of <code>C</code></td>
+          <td>a bouncer at the component door — checks the props "ID" before letting a re-render in</td>
+        </tr>
+        <tr>
+          <td>shallow compare</td>
+          <td><code>Object.is(prevProps[key], nextProps[key])</code> for every key</td>
+          <td>compares the envelope, never opens it — only references, not deep contents</td>
+        </tr>
+        <tr>
+          <td>2nd arg comparator</td>
+          <td><code>(prevProps, nextProps) =&gt; areEqual</code> — return <code>true</code> to SKIP</td>
+          <td>a custom bouncer who opens only the props you name</td>
+        </tr>
+        <tr>
+          <td>when it breaks</td>
+          <td>parent passes a fresh function/object/array literal each render</td>
+          <td>new envelope every time → bouncer always lets the re-render through</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the memo you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Module-level render counter — NOT state, so it never triggers renders.
+// We only mutate it to COUNT how many times MemoChild's body actually runs.
+var renderCount = { child: 0 };
+
+// React.memo wraps Child. On every parent re-render React runs a shallow
+// prop compare; if no prop changed (Object.is per prop), the body is SKIPPED.
+var MemoChild = React.memo(function Child(props) {
+  renderCount.child++; // only runs when React actually re-renders this child
+  return (
+    &lt;div
+      data-testid="child"
+      className="p-3 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm"
+    &gt;
+      Child (render #{renderCount.child}): {props.title}
+    &lt;/div&gt;
+  );
+});
+
+function MemoParent() {
+  var countState = React.useState(0);     // child DEPENDS on this (props.title)
+  var count = countState[0];
+  var setCount = countState[1];
+  var otherState = React.useState(0);     // child does NOT depend on this
+  var other = otherState[0];
+  var setOther = otherState[1];
+
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;React.memo demo&lt;/h2&gt;
+
+      {/* title is a STRING built from `count` only — stable when only `other` changes */}
+      &lt;MemoChild title={'Count is ' + count} /&gt;
+
+      &lt;div className="flex flex-col gap-2 mt-4"&gt;
+        &lt;button
+          data-testid="inc-count"
+          className="px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"
+          onClick={function () { setCount(count + 1); }}
+        &gt;
+          count+1 (changes child props)
+        &lt;/button&gt;
+        &lt;button
+          data-testid="inc-other"
+          className="px-4 py-2 bg-transparent border border-[#61dafb] text-[#61dafb] rounded font-bold text-sm hover:opacity-80"
+          onClick={function () { setOther(other + 1); }}
+        &gt;
+          other+1 (child props unchanged)
+        &lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;p data-testid="child-renders" className="mt-3 text-xs text-[#8b949e]"&gt;
+        Child rendered: {renderCount.child} times
+      &lt;/p&gt;
+      &lt;p data-testid="parent-state" className="mt-1 text-xs text-[#8b949e]"&gt;
+        Parent state — count: {count}, other: {other}
+      &lt;/p&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;MemoParent/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;MemoChild/&gt;</code> becomes <code>React.createElement(MemoChild)</code>.
+        On parent re-render React calls <code>Object.is</code> on each prop; if all match,
+        the memoized child's body never executes and <code>renderCount.child</code> stays put.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the skip, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b class="text-[#e6edf3]">other+1</b> — the parent re-renders but the child's
+        <code>title</code> prop is unchanged, so <code>React.memo</code> skips it (render count
+        holds). Click <b class="text-[#e6edf3]">count+1</b> — <code>title</code> changes, the
+        shallow compare fails, and the child re-renders. The <b class="text-[#e6edf3]">gold-check</b>
+        drives this automatically and asserts the render count at every step.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        child renders: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: note init → other+1 (hold) → count+1 (rise) → other+1 (hold)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>skip a child when props are unchanged</td>
+          <td><code>const C = React.memo(function C(props){...})</code></td>
+          <td>shallow <code>Object.is</code> per prop → reuse last output</td>
+        </tr>
+        <tr>
+          <td>keep a function prop stable</td>
+          <td><code>useCallback(fn, deps)</code> in the parent</td>
+          <td>without it the handler is a fresh ref each render → memo always re-renders</td>
+        </tr>
+        <tr>
+          <td>keep an object/array prop stable</td>
+          <td><code>useMemo(() =&gt; ({...}), deps)</code> in the parent</td>
+          <td>object/array literals are new refs every render → memo always re-renders</td>
+        </tr>
+        <tr>
+          <td>compare only some props</td>
+          <td><code>React.memo(C, (prev, next) =&gt; prev.id === next.id)</code></td>
+          <td>return <code>true</code> to SKIP, <code>false</code> to re-render</td>
+        </tr>
+        <tr>
+          <td>decide IF to memo</td>
+          <td>profile first; wrap only measurably expensive trees</td>
+          <td>memo has its own compare cost — wrapping cheap components is a net loss</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      // note init(=1) → other+1 (hold at 1) → count+1 (rise to 2) → other+1 (hold at 2)
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render MemoParent…");
+        waitForChild(0);
+      }
+
+      function waitForChild(frame) {
+        var child = root.querySelector('[data-testid="child"]');
+        if (child) { step1NoteInitial(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForChild(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the MemoChild in time");
+      }
+
+      // Read the integer out of "Child rendered: N times"
+      function readRenderCount() {
+        var el = root.querySelector('[data-testid="child-renders"]');
+        if (!el) return -1;
+        var m = el.textContent.match(/(\d+)/);
+        return m ? parseInt(m[1], 10) : -1;
+      }
+
+      // Step 1: initial render count must be exactly 1
+      function step1NoteInitial() {
+        var initial = readRenderCount();
+        if (initial !== 1) {
+          failGoldCheck("expected initial child render = 1 but got " + initial);
+          return;
+        }
+        readLive();
+        // Step 2: click "other+1" → unrelated state → child render must HOLD at 1
+        var incOther = root.querySelector('[data-testid="inc-other"]');
+        if (!incOther) { failGoldCheck("inc-other button not found"); return; }
+        incOther.click();
+        pollRenderCount(1, 0, function () {
+          // Step 3: click "count+1" → props.title changes → child render must RISE to 2
+          var incCount = root.querySelector('[data-testid="inc-count"]');
+          if (!incCount) { failGoldCheck("inc-count button not found"); return; }
+          incCount.click();
+          pollRenderCount(2, 0, function () {
+            // Step 4: click "other+1" again → child render must HOLD at 2
+            var incOther2 = root.querySelector('[data-testid="inc-other"]');
+            if (!incOther2) { failGoldCheck("inc-other button not found (step 4)"); return; }
+            incOther2.click();
+            pollRenderCount(2, 0, passGoldCheck);
+          });
+        });
+      }
+
+      function pollRenderCount(expect, frame, done) {
+        readLive();
+        var n = readRenderCount();
+        if (n === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollRenderCount(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected child render=" + expect + " but got " + n);
+      }
+
+      function readLive() {
+        countRead.textContent = readRenderCount();
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] init=1 → other+1(hold) → count+1(rise to 2) → other+1(hold). OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,472 @@
+<!doctype html>
+<!--
+  lazy_suspense.html — Phase 3 async bundle #1: code splitting.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  React.lazy + Suspense end-to-end. Companion: LAZY_SUSPENSE.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: a static `import Foo from './Foo'` bundles Foo's code into your
+  main chunk — users download it on first paint even if they never visit Foo.
+  `React.lazy(() => import('./Foo'))` turns that into a dynamic import: Foo's
+  code is split into its own chunk that downloads ONLY when <Foo/> first renders.
+  `<Suspense fallback={...}>` paints a placeholder while the chunk streams. After
+  the first load the chunk is cached, so navigating back is instant.
+
+  Mechanism: React.lazy wraps a load function that returns a Promise (the dynamic
+  import()). The returned component THROWS that promise during render until it
+  resolves; Suspense catches the thrown thenable, shows fallback, and retries the
+  subtree on resolution — exactly the throw-promise contract from suspense_patterns.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: lazy, Suspense, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  SIMULATION: real dynamic import() needs ES module chunks a bundler emits. In this
+  CDN + Babel eval sandbox there are no chunks to fetch, so fakeLazy() simulates the
+  contract: it builds a promise that resolves after a delay, THROWS it (just like real
+  React.lazy), and caches the resolved component. The Suspense fallback → resolved
+  transition you see is the real Suspense mechanism — only the "network" is faked.
+
+  GOLD VALUE: after compile + createRoot().render(<LazyDemo/>), the gold-check
+  asserts the lazy component is NOT in the DOM (chunk not loaded), clicks
+  "Load Lazy Component", polls for the Suspense fallback (data-testid="lazy-loading"),
+  waits for the simulated chunk to resolve (~800ms), then asserts
+  "Chart loaded lazily!" (data-testid="lazy-loaded") appears. This proves the
+  lazy + Suspense code-splitting pipeline end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lazy &amp; Suspense — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Lazy &amp; Suspense &mdash; split the bundle</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/LAZY_SUSPENSE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/LAZY_SUSPENSE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <code>React.lazy</code> is the <b>code-splitting</b> mechanism; the
+    <a href="./suspense_patterns.html">suspense_patterns</a> bundle covers the
+    <b>loading</b> mechanism — Suspense catches the promise that lazy throws.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">static import → lazy import: pay for what you render</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A static <code>import Foo from './Foo'</code> puts Foo's code in your main bundle —
+        downloaded at first paint even if the user never opens Foo. <code>React.lazy</code>
+        swaps that for a dynamic <code>import()</code>: Foo's code ships in a separate chunk
+        that loads <b class="text-[#e6edf3]">only when <code>&lt;Foo/&gt;</code> first renders</b>.
+        While the chunk streams, <code>&lt;Suspense fallback&gt;</code> paints a placeholder;
+        once resolved the chunk is cached, so re-visiting is instant. Users download only the
+        code for the view they're actually looking at.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>React.lazy(load)</code></td>
+          <td>wraps <code>load</code> → a component that suspends until the import resolves, reads <code>.default</code></td>
+          <td>the vending-machine button — you press it, the machine fetches the item on demand</td>
+        </tr>
+        <tr>
+          <td><code>load()</code></td>
+          <td>returns a <code>Promise</code> (a dynamic <code>import()</code>); called once, result cached</td>
+          <td>the order ticket — handed to the kitchen exactly once</td>
+        </tr>
+        <tr>
+          <td><code>&lt;Suspense fallback&gt;</code></td>
+          <td>catches the thrown import promise, shows <code>fallback</code>, retries on resolve</td>
+          <td>the "please wait" sign while the kitchen cooks</td>
+        </tr>
+        <tr>
+          <td>chunk</td>
+          <td>the separate JS file your bundler emits for the lazy module</td>
+          <td>the separately-shipped box — not in the main delivery truck</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the lazy component you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var Suspense = React.Suspense;
+
+// fakeLazy mirrors React.lazy: THROW a (cached) promise until the simulated
+// chunk resolves, then render the resolved "default". Real React.lazy does
+// exactly this internally around `() =&gt; import('./HeavyChart')`.
+function fakeLazy(loadFn, delay) {
+  var status = 'pending';   // 'pending' | 'success'
+  var Comp = null;          // resolved default export
+  var suspender = null;     // the cached promise (must be referentially stable!)
+  function start() {
+    if (!suspender) {
+      suspender = new Promise(function (resolve) {
+        setTimeout(function () {
+          Comp = loadFn();        // simulate: await import('./HeavyChart')
+          status = 'success';
+          resolve();
+        }, delay);
+      });
+    }
+    return suspender;
+  }
+  return function LazyWrapper(props) {
+    if (status === 'success') return React.createElement(Comp, props);
+    throw start();   // &lt;-- THE throw: Suspense catches, retries on resolve
+  };
+}
+
+// A "heavy" component that lives in its own (simulated) bundle chunk.
+function HeavyChart(props) {
+  return (
+    &lt;div data-testid="lazy-loaded" className="p-6 bg-[#0d1117] rounded-lg border border-[#30363d]"&gt;
+      &lt;div className="text-[#61dafb] font-bold mb-1"&gt;Chart loaded lazily!&lt;/div&gt;
+      &lt;div className="text-[#8b949e] text-sm"&gt;Data: {props.data}&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Only this chunk's code "downloads" when first rendered — not at app boot.
+var LazyChart = fakeLazy(function () { return HeavyChart; }, 800);
+
+function LazyDemo() {
+  var s = React.useState(false);
+  var show = s[0], setShow = s[1];
+  return (
+    &lt;div&gt;
+      &lt;button
+        data-testid="load-btn"
+        onClick={function () { setShow(true); }}
+        className="px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"
+      &gt;
+        Load Lazy Component
+      &lt;/button&gt;
+      {show ? (
+        &lt;Suspense fallback={
+          &lt;div data-testid="lazy-loading" className="mt-3 p-6 border border-dashed border-[#30363d] rounded-lg text-[#8b949e] text-sm flex items-center gap-2"&gt;
+            &lt;span className="inline-block w-3 h-3 rounded-full bg-[#61dafb] animate-pulse"&gt;&lt;/span&gt;
+            Loading chunk…
+          &lt;/div&gt;
+        }&gt;
+          &lt;div className="mt-3"&gt;&lt;LazyChart data="Q1 Revenue" /&gt;&lt;/div&gt;
+        &lt;/Suspense&gt;
+      ) : null}
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;LazyDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;Suspense fallback={...}&gt;&lt;LazyChart/&gt;&lt;/Suspense&gt;</code> becomes
+        <code>React.createElement(Suspense, {fallback:...}, React.createElement(LazyChart))</code>.
+        When <code>&lt;LazyChart/&gt;</code> renders, <code>fakeLazy</code> throws the pending
+        promise — Suspense swaps in the fallback, then re-renders once it resolves.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (lazy + Suspense, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        The lazy component is <b class="text-[#e6edf3]">not</b> in the DOM until you click.
+        Click "Load Lazy Component" — you'll see the Suspense fallback ("Loading chunk…"),
+        then ~800ms later the chunk "resolves" and "Chart loaded lazily!" paints.
+        The <b class="text-[#e6edf3]">gold-check</b> does this automatically: asserts
+        nothing is loaded, clicks, catches the fallback, waits for resolution, asserts content.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        phase: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: not-loaded → click → fallback → resolved "Chart loaded lazily!"
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>split a route/widget</td>
+          <td><code>const X = lazy(() =&gt; import('./X'))</code> + <code>&lt;Suspense fallback&gt;</code></td>
+          <td>code downloads on first render, not at boot</td>
+        </tr>
+        <tr>
+          <td>named-export module</td>
+          <td>re-export as default: <code>export { Named as default }</code></td>
+          <td>lazy reads <code>.default</code> only — named exports break it</td>
+        </tr>
+        <tr>
+          <td>isolate a slow region</td>
+          <td>nested <code>&lt;Suspense&gt;</code> around the lazy subtree only</td>
+          <td>nearest boundary wins — the rest stays interactive</td>
+        </tr>
+        <tr>
+          <td>fail gracefully</td>
+          <td>wrap <code>&lt;Suspense&gt;</code> in an <code>&lt;ErrorBoundary&gt;</code></td>
+          <td>a rejected chunk throws to the boundary, not past Suspense</td>
+        </tr>
+        <tr>
+          <td>warm the chunk early</td>
+          <td><code>const p = import('./X')</code> on hover/focus; render <code>&lt;LazyX/&gt;</code> after</td>
+          <td>preload hides the network cost behind user intent</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+      var LOADING_WINDOW = 60; // ~1s to observe the fallback before it resolves
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render LazyDemo…");
+        waitForLoadButton(0);
+      }
+
+      function waitForLoadButton(frame) {
+        var btn = root.querySelector('[data-testid="load-btn"]');
+        if (btn) {
+          // Step 1: assert the lazy component is NOT yet loaded (chunk not fetched)
+          var already = root.querySelector('[data-testid="lazy-loaded"]');
+          if (already) { failGoldCheck("lazy component rendered before click"); return; }
+          // Step 2: click → triggers render of <Suspense><LazyChart/></Suspense>
+          btn.click();
+          readLive("clicked — awaiting Suspense fallback…");
+          pollFallback(0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForLoadButton(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the Load button in time");
+      }
+
+      // Step 3: the thrown promise makes Suspense paint the fallback
+      function pollFallback(frame) {
+        var loading = root.querySelector('[data-testid="lazy-loading"]');
+        var loaded  = root.querySelector('[data-testid="lazy-loaded"]');
+        if (loading) {
+          readLive("fallback showing — awaiting chunk resolution…");
+          pollLoaded(0);    // now wait for the simulated import to resolve
+          return;
+        }
+        if (loaded) {       // resolved before we sampled the fallback
+          verifyLoaded();
+          return;
+        }
+        if (frame < LOADING_WINDOW) {
+          requestAnimationFrame(function () { pollFallback(frame + 1); });
+          return;
+        }
+        failGoldCheck("Suspense fallback did not appear after click");
+      }
+
+      // Step 4: wait for the chunk to resolve and the real UI to paint
+      function pollLoaded(frame) {
+        var loaded = root.querySelector('[data-testid="lazy-loaded"]');
+        if (loaded) { verifyLoaded(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollLoaded(frame + 1); });
+          return;
+        }
+        failGoldCheck("lazy component never resolved (chunk timeout)");
+      }
+
+      function verifyLoaded() {
+        var el  = root.querySelector('[data-testid="lazy-loaded"]');
+        var txt = el ? el.textContent : "";
+        if (txt.indexOf("Chart loaded lazily!") !== -1) {
+          readLive("chunk resolved — content painted");
+          passGoldCheck();
+        } else {
+          failGoldCheck("loaded but wrong content: " + txt.slice(0, 40));
+        }
+      }
+
+      function readLive(phase) {
+        var loaded  = root.querySelector('[data-testid="lazy-loaded"]');
+        var loading = root.querySelector('[data-testid="lazy-loading"]');
+        var btn     = root.querySelector('[data-testid="load-btn"]');
+        var state = loaded ? "resolved" : (loading ? "loading" : (btn ? "idle" : "boot"));
+        countRead.textContent = state + (phase ? " · " + phase : "");
+      }
+
+      function passGoldCheck() {
+        badge.textContent = "[check] not-loaded → click → fallback → resolved: lazy + Suspense OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive("");
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(function () { readLive(""); }, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

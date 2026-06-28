@@ -32,10 +32,10 @@
 
 ## Phase 4 — Performance (4)
 
-- [ ] 18 `react_memo` — React.memo: preventing re-renders
-- [ ] 19 `re_render_profiling` — Profiling: flamegraph, commit reasons
-- [ ] 20 `virtual_lists` — Virtualized rendering: windowing
-- [ ] 21 `lazy_suspense` — Code splitting: React.lazy, dynamic import
+- [x] 18 `react_memo` — React.memo: preventing re-renders
+- [x] 19 `re_render_profiling` — Profiling: flamegraph, commit reasons
+- [x] 20 `virtual_lists` — Virtualized rendering: windowing
+- [x] 21 `lazy_suspense` — Code splitting: React.lazy, dynamic import
 
 ## Phase 5 — Animations (5)
 

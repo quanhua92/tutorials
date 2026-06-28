@@ -1,0 +1,655 @@
+<!doctype html>
+<!--
+  re_render_profiling.html — React Deep Dive performance bundle.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving a
+  re-render profiler simulator end-to-end. Companion: RE_RENDER_PROFILING.md.
+  Rendered-ground-truth: NO .py.
+
+  The lesson: understanding WHY components re-render is the #1 React performance
+  skill. The React DevTools Profiler records every commit (render+paint cycle)
+  and shows a flamegraph, a ranked chart, and — crucially — the commit REASONS:
+  why each component re-rendered. There are only four root causes: (1) a parent
+  re-rendered (the default — children follow), (2) the component's own state
+  changed, (3) a context value it consumes changed, (4) its props changed. Every
+  wasted re-render traces to one of these. Fix strategies map 1:1 to the cause:
+  React.memo blocks (1)/(4), useMemo/useCallback stabilize (4), split context
+  limits (3), moving state down limits (1).
+
+  This demo SIMULATES the Profiler: a tree App > Parent(memo) > [ChildA, ChildB
+  (memo), ChildC (useContext)] where each component logs its renders, and a
+  <Profiler onRender> batches those logs into a visible "commit timeline" with
+  the re-render reason for every component — including memo SKIPS (the grayed-out
+  bars you see in the real flamegraph).
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: Profiler, memo, hooks
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check asserts
+  the mount commit rendered all 4 components; clicks "Update Parent State" and
+  asserts Parent + all 3 children rendered; clicks "Update ChildA Only" and
+  asserts ONLY ChildA rendered (others skipped); clicks "Toggle Context" and
+  asserts ONLY ChildC (the consumer) rendered. This proves the four re-render
+  reasons and the memo/context isolation model end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Re-render Profiling — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Re-render Profiling &mdash; why did it re-render?</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/RE_RENDER_PROFILING.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/RE_RENDER_PROFILING.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Cross-link: <a href="./react_memo.html">react_memo</a> — React.memo prevents re-renders; profiling
+    shows you <b>where</b> to add it.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">the four re-render reasons (that's all there are)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Every wasted render traces to exactly one of four causes. The React DevTools
+        <b class="text-[#e6edf3]">Profiler</b> records each <b class="text-[#e6edf3]">commit</b>
+        (a render+paint cycle) and shows a <b class="text-[#e6edf3]">flamegraph</b> (component tree
+        with render times), a <b class="text-[#e6edf3]">ranked chart</b> (components sorted by cost),
+        and — with "Record why each component rendered" on — the <b class="text-[#e6edf3]">commit reason</b>
+        for every component. Click a bar to read its reason.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>reason</th><th>trigger</th><th>who re-renders</th></tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">parent re-rendered</b></td>
+          <td>any ancestor rendered</td>
+          <td>all <b>non-memoized</b> descendants (the default cascade)</td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">state changed</b></td>
+          <td><code>useState</code> / <code>useReducer</code> setter</td>
+          <td>that component + its non-memoized descendants</td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">context changed</b></td>
+          <td>a <code>Provider</code> value updated</td>
+          <td>every <code>useContext</code> consumer — <b class="text-[#e6edf3]">bypasses memo</b></td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">props changed</b></td>
+          <td>parent passed a new reference / value</td>
+          <td>the child — a <code>React.memo</code> child only if the prop fails shallow <code>Object.is</code></td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[13px] mt-2 leading-relaxed">
+        Fixes map 1:1 to causes: <code>React.memo</code> blocks parent-cascade &amp; prop-wiggle;
+        <code>useMemo</code>/<code>useCallback</code> stabilize props so memo can skip; splitting
+        context limits context blast radius; moving state down limits the cascade.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the profiler you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Re-render profiling simulator.
+// Models what the React DevTools Profiler shows: each commit (render batch)
+// lists which components rendered and WHY (parent/state/context/props), plus
+// the memo SKIPS (the grayed bars in the real flamegraph).
+var COMMITS = [];   // [{n, phase, ms, entries:[{component, reason, rendered}]}]
+var BUFFER = [];    // render logs collected during the current commit
+var HINT = {};      // {ComponentName: reason} — set by each click handler
+var TELL = null;    // CommitLog re-render trigger (set in useLayoutEffect)
+
+// The profiled tree + memoization map (used to annotate skips in each commit).
+var TREE = ['Parent', 'ChildA', 'ChildB', 'ChildC'];
+var MEMO = { Parent: true, ChildA: false, ChildB: true, ChildC: false };
+
+function logRender(component, reason) {
+  BUFFER.push({ component: component, reason: reason });
+}
+
+// <Profiler onRender> fires once per commit, AT THE END — the perfect flush point.
+function flushCommit(id, phase, actualDuration) {
+  var rendered = {};
+  var i, name;
+  for (i = 0; i &lt; BUFFER.length; i++) rendered[BUFFER[i].component] = BUFFER[i].reason;
+  var entries = [];
+  for (i = 0; i &lt; TREE.length; i++) {
+    name = TREE[i];
+    if (rendered[name]) {
+      entries.push({ component: name, reason: phase === 'mount' ? 'mount' : rendered[name], rendered: true });
+    } else if (phase !== 'mount') {
+      // Component did NOT render this commit. If it is memoized (or under a
+      // memoized ancestor), it was SKIPPED — exactly the gray bars in DevTools.
+      entries.push({
+        component: name,
+        reason: MEMO[name] ? 'memo skipped (props/context unchanged)' : 'ancestor skipped',
+        rendered: false
+      });
+    }
+  }
+  if (entries.length &gt; 0) {
+    COMMITS.push({
+      n: COMMITS.length + 1,
+      phase: phase,
+      ms: Math.round(actualDuration * 100) / 100,
+      entries: entries
+    });
+  }
+  BUFFER.length = 0;
+  HINT = {};
+  if (TELL) { try { queueMicrotask(TELL); } catch (e) { TELL(); } }
+}
+
+function reasonFor(name, fallback) {
+  return HINT[name] || fallback;
+}
+
+var Profiler = React.Profiler;
+var ThemeContext = React.createContext({ on: false });
+
+// ChildA — plain function component. Always follows its parent (no memo).
+// Also owns local state, so "Update ChildA Only" re-renders JUST this one.
+function ChildA() {
+  var s = React.useState(0); var n = s[0]; var setN = s[1];
+  logRender('ChildA', reasonFor('ChildA', 'parent re-rendered'));
+  return (
+    &lt;div data-testid="child-a" className="p-2 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+      &lt;div className="flex items-center justify-between gap-2"&gt;
+        &lt;span className="text-[#e6edf3] text-sm"&gt;ChildA &lt;span className="text-[#8b949e]"&gt;(plain)&lt;/span&gt;&lt;/span&gt;
+        &lt;span className="text-[#61dafb] text-xs"&gt;n={n}&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;button
+        data-testid="upd-childa"
+        className="mt-2 px-2 py-1 text-xs bg-[#61dafb] text-[#0d1117] rounded font-bold hover:opacity-80"
+        onClick={function () { HINT = { 'ChildA': 'state changed' }; setN(function (x) { return x + 1; }); }}
+      &gt;
+        Update ChildA Only
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+// ChildB — React.memo + a prop that changes on parent update. Skipped when the
+// prop is stable (e.g. during a context toggle, where Parent is skipped).
+var ChildB = React.memo(function ChildB(props) {
+  logRender('ChildB', reasonFor('ChildB', 'props changed'));
+  return (
+    &lt;div data-testid="child-b" className="p-2 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+      &lt;span className="text-[#e6edf3] text-sm"&gt;ChildB &lt;span className="text-[#8b949e]"&gt;(React.memo)&lt;/span&gt;&lt;/span&gt;
+      &lt;span className="block text-[#61dafb] text-xs mt-1"&gt;count={props.count}&lt;/span&gt;
+    &lt;/div&gt;
+  );
+});
+
+// ChildC — useContext consumer. Re-renders on context change EVEN IF its parent
+// was memo-skipped: context updates propagate through memoized ancestors.
+function ChildC() {
+  var ctx = React.useContext(ThemeContext);
+  logRender('ChildC', reasonFor('ChildC', 'parent re-rendered'));
+  return (
+    &lt;div data-testid="child-c" className="p-2 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+      &lt;span className="text-[#e6edf3] text-sm"&gt;ChildC &lt;span className="text-[#8b949e]"&gt;(useContext)&lt;/span&gt;&lt;/span&gt;
+      &lt;span className="block text-[#61dafb] text-xs mt-1"&gt;theme.on={String(ctx.on)}&lt;/span&gt;
+    &lt;/div&gt;
+  );
+}
+
+// Parent — React.memo with NO props from App. So an App re-render (context
+// toggle) SKIPS Parent and its non-consumer children — only ChildC wakes up.
+var Parent = React.memo(function Parent() {
+  var s = React.useState(0); var c = s[0]; var setC = s[1];
+  logRender('Parent', reasonFor('Parent', 'state changed'));
+  return (
+    &lt;div data-testid="parent" className="p-3 rounded-lg border border-[#61dafb] bg-[#0b0f14]"&gt;
+      &lt;div className="flex items-center justify-between gap-2 mb-2"&gt;
+        &lt;span className="text-[#61dafb] text-sm font-bold"&gt;Parent &lt;span className="text-[#8b949e] font-normal"&gt;(React.memo)&lt;/span&gt;&lt;/span&gt;
+        &lt;span className="text-[#61dafb] text-xs"&gt;parentCount={c}&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;button
+        data-testid="upd-parent"
+        className="mb-3 px-3 py-1 text-xs bg-[#61dafb] text-[#0d1117] rounded font-bold hover:opacity-80"
+        onClick={function () {
+          HINT = { 'Parent': 'state changed', 'ChildA': 'parent re-rendered', 'ChildB': 'props changed', 'ChildC': 'parent re-rendered' };
+          setC(function (x) { return x + 1; });
+        }}
+      &gt;
+        Update Parent State
+      &lt;/button&gt;
+      &lt;div className="grid grid-cols-1 gap-2"&gt;
+        &lt;ChildA /&gt;
+        &lt;ChildB count={c} /&gt;
+        &lt;ChildC /&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+});
+
+// CommitLog — lives OUTSIDE the <Profiler> so its own re-renders don't loop.
+// useLayoutEffect sets TELL and bumps once to pick up the mount commit.
+function CommitLog() {
+  var r = React.useState(0); var bump = r[1];
+  React.useLayoutEffect(function () {
+    TELL = function () { bump(function (x) { return x + 1; }); };
+    bump(function (x) { return x + 1; });
+    return function () { TELL = null; };
+  }, []);
+  var recent = COMMITS.slice(-6).reverse(); // newest first
+  return (
+    &lt;div data-testid="commit-log" className="mt-3 p-3 rounded-lg border border-[#30363d] bg-[#010409]"&gt;
+      &lt;div className="text-xs text-[#8b949e] mb-2"&gt;commit timeline (newest first) · {COMMITS.length} total&lt;/div&gt;
+      {recent.length === 0 ? (
+        &lt;div className="text-[#8b949e] text-xs"&gt;no commits yet&lt;/div&gt;
+      ) : (
+        &lt;div data-testid="commits" className="space-y-2"&gt;
+          {recent.map(function (commit) {
+            return (
+              &lt;div data-testid="commit" data-commit-n={commit.n} data-phase={commit.phase} key={commit.n} className="p-2 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+                &lt;div className="text-xs text-[#61dafb] font-bold mb-1"&gt;#{commit.n} · {commit.phase} · {commit.ms}ms&lt;/div&gt;
+                &lt;div className="grid grid-cols-1 gap-1"&gt;
+                  {commit.entries.map(function (e, idx) {
+                    return (
+                      &lt;div data-testid="entry" data-component={e.component} data-rendered={e.rendered ? 'true' : 'false'} key={e.component + idx} className={"text-xs px-2 py-1 rounded flex justify-between " + (e.rendered ? 'bg-[#161b22]' : 'bg-[#0d1117] opacity-60')}&gt;
+                        &lt;span className={e.rendered ? 'text-[#e6edf3]' : 'text-[#8b949e] line-through'}&gt;{e.rendered ? '●' : '○'} {e.component}&lt;/span&gt;
+                        &lt;span className="text-[#8b949e]"&gt;{e.reason}&lt;/span&gt;
+                      &lt;/div&gt;
+                    );
+                  })}
+                &lt;/div&gt;
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      )}
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  var s = React.useState(false); var ctxOn = s[0]; var setCtxOn = s[1];
+  // useMemo so the Provider value keeps the SAME reference unless ctxOn flips —
+  // otherwise every App render would notify every consumer for nothing.
+  var value = React.useMemo(function () { return { on: ctxOn }; }, [ctxOn]);
+  return (
+    &lt;div className="max-w-md mx-auto p-4 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-2"&gt;Re-render Profiler&lt;/h2&gt;
+      &lt;button
+        data-testid="toggle-ctx"
+        className="mb-3 px-3 py-1 text-xs bg-transparent border border-[#61dafb] text-[#61dafb] rounded font-bold hover:opacity-80"
+        onClick={function () { HINT = { 'ChildC': 'context changed' }; setCtxOn(function (x) { return !x; }); }}
+      &gt;
+        Toggle Context (theme.on={String(ctxOn)})
+      &lt;/button&gt;
+      &lt;Profiler id="tree" onRender={flushCommit}&gt;
+        &lt;ThemeContext.Provider value={value}&gt;
+          &lt;Parent /&gt;
+        &lt;/ThemeContext.Provider&gt;
+      &lt;/Profiler&gt;
+      &lt;CommitLog /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;Profiler id="tree" onRender={'{flushCommit}'}&gt;</code> wraps the subtree. React calls
+        <code>flushCommit(id, phase, actualDuration, ...)</code> at the end of every commit — the
+        moment to drain <code>BUFFER</code> into a visible commit. The <code>phase</code> arg is
+        <code>"mount"</code>, <code>"update"</code>, or <code>"nested-update"</code>.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the four reasons, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b>Update Parent State</b> → Parent + all 3 children render (state changed → cascade).
+        Click <b>Update ChildA Only</b> → <b>only ChildA</b> renders (its siblings go gray/skipped).
+        Click <b>Toggle Context</b> → <b>only ChildC</b> (the consumer) renders; Parent is memo-skipped.
+        The <b class="text-[#e6edf3]">gold-check</b> drives all three and asserts the commit log matches.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        commits: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: mount(all) → parent(all) → childA(only) → context(only ChildC)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">symptom → fix</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>symptom (what the Profiler shows)</th><th>fix</th><th>why it works</th></tr>
+        <tr>
+          <td>child renders on every parent update</td>
+          <td><code>React.memo(Child)</code> + stable props</td>
+          <td>shallow <code>Object.is</code> prop compare skips equal-prop renders</td>
+        </tr>
+        <tr>
+          <td>memoized child STILL re-renders</td>
+          <td><code>useCallback</code> / <code>useMemo</code> the props</td>
+          <td>inline fns / object literals are new refs every render — memo sees "changed"</td>
+        </tr>
+        <tr>
+          <td>one context value re-renders the world</td>
+          <td>split into N contexts, or <code>useMemo</code> the value</td>
+          <td>every consumer re-renders on any Provider value change — narrow the blast radius</td>
+        </tr>
+        <tr>
+          <td>root state cascades through a huge tree</td>
+          <td>move state down to a leaf</td>
+          <td>only the owner + its descendants re-render — shrink the subtree</td>
+        </tr>
+        <tr>
+          <td>don't know <i>why</i> it rendered</td>
+          <td>Profiler → "Record why each component rendered"</td>
+          <td>annotates each commit with the exact reason (props/state/context/parent)</td>
+        </tr>
+        <tr>
+          <td>"I'll just memo everything"</td>
+          <td><b>don't</b> — profile first</td>
+          <td>memo has a compare cost; only memo what the Profiler proves is wasted</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 220;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render App…");
+        waitForMountCommit(0);
+      }
+
+      // newest commit = first [data-testid="commit"] inside #commits (reversed)
+      function newestCommit() {
+        return root.querySelector('[data-testid="commits"] [data-testid="commit"]');
+      }
+      function commitN(el) {
+        return el ? parseInt(el.getAttribute("data-commit-n"), 10) : -1;
+      }
+      function entryMap(commitEl) {
+        var map = {};
+        if (!commitEl) return map;
+        var entries = commitEl.querySelectorAll('[data-testid="entry"]');
+        for (var i = 0; i < entries.length; i++) {
+          map[entries[i].getAttribute("data-component")] = entries[i].getAttribute("data-rendered");
+        }
+        return map;
+      }
+
+      function allRendered(m, names) {
+        for (var i = 0; i < names.length; i++) {
+          if (m[names[i]] !== "true") return false;
+        }
+        return true;
+      }
+      function onlyRendered(m, who, names) {
+        if (m[who] !== "true") return false;
+        for (var i = 0; i < names.length; i++) {
+          if (names[i] === who) continue;
+          if (m[names[i]] !== "false") return false;
+        }
+        return true;
+      }
+
+      // wait for the first mount commit (#1) with all 4 components rendered
+      function waitForMountCommit(frame) {
+        readLive();
+        var c = newestCommit();
+        if (c && commitN(c) >= 1 && allRendered(entryMap(c), ["Parent", "ChildA", "ChildB", "ChildC"])) {
+          step1Parent(c);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForMountCommit(frame + 1); });
+          return;
+        }
+        failGoldCheck("mount commit did not render all 4 components");
+      }
+
+      // Step 1: click "Update Parent State" → newest commit must render all 4
+      function step1Parent(prev) {
+        clickTestid("upd-parent", function () {
+          waitForNewerCommit(commitN(prev), function (c) {
+            var m = entryMap(c);
+            if (!allRendered(m, ["Parent", "ChildA", "ChildB", "ChildC"])) {
+              failGoldCheck("after Update Parent: expected all 4 children to re-render");
+              return;
+            }
+            step2ChildA(c);
+          });
+        });
+      }
+
+      // Step 2: click "Update ChildA Only" → newest commit must render ONLY ChildA
+      function step2ChildA(prev) {
+        clickTestid("upd-childa", function () {
+          waitForNewerCommit(commitN(prev), function (c) {
+            var m = entryMap(c);
+            if (!onlyRendered(m, "ChildA", ["Parent", "ChildA", "ChildB", "ChildC"])) {
+              failGoldCheck("after Update ChildA Only: expected ONLY ChildA to re-render");
+              return;
+            }
+            step3Context(c);
+          });
+        });
+      }
+
+      // Step 3: click "Toggle Context" → newest commit must render ONLY ChildC
+      function step3Context(prev) {
+        clickTestid("toggle-ctx", function () {
+          waitForNewerCommit(commitN(prev), function (c) {
+            var m = entryMap(c);
+            if (!onlyRendered(m, "ChildC", ["Parent", "ChildA", "ChildB", "ChildC"])) {
+              failGoldCheck("after Toggle Context: expected ONLY ChildC (consumer) to re-render");
+              return;
+            }
+            passGoldCheck();
+          });
+        });
+      }
+
+      // poll until a commit newer than prevN appears, then cb(newestCommitEl)
+      function waitForNewerCommit(prevN, cb) {
+        var frame = 0;
+        (function poll() {
+          readLive();
+          var c = newestCommit();
+          if (c && commitN(c) > prevN) { cb(c); return; }
+          if (frame < MAX_FRAMES) { requestAnimationFrame(function () { poll(); }); return; }
+          failGoldCheck("no new commit appeared after click (prev #" + prevN + ")");
+        })();
+      }
+
+      function clickTestid(testid, done) {
+        var btn = root.querySelector('[data-testid="' + testid + '"]');
+        if (!btn) { failGoldCheck("button " + testid + " not found"); return; }
+        btn.click();
+        // two frames: let React batch, commit, flush, and let TELL microtask land
+        requestAnimationFrame(function () { requestAnimationFrame(done); });
+      }
+
+      function readLive() {
+        var c = newestCommit();
+        countRead.textContent = c ? ("#" + commitN(c)) : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] mount→parent(all)→childA(only)→context(only ChildC). OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

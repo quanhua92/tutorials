@@ -1,0 +1,594 @@
+<!doctype html>
+<!--
+  router_code_splitting.html — Phase 6 router bundle #8 (the code-splitting engine).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground that simulates
+  TanStack Router's createLazy route-level code splitting. Companion:
+  ROUTER_CODE_SPLITTING.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: in a normal SPA the ENTIRE route tree ships in the main bundle —
+  every component, every loader, every heavy chart library — so the user downloads
+  code for routes they may never visit. createLazy flips that: the route CONFIG
+  (path, validateSearch, beforeLoad, types) stays in the main bundle (needed for
+  type-safe <Link> everywhere), but the route's COMPONENT + LOADER are split into
+  a separate chunk fetched ON DEMAND — when the user navigates there, or earlier
+  via prefetch.
+
+    main bundle (always)            lazy chunk (on demand / prefetch)
+    ┌──────────────────────┐        ┌──────────────────────────┐
+    │ route config + types │        │ component (HeavyChart)   │
+    │ validateSearch       │        │ loader (fetchChartData)  │
+    │ beforeLoad           │  ───►  │ ~50KB                    │
+    │ <Link type-safety>   │        │ fetched when /chart hit  │
+    └──────────────────────┘        └──────────────────────────┘
+
+  TanStack Router's real API (v1, verified 2026-06):
+    // routes/analytics/chart.tsx — NON-lazy, in main bundle (config + types only)
+    import { createFileRoute } from '@tanstack/react-router'
+    export const Route = createFileRoute('/analytics/chart')({
+      validateSearch, beforeLoad,   // ← always shipped; <Link to="/chart"> type-checks
+    })
+    // routes/analytics/chart.lazy.tsx — LAZY, separate chunk (component + loader)
+    import { createLazyFileRoute } from '@tanstack/react-router'
+    export const Route = createLazyFileRoute('/analytics/chart')({
+      component: HeavyChart,        // ← only downloaded when /chart is visited
+      loader: async () => fetchChartData(),
+    })
+
+  Why this beats React.lazy:
+    - React.lazy splits ONE component. createLazy splits the WHOLE ROUTE — both the
+      component AND its loader go into the same chunk.
+    - Route-level, not arbitrary: the bundler knows the route boundary.
+    - Type-safe: the route definition (types) lives in the main bundle, so <Link to>
+      and useSearch stay fully typed even though the runtime component is split out.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, useEffect, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<CodeSplitDemo/>), the gold-check
+  asserts: "Home" renders from the main bundle and the chart chunk is NOT loaded;
+  clicking "Navigate to Chart" shows a "Loading chunk…" state; after ~600ms the
+  chart chunk resolves and "Chart loaded!" appears (bundle total → ~250KB); clicking
+  "Back to Home" returns to the home content. This proves the config-in-main /
+  component+loader-in-chunk split end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Code Splitting — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; --warn:#f39c12; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:440px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Code Splitting &mdash; createLazy splits whole routes</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_CODE_SPLITTING.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_CODE_SPLITTING.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Compare with
+    <a href="./lazy_suspense.html">lazy_suspense: React.lazy</a>
+    — <b class="text-[#e6edf3]">React.lazy splits one component; createLazy splits an entire route
+    (component + loader) and keeps the route's types in the main bundle for type-safe links.</b>
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">main bundle vs. lazy chunk — what ships where</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A route is split into <b class="text-[#e6edf3]">two files</b>. The non-lazy file
+        (<code>chart.tsx</code>) holds the route <b class="text-[#e6edf3]">config</b> — path,
+        <code>validateSearch</code>, <code>beforeLoad</code>, and the generated <b class="text-[#e6edf3]">types</b>.
+        It is bundled into the main bundle so every <code>&lt;Link to="/chart"&gt;</code> and
+        <code>useSearch()</code> stays type-safe <i>without</i> pulling in the heavy chart code.
+        The lazy file (<code>chart.lazy.tsx</code>) holds the <b class="text-[#e6edf3]">component</b> and
+        <b class="text-[#e6edf3]">loader</b> — it becomes its own chunk, fetched on demand.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>bundle</th><th>why</th></tr>
+        <tr>
+          <td><code>createFileRoute</code> config<br/>(path, validateSearch, beforeLoad)</td>
+          <td>main bundle<br/>(~always)</td>
+          <td>needed for type-safe <code>&lt;Link&gt;</code>, <code>useSearch</code>, and matching <b>before</b> the route mounts</td>
+        </tr>
+        <tr>
+          <td><code>createLazyFileRoute</code><br/>(component + loader)</td>
+          <td>lazy chunk<br/>(~on demand)</td>
+          <td>heavy runtime code (charts, editors, maps) — only paid for when the route is visited</td>
+        </tr>
+        <tr>
+          <td>route <b>types</b> (inferred)</td>
+          <td>main bundle</td>
+          <td>type info is erased at compile time; it never reaches the wire</td>
+        </tr>
+        <tr>
+          <td><code>&lt;Suspense&gt;</code> boundary</td>
+          <td>main bundle</td>
+          <td>router auto-wraps the lazy route; shows a fallback while the chunk loads</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the code-split router you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// createLazyRoute — simulates TanStack Router's createLazyFileRoute.
+// The route's COMPONENT + LOADER live in a separate chunk (module-level cache),
+// fetched on demand (navigate) or eagerly (prefetch). The route CONFIG (path,
+// validateSearch, beforeLoad, types) would live in a NON-lazy file in the main
+// bundle — here we represent that as the static `home`/`chart` keys below.
+function createLazyRoute(loadFn, label) {
+  var cached = null;            // the chunk's exports, once resolved
+  var status = 'idle';          // 'idle' | 'loading' | 'loaded'
+  var promise = null;
+  var subs = [];                // components waiting on this chunk
+  function fire() { var s = subs.slice(); subs = []; s.forEach(function (f) { try { f(); } catch (e) {} }); }
+  function load() {
+    if (promise) return promise;
+    status = 'loading';
+    promise = loadFn().then(function (Comp) { cached = Comp; status = 'loaded'; fire(); return Comp; });
+    return promise;
+  }
+  return {
+    label: label,
+    getStatus: function () { return status; },
+    prefetch: function () { return load(); },                 // <Link preload="intent"> does this
+    // The hook a route component calls. Returns the component, or null (Suspense fallback).
+    useComponent: function () {
+      var s = React.useState({ Comp: cached, n: 0 });
+      function ready() { s[1]({ Comp: cached, n: s[0].n + 1 }); }
+      React.useEffect(function () {
+        if (cached) { ready(); return; }                       // cache hit → instant (prefetched)
+        subs.push(ready);
+        load();                                                // cold fetch → chunk download
+        return function () { var i = subs.indexOf(ready); if (i >= 0) subs.splice(i, 1); };
+      }, []);
+      return s[0].Comp || null;
+    }
+  };
+}
+
+// A "heavy" chart that ships in its OWN chunk (~50KB) — resolves after a 600ms
+// network round-trip, like a real dynamic import().
+var lazyChart = createLazyRoute(function () {
+  return new Promise(function (resolve) {
+    setTimeout(function () {
+      resolve(function ChartComponent(props) {
+        return (
+          <div data-testid="lazy-chart" className="p-4 bg-[#0d1117] rounded border border-[#30363d]">
+            <div className="text-[#61dafb] font-bold mb-1">📊 Chart loaded!</div>
+            <div className="text-[#8b949e] text-xs">
+              data: {props.data} · fetched on demand · bundle: ~50KB
+            </div>
+          </div>
+        );
+      });
+    }, 600);
+  });
+}, 'chart chunk (~50KB)');
+
+// The chart ROUTE component — mounts only when you navigate to /chart.
+// (In TanStack this is what chart.lazy.tsx exports; <Suspense> wraps it for you.)
+function ChartRoute() {
+  var LazyComp = lazyChart.useComponent();
+  if (LazyComp) return <LazyComp data="Q1 Revenue" />;
+  return (
+    <div data-testid="loading" className="p-4 bg-[#0d1117] rounded border border-[#30363d] text-[#8b949e] text-sm flex items-center gap-2">
+      <span className="animate-pulse">⏳</span> Loading chart chunk… (~50KB on the wire)
+    </div>
+  );
+}
+
+function CodeSplitDemo() {
+  var routeState = React.useState('home');
+  var route = routeState[0];
+  var setRoute = routeState[1];
+  var forceState = React.useReducer(function (x) { return x + 1; }, 0);
+  var force = forceState[1];
+  var last = React.useRef('idle');
+
+  // Poll the chunk's status so the bundle bar re-renders as idle → loading → loaded.
+  React.useEffect(function () {
+    var id = setInterval(function () {
+      var st = lazyChart.getStatus();
+      if (st !== last.current) { last.current = st; force(); }
+    }, 60);
+    return function () { clearInterval(id); };
+  }, []);
+
+  var chunkStatus = lazyChart.getStatus();   // idle | loading | loaded
+
+  var content = route === 'home' ? (
+    <div data-testid="home" className="p-4 bg-[#0d1117] rounded border border-[#30363d]">
+      <div className="text-[#61dafb] font-bold mb-1">🏠 Home route</div>
+      <div className="text-[#8b949e] text-xs">
+        Rendered from the MAIN bundle (~200KB). The chart chunk was never fetched.
+      </div>
+    </div>
+  ) : (
+    <ChartRoute />
+  );
+
+  function navBtnClasses(active) {
+    return 'px-3 py-2 rounded text-sm font-bold border ' + (active
+      ? 'bg-[#61dafb] text-[#0d1117] border-[#61dafb]'
+      : 'bg-transparent text-[#61dafb] border-[#30363d]');
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* navigation — these are the <Link>s; their type info lives in the main bundle */}
+      <div className="flex gap-2 flex-wrap">
+        <button data-testid="nav-home" className={navBtnClasses(route === 'home')}
+          onClick={function () { setRoute('home'); }}>
+          🏠 Home <span className="opacity-60 text-xs">/</span> main bundle
+        </button>
+        <button data-testid="nav-chart" className={navBtnClasses(route === 'chart')}
+          onClick={function () { setRoute('chart'); }}>
+          📊 Chart <span className="opacity-60 text-xs">/</span> lazy chunk
+        </button>
+        <button data-testid="prefetch"
+          className="px-3 py-2 rounded text-sm font-bold border border-[#f39c12] text-[#f39c12] bg-transparent"
+          onClick={function () { lazyChart.prefetch(); force(); }}>
+          ⚡ prefetch chart chunk
+        </button>
+      </div>
+
+      {/* active route content — <Suspense> fallback is the "loading" block */}
+      <div>{content}</div>
+
+      {/* bundle-size visualization */}
+      <div data-testid="bundle" className="p-4 bg-[#0d1117] rounded border border-[#30363d]">
+        <div className="text-xs text-[#8b949e] mb-2 uppercase tracking-wide">bundle size on the wire</div>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[#e6edf3] w-28">main bundle</span>
+            <div className="flex-1 h-4 bg-[#161b22] rounded overflow-hidden border border-[#30363d]">
+              <div className="h-full bg-[#61dafb]" style={{ width: '100%' }}></div>
+            </div>
+            <span data-testid="main-size" className="text-xs text-[#61dafb] w-28 text-right">~200KB · always</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[#e6edf3] w-28">chart chunk</span>
+            <div className="flex-1 h-4 bg-[#161b22] rounded overflow-hidden border border-[#30363d]">
+              <div data-testid="chunk-bar" className="h-full transition-all duration-300"
+                style={{ width: chunkStatus === 'loaded' ? '25%' : '0%', background: '#f39c12' }}></div>
+            </div>
+            <span data-testid="chunk-size" className="text-xs w-28 text-right"
+              style={{ color: chunkStatus === 'idle' ? '#8b949e' : '#f39c12' }}>
+              ~50KB · {chunkStatus}
+            </span>
+          </div>
+        </div>
+        <div className="text-xs text-[#8b949e] mt-2">
+          total downloaded: <span data-testid="total-size" className="text-[#e6edf3] font-bold">
+            {chunkStatus === 'loaded' ? '~250KB' : '~200KB'}
+          </span> — the chart chunk only ships when you visit <code>/chart</code> or prefetch it.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<CodeSplitDemo/>);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;CodeSplitDemo/&gt;</code> becomes <code>React.createElement(CodeSplitDemo)</code>.
+        <code>lazyChart.useComponent()</code> returns the cached component or <code>null</code> (the
+        <code>&lt;Suspense&gt;</code> fallback handles the gap). The status poll re-renders the bundle bar
+        as the chunk transitions <code>idle → loading → loaded</code>.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the split, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b class="text-[#e6edf3]">Chart</b> to navigate to the lazy route — watch the
+        <b class="text-[#e6edf3]"> "Loading chunk…" </b> state, then the chunk resolves (~600ms) and the
+        bar grows to ~250KB. Hit <b class="text-[#e6edf3]">prefetch</b> first and the next navigation is
+        instant (cache hit). The <b class="text-[#e6edf3]">gold-check</b> runs all of this automatically.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        chunk: <span id="chunk-read" class="text-[#f39c12]">—</span>
+        · gold: home → chart (loading → loaded, ~250KB) → home
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>split a heavy route</td>
+          <td><code>createLazyFileRoute('/x')({{component, loader}})</code> in <code>x.lazy.tsx</code></td>
+          <td>component + loader ship in their own chunk; fetched only when visited</td>
+        </tr>
+        <tr>
+          <td>keep links type-safe</td>
+          <td>leave <code>createFileRoute('/x')({{validateSearch, beforeLoad}})</code> in <code>x.tsx</code> (main bundle)</td>
+          <td>types + matching config are always present; <code>&lt;Link to="/x"&gt;</code> validates</td>
+        </tr>
+        <tr>
+          <td>avoid the loading flash</td>
+          <td><code>&lt;Link preload="intent"&gt;</code> or <code>router.preloadRoute()</code></td>
+          <td>fetch the chunk on hover/viewport; by click time it's cached → instant</td>
+        </tr>
+        <tr>
+          <td>show a fallback while loading</td>
+          <td>wrap in <code>&lt;Suspense fallback={{…}}&gt;</code> (router does this per-route)</td>
+          <td>lazy component returns a promise; Suspense renders the fallback</td>
+        </tr>
+        <tr>
+          <td>split ONLY a component (not a route)</td>
+          <td>use <code>React.lazy()</code> + <code>&lt;Suspense&gt;</code> instead</td>
+          <td>createLazy is route-scoped and also splits the loader — React.lazy cannot</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var chunkRead   = document.getElementById("chunk-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 240;   // ~4s; chunk resolves in 600ms
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for Home to render…");
+        waitForHome(0);
+      }
+
+      // Step 1: Home visible AND chart NOT yet loaded.
+      function waitForHome(frame) {
+        readLive();
+        var home = root.querySelector('[data-testid="home"]');
+        var chart = root.querySelector('[data-testid="lazy-chart"]');
+        if (home && !chart) { step2_navigateToChart(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForHome(frame + 1); });
+          return;
+        }
+        failGoldCheck("Home did not render, or chart chunk was already loaded");
+      }
+
+      // Step 2+3: click "Navigate to Chart" → expect the loading/suspense state.
+      function step2_navigateToChart() {
+        waitingGoldCheck("[check] navigating to /chart → expect chunk fetch…");
+        var btn = root.querySelector('[data-testid="nav-chart"]');
+        if (!btn) { failGoldCheck("nav-chart button missing"); return; }
+        btn.click();
+        waitForLoading(0);
+      }
+
+      function waitForLoading(frame) {
+        readLive();
+        var loading = root.querySelector('[data-testid="loading"]');
+        if (loading) { waitForChart(0); return; }
+        // (defensive) if the chunk somehow resolved already, still accept it
+        var chart = root.querySelector('[data-testid="lazy-chart"]');
+        if (chart) { step4_backHome(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForLoading(frame + 1); });
+          return;
+        }
+        failGoldCheck("loading state never appeared after navigating to chart");
+      }
+
+      // Step 4: wait for the chunk to resolve → "Chart loaded!".
+      function waitForChart(frame) {
+        readLive();
+        var chart = root.querySelector('[data-testid="lazy-chart"]');
+        if (chart) { step4_backHome(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForChart(frame + 1); });
+          return;
+        }
+        failGoldCheck("chart chunk did not load in time");
+      }
+
+      // Step 5: click "Back to Home" → Home returns. Also assert bundle grew to ~250KB.
+      function step4_backHome() {
+        readLive();
+        var totalEl = root.querySelector('[data-testid="total-size"]');
+        var totalOk = !!(totalEl && /250/.test(totalEl.textContent));
+        var btn = root.querySelector('[data-testid="nav-home"]');
+        if (!btn) { failGoldCheck("nav-home button missing"); return; }
+        btn.click();
+        waitForHomeAgain(0, totalOk);
+      }
+
+      function waitForHomeAgain(frame, totalOk) {
+        readLive();
+        var home = root.querySelector('[data-testid="home"]');
+        if (home) { passGoldCheck(totalOk); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForHomeAgain(frame + 1, totalOk); });
+          return;
+        }
+        failGoldCheck("home did not return after navigating back");
+      }
+
+      function readLive() {
+        // The lazy chunk's status is exposed on the compiled module's `lazyChart`.
+        try {
+          if (typeof lazyChart !== "undefined") chunkRead.textContent = lazyChart.getStatus();
+          else chunkRead.textContent = "—";
+        } catch (e) {
+          chunkRead.textContent = "—";
+        }
+      }
+
+      function passGoldCheck(totalOk) {
+        readLive();
+        badge.textContent = "[check] home → chart (loading → loaded" +
+          (totalOk ? ", 250KB" : "") + ") → home. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

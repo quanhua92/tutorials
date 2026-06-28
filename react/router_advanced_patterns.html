@@ -1,0 +1,706 @@
+<!doctype html>
+<!--
+  router_advanced_patterns.html — Phase 6 router bundle (ADVANCED PATTERNS).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving three
+  production router patterns end-to-end through an interactive simulator:
+    1. Authenticated routes — beforeLoad checks auth, redirects to /login,
+       remembers the destination, and sends the user back after login.
+    2. Navigation blocking — useBlocker-style guard blocks leaving a route
+       when there are unsaved changes, with an override ("force navigate").
+    3. Location masking — URL shows a clean, shareable path while the router
+       resolves a different internal route (modal/photo masking pattern).
+  Companion: ROUTER_ADVANCED_PATTERNS.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: routes are NOT just "pick a component". The router owns a
+  LIFECYCLE around every navigation: beforeLoad runs first and can throw a
+  redirect (the auth gate), blockers can pause or cancel a navigation (the
+  unsaved-changes gate), and masking decides which URL lands in history vs.
+  which route actually renders. This bundle simulates all three as one
+  state machine so the gate ordering — block check → auth check → commit — is
+  visible and falsifiable.
+
+  CDN setup (same React 19 ESM + Babel pattern as react/use_reducer):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<AuthDemo/>), the gold-check
+  asserts route='home'/user=null, clicks Dashboard (auth redirect → 'login'),
+  clicks Login (user='admin', route='dashboard'), clicks Editor (route='editor'),
+  toggles unsaved changes, clicks Home (BLOCKED — still 'editor'), then clicks
+  Force Navigate (route='home'). This proves the gate ordering + redirect-back
+  memory end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Advanced Router Patterns — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:340px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Advanced Patterns &mdash; auth · blocking · masking</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_ADVANCED_PATTERNS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_ADVANCED_PATTERNS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/tanstack-start/api_endpoints_middleware.html">frontend/tanstack-start: API endpoints &amp; middleware</a>
+    — middleware patterns; auth + blocking extend the same <b>route lifecycle</b>
+    (gates that run before a navigation commits).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">three gates around every navigation</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A route is more than a component. The router runs a <b class="text-[#e6edf3]">lifecycle</b>
+        around each navigation: <code>beforeLoad</code> can <code>throw redirect()</code> (the auth
+        gate), a blocker can <b class="text-[#e6edf3]">pause</b> or cancel the transition (the
+        unsaved-changes gate), and masking decides which URL lands in history vs. which route
+        actually renders. The order matters: <b class="text-[#e6edf3]">block check → auth check →
+        commit URL → render</b>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>pattern</th><th>gate</th><th>API</th><th>what it can do</th></tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">Authenticated route</b></td>
+          <td>before navigation commits</td>
+          <td><code>beforeLoad</code> + <code>throw redirect()</code></td>
+          <td>abort → send to /login, remember the target, redirect back after auth</td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">Navigation blocking</b></td>
+          <td>before navigation commits</td>
+          <td><code>useBlocker({ shouldBlockFn, withResolver })</code></td>
+          <td>pause → show "unsaved changes?" UI → <code>proceed()</code> or <code>reset()</code></td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">Location masking</b></td>
+          <td>at commit (history write)</td>
+          <td><code>&lt;Link mask={{ to }}&gt;</code> / <code>createRouteMask()</code></td>
+          <td>render route A, but persist a clean URL B to history + the address bar</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the auth + blocking simulator (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Simulated router context — mirrors TanStack Router's `context` object
+// that beforeLoad reads. In a real app this comes from your auth provider.
+var auth = { user: null };
+
+// Simulated routes registry: which routes require auth, and what the
+// "clean" masked URL would be (location masking lives here in real apps).
+var ROUTES = {
+  home:      { path: '/',          requiresAuth: false, mask: null },
+  dashboard: { path: '/dashboard', requiresAuth: true,  mask: null },
+  editor:    { path: '/editor',    requiresAuth: false, mask: null },
+  login:     { path: '/login',     requiresAuth: false, mask: null }
+};
+
+function AuthDemo() {
+  // The four pieces of router state this gate-machine tracks:
+  var _React$useState = React.useState(null),
+      user = _React$useState[0],
+      setUser = _React$useState[1];
+  var _React$useState2 = React.useState('home'),
+      route = _React$useState2[0],
+      setRoute = _React$useState2[1];
+  var _React$useState3 = React.useState(null),
+      loginRedirect = _React$useState3[0],
+      setLoginRedirect = _React$useState3[1];
+  var _React$useState4 = React.useState(false),
+      hasUnsavedChanges = _React$useState4[0],
+      setHasUnsavedChanges = _React$useState4[1];
+  var _React$useState5 = React.useState(null),
+      blockedTarget = _React$useState5[0],
+      setBlockedTarget = _React$useState5[1];
+
+  // ── navigate(): the gate pipeline runs here ──────────────────────────
+  // GATE 1 — navigation blocking (useBlocker equivalent):
+  //   if leaving editor with unsaved changes, PAUSE and remember the target.
+  // GATE 2 — auth (beforeLoad equivalent):
+  //   if the target requires auth and there's no user, redirect to /login
+  //   and remember where they wanted to go (loginRedirect).
+  // COMMIT — clear blockers, swap the route.
+  function navigate(target) {
+    // GATE 1: blocker
+    if (hasUnsavedChanges &amp;&amp; target !== route) {
+      setBlockedTarget(target);
+      return false;
+    }
+    // GATE 2: auth
+    if (ROUTES[target].requiresAuth &amp;&amp; !user) {
+      setLoginRedirect(target);  // remember destination → redirect back later
+      setRoute('login');
+      return false;
+    }
+    setBlockedTarget(null);
+    setRoute(target);
+    return true;
+  }
+
+  function login() {
+    setUser('admin');
+    auth.user = 'admin';
+    // beforeLoad's `search.redirect` is honored here: go back to the
+    // page the user originally wanted, else default to dashboard.
+    if (loginRedirect) {
+      setRoute(loginRedirect);
+      setLoginRedirect(null);
+    } else {
+      setRoute('dashboard');
+    }
+  }
+
+  function logout() {
+    setUser(null);
+    auth.user = null;
+    setLoginRedirect(null);
+    setRoute('home');
+  }
+
+  // "Force navigate" = the user confirmed the unsaved-changes prompt.
+  // Mirrors useBlocker's `proceed()` — drops the block and commits.
+  function forceNavigate() {
+    if (blockedTarget) {
+      var target = blockedTarget;
+      setHasUnsavedChanges(false);  // resolve the blocker
+      setBlockedTarget(null);
+      // Re-run the pipeline with the blocker cleared. Auth still applies.
+      if (ROUTES[target].requiresAuth &amp;&amp; !user) {
+        setLoginRedirect(target);
+        setRoute('login');
+      } else {
+        setRoute(target);
+      }
+    }
+  }
+
+  function cancelBlock() {
+    setBlockedTarget(null);  // mirrors useBlocker's `reset()`
+  }
+
+  function toggleUnsaved() {
+    setHasUnsavedChanges(!hasUnsavedChanges);
+  }
+
+  var navBtns = [
+    { key: 'home', label: 'Home' },
+    { key: 'dashboard', label: 'Dashboard (auth)' },
+    { key: 'editor', label: 'Editor (blocker)' }
+  ];
+
+  var ROUTE_COPY = {
+    home: 'Public landing page — no auth, no blocker.',
+    dashboard: 'Private area — beforeLoad threw redirect() to /login until you logged in.',
+    editor: 'Editable area — toggle "unsaved changes" then try to leave.',
+    login: 'Login screen — submitting sends you back to where you were going.'
+  };
+
+  return (
+    &lt;div className="max-w-2xl mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] m-0 mb-4"&gt;Router: gate simulator&lt;/h2&gt;
+
+      {/* state readout — what the gold-check inspects */}
+      &lt;div className="grid grid-cols-2 gap-3 mb-4 text-xs"&gt;
+        &lt;div className="p-3 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+          &lt;div className="text-[#8b949e] uppercase tracking-wide mb-1"&gt;auth (context.user)&lt;/div&gt;
+          &lt;div data-testid="user" className="font-bold text-[#e6edf3]"&gt;
+            {user ? '✓ ' + user : '✗ logged out'}
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div className="p-3 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+          &lt;div className="text-[#8b949e] uppercase tracking-wide mb-1"&gt;current route&lt;/div&gt;
+          &lt;div data-testid="route" className="font-bold text-[#61dafb]"&gt;{route}&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div className="p-3 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+          &lt;div className="text-[#8b949e] uppercase tracking-wide mb-1"&gt;unsaved changes&lt;/div&gt;
+          &lt;div data-testid="unsaved" data-on={hasUnsavedChanges ? 'true' : 'false'} className="font-bold"&gt;
+            &lt;span className={hasUnsavedChanges ? 'text-[#f1c40f]' : 'text-[#8b949e]'}&gt;
+              {hasUnsavedChanges ? '⚠ dirty' : '○ clean'}
+            &lt;/span&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div className="p-3 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+          &lt;div className="text-[#8b949e] uppercase tracking-wide mb-1"&gt;login redirect&lt;/div&gt;
+          &lt;div data-testid="redirect" className="font-bold text-[#8b949e]"&gt;
+            {loginRedirect || '—'}
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* navigation buttons */}
+      &lt;div className="flex flex-wrap gap-2 mb-4"&gt;
+        {navBtns.map(function (b) {
+          var active = route === b.key;
+          return (
+            &lt;button
+              key={b.key}
+              data-testid={'nav-' + b.key}
+              className={"px-3 py-2 rounded text-sm font-bold border " + (active ? 'bg-[#61dafb] text-[#0d1117] border-[#61dafb]' : 'bg-transparent text-[#61dafb] border-[#30363d] hover:border-[#61dafb]')}
+              onClick={function () { navigate(b.key); }}
+            &gt;
+              {b.label}
+            &lt;/button&gt;
+          );
+        })}
+        &lt;div className="ml-auto flex gap-2"&gt;
+          {user ? (
+            &lt;button data-testid="logout" className="px-3 py-2 rounded text-sm font-bold border border-[#e74c3c] text-[#e74c3c] hover:bg-[rgba(231,76,60,.12)]" onClick={logout}&gt;
+              Logout
+            &lt;/button&gt;
+          ) : (
+            &lt;button data-testid="login-btn" className={"px-3 py-2 rounded text-sm font-bold border " + (route === 'login' ? 'bg-[#2ecc71] text-[#0d1117] border-[#2ecc71]' : 'border-[#2ecc71] text-[#2ecc71] hover:bg-[rgba(46,204,113,.12)]')} onClick={login}&gt;
+              ▶ Login as admin
+            &lt;/button&gt;
+          )}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* editor-only: unsaved-changes toggle */}
+      {route === 'editor' ? (
+        &lt;div className="mb-4 p-3 rounded border border-[#30363d] bg-[#0d1117]"&gt;
+          &lt;label className="flex items-center gap-2 text-sm cursor-pointer select-none"&gt;
+            &lt;input data-testid="toggle-unsaved" type="checkbox" checked={hasUnsavedChanges} onChange={toggleUnsaved} className="w-4 h-4 accent-[#f1c40f]" /&gt;
+            &lt;span className="text-[#e6edf3]"&gt;Toggle unsaved changes (enables the blocker)&lt;/span&gt;
+          &lt;/label&gt;
+        &lt;/div&gt;
+      ) : null}
+
+      {/* route content */}
+      &lt;div data-testid="content" className="p-4 rounded border border-dashed border-[#30363d] bg-[#0b0f14] text-sm text-[#8b949e] mb-4"&gt;
+        &lt;div className="text-[11px] uppercase tracking-wide text-[#61dafb] mb-1"&gt;rendering: {ROUTES[route].path}&lt;/div&gt;
+        {ROUTE_COPY[route]}
+      &lt;/div&gt;
+
+      {/* blocker prompt — shown when a navigation is paused */}
+      {blockedTarget ? (
+        &lt;div data-testid="blocked" className="p-4 rounded border border-[#f1c40f] bg-[rgba(241,196,15,.08)] mb-4"&gt;
+          &lt;div className="text-[#f1c40f] font-bold text-sm mb-1"&gt;⚠ Navigation blocked&lt;/div&gt;
+          &lt;div className="text-[#e6edf3] text-sm mb-3"&gt;
+            You have unsaved changes. Leave editor for
+            &lt;span data-testid="blocked-target" className="text-[#61dafb] font-bold mx-1"&gt;{blockedTarget}&lt;/span&gt;?
+          &lt;/div&gt;
+          &lt;div className="flex gap-2"&gt;
+            &lt;button data-testid="force-navigate" className="px-3 py-1.5 rounded text-xs font-bold bg-[#f1c40f] text-[#0d1117] hover:opacity-80" onClick={forceNavigate}&gt;
+              Force navigate (proceed)
+            &lt;/button&gt;
+            &lt;button data-testid="cancel-block" className="px-3 py-1.5 rounded text-xs font-bold border border-[#30363d] text-[#8b949e] hover:text-[#e6edf3]" onClick={cancelBlock}&gt;
+              Stay here (reset)
+            &lt;/button&gt;
+          &lt;/div&gt;
+        &lt;/div&gt;
+      ) : null}
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;AuthDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;AuthDemo/&gt;</code> becomes <code>React.createElement(AuthDemo)</code>.
+        <code>navigate()</code> runs the two gates in order — blocker first (pause + remember
+        target), then auth (redirect to <code>/login</code> + remember destination). The
+        blocker's <code>proceed</code>/<code>reset</code> map to <code>forceNavigate</code>/
+        <code>cancelBlock</code>.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the gate pipeline, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b class="text-[#e6edf3]">Dashboard</b> while logged out → you're sent to
+        <code>/login</code> and the destination is remembered. <b class="text-[#e6edf3]">Login</b>
+        sends you back. In the <b class="text-[#e6edf3]">Editor</b>, toggle unsaved changes and try
+        to leave — navigation pauses. <b class="text-[#e6edf3]">Force navigate</b> resolves the
+        block. The <b class="text-[#e6edf3]">gold-check</b> walks all six steps automatically.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        route: <span id="route-read" class="text-[#61dafb]">—</span>
+        · user: <span id="user-read" class="text-[#61dafb]">—</span>
+        · gold: home→login→dashboard→editor→block→force→home
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>require login for a route</td>
+          <td><code>beforeLoad</code> + <code>throw redirect({'{'}to:'/login', search:{'{'}redirect: location.pathname{'}'}{'}'})</code></td>
+          <td>redirect aborts the navigation; search param remembers the target</td>
+        </tr>
+        <tr>
+          <td>redirect back after login</td>
+          <td>read <code>search.redirect</code> on the login route → <code>navigate({'{'}to: redirect{'}'})</code></td>
+          <td>the "remember where I was going" round-trip</td>
+        </tr>
+        <tr>
+          <td>block leaving with unsaved changes</td>
+          <td><code>useBlocker({'{'}shouldBlockFn: () ={'>'} isDirty, withResolver: true{'}'})</code></td>
+          <td>returns <code>{'{'}proceed, reset, status{'}'}</code> — drive a custom dialog</td>
+        </tr>
+        <tr>
+          <td>also block tab close / reload</td>
+          <td><code>enableBeforeUnload: isDirty</code> on the blocker</td>
+          <td>registers the native <code>beforeunload</code> handler conditionally</td>
+        </tr>
+        <tr>
+          <td>show a clean URL, render a different route</td>
+          <td><code>&lt;Link to="/photos/$id/modal" mask={'{'}to:'/photos/$id'{'}'}&gt;</code></td>
+          <td>address bar + history show the mask; router renders the real route</td>
+        </tr>
+        <tr>
+          <td>shareable masked URLs app-wide</td>
+          <td><code>createRouteMask({'{'}routeTree, from, to{'}'})</code> → router <code>routeMasks</code></td>
+          <td>declare once; every matching <code>navigate</code> is masked</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var routeRead   = document.getElementById("route-read");
+      var userRead    = document.getElementById("user-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK — walks the full gate pipeline ----
+      var MAX_FRAMES = 300;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render AuthDemo…");
+        waitForNavButtons(0);
+      }
+
+      function waitForNavButtons(frame) {
+        var dash = root.querySelector('[data-testid="nav-dashboard"]');
+        if (dash) { step1_assertHomeThenAuthRedirect(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForNavButtons(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the nav buttons in time");
+      }
+
+      // Step 1: assert route='home' + user=null BEFORE clicking
+      function step1_assertHomeThenAuthRedirect() {
+        readLive();
+        var route = readRoute();
+        var user = readUser();
+        if (route !== "home") {
+          failGoldCheck("step1 expected route 'home', got '" + route + "'");
+          return;
+        }
+        if (user !== null && user !== "null" && user !== "" && user.indexOf("logged out") === -1) {
+          failGoldCheck("step1 expected logged out, got user '" + user + "'");
+          return;
+        }
+        // Step 2: click Dashboard while logged out → expect route 'login' (auth redirect)
+        var dash = root.querySelector('[data-testid="nav-dashboard"]');
+        if (!dash) { failGoldCheck("Dashboard nav button missing"); return; }
+        dash.click();
+        pollRoute("login", 0, function () {
+          // login redirect should remember 'dashboard'
+          var red = readRedirect();
+          if (red !== "dashboard") {
+            failGoldCheck("step2 expected loginRedirect 'dashboard', got '" + red + "'");
+            return;
+          }
+          step3_login();
+        });
+      }
+
+      // Step 3: click Login → expect user 'admin' + route 'dashboard' (redirected back)
+      function step3_login() {
+        var login = root.querySelector('[data-testid="login-btn"]');
+        if (!login) { failGoldCheck("login button missing"); return; }
+        login.click();
+        pollUser("admin", 0, function () {
+          pollRoute("dashboard", 0, function () {
+            var red = readRedirect();
+            if (red !== "—") {
+              failGoldCheck("step3 expected redirect cleared (—), got '" + red + "'");
+              return;
+            }
+            step4_goToEditor();
+          });
+        });
+      }
+
+      // Step 4: click Editor → expect route 'editor'
+      function step4_goToEditor() {
+        var ed = root.querySelector('[data-testid="nav-editor"]');
+        if (!ed) { failGoldCheck("editor nav button missing"); return; }
+        ed.click();
+        pollRoute("editor", 0, function () {
+          step5_toggleUnsavedAndBlock();
+        });
+      }
+
+      // Step 5: toggle unsaved → click Home → expect BLOCKED (still 'editor')
+      function step5_toggleUnsavedAndBlock() {
+        var toggle = root.querySelector('[data-testid="toggle-unsaved"]');
+        if (!toggle) { failGoldCheck("unsaved toggle missing on editor"); return; }
+        toggle.click();
+        // wait for unsaved = true
+        pollAttr('[data-testid="unsaved"]', "data-on", "true", 0, function () {
+          var home = root.querySelector('[data-testid="nav-home"]');
+          if (!home) { failGoldCheck("home nav button missing"); return; }
+          home.click();
+          // expect route STILL 'editor' + blocked panel present
+          pollRoute("editor", 0, function () {
+            var blocked = root.querySelector('[data-testid="blocked"]');
+            if (!blocked) {
+              failGoldCheck("step5 expected blocker panel after navigating home");
+              return;
+            }
+            var target = root.querySelector('[data-testid="blocked-target"]');
+            if (!target || target.textContent !== "home") {
+              failGoldCheck("step5 expected blocked-target 'home'");
+              return;
+            }
+            step6_forceNavigate();
+          });
+        });
+      }
+
+      // Step 6: click Force Navigate → expect route 'home'
+      function step6_forceNavigate() {
+        var force = root.querySelector('[data-testid="force-navigate"]');
+        if (!force) { failGoldCheck("force-navigate button missing"); return; }
+        force.click();
+        pollRoute("home", 0, function () {
+          var blocked = root.querySelector('[data-testid="blocked"]');
+          if (blocked) {
+            failGoldCheck("step6 expected blocker panel gone after force navigate");
+            return;
+          }
+          passGoldCheck();
+        });
+      }
+
+      // ---- polling helpers ----
+      function readRoute() {
+        var el = root.querySelector('[data-testid="route"]');
+        return el ? el.textContent.trim() : "(no route el)";
+      }
+      function readUser() {
+        var el = root.querySelector('[data-testid="user"]');
+        return el ? el.textContent.trim() : "(no user el)";
+      }
+      function readRedirect() {
+        var el = root.querySelector('[data-testid="redirect"]');
+        return el ? el.textContent.trim() : "(no redirect el)";
+      }
+      function pollRoute(expect, frame, done) {
+        readLive();
+        if (readRoute() === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollRoute(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected route '" + expect + "' but got '" + readRoute() + "'");
+      }
+      function pollUser(expect, frame, done) {
+        readLive();
+        var u = readUser();
+        if (u.indexOf(expect) !== -1) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollUser(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected user '" + expect + "' but got '" + u + "'");
+      }
+      function pollAttr(sel, attr, expect, frame, done) {
+        readLive();
+        var el = root.querySelector(sel);
+        if (el && el.getAttribute(attr) === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollAttr(sel, attr, expect, frame + 1, done); });
+          return;
+        }
+        var got = el ? el.getAttribute(attr) : "(no el)";
+        failGoldCheck("expected " + sel + "[" + attr + "]='" + expect + "' but got '" + got + "'");
+      }
+
+      function readLive() {
+        routeRead.textContent = readRoute();
+        userRead.textContent = readUser();
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] home→login→dashboard→editor→block→force→home. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 200);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

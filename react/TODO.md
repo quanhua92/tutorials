@@ -54,9 +54,9 @@
 - [x] 31 `router_loader_lifecycle` — beforeLoad → loader → component, caching
 - [x] 32 `router_navigation_preload` — Intent-based preloading, dedup, prefetch
 - [x] 33 `router_nested_context` — Nested routes, Outlet, context flow
-- [ ] 34 `router_code_splitting` — createLazy, route-level splitting, Suspense
-- [ ] 35 `router_advanced_patterns` — Auth routes, navigation blocking, masking
-- [ ] 36 `router_devtools` — DevTools: route tree viz, inspector, profiling
+- [x] 34 `router_code_splitting` — createLazy, route-level splitting, Suspense
+- [x] 35 `router_advanced_patterns` — Auth routes, navigation blocking, masking
+- [x] 36 `router_devtools` — DevTools: route tree viz, inspector, profiling
 
 ## Cross-link Map
 

@@ -1,0 +1,664 @@
+<!doctype html>
+<!--
+  router_devtools.html — Phase 6 router bundle (DevTools).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground simulating the
+  TanStack Router DevTools floating panel. Companion: ROUTER_DEVTOOLS.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: TanStack Router DevTools is a floating panel (`@tanstack/router-devtools`)
+  that mirrors the router's live state — the route tree, the matched chain, extracted
+  params, validated search, route context, loader status, navigation history, and
+  per-match performance. You drop `<TanStackRouterDevtools router={router}/>` once
+  (dev-only) and get an X-ray of everything the router decided for the current URL.
+  This page builds a faithful SIMULATION of that panel so you can see each tab's
+  shape without wiring a real router.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check asserts the
+  DevTools panel rendered, the Route Tree tab shows 4 routes, clicks the Match tab and
+  asserts params {"id":"42"} + search {"tab":"posts"}, clicks History and asserts ≥2
+  navigation entries, clicks Performance and asserts match time + loader time present.
+  This proves the simulated panel mirrors the real DevTools surface end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TanStack Router DevTools — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:340px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">TanStack Router DevTools &mdash; the router&rsquo;s X-ray</h1>
+    <span id="goldcheck" class="goldcheck">[check: &hellip;]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_DEVTOOLS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_DEVTOOLS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Start with
+    <a href="./router_fundamentals.html">router_fundamentals.html</a>
+    — understand the fundamentals first (route tree → history → matching → render).
+    DevTools only visualizes what happens underneath, so the panel makes no sense
+    until you know the pipeline it is mirroring.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">one panel, the whole router</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Drop <code>&lt;TanStackRouterDevtools router=&#123;router&#125;/&gt;</code> once (dev-only) and you get a
+        floating panel that mirrors the router's live state. Four tabs cover the full surface:
+        <b class="text-[#e6edf3]">Route Tree</b> (parent→child, eager vs lazy, matched chain highlighted),
+        <b class="text-[#e6edf3]">Match Inspector</b> (params, validated search, context, loader status),
+        <b class="text-[#e6edf3]">Navigation History</b> (timeline + preload hits/misses + redirect chains),
+        <b class="text-[#e6edf3]">Performance</b> (match time, loader time, render time). It is read-only —
+        it subscribes to <code>router.state</code> and never mutates it.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>tab</th><th>shows</th><th>answers the question</th></tr>
+        <tr>
+          <td><code>Route Tree</code></td>
+          <td>full tree, eager/lazy badges, matched chain highlighted</td>
+          <td>"which routes exist, and which ones are live right now?"</td>
+        </tr>
+        <tr>
+          <td><code>Match</code></td>
+          <td>pathname, params, validated search, context, loader status</td>
+          <td>"what did the router extract from THIS url?"</td>
+        </tr>
+        <tr>
+          <td><code>History</code></td>
+          <td>past navigations, preload hit/miss, redirect chains</td>
+          <td>"how did the user get here, and was anything prefetched?"</td>
+        </tr>
+        <tr>
+          <td><code>Performance</code></td>
+          <td>match time, loader exec time, component render time</td>
+          <td>"where is this navigation spending time?"</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the DevTools panel (edit me)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 mb-2">
+        This is a faithful simulation of the four-tab panel. In a real app the data comes from
+        <code>router.state</code> subscriptions; here it is a static <code>routerState</code> snapshot
+        so you can see exactly what each tab renders. Edit and hit "compile &amp; render".
+      </p>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Simulated router state — the exact shape the real DevTools mirrors.
+var routerState = {
+  routes: [
+    { path: '/', name: 'Root', type: 'eager' },
+    { path: '/users', name: 'Users', type: 'eager' },
+    { path: '/users/$id', name: 'UserDetail', type: 'lazy' },
+    { path: '/settings', name: 'Settings', type: 'eager' }
+  ],
+  currentMatch: {
+    pathname: '/users/42',
+    matchedChain: ['Root', 'Users', 'UserDetail'],
+    params: { id: '42' },
+    search: { tab: 'posts' },
+    context: { user: 'admin', theme: 'dark' },
+    loaderStatus: 'loaded',
+    matchTime: '2.3ms',
+    loaderTime: '45ms'
+  },
+  navigationHistory: [
+    { from: '/', to: '/users', preload: 'hit', time: '12:01:00' },
+    { from: '/users', to: '/users/42', preload: 'miss', time: '12:01:03' }
+  ],
+  performance: {
+    matchTime: '2.3ms',
+    loaderTime: '45ms',
+    renderTime: '8.1ms'
+  }
+};
+
+function DevToolsPanel() {
+  var _React$useState = React.useState('routes'),
+      activeTab = _React$useState[0],
+      setActiveTab = _React$useState[1];
+
+  var tabs = [
+    { id: 'routes', label: 'Route Tree' },
+    { id: 'match', label: 'Match' },
+    { id: 'history', label: 'History' },
+    { id: 'performance', label: 'Performance' }
+  ];
+
+  return (
+    &lt;div data-testid="devtools-panel" className="rounded-xl border border-[#30363d] bg-[#0d1117] shadow-2xl overflow-hidden"&gt;
+      &lt;div className="flex items-center gap-2 px-4 py-2 bg-[#161b22] border-b border-[#30363d]"&gt;
+        &lt;span className="text-[#61dafb] font-bold text-sm"&gt;⚡ TanStack Router DevTools&lt;/span&gt;
+        &lt;span className="ml-auto text-[#8b949e] text-[10px] uppercase tracking-wide border border-[#30363d] rounded px-1.5 py-0.5"&gt;dev only&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;div data-testid="tab-bar" className="flex border-b border-[#30363d]"&gt;
+        {tabs.map(function (tab) {
+          var active = tab.id === activeTab;
+          return (
+            &lt;button
+              key={tab.id}
+              data-testid={'tab-' + tab.id}
+              data-tab={tab.id}
+              data-active={active ? 'true' : 'false'}
+              onClick={function () { setActiveTab(tab.id); }}
+              className={'px-4 py-2 text-xs font-semibold border-b-2 transition-colors ' + (active ? 'border-[#61dafb] text-[#61dafb]' : 'border-transparent text-[#8b949e] hover:text-[#e6edf3]')}
+            &gt;
+              {tab.label}
+            &lt;/button&gt;
+          );
+        })}
+      &lt;/div&gt;
+      &lt;div data-testid="tab-content" className="p-4 min-h-[200px]"&gt;
+        {activeTab === 'routes' &amp;&amp; &lt;RouteTreeView /&gt;}
+        {activeTab === 'match' &amp;&amp; &lt;MatchInspectorView /&gt;}
+        {activeTab === 'history' &amp;&amp; &lt;HistoryView /&gt;}
+        {activeTab === 'performance' &amp;&amp; &lt;PerformanceView /&gt;}
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+function RouteTreeView() {
+  var matchedSet = {};
+  routerState.currentMatch.matchedChain.forEach(function (n) { matchedSet[n] = true; });
+  return (
+    &lt;div data-testid="route-tree"&gt;
+      &lt;p className="text-[#8b949e] text-[11px] mb-2 uppercase tracking-wide"&gt;route tree · matched chain highlighted&lt;/p&gt;
+      &lt;ul data-testid="route-list" className="space-y-1 text-xs font-mono"&gt;
+        {routerState.routes.map(function (route) {
+          var matched = matchedSet[route.name];
+          var lazy = route.type === 'lazy';
+          return (
+            &lt;li
+              key={route.path}
+              data-testid="route-item"
+              data-name={route.name}
+              data-matched={matched ? 'true' : 'false'}
+              className={'flex items-center gap-2 px-2 py-1.5 rounded border ' + (matched ? 'bg-[rgba(97,218,251,.12)] border-[rgba(97,218,251,.4)] text-[#61dafb]' : 'bg-[#161b22] border-[#30363d] text-[#e6edf3]')}
+            &gt;
+              &lt;span className={matched ? 'text-[#61dafb]' : 'text-[#8b949e]'}&gt;{matched ? '▸' : ' '}&lt;/span&gt;
+              &lt;span className="font-mono"&gt;{route.path}&lt;/span&gt;
+              &lt;span className="ml-auto"&gt;{route.name}&lt;/span&gt;
+              &lt;span
+                data-testid="route-type"
+                data-type={route.type}
+                className={'px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ' + (lazy ? 'bg-[rgba(231,76,60,.15)] text-[#e74c3c]' : 'bg-[rgba(46,204,113,.15)] text-[#2ecc71]')}
+              &gt;{route.type}&lt;/span&gt;
+            &lt;/li&gt;
+          );
+        })}
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  );
+}
+
+function MatchInspectorView() {
+  var m = routerState.currentMatch;
+  function Row(props) {
+    return (
+      &lt;div className="grid grid-cols-[90px_1fr] gap-2 items-start py-1.5 border-b border-[#30363d]"&gt;
+        &lt;span className="text-[#8b949e] text-[11px] uppercase tracking-wide"&gt;{props.label}&lt;/span&gt;
+        &lt;code data-testid={props.testId} className="text-[#61dafb] text-xs break-all"&gt;{props.value}&lt;/code&gt;
+      &lt;/div&gt;
+    );
+  }
+  return (
+    &lt;div data-testid="match-inspector"&gt;
+      &lt;p className="text-[#8b949e] text-[11px] mb-2 uppercase tracking-wide"&gt;current match · /users/42&lt;/p&gt;
+      &lt;Row label="pathname" testId="match-pathname" value={m.pathname} /&gt;
+      &lt;Row label="params" testId="match-params" value={JSON.stringify(m.params)} /&gt;
+      &lt;Row label="search" testId="match-search" value={JSON.stringify(m.search)} /&gt;
+      &lt;Row label="context" testId="match-context" value={JSON.stringify(m.context)} /&gt;
+      &lt;Row label="loader" testId="match-loader" value={m.loaderStatus} /&gt;
+      &lt;Row label="chain" testId="match-chain" value={m.matchedChain.join(' → ')} /&gt;
+    &lt;/div&gt;
+  );
+}
+
+function HistoryView() {
+  return (
+    &lt;div data-testid="history"&gt;
+      &lt;p className="text-[#8b949e] text-[11px] mb-2 uppercase tracking-wide"&gt;navigation history · preload hits/misses&lt;/p&gt;
+      &lt;ul data-testid="history-list" className="space-y-2 text-xs font-mono"&gt;
+        {routerState.navigationHistory.map(function (entry, i) {
+          var hit = entry.preload === 'hit';
+          return (
+            &lt;li
+              key={i}
+              data-testid="history-item"
+              data-preload={entry.preload}
+              className="flex items-center gap-2 px-2 py-1.5 rounded bg-[#161b22] border border-[#30363d]"
+            &gt;
+              &lt;span className="text-[#8b949e] w-20"&gt;{entry.time}&lt;/span&gt;
+              &lt;span className="text-[#e6edf3]"&gt;{entry.from}&lt;/span&gt;
+              &lt;span className="text-[#61dafb]"&gt;→&lt;/span&gt;
+              &lt;span className="text-[#e6edf3]"&gt;{entry.to}&lt;/span&gt;
+              &lt;span
+                className={'ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ' + (hit ? 'bg-[rgba(46,204,113,.15)] text-[#2ecc71]' : 'bg-[rgba(231,76,60,.15)] text-[#e74c3c]')}
+              &gt;preload:{entry.preload}&lt;/span&gt;
+            &lt;/li&gt;
+          );
+        })}
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  );
+}
+
+function PerformanceView() {
+  var p = routerState.performance;
+  var metrics = [
+    { label: 'Route match', testId: 'perf-match', value: p.matchTime },
+    { label: 'Loader exec', testId: 'perf-loader', value: p.loaderTime },
+    { label: 'Component render', testId: 'perf-render', value: p.renderTime }
+  ];
+  return (
+    &lt;div data-testid="performance"&gt;
+      &lt;p className="text-[#8b949e] text-[11px] mb-2 uppercase tracking-wide"&gt;performance · per-match timing&lt;/p&gt;
+      &lt;div className="space-y-2"&gt;
+        {metrics.map(function (metric) {
+          return (
+            &lt;div
+              key={metric.testId}
+              data-testid={metric.testId}
+              className="flex items-center gap-3 px-3 py-2 rounded bg-[#161b22] border border-[#30363d]"
+            &gt;
+              &lt;span className="text-[#8b949e] text-[11px] uppercase tracking-wide flex-1"&gt;{metric.label}&lt;/span&gt;
+              &lt;span className="text-[#61dafb] text-sm font-bold"&gt;{metric.value}&lt;/span&gt;
+            &lt;/div&gt;
+          );
+        })}
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  return (
+    &lt;div className="space-y-3"&gt;
+      &lt;div data-testid="app-bar" className="flex items-center gap-3 px-4 py-2 bg-[#161b22] rounded-lg border border-[#30363d]"&gt;
+        &lt;span className="text-[#e6edf3] text-sm font-semibold"&gt;My App&lt;/span&gt;
+        &lt;span className="text-[#8b949e] text-xs"&gt;current: {routerState.currentMatch.pathname}&lt;/span&gt;
+        &lt;span className="ml-auto text-[#8b949e] text-[10px]"&gt;⟵ the panel below is the DevTools&lt;/span&gt;
+      &lt;/div&gt;
+      &lt;p className="text-[#8b949e] text-xs"&gt;
+        Real DevTools floats at <b className="text-[#e6edf3]">bottom-right</b> over your app; here it is
+        inlined into the playground so the gold-check can inspect it.
+      &lt;/p&gt;
+      &lt;DevToolsPanel /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;DevToolsPanel/&gt;</code> becomes <code>React.createElement(DevToolsPanel)</code>.
+        Each <code>setActiveTab(id)</code> re-renders only the panel; the simulated
+        <code>routerState</code> is static so the data the tabs show is stable.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the panel, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        The <b class="text-[#e6edf3]">gold-check</b> clicks through every tab automatically: asserts the panel
+        rendered, the Route Tree shows 4 routes, the Match tab shows <code>params id=42</code> +
+        <code>search tab=posts</code>, the History tab shows ≥2 entries, and the Performance tab shows
+        match + loader times.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        active tab: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: routes(4) → match(id=42, tab=posts) → history(≥2) → perf(match+loader)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → tab / pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>mount DevTools</td>
+          <td><code>&lt;TanStackRouterDevtools router=&#123;router&#125; position="bottom-right"/&gt;</code></td>
+          <td>one mount, dev-only; subscribes to <code>router.state</code></td>
+        </tr>
+        <tr>
+          <td>hide in prod</td>
+          <td><code>process.env.NODE_ENV === 'development' &amp;&amp; &lt;Devtools/&gt;</code></td>
+          <td>the package is dev-only; never ship it to users</td>
+        </tr>
+        <tr>
+          <td>position the logo</td>
+          <td><code>position="top-left|top-right|bottom-left|bottom-right"</code></td>
+          <td>defaults to <code>bottom-left</code>; the trigger logo floats over the app</td>
+        </tr>
+        <tr>
+          <td>"why did this route match?"</td>
+          <td>Route Tree tab → matched-chain highlight</td>
+          <td>shows eager vs lazy + the ancestor chain the URL activated</td>
+        </tr>
+        <tr>
+          <td>"what params/search did it extract?"</td>
+          <td>Match tab → params / search rows</td>
+          <td>validated search = post-<code>validateSearch</code> values, not raw query string</td>
+        </tr>
+        <tr>
+          <td>"did the preload fire?"</td>
+          <td>History tab → preload hit/miss badge</td>
+          <td>correlates intent-hover/preload with the actual navigation</td>
+        </tr>
+        <tr>
+          <td>"why is navigation slow?"</td>
+          <td>Performance tab → match / loader / render times</td>
+          <td>splits time across the three pipeline stages</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function pollFor(predicate, frame, onFound, onTimeout) {
+        if (predicate()) { onFound(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollFor(predicate, frame + 1, onFound, onTimeout); });
+          return;
+        }
+        onTimeout();
+      }
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for the DevTools panel to render…");
+        pollFor(
+          function () { return !!root.querySelector('[data-testid="devtools-panel"]'); },
+          0,
+          step1_routeCount,
+          function () { failGoldCheck("DevTools panel did not render"); }
+        );
+      }
+
+      // Step 1: default tab is 'routes' → assert exactly 4 route items
+      function step1_routeCount() {
+        readLive();
+        pollFor(
+          function () { return root.querySelectorAll('[data-testid="route-item"]').length === 4; },
+          0,
+          function () {
+            var n = root.querySelectorAll('[data-testid="route-item"]').length;
+            if (n !== 4) { failGoldCheck("route tree shows " + n + " routes, expected 4"); return; }
+            readLive();
+            step2_matchTab();
+          },
+          function () {
+            var n = root.querySelectorAll('[data-testid="route-item"]').length;
+            failGoldCheck("expected 4 routes, saw " + n);
+          }
+        );
+      }
+
+      // Step 2: click "Match" tab → assert params {"id":"42"} and search {"tab":"posts"}
+      function step2_matchTab() {
+        waitingGoldCheck("[check] clicking Match tab…");
+        var btn = root.querySelector('[data-testid="tab-match"]');
+        if (!btn) { failGoldCheck("Match tab button not found"); return; }
+        btn.click();
+        pollFor(
+          function () { return !!root.querySelector('[data-testid="match-params"]'); },
+          0,
+          function () {
+            var paramsEl = root.querySelector('[data-testid="match-params"]');
+            var searchEl = root.querySelector('[data-testid="match-search"]');
+            if (!paramsEl || !searchEl) { failGoldCheck("match inspector not rendered"); return; }
+            var pTxt = paramsEl.textContent || "";
+            var sTxt = searchEl.textContent || "";
+            var paramsOk = pTxt.indexOf('"id":"42"') !== -1;
+            var searchOk = sTxt.indexOf('"tab":"posts"') !== -1;
+            if (!paramsOk || !searchOk) {
+              failGoldCheck("match tab: params=" + pTxt + " search=" + sTxt);
+              return;
+            }
+            readLive();
+            step3_historyTab();
+          },
+          function () { failGoldCheck("Match tab content did not appear"); }
+        );
+      }
+
+      // Step 3: click "History" tab → assert ≥2 navigation entries
+      function step3_historyTab() {
+        waitingGoldCheck("[check] clicking History tab…");
+        var btn = root.querySelector('[data-testid="tab-history"]');
+        if (!btn) { failGoldCheck("History tab button not found"); return; }
+        btn.click();
+        pollFor(
+          function () { return root.querySelectorAll('[data-testid="history-item"]').length >= 2; },
+          0,
+          function () {
+            var n = root.querySelectorAll('[data-testid="history-item"]').length;
+            if (n < 2) { failGoldCheck("expected ≥2 history items, saw " + n); return; }
+            readLive();
+            step4_performanceTab();
+          },
+          function () {
+            var n = root.querySelectorAll('[data-testid="history-item"]').length;
+            failGoldCheck("expected ≥2 history items, saw " + n);
+          }
+        );
+      }
+
+      // Step 4: click "Performance" tab → assert match + loader times present
+      function step4_performanceTab() {
+        waitingGoldCheck("[check] clicking Performance tab…");
+        var btn = root.querySelector('[data-testid="tab-performance"]');
+        if (!btn) { failGoldCheck("Performance tab button not found"); return; }
+        btn.click();
+        pollFor(
+          function () { return !!root.querySelector('[data-testid="perf-match"]'); },
+          0,
+          function () {
+            var matchEl = root.querySelector('[data-testid="perf-match"]');
+            var loaderEl = root.querySelector('[data-testid="perf-loader"]');
+            if (!matchEl || !loaderEl) { failGoldCheck("performance metrics not rendered"); return; }
+            var mTxt = (matchEl.textContent || "").trim();
+            var lTxt = (loaderEl.textContent || "").trim();
+            if (mTxt.indexOf("2.3ms") === -1 || lTxt.indexOf("45ms") === -1) {
+              failGoldCheck("perf times missing (match=" + mTxt + ", loader=" + lTxt + ")");
+              return;
+            }
+            passGoldCheck();
+          },
+          function () { failGoldCheck("Performance tab content did not appear"); }
+        );
+      }
+
+      function readLive() {
+        var tab = "—";
+        if (root.querySelector('[data-testid="route-list"]')) tab = "routes";
+        else if (root.querySelector('[data-testid="match-inspector"]')) tab = "match";
+        else if (root.querySelector('[data-testid="history-list"]')) tab = "history";
+        else if (root.querySelector('[data-testid="performance"]')) tab = "performance";
+        var routes = root.querySelectorAll('[data-testid="route-item"]').length;
+        countRead.textContent = tab + (tab === "routes" ? " · " + routes + " routes" : "");
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] panel ✓ · routes=4 · match(id=42,tab=posts) · history≥2 · perf(match+loader). OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

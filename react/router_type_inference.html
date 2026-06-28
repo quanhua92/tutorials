@@ -1,0 +1,587 @@
+<!doctype html>
+<!--
+  router_type_inference.html — Phase 6 TanStack Router bundle #3 (TYPE INFERENCE).
+  STYLE ANCHOR: use_reducer.html (same CDN, styling, JSX-in-textarea, gold-check).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground that SIMULATES
+  TanStack Router's end-to-end type inference visually. We are in plain JS (no
+  TypeScript compiler), so we model the type machinery with data + a checker:
+    (1) a route REGISTRY with "type signatures" (the inferred types),
+    (2) a LINK BUILDER (to / params / search) that the user edits,
+    (3) a simulated type CHECKER that validates the link against the registry in
+        real time — green ✓ on match, red ✗ + a typed error message on mismatch,
+    (4) a type-CHAIN visualization: definition → Register → Link → component.
+  Companion: ROUTER_TYPE_INFERENCE.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: TanStack Router's killer feature is END-TO-END type safety. A route
+  DEFINITION (`createFileRoute('/users/$id')` + `validateSearch` + `loader`) is the
+  single source of truth. TypeScript template-literal types parse the path string
+  ('$id' → { id: string }), validateSearch's return type becomes the search type,
+  and the loader's return type flows into `Route.useLoaderData()`. Those types are
+  registered into the library via DECLARATION MERGING on the `Register` interface,
+  so every exported consumer — <Link>, useNavigate, useParams — is checked against
+  the exact route signature. A wrong param name or an out-of-range search literal
+  is a compile error, not a runtime 404.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<TypeSim/>), the gold-check
+  (1) asserts the registry rendered 4 routes, (2) drives the Link Builder to
+  /users/$id + {id:"42"} + {tab:"posts"} and asserts "Valid ✓", (3) flips params
+  to {name:"42"} and asserts a type error mentioning "Missing param: id" (or
+  "Unexpected param: name"). This proves the simulated type checker propagates a
+  route's inferred signature into real Link validation.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Type Inference — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:300px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Type Inference &mdash; how a route definition types everything</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_TYPE_INFERENCE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live simulator with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_TYPE_INFERENCE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/tanstack-start/router_type_safety.html">frontend/tanstack-start: router type safety</a>
+    (the basics of type-safe routing — this bundle goes to how the type machinery works internally).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">definition is the single source of truth</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A route DEFINITION is where every type is born. TypeScript template-literal
+        types parse the path string (<code>'/users/$id'</code> &rarr;
+        <code>{'{ id: string }'}</code>); <code>validateSearch</code>'s return type
+        becomes the search type; the <code>loader</code>'s return type becomes
+        <code>useLoaderData()</code>'s type. Those types are then registered into the
+        library via <b class="text-[#e6edf3]">declaration merging</b> on the
+        <code>Register</code> interface, so every consumer &mdash;
+        <code>&lt;Link&gt;</code>, <code>useNavigate</code>, <code>useParams</code>
+        &mdash; is checked against the exact route signature. You write fewer types;
+        the router pipes them through for you.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>where the type is born</th><th>how it propagates</th></tr>
+        <tr>
+          <td><code>params</code></td>
+          <td>path string: <code>'/users/$id'</code></td>
+          <td>template-literal type &rarr; <code>{'{ id: string }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>search</code></td>
+          <td><code>validateSearch</code> (zod / valibot / arktype)</td>
+          <td>validator return type &rarr; search param type</td>
+        </tr>
+        <tr>
+          <td><code>loader data</code></td>
+          <td><code>loader: ({params}) =&gt; fetchUser(...)</code></td>
+          <td>return type &rarr; <code>Route.useLoaderData()</code></td>
+        </tr>
+        <tr>
+          <td><code>context</code></td>
+          <td><code>createRootRouteWithContext</code> + <code>beforeLoad</code></td>
+          <td>accumulates down the tree &rarr; <code>useRouteContext()</code></td>
+        </tr>
+        <tr>
+          <td><code>&lt;Link&gt;</code></td>
+          <td>consumer (typed by the route)</td>
+          <td><code>Register</code> merges router types into the module</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the type-inference simulator (edit me)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>routeTypes</code> models the inferred type signatures. <code>checkLink()</code>
+        is the simulated TS checker: it walks the route's param/search keys against the
+        link's <code>params</code>/<code>search</code> and even validates literal-union
+        values (e.g. <code>tab</code> must be <code>'posts' | 'comments'</code>).
+      </p>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Route registry — these "type signatures" are what TS would infer from
+// createFileRoute('/users/$id')({ validateSearch, loader }).
+var routeTypes = {
+  '/':             { params: {},                search: {} },
+  '/users':        { params: {},                search: { filter: 'string' } },
+  '/users/$id':    { params: { id: 'string' },  search: { tab: "'posts' | 'comments'" } },
+  '/posts/$postId':{ params: { postId: 'string' }, search: {} }
+};
+
+// Validate one value against its inferred type string (e.g. 'string', "'a' | 'b'").
+function checkValue(name, value, typeStr) {
+  if (typeStr.charAt(0) === "'") {
+    var opts = typeStr.split('|').map(function (s) { return s.trim().replace(/'/g, ''); });
+    if (opts.indexOf(String(value)) === -1) {
+      return name + ': "' + value + '" is not assignable to ' + typeStr;
+    }
+  }
+  return null;
+}
+
+// Simulated TS type checker for <Link to params search />.
+function checkLink(to, params, search) {
+  var errors = [];
+  var routeType = routeTypes[to];
+  if (!routeType) {
+    return { valid: false, errors: ['Unknown route: ' + to + ' (not in Register)'] };
+  }
+  var expectedParams = Object.keys(routeType.params);
+  for (var i = 0; i &lt; expectedParams.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(params, expectedParams[i])) {
+      errors.push('Missing param: ' + expectedParams[i]);
+    }
+  }
+  var actualParams = Object.keys(params);
+  for (var j = 0; j &lt; actualParams.length; j++) {
+    var pk = actualParams[j];
+    if (!routeType.params[pk]) {
+      errors.push('Unexpected param: ' + pk + ' (route params: ' + (expectedParams.length ? expectedParams.join(', ') : 'none') + ')');
+    } else {
+      var pvErr = checkValue(pk, params[pk], routeType.params[pk]);
+      if (pvErr) errors.push(pvErr);
+    }
+  }
+  var expectedSearch = Object.keys(routeType.search);
+  var actualSearch = Object.keys(search);
+  for (var k = 0; k &lt; actualSearch.length; k++) {
+    var sk = actualSearch[k];
+    if (!routeType.search[sk]) {
+      errors.push('Unexpected search: ' + sk + ' (route search: ' + (expectedSearch.length ? expectedSearch.join(', ') : 'none') + ')');
+    } else {
+      var svErr = checkValue(sk, search[sk], routeType.search[sk]);
+      if (svErr) errors.push(svErr);
+    }
+  }
+  return { valid: errors.length === 0, errors: errors };
+}
+
+function TypeSim() {
+  var s = React.useState('/users/$id'), to = s[0], setTo = s[1];
+  var p = React.useState('{\n  "id": "42"\n}'), paramsText = p[0], setParamsText = p[1];
+  var q = React.useState('{\n  "tab": "posts"\n}'), searchText = q[0], setSearchText = q[1];
+
+  function parse(str) {
+    try { return { ok: true, value: JSON.parse(str) }; }
+    catch (e) { return { ok: false, error: 'Invalid JSON: ' + e.message }; }
+  }
+  var pp = parse(paramsText), ss = parse(searchText);
+  var result;
+  if (!pp.ok) result = { valid: false, errors: [pp.error] };
+  else if (!ss.ok) result = { valid: false, errors: [ss.error] };
+  else result = checkLink(to, pp.value || {}, ss.value || {});
+
+  var routes = Object.keys(routeTypes);
+
+  return (
+    &lt;div&gt;
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2"&gt;Route registry (the inferred type signatures)&lt;/h3&gt;
+      &lt;div style={{ overflowX: 'auto', minWidth: 0 }}&gt;
+        &lt;table&gt;
+          &lt;tr&gt;&lt;th&gt;route&lt;/th&gt;&lt;th&gt;params type&lt;/th&gt;&lt;th&gt;search type&lt;/th&gt;&lt;/tr&gt;
+          {routes.map(function (r) {
+            var t = routeTypes[r];
+            var ps = Object.keys(t.params).map(function (k) { return k + ': ' + t.params[k]; }).join(', ');
+            var qs = Object.keys(t.search).map(function (k) { return k + '?: ' + t.search[k]; }).join(', ');
+            return (
+              &lt;tr data-testid="route-row" key={r}&gt;
+                &lt;td&gt;&lt;code&gt;{r}&lt;/code&gt;&lt;/td&gt;
+                &lt;td className="text-[#8b949e]"&gt;{'{ ' + (ps || '') + ' }'}&lt;/td&gt;
+                &lt;td className="text-[#8b949e]"&gt;{'{ ' + (qs || '') + ' }'}&lt;/td&gt;
+              &lt;/tr&gt;
+            );
+          })}
+        &lt;/table&gt;
+      &lt;/div&gt;
+
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2 mt-4"&gt;Link builder (checked against the registry)&lt;/h3&gt;
+      &lt;div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3"&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;to (route)&lt;/label&gt;
+          &lt;select
+            data-testid="route-select"
+            value={to}
+            onChange={function (e) { setTo(e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm"
+          &gt;
+            {routes.map(function (r) { return &lt;option key={r} value={r}&gt;{r}&lt;/option&gt;; })}
+          &lt;/select&gt;
+        &lt;/div&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;params (JSON)&lt;/label&gt;
+          &lt;textarea
+            data-testid="params-input"
+            value={paramsText}
+            onChange={function (e) { setParamsText(e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm font-mono"
+            rows="3" spellCheck="false"
+          /&gt;
+        &lt;/div&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;search (JSON)&lt;/label&gt;
+          &lt;textarea
+            data-testid="search-input"
+            value={searchText}
+            onChange={function (e) { setSearchText(e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm font-mono"
+            rows="3" spellCheck="false"
+          /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div
+        data-testid="check-result"
+        data-valid={result.valid ? 'true' : 'false'}
+        className={'p-3 rounded border ' + (result.valid ? 'bg-[rgba(46,204,113,.08)] border-[#2ecc71]' : 'bg-[rgba(231,76,60,.08)] border-[#e74c3c]')}
+      &gt;
+        {result.valid ? (
+          &lt;span className="text-[#2ecc71] font-bold"&gt;✓ Valid — types match the route signature&lt;/span&gt;
+        ) : (
+          &lt;div&gt;
+            &lt;div className="text-[#e74c3c] font-bold mb-1"&gt;✗ Type error(s):&lt;/div&gt;
+            &lt;ul className="list-disc ml-5 text-[#e74c3c] text-sm"&gt;
+              {result.errors.map(function (er, i) { return &lt;li key={i}&gt;{er}&lt;/li&gt;; })}
+            &lt;/ul&gt;
+          &lt;/div&gt;
+        )}
+      &lt;/div&gt;
+
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2 mt-4"&gt;Type chain: definition → inference → consumption&lt;/h3&gt;
+      &lt;pre className="src"&gt;
+{"/users/$id  ──define──▶  RouteType { params: { id: string }, search: { tab?: 'posts'|'comments' } }\n" +
+"     │\n" +
+"     └──register──▶  declare module '@tanstack/react-router' { interface Register { router: typeof router } }\n" +
+"     │\n" +
+"     └──<Link to='/users/$id' params={{ id }} search={{ tab }} />   ← checked against RouteType\n" +
+"     │\n" +
+"     └──Route.useLoaderData()  ← typed as the loader return (User)"}
+      &lt;/pre&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;TypeSim/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;TypeSim/&gt;</code> becomes <code>React.createElement(TypeSim)</code>.
+        The route registry + checker run as plain JS; React only re-renders the
+        verdict when <code>to</code>/<code>params</code>/<code>search</code> change.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live type-inference simulator (proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Edit the route, params, or search above and watch the verdict flip. The
+        <b class="text-[#e6edf3]">gold-check</b> drives it automatically: counts 4 routes,
+        builds a valid link, then flips a param name to trigger a type error.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        routes: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: 4 routes → valid link → param-name typo → type error
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>declare params from path</td>
+          <td><code>createFileRoute('/users/$id')</code></td>
+          <td>template-literal type parses <code>$id</code> &rarr; <code>string</code></td>
+        </tr>
+        <tr>
+          <td>narrow a param type</td>
+          <td><code>params: {{ parse: z.number() }}</code></td>
+          <td>parsed parent type flows to every child route</td>
+        </tr>
+        <tr>
+          <td>declare search params</td>
+          <td><code>validateSearch: zodValidator(z.object({...}))</code></td>
+          <td>validator return type becomes the search type</td>
+        </tr>
+        <tr>
+          <td>consume in a component</td>
+          <td><code>Route.useParams()</code> / <code>Route.useSearch()</code></td>
+          <td>typed by THIS route's own signature (no <code>from</code> needed)</td>
+        </tr>
+        <tr>
+          <td>type-safe link</td>
+          <td><code>&lt;Link to="/users/$id" params={ {'id'} } search={ {'tab'} } /&gt;</code></td>
+          <td>checked against the <code>Register</code>-merged router types</td>
+        </tr>
+        <tr>
+          <td>register router types</td>
+          <td><code>declare module {{ '&nbsp;interface Register {{ router }}' }}</code></td>
+          <td>declaration merging lets types cross the module boundary</td>
+        </tr>
+        <tr>
+          <td>shared component, unknown route</td>
+          <td><code>useSearch({{ strict: false }})</code></td>
+          <td>relaxed but accurate union of all routes' search</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. drive a React controlled input/select the reliable way ----
+      function setNativeValue(el, value) {
+        var proto =
+          el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype :
+          el.tagName === "SELECT"   ? HTMLSelectElement.prototype :
+                                      HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event(el.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
+      }
+
+      // ---- 4. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for the registry to render…");
+        waitForRegistry(0);
+      }
+
+      // Step 0: registry must show 4 routes
+      function waitForRegistry(frame) {
+        readLive();
+        var rows = root.querySelectorAll('[data-testid="route-row"]');
+        if (rows.length === 4) { buildValidLink(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForRegistry(frame + 1); });
+          return;
+        }
+        failGoldCheck("registry did not render 4 routes (saw " + rows.length + ")");
+      }
+
+      // Step 1: /users/$id + {id:"42"} + {tab:"posts"} → assert "Valid"
+      function buildValidLink() {
+        setNativeValue(root.querySelector('[data-testid="route-select"]'), "/users/$id");
+        setNativeValue(root.querySelector('[data-testid="params-input"]'), JSON.stringify({ id: "42" }, null, 0));
+        setNativeValue(root.querySelector('[data-testid="search-input"]'), JSON.stringify({ tab: "posts" }, null, 0));
+        pollVerdict(true, 0, function () { buildBrokenLink(); });
+      }
+
+      // Step 2: params → {name:"42"} → assert a type error about "id" / "name"
+      function buildBrokenLink() {
+        setNativeValue(root.querySelector('[data-testid="params-input"]'), JSON.stringify({ name: "42" }, null, 0));
+        pollTypeError(0);
+      }
+
+      function pollVerdict(expectValid, frame, done) {
+        readLive();
+        var box = root.querySelector('[data-testid="check-result"]');
+        var valid = box && box.getAttribute("data-valid") === "true";
+        var txt = box ? box.textContent : "";
+        if (valid === expectValid && (expectValid ? /Valid/.test(txt) : /error/i.test(txt))) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollVerdict(expectValid, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("verdict did not settle to " + (expectValid ? "Valid" : "error"));
+      }
+
+      function pollTypeError(frame) {
+        readLive();
+        var box = root.querySelector('[data-testid="check-result"]');
+        var txt = box ? box.textContent : "";
+        var bad = box && box.getAttribute("data-valid") === "false";
+        if (bad && (/Missing param: id/.test(txt) || /Unexpected param: name/.test(txt))) { readLive(); passGoldCheck(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollTypeError(frame + 1); });
+          return;
+        }
+        failGoldCheck("expected a param type error but verdict was: " + (txt || "(empty)"));
+      }
+
+      function readLive() {
+        var rows = root.querySelectorAll('[data-testid="route-row"]');
+        countRead.textContent = rows.length;
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] 4 routes → valid link → param typo → type error. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

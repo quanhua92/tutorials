@@ -43,13 +43,13 @@
 - [x] 23 `view_transitions` — View Transitions API: crossfade, shared elements
 - [x] 24 `framer_motion_core` — Framer Motion: motion components, gestures
 - [x] 25 `spring_physics` — Spring physics: damping, stiffness, natural motion
-- [ ] 26 `animation_orchestration` — Variants, stagger, AnimatePresence exits
+- [x] 26 `animation_orchestration` — Variants, stagger, AnimatePresence exits
 
 ## Phase 6 — TanStack Router Deep Dive (10)
 
-- [ ] 27 `router_fundamentals` — Route tree, history, matching — the mental model
-- [ ] 28 `router_route_tree` — Compilation, linearization, matching algorithm
-- [ ] 29 `router_type_inference` — How definitions propagate types
+- [x] 27 `router_fundamentals` — Route tree, history, matching — the mental model
+- [x] 28 `router_route_tree` — Compilation, linearization, matching algorithm
+- [x] 29 `router_type_inference` — How definitions propagate types
 - [ ] 30 `router_search_validation` — Zod/Valibot schemas, defaults
 - [ ] 31 `router_loader_lifecycle` — beforeLoad → loader → component, caching
 - [ ] 32 `router_navigation_preload` — Intent-based preloading, dedup, prefetch

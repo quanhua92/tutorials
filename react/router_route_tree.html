@@ -1,0 +1,550 @@
+<!doctype html>
+<!--
+  router_route_tree.html — Phase 6 router bundle #2.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving how
+  TanStack Router compiles route definitions into an internal tree, linearizes
+  that tree into a ranked candidate list, then matches a URL against it.
+  Companion: ROUTER_ROUTE_TREE.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: a URL never hits a component directly. TanStack Router first turns
+  file conventions (or code-based createRoute calls) into a parent-child ROUTE
+  TREE. At build time that tree is LINEARIZED into a flat array of full paths,
+  each carrying its ancestor chain. The array is RANKED by specificity — static
+  segments beat $params beat $splat, and longer paths beat shorter ones when the
+  shared prefix ties. Matching then walks the ranked candidates segment-by-
+  segment: first full match wins, params are sliced out of $segments, and the
+  matched node's chain becomes the rendered route context stack [Root → … → leaf].
+
+  CDN setup (same React 19 ESM + Babel pattern as react/use_reducer):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check asserts
+  the route tree rendered 6 nodes (≥5), sets the URL input to "/users/42/posts"
+  (real native input event) and asserts the matched route is "UserPosts" with
+  params {"id":"42"}, then sets "/settings" and asserts the match is "Settings".
+  This proves the linearize → rank → match pipeline end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Route Tree Internals — TanStack Router Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Route Tree Internals &mdash; compile &middot; linearize &middot; match</h1>
+    <span id="goldcheck" class="goldcheck">[check: &hellip;]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_ROUTE_TREE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_ROUTE_TREE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Start with
+    <a href="../frontend/tanstack-start/file_based_routing.html">frontend/tanstack-start: file-based routing</a>
+    for the basics of file conventions — this bundle goes under the hood to the
+    internal tree mechanics (compile → linearize → rank → match).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">URL → component: never direct, always via the tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A URL like <code>/users/42/posts</code> never reaches a component directly. TanStack Router
+        turns file conventions (or <code>createRoute()</code> calls) into a parent-child
+        <b class="text-[#e6edf3]">route tree</b>, flattens it into a ranked candidate list, and
+        matches the URL segment-by-segment. The matched node's <b class="text-[#e6edf3]">ancestor chain</b>
+        becomes the rendered route-context stack: <code>[Root, Users, UserDetail, UserPosts]</code>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>stage</th><th>input</th><th>output</th></tr>
+        <tr>
+          <td><code>1 · compile</code></td>
+          <td>file convention: <code>users.$id.posts.tsx</code></td>
+          <td>tree node <code>{'{ name:"UserPosts", path:"/users/$id/posts", parent:"UserDetail" }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>2 · linearize</code></td>
+          <td>the parent-child tree</td>
+          <td>flat array of full paths, each carrying its ancestor chain</td>
+        </tr>
+        <tr>
+          <td><code>3 · rank</code></td>
+          <td>flat array</td>
+          <td>sorted by specificity — static(0) &gt; $param(1) &gt; $splat(2); longer beats shorter on ties</td>
+        </tr>
+        <tr>
+          <td><code>4 · match</code></td>
+          <td>URL <code>/users/42/posts</code></td>
+          <td>first ranked candidate whose segments all match → <code>{'{ route, params:{id:"42"} }'}</code></td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the compiler you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// ── Route definition (mirrors src/routes file conventions) ──────────
+//   __root.tsx → Root,  index.tsx → Index,  users.tsx → Users,
+//   users.$id.tsx → UserDetail,  users.$id.posts.tsx → UserPosts,
+//   settings.tsx → Settings
+var routeTree = {
+  name: 'Root', path: '/', children: [
+    { name: 'Index', path: '/', parent: 'Root' },
+    { name: 'Users', path: '/users', parent: 'Root', children: [
+      { name: 'UserDetail', path: '/users/$id', parent: 'Users', children: [
+        { name: 'UserPosts', path: '/users/$id/posts', parent: 'UserDetail' }
+      ] }
+    ] },
+    { name: 'Settings', path: '/settings', parent: 'Root' }
+  ]
+};
+
+// ── 1. Tree → flat list (each node keeps its ancestor chain) ─────────
+// Root is the implicit wrapper: it stays in every chain but is never the
+// terminal match, so it is excluded from the candidate set.
+function linearize(node, chain) {
+  var newChain = chain.concat([{ name: node.name, path: node.path }]);
+  var here = {
+    name: node.name,
+    path: node.path,
+    segments: node.path.split('/').filter(Boolean),
+    chain: newChain,
+    isRoot: node.name === 'Root'
+  };
+  var out = [here];
+  if (node.children) {
+    node.children.forEach(function (child) {
+      out = out.concat(linearize(child, newChain));
+    });
+  }
+  return out;
+}
+
+// ── 2. Rank by specificity: static(0) > $param(1) > $splat(2) ───────
+// Longer paths beat shorter when the shared-prefix ranks tie (PAD=99 sentinels
+// the missing positions so a deeper real rank wins over an absent one).
+function segRank(seg) {
+  if (seg === '$') return 2;
+  return seg.charAt(0) === '$' ? 1 : 0;
+}
+function rankRoutes(routes) {
+  var PAD = 99;
+  return routes.slice().sort(function (a, b) {
+    var sa = a.segments.map(segRank), sb = b.segments.map(segRank);
+    var n = Math.max(sa.length, sb.length);
+    for (var i = 0; i < n; i++) {
+      var ra = i < sa.length ? sa[i] : PAD;
+      var rb = i < sb.length ? sb[i] : PAD;
+      if (ra !== rb) return ra - rb;
+    }
+    return 0;
+  });
+}
+
+// ── 3. Match a URL against the ranked candidates ─────────────────────
+// Walk in rank order; first candidate whose segment count AND every segment
+// matches wins. $param slices one segment into params; $ captures the rest.
+function matchUrl(candidates, pathname) {
+  var parts = pathname.split('?')[0].split('/').filter(Boolean);
+  for (var i = 0; i &lt; candidates.length; i++) {
+    var route = candidates[i];
+    if (route.segments.length !== parts.length) continue;
+    var params = {}, ok = true;
+    for (var j = 0; j &lt; route.segments.length; j++) {
+      var seg = route.segments[j];
+      if (seg === '$') { params._splat = parts.slice(j).join('/'); break; }
+      if (seg.charAt(0) === '$') { params[seg.slice(1)] = parts[j]; }
+      else if (seg !== parts[j]) { ok = false; break; }
+    }
+    if (ok) return { route: route, params: params };
+  }
+  return null;
+}
+
+// Build the working sets once.
+var ALL = linearize(routeTree, []);
+var CANDIDATES = rankRoutes(ALL.filter(function (r) { return !r.isRoot; }));
+
+function TreeNode(props) {
+  var r = props.route;
+  var depth = props.depth || 0;
+  return (
+    &lt;div data-testid="route-node" style={{ paddingLeft: (depth * 18) + 'px', color: r.isRoot ? '#61dafb' : '#e6edf3', fontWeight: r.isRoot ? 700 : 400 }}&gt;
+      {r.isRoot ? '◆ ' : '└─ '}{r.name}
+      &lt;span style={{ color: '#8b949e', fontWeight: 400 }}&gt;  {r.path}&lt;/span&gt;
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  var _React$useState = React.useState('/users/42/posts');
+  var url = _React$useState[0];
+  var setUrl = _React$useState[1];
+
+  var match = matchUrl(CANDIDATES, url);
+  var name = match ? match.route.name : 'no match';
+  var params = match ? match.params : {};
+  var chain = match ? match.route.chain.map(function (c) { return c.name; }).join(' → ') : '—';
+  var paramKeys = Object.keys(params);
+
+  return (
+    &lt;div className="space-y-5"&gt;
+      {/* 1 · the tree */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;route tree (file convention → nodes)&lt;/div&gt;
+        &lt;div className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-[13px]"&gt;
+          {ALL.map(function (r) { return &lt;TreeNode key={r.name} route={r} depth={r.chain.length - 1} /&gt;; })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 2 · linearized + ranked candidates */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;linearized + ranked (match order)&lt;/div&gt;
+        &lt;div className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-[13px] space-y-1" data-testid="candidates"&gt;
+          {CANDIDATES.map(function (r, i) {
+            return (
+              &lt;div data-testid="candidate" key={r.name}&gt;
+                &lt;span className="text-[#8b949e]"&gt;{i + 1 + '. '}&lt;/span&gt;
+                &lt;span className="text-[#e6edf3]"&gt;{r.name}&lt;/span&gt;
+                &lt;span className="text-[#8b949e]"&gt;  {r.path}&lt;/span&gt;
+                &lt;span className="text-[#61dafb]"&gt;  rank=[{r.segments.map(segRank).join(',')}]&lt;/span&gt;
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 3 · URL input */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;try a URL&lt;/div&gt;
+        &lt;input
+          data-testid="url-input"
+          className="w-full px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+          value={url}
+          onChange={function (e) { setUrl(e.target.value); }}
+          placeholder="/users/42/posts"
+        /&gt;
+        &lt;div className="flex flex-wrap gap-2 mt-2"&gt;
+          {['/users/42/posts', '/users/7', '/settings', '/', '/nope'].map(function (u) {
+            return (
+              &lt;button key={u} data-testid="quick" data-url={u}
+                className="px-2 py-1 text-xs bg-[#161b22] border border-[#30363d] rounded text-[#61dafb] hover:border-[#61dafb]"
+                onClick={function () { setUrl(u); }}&gt;{u}&lt;/button&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 4 · match result */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;match result&lt;/div&gt;
+        &lt;div className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-[13px] space-y-2"&gt;
+          &lt;div&gt;matched route: &lt;span data-testid="match-name" data-name={name} className="text-[#61dafb] font-bold"&gt;{name}&lt;/span&gt;&lt;/div&gt;
+          &lt;div&gt;params: &lt;span data-testid="match-params" data-json={JSON.stringify(params)} className="text-[#2ecc71]"&gt;{paramKeys.length ? paramKeys.map(function (k) { return k + '=' + params[k]; }).join(', ') : '(none)'}&lt;/span&gt;&lt;/div&gt;
+          &lt;div&gt;route chain: &lt;span data-testid="match-chain" className="text-[#e6edf3]"&gt;{chain}&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;App/&gt;</code> becomes <code>React.createElement(App)</code>. Each render re-runs
+        <code>matchUrl(CANDIDATES, url)</code> against the pre-built, pre-ranked candidate list —
+        the same linearize-once / match-many shape TanStack uses at runtime.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the matching pipeline, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Type a URL (or click a quick button). The <b class="text-[#e6edf3]">gold-check</b> drives the
+        input directly: <code>/users/42/posts</code> → asserts <code>UserPosts</code> +
+        <code>id=42</code>, then <code>/settings</code> → asserts <code>Settings</code>. That proves
+        ranking put the right candidate first and <code>$id</code> was sliced into params.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        tree nodes: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: 6 nodes → /users/42/posts→UserPosts{id:42} → /settings→Settings
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>static beats dynamic</td>
+          <td><code>/users/new</code> before <code>/users/$id</code></td>
+          <td>rank 0 &lt; rank 1 — static segment wins the same-length tie</td>
+        </tr>
+        <tr>
+          <td>capture one segment</td>
+          <td><code>/users/$id</code> → <code>params.id</code></td>
+          <td>$ matches exactly until the next <code>/</code></td>
+        </tr>
+        <tr>
+          <td>capture the rest</td>
+          <td><code>/files/$</code> → <code>params._splat</code></td>
+          <td>trailing $ is a splat/wildcard, consumes everything left</td>
+        </tr>
+        <tr>
+          <td>resolve ambiguity</td>
+          <td><code>params: { priority: 10, parse }</code></td>
+          <td>higher priority candidate tried first; parse()=false falls through</td>
+        </tr>
+        <tr>
+          <td>build the context stack</td>
+          <td>matched node <code>.chain</code> → <code>[Root, …, leaf]</code></td>
+          <td>each ancestor's layout/outlet wraps the next — the route-context chain</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render the route tree…");
+        waitForTree(0);
+      }
+
+      function waitForTree(frame) {
+        var nodes = root.querySelectorAll('[data-testid="route-node"]');
+        if (nodes.length >= 5) { step1_matchPosts(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForTree(frame + 1); });
+          return;
+        }
+        failGoldCheck("route tree did not render 5+ nodes (got " + nodes.length + ")");
+      }
+
+      // Step 1: type "/users/42/posts" → expect UserPosts + params id=42
+      function step1_matchPosts() {
+        var input = root.querySelector('[data-testid="url-input"]');
+        if (!input) { failGoldCheck("url input not found"); return; }
+        setInput(input, "/users/42/posts");
+        pollMatchName("UserPosts", 0, function () {
+          var pm = root.querySelector('[data-testid="match-params"]');
+          var json = pm ? pm.getAttribute("data-json") : "";
+          if (!json || json.indexOf('"id":"42"') < 0) {
+            failGoldCheck('expected params {"id":"42"} for /users/42/posts (got ' + json + ")");
+            return;
+          }
+          step2_matchSettings();
+        });
+      }
+
+      // Step 2: type "/settings" → expect Settings
+      function step2_matchSettings() {
+        var input = root.querySelector('[data-testid="url-input"]');
+        setInput(input, "/settings");
+        pollMatchName("Settings", 0, passGoldCheck);
+      }
+
+      function pollMatchName(expect, frame, done) {
+        readLive();
+        var el = root.querySelector('[data-testid="match-name"]');
+        if (el && el.getAttribute("data-name") === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollMatchName(expect, frame + 1, done); });
+          return;
+        }
+        var actual = el ? el.getAttribute("data-name") : "(none)";
+        failGoldCheck('expected match "' + expect + '" but DOM shows "' + actual + '"');
+      }
+
+      // Drive a React-controlled <input>: use the native value setter so React's
+      // tracker sees the change, then dispatch a bubbling input event → onChange.
+      function setInput(el, val) {
+        var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+        var setter = desc && desc.set;
+        if (setter) setter.call(el, val); else el.value = val;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      function readLive() {
+        var nodes = root.querySelectorAll('[data-testid="route-node"]');
+        countRead.textContent = nodes.length;
+      }
+
+      function passGoldCheck() {
+        readLive();
+        var n = root.querySelectorAll('[data-testid="route-node"]').length;
+        badge.textContent = "[check] " + n + " routes · /users/42/posts→UserPosts{id:42} · /settings→Settings. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

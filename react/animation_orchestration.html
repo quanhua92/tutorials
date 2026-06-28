@@ -1,0 +1,521 @@
+<!doctype html>
+<!--
+  animation_orchestration.html — Phase 5 animations bundle #2.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  THREE Framer Motion orchestration primitives — variants, stagger, and
+  AnimatePresence — reimplemented from scratch (no motion/react dependency).
+  Companion: ANIMATION_ORCHESTRATION.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: animating ONE element is easy (see framer_motion_core.html).
+  Choreographing MANY elements — a list entering one-by-one, a removed item
+  fading out BEFORE it unmounts, a parent switching a named label that every
+  child follows — needs orchestration. Framer Motion ships three primitives
+  for this; each maps to a plain-React mechanism you can write yourself:
+
+    variants        →  a React Context carrying the active label down the tree
+    stagger         →  each child reads its index, delay = index * step
+    AnimatePresence →  defer the unmount: render the exiting child with its
+                       "exit" target for N ms, THEN splice it from state
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: createContext, useState, useEffect
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<OrchestrationDemo/>), the
+  gold-check asserts 3 items render, clicks "Add" (4 items), clicks "Remove" on
+  item #1, waits for the 300ms exit animation to finish, asserts 3 items remain
+  AND that id=1 is gone while ids 2/3/4 survive. This proves variants propagate,
+  stagger applies a per-index delay, and AnimatePresence defers the unmount.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Animation Orchestration — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Animation Orchestration &mdash; variants · stagger · AnimatePresence</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ANIMATION_ORCHESTRATION.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ANIMATION_ORCHESTRATION.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <a href="./framer_motion_core.html">framer_motion_core</a> covers single-element
+    animation (the rAF tween loop) — orchestration coordinates MULTIPLE elements on top of it.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">one element → many elements: the three primitives</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        <code>framer_motion_core</code> animates a single element with a <code>requestAnimationFrame</code> tween.
+        Real UIs need <b class="text-[#e6edf3]">choreography</b>: a list ripples in one-by-one, a dismissed card
+        fades out before it leaves the DOM, a parent flips a label and every child follows. Framer Motion ships
+        three primitives for this — and each is a plain-React mechanism in disguise:
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>primitive</th><th>what it does</th><th>the plain-React mechanism (used here)</th></tr>
+        <tr>
+          <td><code>variants</code></td>
+          <td>named target objects (<code>hidden</code>, <code>visible</code>, <code>exit</code>) — parent switches the label, children inherit it</td>
+          <td>a <code>React.Context</code> carries the active label + stagger step down the tree</td>
+        </tr>
+        <tr>
+          <td><code>stagger</code></td>
+          <td>children animate with a sequential delay — a wave, not a flash</td>
+          <td>each child reads its <code>index</code> and sets <code>transitionDelay = index * step</code></td>
+        </tr>
+        <tr>
+          <td><code>AnimatePresence</code></td>
+          <td>keeps a removed child mounted long enough to play its exit animation</td>
+          <td>park the id in an "exiting" map, render it with the <code>exit</code> target, splice after N ms</td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[13px] mt-3 leading-relaxed">
+        The demo below implements all three <b class="text-[#e6edf3]">from scratch</b> — no <code>motion/react</code>
+        import. Items enter with a stagger, the list label flips <code>hidden → visible</code> on mount, and the
+        Remove button parks the row in an exit state for 300ms before the real unmount.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the orchestrator you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var EXIT_MS = 300;          // exit animation duration (ms)
+var STAGGER  = 0.08;        // delay between each child's enter (s)
+
+// ── 1. VARIANTS ───────────────────────────────────────────────────────
+// Named target objects. The parent switches a string label and every child
+// that declares the SAME variant set follows automatically.
+var listVariants = {
+  hidden:  { opacity: 0 },
+  visible: { opacity: 1, transition: { staggerChildren: STAGGER } }
+};
+var itemVariants = {
+  hidden:  { opacity: 0, y: 20 },   // enter origin
+  visible: { opacity: 1, y: 0  },   // enter target
+  exit:    { opacity: 0, x: -40 }   // unmount target (AnimatePresence)
+};
+
+// ── 2. VARIANT PROPAGATION ────────────────────────────────────────────
+// A Context carries the active label + stagger step down the tree. This is
+// exactly what <motion.ul variants=… initial="hidden" animate="visible">
+// leaks to its <motion.li variants=…> children.
+var VariantContext = React.createContext({ name: 'visible', stagger: STAGGER });
+
+// turn a variant target into an inline-style object
+function styleFrom(v) {
+  return {
+    opacity: v.opacity != null ? v.opacity : 1,
+    transform: 'translate(' + (v.x || 0) + 'px,' + (v.y || 0) + 'px)',
+    transition: 'opacity ' + (EXIT_MS / 1000) + 's ease, transform ' + (EXIT_MS / 1000) + 's ease'
+  };
+}
+
+// one list item — reads the label from context, applies a stagger delay
+function MotionItem(props) {
+  var ctx = React.useContext(VariantContext);
+  var label = props.exiting ? 'exit' : ctx.name;        // exit wins over context
+  var target = itemVariants[label] || itemVariants.visible;
+  var style = styleFrom(target);
+  if (!props.exiting) {
+    style.transitionDelay = (props.index * ctx.stagger) + 's';   // STAGGER
+  }
+  return (
+    &lt;li data-testid="item" data-id={props.id}
+        style={style}
+        className="flex items-center gap-3 p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+      &lt;span className="flex-1 text-[#e6edf3]"&gt;Item #{props.id}&lt;/span&gt;
+      &lt;button data-testid="remove" data-id={props.id}
+              className="text-[#e74c3c] text-sm hover:font-bold"
+              onClick={function () { props.onRemove(props.id); }}&gt;
+        ✕
+      &lt;/button&gt;
+    &lt;/li&gt;
+  );
+}
+
+// ── 3. ANIMATEPRESENCE ────────────────────────────────────────────────
+// React unmounts instantly. To play an exit animation we DEFER the unmount:
+// park the removed id in an "exiting" map (it keeps rendering with the
+// 'exit' target), then splice it from the list after EXIT_MS.
+function OrchestrationDemo() {
+  var itemsState = React.useState([1, 2, 3]);
+  var items = itemsState[0];
+  var setItems = itemsState[1];
+  var exState  = React.useState({});
+  var exiting  = exState[0];
+  var setExiting = exState[1];
+  var nextId = React.useRef(4);
+
+  // list-level label: start 'hidden', flip to 'visible' next frame so the
+  // enter stagger is visible on mount.
+  var labelState = React.useState('hidden');
+  var label = labelState[0];
+  var setLabel = labelState[1];
+  React.useEffect(function () {
+    requestAnimationFrame(function () { setLabel('visible'); });
+  }, []);
+
+  function addItem() {
+    var id = nextId.current++;
+    setItems(function (prev) { return prev.concat([id]); });
+  }
+
+  function removeItem(id) {
+    setExiting(function (prev) {
+      var next = Object.assign({}, prev);
+      next[id] = true;
+      return next;
+    });
+    setTimeout(function () {
+      setItems(function (prev) {
+        return prev.filter(function (i) { return i !== id; });
+      });
+      setExiting(function (prev) {
+        var next = Object.assign({}, prev);
+        delete next[id];
+        return next;
+      });
+    }, EXIT_MS);
+  }
+
+  var list = items.map(function (id, i) {
+    return (
+      &lt;MotionItem key={id} id={id} index={i}
+                  exiting={!!exiting[id]}
+                  onRemove={removeItem} /&gt;
+    );
+  });
+
+  return (
+    &lt;VariantContext.Provider value={{ name: label, stagger: STAGGER }}&gt;
+      &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+        &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;
+          List ({items.length})
+        &lt;/h2&gt;
+        &lt;button data-testid="add"
+                className="w-full mb-4 px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"&gt;
+          + Add item
+        &lt;/button&gt;
+        &lt;ul data-testid="list" className="space-y-2"&gt;
+          {list}
+        &lt;/ul&gt;
+        &lt;p data-testid="summary" className="mt-3 text-xs text-[#8b949e]"&gt;
+          variants: {label} · stagger: {STAGGER}s · exit: {EXIT_MS}ms
+        &lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/VariantContext.Provider&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;OrchestrationDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;VariantContext.Provider&gt;</code> becomes
+        <code>React.createElement(VariantContext.Provider, …)</code>. The Context value flows down;
+        each <code>MotionItem</code> reads it via <code>useContext</code> and computes its own delay.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (variants + stagger + exit, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        On mount the list label flips <code>hidden → visible</code> and items ripple in with a
+        <code>0.08s</code> stagger. Click <b class="text-[#e6edf3]">Add</b> to append; click
+        <b class="text-[#e6edf3]">✕</b> to remove — the row slides out over 300ms, THEN unmounts. The
+        <b class="text-[#e6edf3]">gold-check</b> automates this: assert 3 → add → assert 4 → remove #1 →
+        wait for exit → assert 3 remain and #1 is gone.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        items: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: 3 → +Add → 4 → remove #1 → wait exit → 3 remain, #1 gone
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → orchestration primitive</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>primitive</th><th>why</th></tr>
+        <tr>
+          <td>parent flips a label, children follow</td>
+          <td><code>variants</code> + a Context</td>
+          <td>one switch animates N children — no per-child prop drilling</td>
+        </tr>
+        <tr>
+          <td>list ripples in one-by-one</td>
+          <td><code>staggerChildren</code> / per-index <code>transitionDelay</code></td>
+          <td>wave effect; each child waits <code>index * step</code></td>
+        </tr>
+        <tr>
+          <td>removed element animates out first</td>
+          <td><code>AnimatePresence</code> / defer unmount</td>
+          <td>React unmounts instantly; you must hold the node for the exit duration</td>
+        </tr>
+        <tr>
+          <td>pause before children start</td>
+          <td><code>delayChildren</code> (no stagger)</td>
+          <td>all children wait ONE delay, then animate together</td>
+        </tr>
+        <tr>
+          <td>parent finishes before children start</td>
+          <td><code>when: 'beforeChildren'</code></td>
+          <td>strict ordering — parent then children, not overlapping</td>
+        </tr>
+        <tr>
+          <td>different timing per variant</td>
+          <td><code>transition</code> inside each variant target</td>
+          <td><code>visible</code> can spring, <code>exit</code> can tween — independent</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+      var EXIT_MS     = 300;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      //  assert 3 → +Add → 4 → remove #1 → wait exit → 3 remain, #1 gone
+      var MAX_FRAMES = 220;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render OrchestrationDemo…");
+        waitForList(0);
+      }
+
+      function waitForList(frame) {
+        var list = root.querySelector('[data-testid="list"]');
+        if (list) { assertCount(3, 0, step1_add); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForList(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the list in time");
+      }
+
+      // Step 1: click "Add" → expect 4 items
+      function step1_add() {
+        var addBtn = root.querySelector('[data-testid="add"]');
+        if (!addBtn) { failGoldCheck("Add button not found"); return; }
+        addBtn.click();
+        assertCount(4, 0, step2_remove);
+      }
+
+      // Step 2: click remove on first item (id=1), wait for exit, assert 3 + id gone
+      function step2_remove() {
+        var removeBtn = root.querySelector('[data-testid="remove"]');
+        if (!removeBtn) { failGoldCheck("Remove button not found"); return; }
+        var removedId = removeBtn.getAttribute("data-id");
+        removeBtn.click();
+        // During EXIT_MS the row stays in the DOM (exiting). After that the
+        // real unmount fires and count drops to 3 — poll for it.
+        assertCount(3, 0, function () {
+          var present = {};
+          root.querySelectorAll('[data-testid="item"]').forEach(function (el) {
+            present[el.getAttribute("data-id")] = true;
+          });
+          if (present[removedId]) {
+            failGoldCheck("removed id " + removedId + " still present after exit");
+            return;
+          }
+          var survivors = ["2", "3", "4"].every(function (id) { return !!present[id]; });
+          if (!survivors) {
+            failGoldCheck("expected ids 2,3,4 to survive, got " + Object.keys(present).join(","));
+            return;
+          }
+          passGoldCheck("3 → add → 4 → remove #" + removedId + " → exit played → 3 remain (2,3,4). OK");
+        });
+      }
+
+      function assertCount(expect, frame, done) {
+        readLive();
+        var items = root.querySelectorAll('[data-testid="item"]');
+        if (items.length === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { assertCount(expect, frame + 1, done); });
+          return;
+        }
+        var actual = root.querySelectorAll('[data-testid="item"]').length;
+        failGoldCheck("expected " + expect + " items but DOM shows " + actual);
+      }
+
+      function readLive() {
+        var items = root.querySelectorAll('[data-testid="item"]');
+        countRead.textContent = items.length;
+      }
+
+      function passGoldCheck(msg) {
+        readLive();
+        badge.textContent = "[check] " + msg;
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

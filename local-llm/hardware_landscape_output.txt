@@ -1,0 +1,340 @@
+hardware_landscape.py - the 2026 local-LLM hardware landscape, by the numbers.
+Pure Python stdlib. Numbers below feed HARDWARE_LANDSCAPE.md.
+Sources: hardware-corner.net + aimultiple.com/dgx-spark-alternatives (2026).
+
+Lineage: single GPU (3090) -> unified (Mac Studio) -> workstation (DGX Spark)
+       -> budget (Strix Halo) -> multi-GPU DIY (3x3090).
+
+==========================================================================
+  SECTION A: THE 2026 HARDWARE TABLE - capacity, bandwidth, price
+==========================================================================
+The two specs that matter, side by side. Memory CAPACITY (GB) decides
+what fits; memory BANDWIDTH (GB/s) decides decode speed. They are NOT the
+same number and confusing them is the #1 beginner mistake.
+
+| hardware                 | mem(GB) | bw(GB/s) | backend     | price       |
+|--------------------------|---------|----------|-------------|-------------|
+| 3x RTX 3090              |      72 |      936 | CUDA        | ~$2.5K      |
+| AMD Strix Halo           |     128 |      273 | ROCm        | $2,348 (Framework Desktop) |
+| DGX Spark (GB10)         |     128 |      273 | CUDA        | $4,699 (raised Feb 2026) |
+| Mac Mini M4 Pro          |      48 |      273 | Metal/MLX   | ~$1.6K      |
+| Mac Studio M3 Ultra      |     512 |      819 | Metal/MLX   | ~$6-12K (config-dependent) |
+| Mac Studio M4 Max        |     128 |      546 | Metal/MLX   | ~$2-4K      |
+| RTX 4090                 |      24 |     1008 | CUDA        | ~$1.6K      |
+| RTX 5090                 |      32 |     1792 | CUDA        | ~$2K        |
+| RX 7900 XTX              |      24 |      960 | ROCm/Vulkan | ~$900       |
+
+Derived value metrics (price / spec = how cheap each unit of capability is):
+| hardware                 | $/GB-mem | $/(GB/s)  | capacity tier | bw tier    |
+|--------------------------|----------|-----------|---------------|------------|
+| 3x RTX 3090              |    34.7  |      2.7  | big           | FAST       |
+| AMD Strix Halo           |    18.3  |      8.6  | HUGE          | low        |
+| DGX Spark (GB10)         |    36.7  |     17.2  | HUGE          | low        |
+| Mac Mini M4 Pro          |    33.3  |      5.9  | big           | low        |
+| Mac Studio M3 Ultra      |    17.6  |     11.0  | HUGE          | FAST       |
+| Mac Studio M4 Max        |    23.4  |      5.5  | HUGE          | mid        |
+| RTX 4090                 |    66.7  |      1.6  | small         | FAST       |
+| RTX 5090                 |    62.5  |      1.1  | small         | FAST       |
+| RX 7900 XTX              |    37.5  |      0.9  | small         | FAST       |
+
+Read it in two directions:
+  - DOWN a column: Mac Studio M3 Ultra has the most CAPACITY (512GB);
+    RTX 5090 has the most BANDWIDTH (1792 GB/s). No single box wins both.
+  - ACROSS a row: Strix Halo is ~half the $/GB-mem of DGX Spark for the
+    SAME 128GB/273GB/s recipe - it is the value pick (see Section E).
+[check] Strix Halo cheaper per GB-mem than DGX Spark :  OK
+[check] no single hardware has both max capacity AND max bandwidth :  OK
+
+==========================================================================
+  SECTION B: WHY DECODE IS BANDWIDTH-BOUND - weights read every token
+==========================================================================
+During DECODE (generating one token at a time, batch=1), the engine must
+read (almost) ALL the active model weights out of memory ONCE per token.
+Compute is idle waiting on memory. So:
+
+    decode_tps ~= bandwidth_GBps / bytes_read_per_token
+
+Doubling bandwidth doubles tok/s. Doubling FLOPS does ~nothing for decode
+(it helps PREFILL - see Section D). This is the roofline model.
+
+Worked: a DENSE 70B Q4_K_M model. weight = 70 * 4.5 / 8 = 39.38 GB.
+Theoretical peak decode (bw / weight, efficiency=1.0) per hardware:
+| hardware                 | bw(GB/s) | peak tps | est tps* |
+|--------------------------|----------|----------|----------|
+| 3x RTX 3090              |      936 |    23.8  |   13.1   |
+| AMD Strix Halo           |      273 |     6.9  |    3.8   |
+| DGX Spark (GB10)         |      273 |     6.9  |    3.8   |
+| Mac Mini M4 Pro          |      273 |     6.9  |    3.8   |
+| Mac Studio M3 Ultra      |      819 |    20.8  |   11.4   |
+| Mac Studio M4 Max        |      546 |    13.9  |    7.6   |
+| RTX 4090                 |     1008 |    25.6  |   14.1   |
+| RTX 5090                 |     1792 |    45.5  |   25.0   |
+| RX 7900 XTX              |      960 |    24.4  |   13.4   |
+  * est = peak * 0.55 (KV-cache reads + attention overhead)
+
+Two facts this table forces on you:
+  1. 3x3090 (936 GB/s) decodes 3.4x faster than
+     DGX Spark (273 GB/s) - PURELY because of bandwidth. Same model.
+  2. Mac Mini M4 Pro (273 GB/s) is bandwidth-equal to DGX Spark
+     (273 GB/s) - so it decodes a 70B at the SAME speed, for ~1/3 $.
+[check] 3x3090 peak decode > DGX Spark peak decode (more bandwidth) :  OK
+[check] decode scales linearly with bandwidth (3x3090/DGX == bw ratio) :  OK
+
+CAVEAT: this is for DENSE models. MoE models (GPT-OSS, DeepSeek, Qwen3-MoE)
+read only the ACTIVE experts per token (~7-8 GB for GPT-OSS 120B, not the
+full 60 GB on-disk), so they decode MUCH faster than a dense 120B would -
+but the bandwidth-bound law still holds (Section C proves it).
+
+==========================================================================
+  SECTION C: GPT-OSS 120B BENCHMARK - the measured proof (gold values)
+==========================================================================
+GPT-OSS 120B in MXFP4 (4-bit), measured across four very different systems.
+Source: hardware-corner.net + aimultiple.com/dgx-spark-alternatives (2026).
+This is the canonical 2026 local-LLM benchmark - the numbers the whole
+landscape is judged against.
+
+| system               | prefill(tok/s) | decode(tok/s) | bw(GB/s) |
+|----------------------|----------------|---------------|----------|
+| 3x RTX 3090          |      1642.0  |      124.03   |      936 |
+| Mac Studio M3 Ultra  |         n/a  |       70.79   |      819 |
+| DGX Spark (GB10)     |      1723.1  |       38.55   |      273 |
+| AMD Strix Halo       |       339.9  |       34.13   |      273 |
+
+THE DIAGNOSTIC: effective GB streamed per generated token = bw / decode_tps.
+If decode is bandwidth-bound, this is ~constant across all hardware.
+| system               | bw(GB/s) | decode  | GB/token | reads how?        |
+|----------------------|----------|---------|----------|-------------------|
+| 3x RTX 3090          |      936 | 124.03  |    7.55  | CUDA (most efficient) |
+| Mac Studio M3 Ultra  |      819 |  70.79  |   11.57  | Metal/MLX (overhead) |
+| DGX Spark (GB10)     |      273 |  38.55  |    7.08  | CUDA (efficient) |
+| AMD Strix Halo       |      273 |  34.13  |    8.00  | ROCm |
+
+GB/token clusters at ~7-8 for the CUDA/ROCm systems (active MoE experts),
+~11.6 for the Mac (Metal/MLX moves more per token). The spread is software
+efficiency, NOT a different model - the bandwidth-bound law still holds:
+
+  decode(3x3090) / decode(DGX Spark) = 3.22   vs   bw ratio = 3.43
+  -> the ~3.2x measured decode gap tracks the ~3.4x bandwidth gap.
+     That IS the bandwidth-bound signature.
+[check] decode ratio (3x3090/DGX) within 15% of bandwidth ratio :  OK  (3.22 vs 3.43)
+[check] same-bandwidth systems decode within 20% (DGX vs Strix, both 273 GB/s) :  OK  (38.55 vs 34.13)
+
+GOLD (for HARDWARE_LANDSCAPE.html): Strix Halo effective bytes/token
+    273 GB/s / 34.13 tok/s = 7.998828 GB/token  (~8.00 GB/token)
+[check] gold: Strix Halo bytes/token ~= 8.00 :  OK  (got 7.9988)
+
+==========================================================================
+  SECTION D: PREFILL vs DECODE - compute-bound vs bandwidth-bound
+==========================================================================
+LLM serving has TWO phases with OPPOSITE bottlenecks. Mixing them up is
+why people buy the wrong hardware.
+
+| phase   | what it does              | bottleneck    | wins on...      |
+|---------|---------------------------|---------------|-----------------|
+| PREFILL | process the WHOLE prompt   | COMPUTE(FLOPS)| tensor cores    |
+| DECODE  | emit ONE token at a time   | MEMORY(bw)    | bandwidth (GB/s)|
+
+PREFILL batches the entire prompt into one giant matmul - compute units are
+the limit, so FLOPS (tensor-core throughput) sets the speed. DECODE emits one
+token at a time (batch=1), so each weight is read once per token and memory
+BANDWIDTH is the limit - FLOPS sit idle waiting for data.
+
+The GPT-OSS 120B benchmark makes the split vivid:
+| system               | prefill | decode  | who wins prefill?   | who wins decode?  |
+|----------------------|---------|---------|---------------------|------------------|
+| DGX Spark (GB10)     |   1723  |  38.55  | 1 PFLOP FP4 -> WINS | 273 GB/s -> slow |
+| AMD Strix Halo       |    340  |  34.13  | ~50 TOPS -> slow    | 273 GB/s -> slow |
+| 3x RTX 3090          |   1642  | 124.03  | fast compute        | 936 GB/s -> WINS |
+
+  DGX Spark prefill / Strix Halo prefill = 5.1x
+  -> Spark's 1 PFLOP FP4 tensor cores crush prefill (compute-bound).
+  -> Yet they DECODE at nearly the same speed (both 273 GB/s, bandwidth-bound).
+
+RULE OF THUMB: if your workload is LONG PROMPTS / short answers (RAG, code
+completion, document Q&A), prefill dominates -> buy COMPUTE (DGX Spark,
+tensor cores). If it is CHAT / long generation, decode dominates -> buy
+BANDWIDTH (3x3090, Mac Studio). Section F shows you can split the two.
+[check] DGX Spark prefill >> Strix Halo prefill (compute-bound phase) :  OK  (1723.07 vs 339.87)
+[check] DGX Spark decode ~= Strix Halo decode (bandwidth-bound, same 273 GB/s) :  OK
+
+==========================================================================
+  SECTION E: 'WHICH TO BUY?' - the decision tree + price/performance
+==========================================================================
+Pick by your LARGEST model and your budget. Memory capacity is a hard gate
+(it either fits or it doesn't); bandwidth then sets the speed you get.
+
+Price/performance for GPT-OSS 120B DECODE (where we have measured tok/s):
+| system               | price    | decode  | $/tok-per-sec | verdict           |
+|----------------------|----------|---------|---------------|-------------------|
+| 3x RTX 3090          |   $2,500 | 124.03  |           20  | best $/tok-s overall |
+| Mac Studio M3 Ultra  |   $9,000 |  70.79  |          127  | biggest models (512GB) |
+| DGX Spark (GB10)     |   $4,699 |  38.55  |          122  | prefill + CUDA stack |
+| AMD Strix Halo       |   $2,348 |  34.13  |           69  | best unified value |
+
+  3x3090 $/tok-per-sec = 20   (best raw decode value)
+  Strix Halo $/tok-per-sec = 69   vs   DGX Spark = 122
+  -> Among 128GB unified boxes, Strix Halo is ~1.8x better
+     value than DGX Spark (half the price, same ~273 GB/s decode speed).
+[check] 3x3090 is the best raw decode value (lowest $/tps) :  OK
+[check] Strix Halo beats DGX Spark on $/tps (half price, same bandwidth) :  OK
+
+DECISION TREE (by what you actually want to run):
+
+  Want <= 14B Q4 (chat, fast)?
+    -> single discrete GPU: RTX 5090 (32GB/1792 GB/s) or RTX 4090 (24GB).
+       Best tok/s per dollar; bandwidth is huge; capacity is the only cap.
+
+  Want 70B Q4 (strong reasoning, fits in ~40GB)?
+    -> 3x RTX 3090 (72GB, 936 GB/s): fastest decode, cheapest speed.
+    -> Mac Studio M4 Max (128GB, 546 GB/s): single-box, quiet, MLX.
+    -> offload on a single 24GB card is viable but slow (see gpu_offload).
+
+  Want 120B-200B+ (GPT-OSS, command-R, huge context)?
+    -> Mac Studio M3 Ultra (512GB): the ONLY single box that holds 200B+ Q4.
+    -> DGX Spark / Strix Halo (128GB): hold up to ~120B Q4, CUDA vs ROCm.
+
+  Want the CUDA ecosystem + fast prefill (dev, fine-tuning, agents)?
+    -> DGX Spark. You pay for the stack, not the raw decode speed.
+
+==========================================================================
+  SECTION F: THE HYBRID TRICK - disaggregate prefill from decode
+==========================================================================
+Since prefill and decode have OPPOSITE bottlenecks (Section D), no single
+box is optimal at both. EXO Labs' insight: network TWO boxes and let each
+do the phase it is best at. Source: blog.exolabs.net (2026).
+
+    DGX Spark (1 PFLOP FP4)  -->  fast PREFILL   [compute-bound phase]
+    Mac Studio M3 Ultra      -->  fast DECODE     [bandwidth-bound phase]
+                networked over 200 Gbps ConnectX-7
+
+Measured result on GPT-OSS 120B: this disaggregated pair runs ~2.8x faster
+END-TO-END than the Mac Studio alone (the Spark's prefill removes the Mac's
+weakness; the Mac's 819 GB/s decode removes the Spark's 273 GB/s weakness).
+
+  Mac Studio alone:  prefill ~420 t/s, decode 70.8 t/s
+  Hybrid:            prefill ~1723 t/s (Spark), decode 70.8 t/s (Mac)
+  -> prefill speedup ~4.1x, decode unchanged; end-to-end ~2.8x (EXO Labs).
+[check] hybrid prefill (Spark) beats Mac-alone prefill :  OK  (1723.07 vs ~420)
+[check] hybrid decode (Mac) beats Spark-alone decode :  OK  (70.79 vs 38.55)
+
+This is PREFILL/DECODE DISAGGREGATION at the desktop scale - the same idea
+datacenters use (separate prefill pools from decode pools). Cross-ref
+llm/DISAGGREGATED_SERVING for the datacenter version. The win comes from
+NOT forcing one machine's memory system to serve two opposite bottlenecks.
+
+==========================================================================
+  SECTION G: 'WILL IT FIT + HOW FAST?' - the calculator
+==========================================================================
+Pick a (model size, quant). For each hardware: does it FIT in capacity, and
+if so what decode tok/s do we ESTIMATE? Dense-model roofline at efficiency=
+0.55 (KV+attention overhead). MoE models run faster than this.
+
+=== 8B Q4_K_M  (8.0B @ 4.5 bpw = 4.5 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |   yes |          114.4      |
+| AMD Strix Halo           |   yes |           33.4      |
+| DGX Spark (GB10)         |   yes |           33.4      |
+| Mac Mini M4 Pro          |   yes |           33.4      |
+| Mac Studio M3 Ultra      |   yes |          100.1      |
+| Mac Studio M4 Max        |   yes |           66.7      |
+| RTX 4090                 |   yes |          123.2      |
+| RTX 5090                 |   yes |          219.0      |
+| RX 7900 XTX              |   yes |          117.3      |
+
+=== 8B Q8_0  (8.0B @ 8.5 bpw = 8.5 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |   yes |           60.6      |
+| AMD Strix Halo           |   yes |           17.7      |
+| DGX Spark (GB10)         |   yes |           17.7      |
+| Mac Mini M4 Pro          |   yes |           17.7      |
+| Mac Studio M3 Ultra      |   yes |           53.0      |
+| Mac Studio M4 Max        |   yes |           35.3      |
+| RTX 4090                 |   yes |           65.2      |
+| RTX 5090                 |   yes |          116.0      |
+| RX 7900 XTX              |   yes |           62.1      |
+
+=== 14B Q4_K_M  (14.0B @ 4.5 bpw = 7.9 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |   yes |           65.4      |
+| AMD Strix Halo           |   yes |           19.1      |
+| DGX Spark (GB10)         |   yes |           19.1      |
+| Mac Mini M4 Pro          |   yes |           19.1      |
+| Mac Studio M3 Ultra      |   yes |           57.2      |
+| Mac Studio M4 Max        |   yes |           38.1      |
+| RTX 4090                 |   yes |           70.4      |
+| RTX 5090                 |   yes |          125.2      |
+| RX 7900 XTX              |   yes |           67.0      |
+
+=== 70B Q4_K_M  (70.0B @ 4.5 bpw = 39.4 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |   yes |           13.1      |
+| AMD Strix Halo           |   yes |            3.8      |
+| DGX Spark (GB10)         |   yes |            3.8      |
+| Mac Mini M4 Pro          |   yes |            3.8      |
+| Mac Studio M3 Ultra      |   yes |           11.4      |
+| Mac Studio M4 Max        |   yes |            7.6      |
+| RTX 4090                 |    NO |   offload (see gpu_offload) |
+| RTX 5090                 |    NO |   offload (see gpu_offload) |
+| RX 7900 XTX              |    NO |   offload (see gpu_offload) |
+
+=== 70B Q8_0  (70.0B @ 8.5 bpw = 74.4 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |    NO |   offload (see gpu_offload) |
+| AMD Strix Halo           |   yes |            2.0      |
+| DGX Spark (GB10)         |   yes |            2.0      |
+| Mac Mini M4 Pro          |    NO |   offload (see gpu_offload) |
+| Mac Studio M3 Ultra      |   yes |            6.1      |
+| Mac Studio M4 Max        |   yes |            4.0      |
+| RTX 4090                 |    NO |   offload (see gpu_offload) |
+| RTX 5090                 |    NO |   offload (see gpu_offload) |
+| RX 7900 XTX              |    NO |   offload (see gpu_offload) |
+
+=== 120B Q4  (120.0B @ 4.0 bpw = 60.0 GB weights) ===
+| hardware                 | fits? | est decode (tok/s) |
+|--------------------------|-------|--------------------|
+| 3x RTX 3090              |   yes |            8.6      |
+| AMD Strix Halo           |   yes |            2.5      |
+| DGX Spark (GB10)         |   yes |            2.5      |
+| Mac Mini M4 Pro          |    NO |   offload (see gpu_offload) |
+| Mac Studio M3 Ultra      |   yes |            7.5      |
+| Mac Studio M4 Max        |   yes |            5.0      |
+| RTX 4090                 |    NO |   offload (see gpu_offload) |
+| RTX 5090                 |    NO |   offload (see gpu_offload) |
+| RX 7900 XTX              |    NO |   offload (see gpu_offload) |
+
+How to read the calculator:
+  - 8B Q4 (4.5 GB): fits EVERYTHING, even a 24GB card. A single RTX
+    5090 estimates ~219 tok/s (1792 GB/s is enormous for 4.5 GB).
+  - 120B Q4 (60 GB): fits Mac Studio M3 Ultra (512GB), the 128GB
+    unified boxes (DGX Spark / Strix Halo / M4 Max), AND 3x RTX 3090 (72GB).
+    A single 24-32GB discrete GPU CANNOT hold it -> must offload (gpu_offload).
+[check] 8B Q4 fits all hardware (even 24GB) :  OK
+[check] 120B Q4 does NOT fit a 24GB card :  OK
+[check] 120B Q4 fits Mac Studio M3 Ultra (512GB) :  OK
+[check] RTX 5090 estimates the fastest decode for 8B (most bandwidth) :  OK
+
+==========================================================================
+  GOLD VALUE - the canonical numbers the HTML must reproduce
+==========================================================================
+Two gold checks: (1) the bandwidth-bound diagnostic for Strix Halo,
+(2) the decode roofline for a dense 70B on 3x RTX 3090.
+
+  GOLD 1: Strix Halo effective bytes/token = 273 / 34.13 = 7.998828
+          (rounds to 8.00 GB/token)
+[check] gold1: 273/34.13 ~= 8.00 :  OK  (got 7.9988)
+
+  GOLD 2: decode(70B Q4_K_M, 3x3090) = 936 / 39.38 * 0.55
+          = 13.07 tok/s  (estimate; real llama.cpp ~10-15 tok/s)
+[check] gold2: 70B Q4 on 3x3090 estimates in 10-20 tok/s band :  OK  (got 13.07)
+
+  The HTML recomputes GOLD 1 (273/34.13) with the identical formula and
+  shows [check: OK] if it lands on 8.00.
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

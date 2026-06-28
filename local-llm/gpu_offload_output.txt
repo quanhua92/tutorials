@@ -1,0 +1,153 @@
+gpu_offload.py - reference impl. All numbers below feed GPU_OFFLOAD.md.
+pure Python stdlib (no torch, no numpy). Model = Llama-3-8B.
+
+========================================================================
+  SECTION A: what `-ngl N` does (the layer split)
+========================================================================
+Model: Llama-3-8B  layers = 32  (each layer = attention + MLP)
+`-ngl N` puts the FIRST N layers on the GPU; the remaining 32-N on CPU.
+Weights of GPU layers -> VRAM (loaded ONCE). Weights of CPU layers ->
+RAM / mmap (streamed per token through SIMD). One activation crosses
+the boundary at the GPU/CPU seam.
+
+| -ngl | GPU layers (0..N-1) | CPU layers (N..31) | boundary at | mode        |
+|------|---------------------|----------------------|-------------|-------------|
+| 0    | (none)              | 0..31                | -           | ALL-CPU     |
+| 8    | 0..7                | 8..31                | after L7    | PARTIAL     |
+| 16   | 0..15               | 16..31               | after L15   | PARTIAL     |
+| 24   | 0..23               | 24..31               | after L23   | PARTIAL     |
+| 32   | 0..31               | (none)               | none        | FULL OFFLOAD |
+
+Layer visual for -ngl 16 of 32 (G = GPU, . = CPU):
+  L00 [GGGGGGGGGGGGGGGG................] L31
+  GPU: layers 0-15   |   CPU: layers 16-31   |   seam: after L15
+  -> 16 CPU-bound layers remain in the hot path; decode is CPU-limited.
+[check] -ngl 0  => ALL-CPU (no GPU layers): True -> OK
+[check] -ngl 32 => FULL OFFLOAD (no CPU layers): True -> OK
+[check] boundary only exists when 0 < ngl < L: True -> OK
+
+========================================================================
+  SECTION B: VRAM budget per layer (how many fit?)
+========================================================================
+VRAM_used = weight_per_layer * ngl  +  kv_cache(ctx)  +  runtime_overhead
+  runtime_overhead = 0.50 GiB (context, graph, slack)
+  weight_per_layer = WEIGHT_GIB[quant] / 32
+
+| quant  | total weights | per layer | layers in 8GiB* | layers in 16GiB* |
+|--------|---------------|-----------|-----------------|------------------|
+| FP16   |       15.00 GiB |  0.469   |       16/32       |        32/32        |
+| Q8_0   |        7.90 GiB |  0.247   |       30/32       |        32/32        |
+| Q5_K_M |        5.70 GiB |  0.178   |       32/32       |        32/32        |
+| Q4_K_M |        4.52 GiB |  0.141   |       32/32       |        32/32        | <-- GOLD
+| Q4_0   |        4.30 GiB |  0.134   |       32/32       |        32/32        |
+
+* weights-only ceiling (gpu - overhead, KV not yet counted).
+At Q4_K_M, ~145 MiB/layer is tiny: an 8 GiB card has room for ~49 layers,
+but the model only HAS 32. So weights fit EASILY -- the real constraint is
+the KV cache at long context (see Section D / E).
+
+========================================================================
+  SECTION C: the activation transfer bottleneck (decode vs prefill)
+========================================================================
+What crosses the CPU<->GPU seam is the ACTIVATION, not the weights.
+  activation = batch * seq_len * dim * bytes_per_element
+
+| phase   | batch | seq_len | dim  | bytes | human   |
+|---------|-------|---------|------|-------|---------|
+| decode  |   1   |    1    | 4096 |  8192 | 8 KiB |
+| prefill |   1   |  1024   | 4096 | 8388608 | 8 MiB |
+
+For comparison, the WEIGHTS that cross at LOAD time (once):
+  weight per layer (Q4_K_M) = 145 MiB  (151,666,032 bytes)
+  -> a layer's weights are 18514x bigger than one decode activation.
+
+Bidirectional seam crossing (activation IN + activation OUT):
+  decode round-trip  = 16 KiB/token   (negligible vs DDR/HBM bw)
+  prefill round-trip = 16 MiB/batch   (still small next to weights)
+
+KEY INSIGHT: the partial-offload bottleneck is the CPU COMPUTE on the
+32-ngl non-offloaded layers, NOT the seam copy. More GPU
+layers => fewer CPU layers in the hot path => faster decode (Section D).
+[check] decode activation == 8192 B (8 KiB): True -> OK
+[check] prefill(1024) activation == 8 MiB: True -> OK
+
+========================================================================
+  SECTION D: decision tree + decode-speed curve
+========================================================================
+GIVEN: (model, quant, ctx, gpu_vram). DECIDE -ngl in 3 steps:
+  1. kv        = KV_cache(ctx, dtype)               [grows with context]
+  2. avail     = gpu_vram - overhead - kv            [budget for weights]
+  3. ngl       = min( floor(avail / weight_per_layer), n_layers )
+
+| gpu    | quant  |  ctx  | KV (GiB) | avail | ngl | total | verdict
+|--------|--------|-------|----------|-------|-----|-------|---------------------------
+| 8 GiB | Q4_K_M |  4096 |    0.50  |  7.00 |  32 |  5.52 | ALL 32 layers on GPU  ->  -ngl 32 (or -ngl 999)
+| 8 GiB | Q4_K_M | 32768 |    4.00  |  3.50 |  24 |  7.89 | 24/32 layers on GPU (-ngl 24), 8 on CPU
+| 8 GiB | Q8_0   |  4096 |    0.50  |  7.00 |  28 |  7.91 | 28/32 layers on GPU (-ngl 28), 4 on CPU
+| 12 GiB | Q4_K_M |  8192 |    1.00  | 10.50 |  32 |  6.02 | ALL 32 layers on GPU  ->  -ngl 32 (or -ngl 999)
+
+Decode-speed curve (Llama-8B Q4_K_M, illustrative): tok/s vs -ngl
+| -ngl | % on GPU | decode tok/s | gain over CPU-only |
+|------|----------|--------------|--------------------|
+|    0 |       0% |        9.0   | +  0.0            |
+|    4 |      12% |       19.8   | + 10.8            |
+|    8 |      25% |       30.5   | + 21.5            |
+|   16 |      50% |       52.0   | + 43.0            |
+|   24 |      75% |       73.5   | + 64.5            |
+|   32 |     100% |       95.0   | + 86.0            |  <- FULL OFFLOAD plateau
+
+The curve is ~linear in ngl then FLAT: once the last CPU layer is gone,
+extra GPU layers cannot help -- decode is now VRAM-bandwidth-bound.
+
+========================================================================
+  SECTION E: practical configs (8/12/16/24 GiB x Q4/Q8/FP16)
+========================================================================
+Sweep across common (GPU, quant, ctx) tuples. 'fit?' = all layers on GPU.
+
+| GPU   | quant  |   ctx | KV    | weights(GPU) | ngl   | total  | fit? |
+|-------|--------|-------|-------|--------------|-------|--------|------|
+|    8  | Q4_K_M |  4096 | 0.50 |       4.52   | 32/32  |  5.52  | YES  |
+|    8  | Q4_K_M | 32768 | 4.00 |       3.39   | 24/32  |  7.89  | no   |
+|    8  | Q8_0   |  4096 | 0.50 |       6.91   | 28/32  |  7.91  | no   |
+|   12  | Q4_K_M |  8192 | 1.00 |       4.52   | 32/32  |  6.02  | YES  |
+|   12  | Q8_0   |  8192 | 1.00 |       7.90   | 32/32  |  9.40  | YES  |
+|   16  | Q8_0   | 16384 | 2.00 |       7.90   | 32/32  | 10.40  | YES  |
+|   16  | Q4_K_M | 32768 | 4.00 |       4.52   | 32/32  |  9.02  | YES  |
+|   24  | FP16   |  8192 | 1.00 |      15.00   | 32/32  | 16.50  | YES  |
+|   24  | Q4_K_M | 65536 | 8.00 |       4.52   | 32/32  | 13.02  | YES  |
+
+Reading the table:
+  * 8 GiB + Q4_K_M + 4K  : GOLD -- all 32 fit, ~1.5 GiB headroom.
+  * 8 GiB + Q4_K_M + 32K : KV(4.0) eats the budget -> only 24/32 offload.
+  * 8 GiB + Q8_0  + 4K   : heavier weights -> 28/32, 4 layers on CPU.
+  * 24 GiB is roomy: even FP16 at 8K ctx fits all 32 with headroom.
+
+========================================================================
+  SECTION G: GOLD offload plan (the centerpiece)
+========================================================================
+Canonical plan: Llama-3-8B, Q4_K_M, 8 GiB GPU, 4096 ctx, f16 KV.
+
+  weights (Q4_K_M, all 32) =  4.52 GiB   (0.1412 GiB/layer)
+  KV cache @ 4096 (f16)     =  0.50 GiB   (128 KiB/token)
+  runtime overhead         =  0.50 GiB
+  -------------------------------------------
+  TOTAL VRAM               =  5.52 GiB   (GPU = 8 GiB)
+
+  avail for weights = 8 - 0.50 - 0.50 = 7.00 GiB
+  max layers        = floor(7.00 / 0.1412) = 49  (model has 32)
+  -> ngl            = min(49, 32) = 32
+  verdict           = ALL 32 layers on GPU  ->  -ngl 32 (or -ngl 999)
+
+  headroom          = 8 - 5.52 = 2.48 GiB
+[check] total VRAM == 5.52 GiB: True -> OK
+[check] ngl == 32 (ALL layers offloaded): True -> OK
+[check] model fits in 8 GiB (total < gpu): True -> OK
+[check] headroom == 2.48 GiB: True -> OK
+
+GOLD (recomputed & badge-checked in gpu_offload.html):
+  weights = 4.52, KV = 0.50, overhead = 0.50
+  total   = 5.52 GiB   ->   ngl = 32   (-ngl 32 or -ngl 999)
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

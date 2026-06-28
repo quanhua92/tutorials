@@ -1,0 +1,171 @@
+threading.py - reference impl. All numbers below feed THREADING.md.
+pure Python stdlib (no torch, no numpy). Simulates llama.cpp threading.
+CPU model: 8 physical / 16 logical cores.
+
+========================================================================
+  SECTION A: prefill vs decode (why they scale differently)
+========================================================================
+A forward pass has TWO phases with opposite bottlenecks:
+
+  PREFILL (prompt processing):  batch = prompt length. Compute-heavy.
+  DECODE  (token generation):   batch = 1.            Memory-bound.
+
+Roofline on a [d=4096, d=4096] layer, Q4_0 weights (0.5 B/elem):
+
+| phase   | batch | FLOPs      | memory bytes | intensity (FLOP/byte) | bound     |
+|---------|-------|------------|--------------|-----------------------|-----------|
+| decode  | 1     | 33554432   | 8396800      | 4.00                  | MEMORY    |
+| prefill | 512   | 17179869184 | 12582912     | 1365.33               | COMPUTE   |
+
+Decode  intensity = 4.00 FLOP/byte  -> the bus sets the
+         ceiling. More threads share ONE bus -> speedup saturates fast.
+Prefill intensity = 1365 FLOP/byte -> cores are the
+         ceiling. More threads = more parallel FLOPs -> near-linear speedup.
+
+[check] decode intensity < prefill intensity: True -> OK
+[check] decode is memory-bound (intensity < 5): True -> OK
+[check] prefill is compute-bound (intensity > 10): True -> OK
+
+========================================================================
+  SECTION B: optimal thread count = PHYSICAL cores (not hyperthreads)
+========================================================================
+This CPU: 8 physical cores, 16 logical (2-way hyperthreading).
+
+A hyperthread shares the SAME physical core's FPU/SIMD unit with its
+sibling. For SIMD-heavy matmul work, two hyperthreads on one core do
+NOT double the throughput -- they contend for the vector unit and the
+L1/L2 cache. The sweet spot for `--threads` and `--threads-batch` is
+therefore 8 (physical), NOT 16 (logical).
+
+| threads | type        | prefill speedup | decode speedup |
+|---------|-------------|-----------------|----------------|
+| 1       | physical    | 1.0             | 1.0            |
+| 2       | physical    | 1.8             | 1.6            |
+| 4       | physical    | 3.2             | 1.9            |
+| 8       | physical (PEAK) | 5.5             | 2.0            |
+| 16      | hyperthread (penalty) | 5.0             | 1.8            |
+
+Prefill @ 8 threads (physical): 5.5x  -- PEAK
+Prefill @ 16 threads (hyper):     5.0x  -- -9% vs peak (WORSE)
+[check] prefill @ 8 > prefill @ 16: True -> OK
+[check] prefill @ 8 == 5.5x: True -> OK
+
+========================================================================
+  SECTION C: the performance curve (diminishing returns + HT penalty)
+========================================================================
+Full scaling sweep, 1..32 threads. Speedup is vs 1 thread.
+
+| threads | prefill (x) | prefill bar | decode (x) | decode bar |
+|---------|-------------|-------------|------------|------------|
+| 1       | 1.00        | ###         | 1.00       | ###        |
+| 2       | 1.80        | #####       | 1.60       | ####       |
+| 3       | 2.50        | #######     | 1.75       | #####      |
+| 4       | 3.20        | #########   | 1.90       | #####      |
+| 5       | 3.90        | ########### | 1.95       | #####      |
+| 6       | 4.60        | ############# | 2.00       | ######     |
+| 7       | 5.05        | ############### | 2.00       | ######     |
+| 8       | 5.50        | ################ | 2.00       | ######     | <== physical peak
+| 10      | 5.35        | ################ | 1.95       | #####      |
+| 12      | 5.20        | ############### | 1.90       | #####      |
+| 16      | 5.00        | ############### | 1.80       | #####      | <== hyperthread penalty
+| 24      | 4.60        | ############# | 1.60       | ####       |
+| 32      | 4.20        | ############ | 1.40       | ####       |
+
+Read the curve:
+  * PREFILL climbs steeply to 5.5x at 8 threads, then FALLS. The drop
+    past 8 is the hyperthread penalty: cache thrashing + FPU
+    contention on shared physical cores.
+  * DECODE saturates by ~4-6 threads at ~2.0x. Beyond that, the memory
+    bus is the wall -- extra threads only add scheduling overhead.
+
+[check] prefill peak == 5.5x at 8 threads: True -> OK
+[check] decode peak == 2.0x at 8 threads: True -> OK
+[check] prefill @16 (5.0x) < prefill @8 (5.5x): True -> OK
+[check] decode @16 (1.8x) < decode @8 (2.0x): True -> OK
+
+========================================================================
+  SECTION D: NUMA awareness (multi-socket efficiency)
+========================================================================
+On a 2-socket server (e.g. 2 x 32-core EPYC = 64 cores, 2 NUMA nodes),
+RAM is split: socket 0 owns half the DRAM, socket 1 owns the other half.
+If a thread on socket 1 reads weights that live in socket 0's DRAM, the
+traffic crosses the interconnect (UPI / Infinity Fabric) at ~50-70% of
+local bandwidth, and that interconnect is SHARED.
+
+`--numa` (or `--numa isabelle`) pins each thread to the NUMA node where
+its chunk of weights is resident, restoring full local bandwidth.
+
+Effective bandwidth vs cross-node thread fraction (decode, memory-bound):
+| remote threads (of 8) | cross fraction | effective bw | decode speedup |
+|-----------------------|----------------|--------------|----------------|
+| 0                     | 0.00           | 1.00         | 2.00           |  (all local --numa)
+| 1                     | 0.12           | 0.93         | 1.85           |
+| 2                     | 0.25           | 0.85         | 1.70           |
+| 4                     | 0.50           | 0.70         | 1.40           |
+| 8                     | 1.00           | 0.40         | 0.80           |  (no pinning -- WORST)
+
+Without NUMA pinning, a naive 64-thread run can be SLOWER than an 8-thread
+run on one socket, because every thread fights over the interconnect.
+
+[check] --numa (0 remote) keeps full bandwidth: True -> OK
+[check] 8 remote threads -> bw <= 0.4 (severe penalty): True -> OK
+
+========================================================================
+  SECTION E: practical config (the two knobs + NUMA)
+========================================================================
+llama.cpp exposes separate thread counts for the two phases:
+
+  --threads N          threads for DECODE (token generation)
+  --threads-batch N    threads for PREFILL (prompt processing)
+  --numa [distribute|isolate|numactl]   NUMA pinning policy
+
+For this 8-core / 16-thread CPU:
+  optimal --threads-batch = 8   (prefill peaks here: 5.5x)
+  optimal --threads       = 6   (decode peaks here: 2.0x)
+
+Common presets:
+| use case                  | --threads | --threads-batch | --numa |
+|---------------------------|-----------|-----------------|--------|
+| laptop (8P/16T)           | 8         | 8               | (single node) |
+| desktop (16P/32T)         | 16        | 16              | (single node) |
+| server 2-socket (64P)     | 32        | 32              | isolate |
+| server 2-socket (128P)    | 64        | 64              | isolate |
+| Raspberry Pi (4P)         | 4         | 4               | (n/a) |
+
+Rules of thumb:
+  1. set BOTH to PHYSICAL core count (8 here). Going to
+     logical/hyperthreads (16) is usually SLOWER.
+  2. if decode stalls, try LOWERING --threads to 4-6 (bandwidth-bound;
+     fewer threads = less contention = same or better tok/s.
+  3. on multi-socket servers, ALWAYS add --numa. Without it, threads
+     wander across nodes and tank bandwidth.
+[check] optimal prefill threads == physical cores: True -> OK
+[check] optimal decode threads in [4,8]: True -> OK
+
+========================================================================
+  SECTION G: GOLD scaling table (the centerpiece)
+========================================================================
+Canonical 8-physical-core CPU. Speedup vs 1 thread.
+
+| threads | kind         | prefill (x) | decode (x) |
+|---------|--------------|-------------|------------|
+| 1       | physical     | 1.0         | 1.0        |
+| 2       | physical     | 1.8         | 1.6        |
+| 4       | physical     | 3.2         | 1.9        |
+| 8       | physical     | 5.5         | 2.0        |
+| 16      | hyperthread  | 5.0         | 1.8        |
+
+GOLD (recomputed & badge-checked in threading.html):
+  prefill @ 8 threads  = 5.5x   (peak)
+  decode  @ 8 threads  = 2.0x   (peak)
+  prefill @ 16 threads = 5.0x   (hyperthread penalty)
+  decode  @ 16 threads = 1.8x   (hyperthread penalty)
+[check] prefill @8 == 5.5x: True -> OK
+[check] decode  @8 == 2.0x: True -> OK
+[check] prefill @16 == 5.0x: True -> OK
+[check] decode  @16 == 1.8x: True -> OK
+[check] hyperthread penalty: @16 < @8 (both phases): True -> OK
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

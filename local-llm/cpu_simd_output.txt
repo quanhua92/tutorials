@@ -1,0 +1,170 @@
+cpu_simd.py - CPU SIMD for quantized LLM inference (scalar simulation).
+Pure Python stdlib. Numbers below feed CPU_SIMD.md.
+Sources: ggml/src/ggml-cpu/quants.c, Intel SDM Vol 1, ARM NEON/SVE ref.
+
+Lineage: scalar (1) -> SSE (4) -> AVX2 (8) -> AVX-512 (16)
+         parallel ARM branch: NEON (4) -> SVE (scalable)
+
+==========================================================================
+  SECTION A: SIMD = parallel data lanes
+==========================================================================
+SCALAR: one instruction touches one element.
+  mul r1, r2, r3     ; r1 = r2 * r3   (one multiply, one value)
+
+SIMD: one instruction touches a VECTOR of N elements side by side.
+  vmulps ymm0, ymm1, ymm2   ; 8 multiplies in parallel (AVX2)
+
+The register is a LANE STACK - the hardware replicates the op across
+every lane simultaneously. Doubling register width doubles throughput
+at no extra clock cost (same pipeline, same latency, more lanes).
+
+Lane widths by element type (AVX2 ymm = 256 bits):
+| element type | bits | lanes in 256-bit AVX2 |
+|---|---|---|
+| float32     |   32 |                     8 |
+| int8        |    8 |                    32 |
+| int4/nibble |    4 |                    64 |
+| float16     |   16 |                    16 |
+
+The Q4_0 dequant exploits this directly: the block size is 32 weights
+= 128 packed bits = half an AVX2 ymm, so a full block's nibbles load
+in one instruction and unpack into 8 float32 lanes per FMA.
+[check] 32 nibbles = 128 bits = half ymm :  OK
+[check] AVX2 holds 8 float32 lanes :  OK
+[check] AVX-512 holds 16 float32 lanes :  OK
+
+==========================================================================
+  SECTION B: ISA comparison table (register width / Q4 lanes)
+==========================================================================
+Four SIMD ISAs you will actually hit when running local LLMs. The
+'Q4 elements/lane' column is the dequant throughput of ONE FMA op.
+
+| ISA      | reg type    | bits  | float32 lanes | Q4 elem/lane | available on                     |
+|----------|-------------|-------|---------------|--------------|----------------------------------|
+| AVX2     | __m256i     |   256 |             8 |           64 | Intel Haswell (2013)+, AMD Zen (2017)+ |
+| AVX-512  | __m512i     |   512 |            16 |          128 | Intel Xeon Scalable, AMD Zen4 (2022)+ |
+| NEON     | uint8x16_t  |   128 |             4 |           32 | ARM: all Apple Silicon, mobile, Graviton |
+| SVE      | svint8_t    |   128 |             4 |           32 | ARM Neoverse V2, AWS Graviton4 (scalable) |
+
+Read this table two ways:
+  * For DOT PRODUCT (fp32 FMA): the 'float32 lanes' column matters.
+    AVX-512 = 16x, AVX2 = 8x, NEON = 4x.
+  * For UNPACK (nibble shuffle): the 'Q4 elem/lane' column matters.
+    A single AVX2 register holds 64 packed nibbles at once.
+
+Note: Apple Silicon (M1-M4) is NEON-only (128-bit). 4 float32 lanes
+seems weak vs AVX-512's 16, BUT unified memory + ~100 GB/s bandwidth
+compensate - decode is bandwidth-bound, not compute-bound (see
+quant_types.py Section F: decode speed ~= 1/bpw).
+[check] NEON = 128 bits :  OK
+[check] AVX-512 = 2x AVX2 width :  OK
+
+==========================================================================
+  SECTION C: Q4_0 dequant inner loop (step by step)
+==========================================================================
+The ggml-cpu inner loop for vec_dot_q4_0_q8_0 (verified against
+ggml/src/ggml-cpu/quants.c). Six steps per block of 32 weights:
+
+  for each block of 32 weights:
+    1. LOAD scale: d = fp16->fp32(block.d)              [1 broadcast]
+    2. LOAD packed bytes: 16 bytes = 32 nibbles         [1 load]
+    3. UNPACK: split each byte into 2 nibbles            [shuffle]
+       AVX2: _mm256_shuffle_epi8 lookup table
+    4. SUBTRACT 8 + CONVERT to float32                  [_mm256_cvtepi32_ps]
+    5. MUL by scale: w = d * (q-8)                      [_mm256_mul_ps]
+    6. FMA accumulate: acc += w * x                     [_mm256_fmadd_ps]
+  after all blocks: HORIZONTAL SUM the lane accumulator  [_mm256_hadd]
+
+Hero block (8 weights, half an AVX2 ymm):
+  q (4-bit)   = [3, 7, 1, 6, 9, 2, 5, 8]
+  d (scale)   = 0.5
+  x (input)   = [1, 2, 3, 4, 5, 6, 7, 8]
+
+STEP 3-5 walkthrough (scalar emulation of the SIMD lanes):
+| i | q | q-8 | d*(q-8)  | x | w*x     |
+|---|---|-----|----------|---|----------|
+| 0 | 3 |  -5 |     -2.5 | 1 |     -2.5 |
+| 1 | 7 |  -1 |     -0.5 | 2 |     -1.0 |
+| 2 | 1 |  -7 |     -3.5 | 3 |    -10.5 |
+| 3 | 6 |  -2 |     -1.0 | 4 |     -4.0 |
+| 4 | 9 |   1 |     +0.5 | 5 |     +2.5 |
+| 5 | 2 |  -6 |     -3.0 | 6 |    -18.0 |
+| 6 | 5 |  -3 |     -1.5 | 7 |    -10.5 |
+| 7 | 8 |   0 |     +0.0 | 8 |     +0.0 |
+
+dequant  = [-2.5, -0.5, -3.5, -1.0, +0.5, -3.0, -1.5, +0.0]
+products = [-2.5, -1.0, -10.5, -4.0, +2.5, -18.0, -10.5, +0.0]
+dot      = -44.0
+[check] Q4_0 hero dequant matches spec :  OK  (got [-2.5, -0.5, -3.5, -1.0, +0.5, -3.0, -1.5, +0.0] expected [-2.5, -0.5, -3.5, -1.0, 0.5, -3.0, -1.5, 0.0])
+[check] Q4_0 hero dot product = -44.0 :  OK  (got -44.0)
+
+==========================================================================
+  SECTION D: dot-product op count - scalar vs SIMD
+==========================================================================
+Same dot product (8 Q4_0 weights x 8 inputs), three ways. This is
+the core argument for SIMD: the math is identical, the op count is
+NOT. Each SIMD instruction replaces N scalar ops.
+
+SCALAR (no FMA):
+  8 multiplies + 7 adds = 15 ops
+  dot = -44.0
+
+SCALAR + FMA (acc = fma(w,x,acc)):
+  8 FMA instructions, 0 horizontal sums = 8 ops
+  dot = -44.0
+
+SIMD vector kernels (the SAME dot product, vectorized):
+
+| ISA      | lanes | load | dequant | fma | hsum | total | speedup vs scalar |
+|----------|-------|------|---------|-----|------|-------|-------------------|
+| AVX2     |     8 |    1 |       3 |   1 |    1 |     7 |             2.1x |
+| AVX-512  |    16 |    1 |       3 |   1 |    1 |     7 |             2.1x |
+| NEON     |     4 |    1 |       6 |   2 |    1 |    11 |             1.4x |
+
+Why AVX-512 wins so hard: 16 lanes means 1 FMA does the work of 16
+scalar FMAs. The dequant + load overhead amortizes across more lanes.
+On 8 elements the speedup is compressed (the hsum overhead is fixed),
+but on a real 32-element block AVX-512 issues 2 FMAs vs AVX2's 4.
+
+Real production block (32 weights = full Q4_0 block):
+| ISA      | lanes | fma ops | speedup vs scalar(32) |
+|----------|-------|---------|-----------------------|
+| AVX2     |     8 |       4 |                   3.3x |
+| AVX-512  |    16 |       2 |                   5.7x |
+| NEON     |     4 |       8 |                   1.8x |
+[check] scalar dot == SIMD dot (same math) :  OK
+[check] AVX2 fewer ops than scalar :  OK
+[check] AVX-512 fewer ops than AVX2 :  OK
+
+==========================================================================
+  SECTION E: practical impact - why AVX-512 matters for CPU inference
+==========================================================================
+Three real-world consequences of the SIMD math in Section D:
+
+1. BUILD FLAGS decide your speed. llama.cpp's CMake probes the CPU
+   at build time and picks the best ISA. A binary built without
+   AVX-512 on a Zen4 box silently falls back to AVX2 (half the lanes).
+     GGML_NATIVE=ON      -> auto-detect (recommended)
+     GGML_AVX512=ON      -> force AVX-512 code path
+     GGML_AVX2=OFF       -> scalar/SSE only (for old CPUs / containers)
+
+2. CLOUD GOTCHA. Some cloud providers (notably old GCP Cloud Run)
+   expose AVX-512 in CPUID but SIGILL on the instructions. ggml picks
+   the AVX-512 path at startup, then crashes on the first matmul.
+   Fix: GGML_AVX512=OFF or pin to a CPU family without AVX-512.
+
+3. APPLE SILICON REALITY. M1-M4 have NEON (128-bit = 4 float32 lanes)
+   but NO AVX. The 4x lane deficit vs AVX-512 looks bad, but Apple's
+   unified memory (~100 GB/s) means decode is bandwidth-bound:
+   you pay to MOVE the weights, not to MULTIPLY them. So a 4.5 bpw
+   Q4_0 model on an M2 often matches an AVX-512 Xeon at the same bpw.
+
+The 1-line summary: SIMD width caps compute throughput, but local LLM
+decode is bandwidth-bound - so memory bandwidth and bpw usually matter
+MORE than raw SIMD width. SIMD is the floor; bandwidth is the ceiling.
+[check] AVX2 = 8x scalar FMA width :  OK
+[check] NEON = half AVX2 lanes :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

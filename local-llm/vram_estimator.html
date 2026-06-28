@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRAM Estimator &mdash; weights + KV cache + overhead (live budget)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0a0e14; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --border:#30363d;
+    --accent:#f97316;        /* orange accent = weights */
+    --green:#27ae60; --red:#c0392b; --blue:#58a6ff; --gold:#f1c40f; --purple:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem;line-height:1.5}
+  a{color:var(--accent)}
+  h1{font-size:1.32rem;margin:.2rem 0 .1rem}
+  h2{font-size:1rem;color:var(--muted);margin:1.7rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem;display:flex;align-items:center;gap:.5rem}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem;max-width:920px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.95rem 1.05rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.76rem;line-height:1.55;margin-bottom:.4rem}
+  label{color:var(--muted);font-size:.8rem;display:flex;gap:.45rem;align-items:center;flex-wrap:wrap}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin:.3rem 0 .6rem}
+  select, input[type=number]{background:var(--panel2);color:var(--ink);
+     border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:.82rem;font-family:inherit}
+  input[type=range]{accent-color:var(--accent);width:170px}
+  .badge{display:inline-block;background:#3a2a14;color:var(--accent);border:1px solid var(--accent);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.4rem;
+         text-decoration:none}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+     background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);
+     font-size:.82rem;color:var(--muted);line-height:1.5}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem .85rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--accent)}
+  .readout .w{color:var(--accent)}
+  .readout .k{color:var(--blue)}
+  .readout .o{color:var(--purple)}
+  .readout .good{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .dim{color:var(--muted)}
+  table.dt{border-collapse:collapse;font-size:.78rem;width:100%;margin-top:.5rem;font-variant-numeric:tabular-nums}
+  table.dt td,table.dt th{border:1px solid var(--border);padding:5px 8px;text-align:left}
+  table.dt th{color:var(--muted);font-weight:600}
+  table.dt tr.sel td{background:#241a10}        /* orange tint = selected model */
+  table.dt td.fit{color:var(--green);font-weight:600;text-align:center}
+  table.dt td.no{color:var(--red);text-align:center}
+  #check{display:inline-block;border:1px solid var(--green);border-radius:6px;padding:5px 12px;
+         font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;color:var(--green)}
+  #check.fail{border-color:var(--red);color:var(--red)}
+  .formula{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.55rem .8rem;
+           margin:.4rem 0;font-family:ui-monospace,monospace;font-size:.76rem;color:var(--ink);white-space:pre-wrap;overflow-x:auto}
+  .formula b{color:var(--accent)}
+  .formula .k{color:var(--blue)}
+  .formula .o{color:var(--purple)}
+
+  /* --- stacked bar chart --- */
+  .chart{position:relative;margin:.6rem 0 .2rem}
+  .axis{display:flex;justify-content:space-between;color:var(--muted);font-size:.68rem;
+        font-family:ui-monospace,monospace;margin-bottom:.2rem;font-variant-numeric:tabular-nums}
+  .bararea{position:relative;height:46px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .stack{display:flex;height:100%}
+  .seg{height:100%;transition:width .15s;display:flex;align-items:center;justify-content:center;
+       font-size:.7rem;color:#0d1117;font-weight:700;font-family:ui-monospace,monospace;
+       white-space:nowrap;overflow:hidden}
+  .seg.w{background:var(--accent)}
+  .seg.k{background:var(--blue)}
+  .seg.o{background:var(--purple)}
+  .gpuline{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--red);
+           box-shadow:0 0 0 1px rgba(192,57,43,.25);z-index:3}
+  .gpuline::after{content:attr(data-lab);position:absolute;top:-15px;left:50%;transform:translateX(-50%);
+        background:var(--red);color:#fff;font-size:.62rem;font-weight:600;padding:1px 5px;border-radius:3px;
+        white-space:nowrap;font-family:ui-monospace,monospace}
+  .legend{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.45rem;font-size:.74rem;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:.35rem}
+  .legend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+  .legend .lw{background:var(--accent)} .legend .lk{background:var(--blue)} .legend .lo{background:var(--purple)}
+  .legend .lg{background:var(--red)}
+
+  /* per-model mini bars */
+  .rows{margin-top:.6rem}
+  .rowbar{display:flex;align-items:center;gap:.5rem;margin:.32rem 0}
+  .rowbar .lab{width:120px;color:var(--ink);font-size:.74rem;font-family:ui-monospace,monospace}
+  .rowbar .lab .fit{color:var(--green)} .rowbar .lab .nofit{color:var(--red)}
+  .rowbar .track{flex:1;height:18px;background:var(--panel2);border:1px solid var(--border);border-radius:3px;position:relative;overflow:hidden}
+  .rowbar .stack{display:flex;height:100%}
+  .rowbar .gpuline{top:-2px;bottom:-2px}
+  .rowbar .num{width:62px;text-align:right;font-size:.72rem;font-variant-numeric:tabular-nums;color:var(--muted)}
+  .note{font-size:.74rem;color:var(--muted);font-style:italic;margin-top:.4rem}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&#8592; back to Local LLM dashboard</a>
+  <h1>VRAM Estimator &mdash; <span style="color:#f97316">weights + KV cache + overhead</span>
+    <a class="badge md" title="Full guide — lineage, formulas, pitfalls, decision matrix" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/VRAM_ESTIMATOR.md">&#128214; VRAM_ESTIMATOR.md</a>
+    <a class="badge" title="Ground-truth source code (pure Python stdlib)" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/vram_estimator.py">&#128196; vram_estimator.py</a>
+  </h1>
+  <div class="sub">
+    The rule of thumb (<code>model_GB &asymp; params_in_B &times; bits/8</code>) is just the <b style="color:#f97316">weights</b> term &mdash;
+    it ignores the <b style="color:#58a6ff">KV cache</b>, which grows linearly with context. Pick a model, quant, and context below and watch
+    the exact budget recompute live: <b style="color:#f97316">weights</b> + <b style="color:#58a6ff">KV cache</b> +
+    <b style="color:#a78bfa">overhead</b> = <b>total</b>, with a red line for the GPU VRAM limit. The gold-check pins
+    Llama-3-8B Q4_K_M to the exact <code>.py</code> output.
+  </div>
+  <div class="guide-callout">&#128214; <a href="https://github.com/quanhua92/tutorials/blob/main/local-llm/VRAM_ESTIMATOR.md">Read the full guide</a> &mdash; lineage (rule-of-thumb &rarr; exact), the GQA-cache pitfall, the full comparison table, and the &ldquo;will it fit?&rdquo; decision matrix. This page is the interactive companion.</div>
+  <span id="check">check: ...</span>
+
+  <!-- ===== PANEL 1: VRAM calculator ===== -->
+  <h2><span class="n">&#9312;</span> VRAM calculator &mdash; pick model / quant / context</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the three-term VRAM budget for the selected config, as a stacked bar.
+      Same formulas as <code>vram_estimator.py</code> Sections A&ndash;C. The red line is the GPU VRAM limit; if the bar
+      crosses it, the model does not fit (try a smaller quant, Q8 KV cache, shorter context, or GPU offload).</div>
+    <div class="controls">
+      <label>model:
+        <select id="model"></select>
+      </label>
+      <label>quant:
+        <select id="quant"></select>
+      </label>
+      <label>KV precision:
+        <select id="kvbpe">
+          <option value="2">FP16 (2 B/E)</option>
+          <option value="1">Q8 (1 B/E) &mdash; halves cache</option>
+        </select>
+      </label>
+      <label>GPU:
+        <select id="gpu">
+          <option value="8">8 GB</option>
+          <option value="12">12 GB</option>
+          <option value="16">16 GB</option>
+          <option value="24">24 GB</option>
+          <option value="48">48 GB</option>
+        </select>
+      </label>
+      <button id="goldBtn" style="background:var(--accent);color:#0d1117;border:none;border-radius:6px;padding:5px 12px;font-weight:600;cursor:pointer">load gold (Llama-3-8B Q4_K_M 4K)</button>
+    </div>
+    <div class="controls">
+      <label>context:
+        <input type="range" id="ctx" min="512" max="32768" step="512" value="4096">
+        <span id="ctxval" style="color:var(--ink);font-family:ui-monospace,monospace;font-size:.82rem">4096</span> tokens
+      </label>
+    </div>
+    <div class="formula" id="formula"></div>
+    <div class="chart">
+      <div class="axis"><span>0</span><span id="axismax"></span></div>
+      <div class="bararea" id="bararea">
+        <div class="stack" id="stack"></div>
+        <div class="gpuline" id="gpuline"></div>
+      </div>
+      <div class="legend">
+        <span><i class="lw"></i>weights</span>
+        <span><i class="lk"></i>KV cache</span>
+        <span><i class="lo"></i>overhead</span>
+        <span><i class="lg"></i>GPU VRAM limit</span>
+      </div>
+    </div>
+    <div id="ro" class="readout"></div>
+    <div class="note">The bar scales to max(total, GPU)&times;1.1. The red line marks the GPU limit &mdash; the bar crossing it = OOM. Real usable VRAM is ~90% of nominal (OS/display + CUDA context); leave headroom.</div>
+  </div>
+
+  <!-- ===== PANEL 2: all 4 models compared at this quant/ctx/gpu ===== -->
+  <h2><span class="n">&#9313;</span> All models &mdash; who fits at this quant &amp; context?</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the selected quant + context + GPU applied to every model at once. Each row is one
+      stacked bar; the red line is the GPU limit. Green label = fits, red = OOM (needs offload or a smaller quant).</div>
+    <div class="rows" id="rows"></div>
+    <div class="note">Llama-2-13B is plain multi-head (n_kv_heads = n_heads), so its KV bar is huge vs the GQA models. A 13B MHA can cache <i>more</i> than a 70B GQA at the same context.</div>
+  </div>
+
+  <!-- ===== PANEL 3: will-it-fit matrix ===== -->
+  <h2><span class="n">&#9314;</span> &ldquo;Will it fit?&rdquo; matrix &mdash; Q4_K_M at 4K / 32K</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> for the default local quant (Q4_K_M), the total VRAM for each (model, context) vs every common GPU.
+      Same numbers as <code>vram_estimator.py</code> Section E. <span style="color:var(--green)">FIT</span> = total &le; nominal VRAM.</div>
+    <table class="dt" id="matrix"></table>
+    <div class="note">When nothing fits, the escape hatches are: smaller quant (IQ3_S), Q8 KV cache (<code>-ctk q8_0 -ctv q8_0</code>), shorter context (<code>-c</code>), or GPU offload (<code>-ngl N</code>).</div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================
+   Reproduce vram_estimator.py's VRAM math identically in JS,
+   then gold-check the pinned Llama-3-8B Q4_K_M weights value.
+   ============================================================ */
+
+/* --- model configs (1:1 with vram_estimator.py MODELS) --- */
+var MODELS = {
+  "Llama-3-8B":  {params:8.03,  layers:32, n_heads:32, n_kv_heads:8,  head_dim:128, dim:4096},
+  "Qwen2.5-7B":  {params:7.62,  layers:28, n_heads:28, n_kv_heads:4,  head_dim:128, dim:3584},
+  "Llama-2-13B": {params:13.02, layers:40, n_heads:40, n_kv_heads:40, head_dim:128, dim:5120},
+  "Llama-3-70B": {params:70.0,  layers:80, n_heads:64, n_kv_heads:8,  head_dim:128, dim:8192}
+};
+var BPW = {"Q4_K_M":4.5, "Q8_0":8.5, "FP16":16.0};
+var GPUS = [8,12,16,24];
+
+/* --- the three terms: identical formulas to vram_estimator.py --- */
+function weightsGB(paramsB, bpw){ return paramsB * bpw / 8.0; }
+function kvGB(n_layers, n_ctx, n_kv_heads, head_dim, bpe){
+  return n_layers * 2 * n_ctx * n_kv_heads * head_dim * bpe / 1e9;
+}
+function overheadGB(w){ return Math.max(0.5, 0.10 * w); }
+function budget(m, bpw, ctx, bpe){
+  var w = weightsGB(m.params, bpw);
+  var k = kvGB(m.layers, ctx, m.n_kv_heads, m.head_dim, bpe);
+  var o = overheadGB(w);
+  return {w:w, k:k, o:o, total:w+k+o};
+}
+
+/* --- helpers --- */
+function gb2(x){ return x.toFixed(2); }
+function pct(x){ return (x*100).toFixed(1) + "%"; }
+
+/* --- populate dropdowns --- */
+(function(){
+  var ms = document.getElementById("model");
+  Object.keys(MODELS).forEach(function(name){
+    var o = document.createElement("option");
+    o.value = name; o.textContent = name + "  (" + MODELS[name].params + "B)";
+    ms.appendChild(o);
+  });
+  ms.value = "Llama-3-8B";
+  var qs = document.getElementById("quant");
+  Object.keys(BPW).forEach(function(name){
+    var o = document.createElement("option");
+    o.value = name; o.textContent = name + "  (" + BPW[name] + " bpw)";
+    qs.appendChild(o);
+  });
+  qs.value = "Q4_K_M";
+})();
+
+/* --- render panel 1: selected config --- */
+function renderSelected(){
+  var name = document.getElementById("model").value;
+  var qname = document.getElementById("quant").value;
+  var bpw = BPW[qname];
+  var bpe = parseInt(document.getElementById("kvbpe").value, 10);
+  var ctx = parseInt(document.getElementById("ctx").value, 10);
+  var gpu = parseFloat(document.getElementById("gpu").value);
+  var m = MODELS[name];
+  var b = budget(m, bpw, ctx, bpe);
+
+  document.getElementById("ctxval").textContent = ctx;
+  document.getElementById("formula").innerHTML =
+    '<b>weights</b> = params &times; bpw / 8 = ' + m.params + ' &times; ' + bpw + ' / 8 = <b>' +
+      gb2(b.w) + ' GB</b>\n' +
+    '<span class="k">kv</span>     = n_layers &times; 2 &times; ctx &times; n_kv_heads &times; head_dim &times; bpe / 1e9\n' +
+    '       = ' + m.layers + ' &times; 2 &times; ' + ctx + ' &times; ' + m.n_kv_heads +
+      ' &times; ' + m.head_dim + ' &times; ' + bpe + ' / 1e9 = <span class="k">' + gb2(b.k) + ' GB</span>\n' +
+    '<span class="o">overhead</span> = max(0.5, 0.10 &times; weights) = max(0.5, ' +
+      (0.10*b.w).toFixed(3) + ') = <span class="o">' + gb2(b.o) + ' GB</span>\n' +
+    '<b>total</b>   = <b>' + gb2(b.total) + ' GB</b>   vs GPU ' + gpu + ' GB';
+
+  var scale = Math.max(b.total, gpu) * 1.1;
+  document.getElementById("axismax").textContent = gb2(scale) + " GB";
+  var wPct = b.w / scale * 100, kPct = b.k / scale * 100, oPct = b.o / scale * 100;
+  document.getElementById("stack").innerHTML =
+    '<div class="seg w" style="width:' + wPct + '%">' + (wPct>7? gb2(b.w):"") + '</div>' +
+    '<div class="seg k" style="width:' + kPct + '%">' + (kPct>7? gb2(b.k):"") + '</div>' +
+    '<div class="seg o" style="width:' + oPct + '%">' + (oPct>7? gb2(b.o):"") + '</div>';
+  var gl = document.getElementById("gpuline");
+  gl.style.left = (gpu / scale * 100) + "%";
+  gl.setAttribute("data-lab", gpu + "GB limit");
+
+  var fits = b.total <= gpu;
+  var ro = document.getElementById("ro");
+  ro.innerHTML =
+    '<span class="dim">model         = </span>' + name + '  (' + m.params + 'B params, ' + m.layers + ' layers, GQA ' + (m.n_heads/m.n_kv_heads).toFixed(0) + 'x)\n' +
+    '<span class="dim">quant / KV    = </span>' + qname + ' (' + bpw + ' bpw)   KV ' + (bpe===2?'FP16':'Q8') + ' (' + bpe + ' B/E)\n' +
+    '<span class="w">weights       = ' + gb2(b.w) + ' GB</span>   <span class="dim">params&times;bpw/8</span>\n' +
+    '<span class="k">kv_cache      = ' + gb2(b.k) + ' GB</span>   <span class="dim">scales linearly with ctx</span>\n' +
+    '<span class="o">overhead      = ' + gb2(b.o) + ' GB</span>   <span class="dim">max(0.5, 10%&times;weights)</span>\n' +
+    '<b>TOTAL         = ' + gb2(b.total) + ' GB</b>   ' +
+      (fits ? '<span class="good">&check; fits ' + gpu + 'GB (' + (gpu-b.total).toFixed(2) + ' GB free)</span>'
+            : '<span class="bad">&times; OOM by ' + (b.total-gpu).toFixed(2) + ' GB &mdash; shrink quant / KV / ctx, or offload</span>');
+}
+
+/* --- render panel 2: all 4 models at this quant/ctx/gpu --- */
+function renderRows(){
+  var qname = document.getElementById("quant").value;
+  var bpw = BPW[qname];
+  var bpe = parseInt(document.getElementById("kvbpe").value, 10);
+  var ctx = parseInt(document.getElementById("ctx").value, 10);
+  var gpu = parseFloat(document.getElementById("gpu").value);
+  var sel = document.getElementById("model").value;
+  var scale = 0;
+  var rows = [];
+  Object.keys(MODELS).forEach(function(name){
+    var b = budget(MODELS[name], bpw, ctx, bpe);
+    scale = Math.max(scale, b.total, gpu);
+    rows.push({name:name, b:b});
+  });
+  scale = scale * 1.1;
+  var html = "";
+  rows.forEach(function(r){
+    var fits = r.b.total <= gpu;
+    var wPct = r.b.w/scale*100, kPct = r.b.k/scale*100, oPct = r.b.o/scale*100;
+    var gp = gpu/scale*100;
+    html += '<div class="rowbar">' +
+      '<span class="lab">' + r.name + ' <span class="' + (fits?'fit':'nofit') + '">' + (fits?'&check;':'&times;') + '</span></span>' +
+      '<span class="track">' +
+        '<div class="stack">' +
+          '<div class="seg w" style="width:' + wPct + '%"></div>' +
+          '<div class="seg k" style="width:' + kPct + '%"></div>' +
+          '<div class="seg o" style="width:' + oPct + '%"></div>' +
+        '</div>' +
+        '<div class="gpuline" style="left:' + gp + '%"></div>' +
+      '</span>' +
+      '<span class="num">' + gb2(r.b.total) + ' GB</span>' +
+    '</div>';
+  });
+  document.getElementById("rows").innerHTML = html;
+}
+
+/* --- render panel 3: will-it-fit matrix (Q4_K_M) --- */
+function renderMatrix(){
+  var html = '<tr><th>model</th><th>context</th><th>total (Q4_K_M)</th>' +
+    GPUS.map(function(g){return '<th>'+g+' GB</th>';}).join("") + '</tr>';
+  ["4K","32K"].forEach(function(clabel){
+    var ctx = clabel==="4K" ? 4096 : 32768;
+    Object.keys(MODELS).forEach(function(name){
+      var b = budget(MODELS[name], BPW["Q4_K_M"], ctx, 2);
+      html += '<tr><td><b>' + name + '</b></td><td>' + clabel + '</td><td>' + gb2(b.total) + ' GB</td>' +
+        GPUS.map(function(g){ return b.total<=g ? '<td class="fit">FIT</td>' : '<td class="no">no</td>'; }).join("") +
+        '</tr>';
+    });
+  });
+  document.getElementById("matrix").innerHTML = html;
+}
+
+/* --- GOLD-CHECK: Llama-3-8B Q4_K_M weights must match vram_estimator.py exactly --- */
+function goldCheck(){
+  // weights(8.03, 4.5) = 8.03 * 4.5 / 8 = 4.516875 GB -> "4.52" to 2 dp
+  var GOLD_W = weightsGB(8.03, 4.5);
+  var ok = GOLD_W.toFixed(2) === "4.52";
+  // also confirm total at 4K FP16 lands in the expected band
+  var m = MODELS["Llama-3-8B"];
+  var t = budget(m, 4.5, 4096, 2).total;
+  var okTotal = t > 5.0 && t < 6.0;
+  var el = document.getElementById("check");
+  if (ok && okTotal){
+    el.textContent = "[check: OK]  weights(Llama-3-8B, Q4_K_M) = 8.03*4.5/8 = " + GOLD_W.toFixed(2) +
+      " GB, total@4K = " + t.toFixed(2) + " GB  (matches vram_estimator.py)";
+    el.className = "";
+  } else {
+    el.textContent = "[check: FAIL]  got weights=" + GOLD_W + ", total=" + t;
+    el.className = "fail";
+  }
+}
+
+/* --- wire up --- */
+function renderAll(){ renderSelected(); renderRows(); renderMatrix(); goldCheck(); }
+["model","quant","kvbpe","gpu","ctx"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", renderAll);
+});
+document.getElementById("goldBtn").addEventListener("click", function(){
+  document.getElementById("model").value = "Llama-3-8B";
+  document.getElementById("quant").value = "Q4_K_M";
+  document.getElementById("kvbpe").value = "2";
+  document.getElementById("gpu").value = "8";
+  document.getElementById("ctx").value = 4096;
+  renderAll();
+});
+
+renderAll();
+</script>
+</body>
+</html>

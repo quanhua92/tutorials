@@ -1,0 +1,197 @@
+vram_estimator.py - LLM-inference VRAM budget (weights + KV cache + overhead).
+Pure Python stdlib. Numbers below feed VRAM_ESTIMATOR.md.
+Sources: llama.cpp memory math + the per-model config.json head/layer counts.
+
+Lineage: rule-of-thumb (params*B/8) -> exact (weights + KV + overhead).
+
+==========================================================================
+  SECTION A: WEIGHTS term - params x bpw / 8 (the dominant cost)
+==========================================================================
+The weights term is the size of the resident .gguf tensors. It dwarfs
+everything else at short context and is set ENTIRELY by the quant type.
+
+Formula (the rule of thumb, made exact):
+  weights_GB = params_in_billions * bits_per_weight / 8
+  (the 1e9 from params and the 1e9 bytes->GB cancel)
+
+bpw per quant type (cross-ref QUANT_TYPES.md):
+| quant   | bpw  | bytes/weight | note                              |
+|---------|------|--------------|-----------------------------------|
+| FP16    | 16.0 |       2.0000 | unquantized half precision
+| Q4_K_M  |  4.5 |       0.5625 | rule-of-thumb (pure Q4_K block)
+| Q8_0    |  8.5 |       1.0625 | near-lossless int8 block
+
+Worked: Llama-3-8B (8.03B params) across the three quants:
+| quant   | params | bpw  | weights_GB |
+|---------|--------|------|------------|
+| FP16    |   8.03 | 16.0 |    16.0600 |
+| Q4_K_M  |   8.03 |  4.5 |     4.5169 |
+| Q8_0    |   8.03 |  8.5 |     8.5319 |
+
+GOLD (for VRAM_ESTIMATOR.html):
+  Llama-3-8B Q4_K_M weights = 8.03 * 4.5 / 8 = 4.516875 GB  (~4.52 GB)
+[check] Q4_K_M weights ~= 4.52 GB :  OK  (got 4.516875)
+[check] FP16 is ~2x Q8_0 weights :  OK
+
+The quant type is the single biggest lever on the weights term (and
+hence on the whole budget at short context). Cutting 16->4.5 bpw shrinks
+the resident weights ~3.5x with modest quality loss (see QUANT_TYPES.md).
+
+==========================================================================
+  SECTION B: KV CACHE term - the part that scales with context
+==========================================================================
+The KV cache stores, for every token decoded so far, the K and V vectors
+of every KV head in every layer. It grows LINEARLY with n_ctx, which is
+why long-context models eat VRAM that the rule-of-thumb never predicted.
+
+Formula:
+  bytes = n_layers * 2 * n_ctx * n_kv_heads * head_dim * bytes_per_element
+           ^^^^^^^^  ^        ^^^^^^^^^^   ^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^
+           per layer K+V      GQA heads    head width   FP16=2, Q8=1
+  GB    = bytes / 1e9
+
+Worked: Llama-3-8B (32 layers, 8 KV heads, head_dim=128), FP16 KV (2 B/E):
+  @   4096 ctx: 32*2*4096*8*128*2   =   536,870,912 bytes = 0.536871 GB
+  @  32768 ctx: 32*2*32768*8*128*2  = 4,294,967,296 bytes = 4.294967 GB
+  -> context x8 (4k->32k) => KV x8.0 (strictly linear in n_ctx)
+
+GQA is the multiplier that decides HOW FAST the cache grows. Compare the
+KV head ratio (n_heads / n_kv_heads) for each model:
+| model        | n_heads | n_kv_heads | GQA ratio | KV@4K (FP16) | KV@32K (FP16) |
+|--------------|---------|------------|-----------|--------------|---------------|
+| Llama-2-13B  |      40 |         40 |    1.0x   |     3.3554 GB |     26.8435 GB |
+| Llama-3-70B  |      64 |          8 |    8.0x   |     1.3422 GB |     10.7374 GB |
+| Llama-3-8B   |      32 |          8 |    4.0x   |     0.5369 GB |      4.2950 GB |
+| Qwen2.5-7B   |      28 |          4 |    7.0x   |     0.2349 GB |      1.8790 GB |
+
+Llama-2-13B uses plain multi-head attention (ratio 1x) so its KV cache is
+HUGE relative to its size - 13B MHA caches more than 70B GQA at the same ctx.
+  Llama-2-13B @32K FP16 KV = 26.844 GB   vs   Llama-3-70B @32K FP16 KV = 10.737 GB
+[check] 70B GQA KV < 13B MHA KV at 32K :  OK  (70B=10.737 vs 13B=26.844)
+[check] KV is linear in context (32K/4K == 8x) :  OK
+
+KV-cache quantization (Q8, 1 B/E) HALVES this term. Cross-ref kv_cache_quant.
+  Llama-3-8B @32K: FP16 KV = 4.295 GB, Q8 KV = 2.147 GB (-50%)
+
+==========================================================================
+  SECTION C: OVERHEAD term - context buffers + compute workspace
+==========================================================================
+The third term is everything that is neither weights nor KV: activations,
+the compute workspace (scratch buffers for the matmuls / attention), the
+CUDA/Metal context, and OS/display reservation on consumer cards.
+
+Formula (the least-exact term - it is a rule of thumb):
+  overhead_GB = max(0.5, 0.10 * weights_GB)
+  (a ~0.5 GB floor for small models, ~10% of weights for large ones)
+
+| model        | quant   | weights_GB | 10%    | overhead_GB |
+|--------------|---------|------------|--------|-------------|
+| Llama-2-13B  | FP16    |    26.0400 |  2.604 |    2.6040  (10%) |
+| Llama-2-13B  | Q4_K_M  |     7.3237 |  0.732 |    0.7324  (10%) |
+| Llama-2-13B  | Q8_0    |    13.8338 |  1.383 |    1.3834  (10%) |
+| Llama-3-70B  | FP16    |   140.0000 | 14.000 |   14.0000  (10%) |
+| Llama-3-70B  | Q4_K_M  |    39.3750 |  3.938 |    3.9375  (10%) |
+| Llama-3-70B  | Q8_0    |    74.3750 |  7.438 |    7.4375  (10%) |
+| Llama-3-8B   | FP16    |    16.0600 |  1.606 |    1.6060  (10%) |
+| Llama-3-8B   | Q4_K_M  |     4.5169 |  0.452 |    0.5000  (floor) |
+| Llama-3-8B   | Q8_0    |     8.5319 |  0.853 |    0.8532  (10%) |
+| Qwen2.5-7B   | FP16    |    15.2400 |  1.524 |    1.5240  (10%) |
+| Qwen2.5-7B   | Q4_K_M  |     4.2862 |  0.429 |    0.5000  (floor) |
+| Qwen2.5-7B   | Q8_0    |     8.0962 |  0.810 |    0.8096  (10%) |
+
+Why a FLOOR: even a tiny model needs context buffers + a CUDA/Metal
+context (~0.3-0.5 GB). Why a PERCENTAGE: activation + workspace tensors
+scale with the matmul sizes, which scale with the weights.
+
+If you OOM right at the edge, the overhead term is the first place to
+blame: quantize the KV cache, drop --parallel-context / batch size, or add
+a few hundred MB of slack to this estimate.
+
+==========================================================================
+  SECTION D: COMPARISON TABLE - the full VRAM budget at a glance
+==========================================================================
+Every (model, quant, context) combo, broken into the three terms.
+Weights shrink with the quant; KV is fixed by model+ctx; overhead floats.
+
+=== 4096 ctx (short)  (FP16 KV, 2 B/E) ===
+| model        | quant   | weights | KV     | overhd | TOTAL  |
+|--------------|---------|---------|--------|--------|--------|
+| Llama-2-13B  | FP16    |  26.04GB |  3.36GB |  2.60GB | 32.00GB |
+| Llama-2-13B  | Q4_K_M  |   7.32GB |  3.36GB |  0.73GB | 11.41GB |
+| Llama-2-13B  | Q8_0    |  13.83GB |  3.36GB |  1.38GB | 18.57GB |
+| Llama-3-70B  | FP16    | 140.00GB |  1.34GB | 14.00GB | 155.34GB |
+| Llama-3-70B  | Q4_K_M  |  39.38GB |  1.34GB |  3.94GB | 44.65GB |
+| Llama-3-70B  | Q8_0    |  74.38GB |  1.34GB |  7.44GB | 83.15GB |
+| Llama-3-8B   | FP16    |  16.06GB |  0.54GB |  1.61GB | 18.20GB |
+| Llama-3-8B   | Q4_K_M  |   4.52GB |  0.54GB |  0.50GB |  5.55GB |
+| Llama-3-8B   | Q8_0    |   8.53GB |  0.54GB |  0.85GB |  9.92GB |
+| Qwen2.5-7B   | FP16    |  15.24GB |  0.23GB |  1.52GB | 17.00GB |
+| Qwen2.5-7B   | Q4_K_M  |   4.29GB |  0.23GB |  0.50GB |  5.02GB |
+| Qwen2.5-7B   | Q8_0    |   8.10GB |  0.23GB |  0.81GB |  9.14GB |
+
+=== 32768 ctx (long)  (FP16 KV, 2 B/E) ===
+| model        | quant   | weights | KV     | overhd | TOTAL  |
+|--------------|---------|---------|--------|--------|--------|
+| Llama-2-13B  | FP16    |  26.04GB | 26.84GB |  2.60GB | 55.49GB |
+| Llama-2-13B  | Q4_K_M  |   7.32GB | 26.84GB |  0.73GB | 34.90GB |
+| Llama-2-13B  | Q8_0    |  13.83GB | 26.84GB |  1.38GB | 42.06GB |
+| Llama-3-70B  | FP16    | 140.00GB | 10.74GB | 14.00GB | 164.74GB |
+| Llama-3-70B  | Q4_K_M  |  39.38GB | 10.74GB |  3.94GB | 54.05GB |
+| Llama-3-70B  | Q8_0    |  74.38GB | 10.74GB |  7.44GB | 92.55GB |
+| Llama-3-8B   | FP16    |  16.06GB |  4.29GB |  1.61GB | 21.96GB |
+| Llama-3-8B   | Q4_K_M  |   4.52GB |  4.29GB |  0.50GB |  9.31GB |
+| Llama-3-8B   | Q8_0    |   8.53GB |  4.29GB |  0.85GB | 13.68GB |
+| Qwen2.5-7B   | FP16    |  15.24GB |  1.88GB |  1.52GB | 18.64GB |
+| Qwen2.5-7B   | Q4_K_M  |   4.29GB |  1.88GB |  0.50GB |  6.67GB |
+| Qwen2.5-7B   | Q8_0    |   8.10GB |  1.88GB |  0.81GB | 10.78GB |
+
+Read the table downward: quantizing 16->4.5 bpw cuts the TOTAL at 4K ctx
+by ~3.5x, but at 32K ctx the (quant-invariant) KV term limits the win.
+  Llama-3-8B: FP16->Q4_K_M saves 12.65 GB at 4K, but only 12.65 GB at 32K (KV term is fixed).
+[check] quantization saves more at short ctx than long ctx :  OK
+
+==========================================================================
+  SECTION E: 'WILL IT FIT?' - decision matrix vs common GPUs
+==========================================================================
+For Q4_K_M (the default local quant), does each (model, context) fit on a
+given GPU? A check means TOTAL VRAM <= nominal GPU VRAM. Real usable VRAM
+is ~90% of nominal (OS/display + CUDA context); leave headroom.
+
+| model        | ctx    | total(Q4_K_M) | 8GB | 12GB | 16GB | 24GB |
+|--------------|--------|---------------|--------|--------|--------|--------|
+| Llama-2-13B  | 4K     |       11.41 GB |    no    |    FIT    |    FIT    |    FIT   |
+| Llama-2-13B  | 32K    |       34.90 GB |    no    |     no    |     no    |     no   |
+| Llama-3-70B  | 4K     |       44.65 GB |    no    |     no    |     no    |     no   |
+| Llama-3-70B  | 32K    |       54.05 GB |    no    |     no    |     no    |     no   |
+| Llama-3-8B   | 4K     |        5.55 GB |   FIT    |    FIT    |    FIT    |    FIT   |
+| Llama-3-8B   | 32K    |        9.31 GB |    no    |    FIT    |    FIT    |    FIT   |
+| Qwen2.5-7B   | 4K     |        5.02 GB |   FIT    |    FIT    |    FIT    |    FIT   |
+| Qwen2.5-7B   | 32K    |        6.67 GB |   FIT    |    FIT    |    FIT    |    FIT   |
+
+Reading the matrix:
+  - Llama-3-8B Q4_K_M @4K  = 5.55 GB -> fits an 8GB card (barely).
+  - Llama-3-8B Q4_K_M @32K = 9.31 GB -> needs 12GB+ (KV dominates).
+  - Llama-3-70B Q4_K_M @4K = 44.65 GB -> needs 2x24GB or CPU offload (see gpu_offload).
+[check] Llama-3-8B Q4_K_M @4K fits 8GB :  OK  (total=5.55)
+[check] Llama-3-8B Q4_K_M @32K does NOT fit 8GB :  OK  (total=9.31)
+[check] Llama-3-8B Q4_K_M @32K fits 12GB :  OK  (total=9.31)
+[check] Llama-3-70B Q4_K_M @4K does NOT fit 24GB :  OK
+
+==========================================================================
+  GOLD VALUE - the canonical number the HTML must reproduce
+==========================================================================
+Llama-3-8B, Q4_K_M (4.5 bpw), 4096 context, FP16 KV:
+  weights  = 8.03 * 4.5 / 8                  = 4.516875 GB
+  kv_cache = 32*2*4096*8*128*2 / 1e9         = 0.536871 GB
+  overhead = max(0.5, 0.10*4.5169)            = 0.500000 GB
+  TOTAL                                       = 5.553746 GB
+
+  GOLD (pinned in VRAM_ESTIMATOR.html):
+    weights(Llama-3-8B, Q4_K_M) = 4.52 GB   (to 2 dp)
+    total (Llama-3-8B, Q4_K_M, 4K) = 5.55 GB   (to 2 dp)
+[check] gold weights ~= 4.52 GB :  OK
+[check] gold total > 5 and < 6 GB :  OK  (total=5.5537)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

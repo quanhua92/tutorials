@@ -1,0 +1,527 @@
+<!doctype html>
+<!--
+  use_ref_dom.html — Phase 1 hooks bundle #2 (useRef & DOM access).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving useRef
+  end-to-end. Companion: USE_REF_DOM.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: useRef(initialValue) returns a mutable object { current: initialValue }
+  whose .current property persists across re-renders WITHOUT triggering one. It is
+  the non-reactive sibling of useState. Two faces:
+    1. DOM access — attach ref={myRef} to a JSX node; React assigns the real DOM
+       node to myRef.current after mount. Then myRef.current.focus(),
+       .offsetWidth, .scrollIntoView() — direct DOM APIs, no querySelector.
+    2. Instance value — store timers, previous values, "anything mutable that
+       should NOT trigger a re-render". The value is read at access time, not
+       snapshotted. Writing ref.current = X schedules NOTHING.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useRef, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<RefDemo/>), the gold-check
+  clicks "Focus Input" (asserts document.activeElement is the input), clicks
+  "Measure Width" (asserts offsetWidth > 0 was read from the node), then clicks
+  "Increment" (asserts count went 0→1 while previous stayed 0 — proving the ref
+  lags one render and persists). This proves BOTH ref faces end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useRef & DOM access — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:300px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useRef &amp; DOM access</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_REF_DOM.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_REF_DOM.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Refs are the non-reactive sibling of
+    <a href="../frontend/react/react_state_hooks.html">frontend/react: useState</a>
+    (the reactive model — refs opt OUT of it on purpose).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">useRef: a box that survives renders</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        <code>useRef(initialValue)</code> returns <b class="text-[#e6edf3]">{'{ current: initialValue }'}</b>.
+        The <code>.current</code> property is mutable and persists across every re-render —
+        but writing to it schedules <b class="text-[#e6edf3]">no</b> re-render. That is the whole
+        point: refs are how you reach <i>outside</i> React's reactive model. Two faces — attach one to
+        a JSX node to grab the live DOM element, or use it as a mutable instance slot (timer id,
+        previous value) that should never by itself repaint the screen.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>re-renders?</th></tr>
+        <tr>
+          <td><code>useRef(x)</code></td>
+          <td>returns <code>{'{ current: x }'}</code>; same object identity every render</td>
+          <td>declaring it: no</td>
+        </tr>
+        <tr>
+          <td><code>ref=&#123;myRef&#125;</code></td>
+          <td>attach to a JSX node; React assigns the live DOM node to <code>myRef.current</code> after mount</td>
+          <td>no — just wiring</td>
+        </tr>
+        <tr>
+          <td><code>myRef.current.focus()</code></td>
+          <td>direct DOM API on the node — no <code>querySelector</code></td>
+          <td>no (unless <em>you</em> call setState)</td>
+        </tr>
+        <tr>
+          <td><code>myRef.current = X</code></td>
+          <td>mutate the box directly (store a timer id, previous value)</td>
+          <td><b class="text-[#e74c3c]">never</b> — read at access time, not snapshotted</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the refs you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var RefDemo = function () {
+  // 1 · DOM ref — points at the &lt;input&gt; node after mount
+  var inputRef = React.useRef(null);
+  var widthState = React.useState(0);
+  var width = widthState[0];
+  var setWidth = widthState[1];
+
+  // 2 · instance-value ref — holds the setInterval() id (no re-render needed)
+  var intervalRef = React.useRef(null);
+  var runState = React.useState(false);
+  var running = runState[0];
+  var setRunning = runState[1];
+  var elState = React.useState(0);
+  var elapsed = elState[0];
+  var setElapsed = elState[1];
+
+  // 3 · previous-value ref — persists across renders, mutates silently
+  var prevRef = React.useRef(0);
+  var cntState = React.useState(0);
+  var count = cntState[0];
+  var setCount = cntState[1];
+
+  // effect runs AFTER commit, so prevRef lags one render behind count
+  React.useEffect(function () {
+    prevRef.current = count;
+  }, [count]);
+
+  var start = function () {
+    if (running) return;
+    setRunning(true);
+    intervalRef.current = setInterval(function () {
+      setElapsed(function (e) { return e + 1; });
+    }, 1000);
+  };
+  var stop = function () {
+    setRunning(false);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);  // read the id back out of the ref
+      intervalRef.current = null;
+    }
+  };
+
+  // refs are NOT auto-cleaned — clear the timer ourselves on unmount
+  React.useEffect(function () {
+    return function () {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;useRef — two faces&lt;/h2&gt;
+
+      {/* 1 · DOM access */}
+      &lt;div className="mb-4 p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-[11px] text-[#8b949e] mb-2 uppercase tracking-wide"&gt;1 · DOM access (ref -&gt; node)&lt;/p&gt;
+        &lt;input
+          data-testid="input"
+          ref={inputRef}
+          className="w-full px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none"
+          placeholder="click Focus, then Measure"
+        /&gt;
+        &lt;div className="mt-2 flex gap-2"&gt;
+          &lt;button
+            data-testid="focus"
+            className="px-3 py-1.5 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs"
+            onClick={function () { inputRef.current.focus(); }}
+          &gt;
+            Focus Input
+          &lt;/button&gt;
+          &lt;button
+            data-testid="measure"
+            className="px-3 py-1.5 border border-[#61dafb] text-[#61dafb] rounded text-xs font-bold"
+            onClick={function () { setWidth(inputRef.current.offsetWidth); }}
+          &gt;
+            Measure Width
+          &lt;/button&gt;
+        &lt;/div&gt;
+        &lt;p className="mt-2 text-xs text-[#8b949e]"&gt;
+          width: &lt;span data-testid="width" className="text-[#61dafb]"&gt;{width}&lt;/span&gt;px
+        &lt;/p&gt;
+      &lt;/div&gt;
+
+      {/* 2 · stopwatch (interval id lives in a ref) */}
+      &lt;div className="mb-4 p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-[11px] text-[#8b949e] mb-2 uppercase tracking-wide"&gt;2 · instance value (timer id in ref)&lt;/p&gt;
+        &lt;p data-testid="elapsed" className="text-2xl font-bold text-[#61dafb]"&gt;{elapsed}s&lt;/p&gt;
+        &lt;div className="mt-2 flex gap-2"&gt;
+          &lt;button
+            data-testid="start"
+            className="px-3 py-1.5 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs"
+            onClick={start}
+          &gt;
+            {running ? 'running…' : 'start'}
+          &lt;/button&gt;
+          &lt;button
+            data-testid="stop"
+            className="px-3 py-1.5 border border-[#e74c3c] text-[#e74c3c] rounded text-xs font-bold"
+            onClick={stop}
+          &gt;
+            stop
+          &lt;/button&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 3 · previous value (ref persists, no re-render) */}
+      &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-[11px] text-[#8b949e] mb-2 uppercase tracking-wide"&gt;3 · previous value (ref lags one render)&lt;/p&gt;
+        &lt;p className="text-sm text-[#e6edf3]"&gt;
+          Current: &lt;span data-testid="count" className="text-[#61dafb]"&gt;{count}&lt;/span&gt;
+          {' '}· Previous: &lt;span data-testid="prev" className="text-[#61dafb]"&gt;{prevRef.current}&lt;/span&gt;
+        &lt;/p&gt;
+        &lt;button
+          data-testid="increment"
+          className="mt-2 px-3 py-1.5 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs"
+          onClick={function () { setCount(function (c) { return c + 1; }); }}
+        &gt;
+          Increment
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+};
+
+createRoot(document.getElementById('root')).render(&lt;RefDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;RefDemo/&gt;</code> becomes <code>React.createElement(RefDemo)</code>.
+        <code>ref=&#123;inputRef&#125;</code> compiles to a <code>ref</code> prop — React reads it,
+        finds the node, and assigns <code>inputRef.current = node</code> right after mount.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (both ref faces, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b class="text-[#e6edf3]">Focus Input</b> to call <code>inputRef.current.focus()</code> on the node.
+        Click <b class="text-[#e6edf3]">Measure Width</b> to read <code>inputRef.current.offsetWidth</code>.
+        Click <b class="text-[#e6edf3]">Increment</b> — the <code>prevRef</code> ref lags one render, so
+        Previous shows the value from before the click. The <b class="text-[#e6edf3]">gold-check</b>
+        runs all three automatically below.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        focus: <span id="focus-read" class="text-[#61dafb]">—</span>
+        · count: <span id="count-read" class="text-[#61dafb]">—</span>
+        · prev: <span id="prev-read" class="text-[#61dafb]">—</span>
+        · gold: focus → measure(width&gt;0) → increment(count 1, prev 0)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>focus / scroll / select</td>
+          <td><code>inputRef.current.focus()</code></td>
+          <td>imperative DOM call — no <code>querySelector</code>, works with the exact node</td>
+        </tr>
+        <tr>
+          <td>measure a node</td>
+          <td><code>inputRef.current.offsetWidth</code></td>
+          <td>read layout synchronously; wrap in <code>useLayoutEffect</code> to avoid flicker</td>
+        </tr>
+        <tr>
+          <td>store a timer id</td>
+          <td><code>intervalRef.current = setInterval(...)</code></td>
+          <td>persists across renders without causing them; <code>clearInterval</code> on unmount</td>
+        </tr>
+        <tr>
+          <td>previous value</td>
+          <td><code>prevRef</code> + <code>useEffect</code> set after commit</td>
+          <td>ref lags one render → shows the value from before the latest state change</td>
+        </tr>
+        <tr>
+          <td>integrate non-React lib</td>
+          <td>pass <code>ref.current</code> inside <code>useEffect</code></td>
+          <td>hand the mounted node to the library once; tear down in the cleanup return</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var focusRead   = document.getElementById("focus-read");
+      var countRead   = document.getElementById("count-read");
+      var prevRead    = document.getElementById("prev-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render RefDemo…");
+        waitForFocusButton(0);
+      }
+
+      function waitForFocusButton(frame) {
+        var focusBtn = root.querySelector('[data-testid="focus"]');
+        if (focusBtn) { stepFocus(focusBtn); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForFocusButton(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the Focus button in time");
+      }
+
+      // Step 1: click "Focus Input" → activeElement must be the <input>
+      function stepFocus(focusBtn) {
+        focusBtn.click();
+        pollFocus(0, function () {
+          // Step 2: click "Measure Width" → width text must be > 0
+          var measureBtn = root.querySelector('[data-testid="measure"]');
+          if (!measureBtn) { failGoldCheck("Measure button not found"); return; }
+          measureBtn.click();
+          pollWidth(0, function () {
+            // Step 3: click "Increment" → count 1, prev 0
+            var incBtn = root.querySelector('[data-testid="increment"]');
+            if (!incBtn) { failGoldCheck("Increment button not found"); return; }
+            incBtn.click();
+            pollCountPrev(0, passGoldCheck);
+          });
+        });
+      }
+
+      function pollFocus(frame, done) {
+        readLive();
+        var inputEl = root.querySelector('[data-testid="input"]');
+        if (inputEl && document.activeElement === inputEl) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollFocus(frame + 1, done); });
+          return;
+        }
+        failGoldCheck("activeElement is not the input after Focus click");
+      }
+
+      function pollWidth(frame, done) {
+        readLive();
+        var wEl = root.querySelector('[data-testid="width"]');
+        var w = wEl ? parseInt(wEl.textContent, 10) : 0;
+        if (!isNaN(w) && w > 0) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollWidth(frame + 1, done); });
+          return;
+        }
+        failGoldCheck("offsetWidth not read into the width span (>0 expected)");
+      }
+
+      function pollCountPrev(frame, done) {
+        readLive();
+        var cEl = root.querySelector('[data-testid="count"]');
+        var pEl = root.querySelector('[data-testid="prev"]');
+        var c = cEl ? cEl.textContent : "";
+        var p = pEl ? pEl.textContent : "";
+        if (c === "1" && p === "0") { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollCountPrev(frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected count=1 prev=0 but got count=" + c + " prev=" + p);
+      }
+
+      function readLive() {
+        var inputEl = root.querySelector('[data-testid="input"]');
+        focusRead.textContent = (inputEl && document.activeElement === inputEl) ? "yes" : "no";
+        var cEl = root.querySelector('[data-testid="count"]');
+        if (cEl) countRead.textContent = cEl.textContent;
+        var pEl = root.querySelector('[data-testid="prev"]');
+        if (pEl) prevRead.textContent = pEl.textContent;
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] focus→input, width>0, count 1/prev 0. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

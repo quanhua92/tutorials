@@ -7,10 +7,10 @@
 ## Phase 1 — Hooks Mastery (6)
 
 - [x] 01 `use_reducer` ⭐ **STYLE ANCHOR** — useReducer: dispatch table, state machines
-- [ ] 02 `use_ref_dom` — useRef: mutable refs, DOM access, timers
-- [ ] 03 `use_memo_callback` — useMemo & useCallback: memoization, referential equality
-- [ ] 04 `use_context` — Context API: Provider/Consumer, context splits
-- [ ] 05 `custom_hooks` — Custom hooks: useDebounce, useLocalStorage, useFetch
+- [x] 02 `use_ref_dom` — useRef: mutable refs, DOM access, timers
+- [x] 03 `use_memo_callback` — useMemo & useCallback: memoization, referential equality
+- [x] 04 `use_context` — Context API: Provider/Consumer, context splits
+- [x] 05 `custom_hooks` — Custom hooks: useDebounce, useLocalStorage, useFetch
 - [ ] 06 `use_layout_effect` — useLayoutEffect vs useEffect: paint timing
 
 ## Phase 2 — Component Patterns (6)

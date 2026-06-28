@@ -1,0 +1,482 @@
+<!doctype html>
+<!--
+  use_memo_callback.html — React Deep Dive hooks bundle (memoization).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving useMemo
+  & useCallback end-to-end. Companion: USE_MEMO_CALLBACK.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: every render creates fresh function and object references by
+  default. That breaks React.memo() — a memoized child still re-renders because
+  its props are new references each time. useMemo caches the RESULT of an
+  expensive computation; useCallback caches a FUNCTION reference. Both recompute
+  / re-create only when their deps change, keeping references stable so memoized
+  children actually skip re-renders. They exist for ONE job: preventing wasted
+  work — NOT as a default. Premature memoization costs more than it saves.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useMemo, useCallback, memo
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<MemoDemo/>), the gold-check
+  asserts fib(1)=1 (initial), clicks count+1 twice → fib(2)=1, fib(3)=2, then
+  clicks other+1 and asserts fib is STILL fib(3)=2 (useMemo cache survived an
+  unrelated re-render), and asserts the React.memo child rendered with
+  Clicked: 1. This proves both hooks hold references stable end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useMemo &amp; useCallback — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useMemo &amp; useCallback &mdash; caching values &amp; functions</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_MEMO_CALLBACK.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_MEMO_CALLBACK.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/react/react_state_hooks.html">frontend/react: useState</a>
+    (the re-render model these hooks optimize).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">the problem: every render mints fresh references</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        When a parent re-renders, every inline <code>function () {{}}</code> and every
+        object literal <code>{{}}</code> is a <b class="text-[#e6edf3]">brand-new reference</b>.
+        A child wrapped in <code>React.memo()</code> shallow-compares its props, sees new
+        references, and re-renders anyway — the memo did nothing. <code>useMemo</code> and
+        <code>useCallback</code> keep references <b class="text-[#e6edf3]">stable</b> across
+        renders so memoized children actually skip. <code>useMemo</code> caches a
+        <b class="text-[#e6edf3]">value</b>; <code>useCallback</code> caches a
+        <b class="text-[#e6edf3]">function</b>. Both recompute/recreate only when their
+        <code>deps</code> change.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>hook</th><th>signature</th><th>caches</th><th>re-runs when</th></tr>
+        <tr>
+          <td><code>useMemo</code></td>
+          <td><code>useMemo(factory, deps)</code></td>
+          <td>the <b>result</b> of <code>factory()</code></td>
+          <td>a value in <code>deps</code> changes (referential inequality)</td>
+        </tr>
+        <tr>
+          <td><code>useCallback</code></td>
+          <td><code>useCallback(fn, deps)</code></td>
+          <td>the <b>function reference</b> itself</td>
+          <td>a value in <code>deps</code> changes — sugar for <code>useMemo(() =&gt; fn, deps)</code></td>
+        </tr>
+        <tr>
+          <td><code>React.memo</code></td>
+          <td><code>React.memo(Component)</code></td>
+          <td>the <b>last render output</b></td>
+          <td>any prop fails a shallow <code>Object.is</code> compare — needs stable prop refs to help</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the memoization you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Naive recursive Fibonacci — deliberately O(2^n) so the cache matters.
+function slowFib(n) {
+  if (n <= 1) return n;
+  return slowFib(n - 1) + slowFib(n - 2);
+}
+
+// A child wrapped in React.memo: it shallow-compares props and SKIPS the
+// re-render when every prop is the same reference / value as last time.
+var MemoChild = React.memo(function Child(props) {
+  // props.onClick keeps the SAME reference only because the parent used
+  // useCallback. Without it, a fresh function every render breaks memo.
+  return (
+    &lt;button
+      data-testid="child-btn"
+      onClick={props.onClick}
+      className="px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"
+    &gt;
+      Clicked: {props.count}
+    &lt;/button&gt;
+  );
+});
+
+function MemoDemo() {
+  var s1 = React.useState(1); var count = s1[0]; var setCount = s1[1];
+  var s2 = React.useState(0); var other = s2[0]; var setOther = s2[1];
+
+  // useMemo: only recomputes fib when `count` changes.
+  var fib = React.useMemo(function () { return slowFib(count); }, [count]);
+
+  // useCallback: keeps handleClick the SAME reference forever (empty deps).
+  // Pass it to the React.memo child so the child skips re-render on unrelated state.
+  var handleClick = React.useCallback(function () {
+    setOther(function (x) { return x + 1; });
+  }, []);
+
+  // BAD (commented): a fresh function every render — would force MemoChild to
+  // re-render even though its real inputs (other) did not change.
+  // var handleClickBad = function () { setOther(function (x) { return x + 1; }); };
+
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;useMemo &amp; useCallback&lt;/h2&gt;
+
+      &lt;p data-testid="fib-result" className="text-[#e6edf3] text-sm mb-1"&gt;
+        fib({count}) = {fib}
+      &lt;/p&gt;
+      &lt;p data-testid="other" className="text-[#8b949e] text-sm mb-3"&gt;
+        other: {other}
+      &lt;/p&gt;
+
+      &lt;div className="flex gap-2 mb-4"&gt;
+        &lt;button
+          data-testid="inc-count"
+          className="px-3 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"
+          onClick={function () { setCount(function (x) { return x + 1; }); }}
+        &gt;
+          count+1
+        &lt;/button&gt;
+        &lt;button
+          data-testid="inc-other"
+          className="px-3 py-2 bg-transparent border border-[#61dafb] text-[#61dafb] rounded font-bold text-sm hover:opacity-80"
+          onClick={function () { setOther(function (x) { return x + 1; }); }}
+        &gt;
+          other+1
+        &lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;div className="border-t border-[#30363d] pt-4"&gt;
+        &lt;p className="text-xs text-[#8b949e] mb-2"&gt;
+          React.memo child (onClick stable via useCallback):
+        &lt;/p&gt;
+        &lt;MemoChild count={other} onClick={handleClick} /&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;MemoDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;MemoDemo/&gt;</code> becomes <code>React.createElement(MemoDemo)</code>.
+        <code>React.useMemo(fn, [count])</code> returns the cached fib unless <code>count</code>
+        changed; <code>React.useCallback(fn, [])</code> returns the same function instance on
+        every render. The <b class="text-[#e6edf3]">gold-check</b> proves the cache survives an
+        unrelated re-render.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (memoization, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b>count+1</b> and <code>useMemo</code> recomputes fib. Click <b>other+1</b> and
+        fib is <b class="text-[#e6edf3]">still cached</b> (the value did not recompute) — while
+        the <code>React.memo</code> child updates only because its <code>count</code> prop
+        changed, never because <code>onClick</code> wiggled. The <b class="text-[#e6edf3]">gold-check</b>
+        drives this automatically.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        live: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: fib(1)→(2)→(3), other+1 keeps fib(3)=2, child shows Clicked: 1
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>cache a costly value</td>
+          <td><code>useMemo(() =&gt; compute(x), [x])</code></td>
+          <td>skips recomputation on unrelated re-renders</td>
+        </tr>
+        <tr>
+          <td>stable callback prop</td>
+          <td><code>useCallback(handleClick, [dep])</code></td>
+          <td>keeps the fn ref identical so a <code>React.memo</code> child skips</td>
+        </tr>
+        <tr>
+          <td>stable object/array prop</td>
+          <td><code>useMemo(() =&gt; ({'{'}a, b{'}'}), [a, b])</code></td>
+          <td>object literals are new every render — wrap them to keep refs stable</td>
+        </tr>
+        <tr>
+          <td>skip a child's re-render</td>
+          <td><code>React.memo(Child)</code> + stable props</td>
+          <td>memo compares props shallowly; it needs BOTH value + ref stability to help</td>
+        </tr>
+        <tr>
+          <td>"just in case" memoization</td>
+          <td><b>don't</b> — measure with Profiler first</td>
+          <td>deps comparison + cache storage cost more than the re-render you avoided</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      // normalize textContent: collapse whitespace so JSX formatting never breaks asserts
+      function txt(el) {
+        return el ? el.textContent.replace(/\s+/g, " ").trim() : "";
+      }
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render MemoDemo…");
+        waitForFib(0);
+      }
+
+      function waitForFib(frame) {
+        var fibEl = root.querySelector('[data-testid="fib-result"]');
+        if (fibEl) { step1Initial(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForFib(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render fib-result in time");
+      }
+
+      // Step 1: assert fib(1) = 1 (initial state)
+      function step1Initial() {
+        readLive();
+        if (!/fib\(1\)\s*=\s*1/.test(txt(root.querySelector('[data-testid="fib-result"]')))) {
+          failGoldCheck("expected fib(1) = 1 on first render");
+          return;
+        }
+        clickInc("inc-count", step2Count2);
+      }
+
+      // Step 2: click count+1 → assert fib(2) = 1
+      function step2Count2() {
+        if (!/fib\(2\)\s*=\s*1/.test(txt(root.querySelector('[data-testid="fib-result"]')))) {
+          failGoldCheck("expected fib(2) = 1 after first count+1");
+          return;
+        }
+        clickInc("inc-count", step3Count3);
+      }
+
+      // Step 3: click count+1 again → assert fib(3) = 2
+      function step3Count3() {
+        if (!/fib\(3\)\s*=\s*2/.test(txt(root.querySelector('[data-testid="fib-result"]')))) {
+          failGoldCheck("expected fib(3) = 2 after second count+1");
+          return;
+        }
+        clickInc("inc-other", step4CacheSurvives);
+      }
+
+      // Step 4: click other+1 → assert fib is STILL fib(3) = 2 (useMemo cache held)
+      //         and the React.memo child rendered with the new primitive prop.
+      function step4CacheSurvives() {
+        readLive();
+        var fibEl = root.querySelector('[data-testid="fib-result"]');
+        var otherEl = root.querySelector('[data-testid="other"]');
+        var childBtn = root.querySelector('[data-testid="child-btn"]');
+        if (!/fib\(3\)\s*=\s*2/.test(txt(fibEl))) {
+          failGoldCheck("fib changed after unrelated re-render — useMemo cache broke");
+          return;
+        }
+        if (!/other:\s*1/.test(txt(otherEl))) {
+          failGoldCheck("expected other: 1 after other+1");
+          return;
+        }
+        if (!/Clicked:\s*1/.test(txt(childBtn))) {
+          failGoldCheck("React.memo child did not render Clicked: 1");
+          return;
+        }
+        passGoldCheck();
+      }
+
+      // click a testid button, then poll until fib-result reflects a new value
+      function clickInc(testid, done) {
+        var btn = root.querySelector('[data-testid="' + testid + '"]');
+        if (!btn) { failGoldCheck('button ' + testid + ' not found'); return; }
+        btn.click();
+        requestAnimationFrame(function () { requestAnimationFrame(done); });
+      }
+
+      function readLive() {
+        var fibEl = root.querySelector('[data-testid="fib-result"]');
+        countRead.textContent = fibEl ? txt(fibEl) : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] fib(1)→(2)→(3); other+1 keeps cache; child=Clicked:1. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

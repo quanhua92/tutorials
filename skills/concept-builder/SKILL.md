@@ -396,6 +396,65 @@ green. The full failure→fix dispatch table is in `brief_checklist.md` §4.
 | Numbers in `.md` ≠ `_output.txt` | worker hand-typed a table | regenerate, paste verbatim under callouts |
 | No `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional |
 | No pitfalls table | junior tutorial | re-spawn, cite the three-layer depth rule |
+| Mermaid diagram doesn't render on GitHub | syntax not supported by GitHub's renderer (see §15.1) | run mermaid sweep, fix only broken blocks |
+
+---
+
+## 15.1 Mermaid diagram validation (non-negotiable for `.md` guides)
+
+Mermaid diagrams that look fine in a local editor can silently break on GitHub.
+**Always validate with the official CLI before shipping.**
+
+### The three syntax patterns that break GitHub (verified by `mmdc`)
+
+| Broken syntax | Why it breaks | Correct syntax |
+|---|---|---|
+| `A -.label.> B` or `A -.label.-> B` | Dotted-arrow-with-inline-label is not supported by GitHub's mermaid renderer | `A -.->\|label\| B` |
+| `A -->\|text (with parens)\| B` | Unquoted `()` in edge labels close node shapes early | `A -->\|"text (with parens)"\| B` |
+| `A -->\|GET /{key}\| B` | Unquoted `{}` in edge labels look like diamond/decision nodes | `A -->\|"GET /{key}"\| B` |
+
+### Validation procedure
+
+1. **Extract + render every mermaid block with `@mermaid-js/mermaid-cli`:**
+
+```bash
+# Validate all mermaid blocks in a section (sequential, ~2s per block)
+python3 -c "
+import re
+from pathlib import Path
+for md in sorted(Path('SECTION').rglob('*.md')):
+    text = md.read_text(errors='replace')
+    for i, m in enumerate(re.finditer(r'\`\`\`mermaid\n(.*?)\`\`\`', text, re.S)):
+        open(f'/tmp/block_{i}.mmd', 'w').write(m.group(1))
+        import subprocess
+        r = subprocess.run(['npx', '@mermaid-js/mermaid-cli', '-i', f'/tmp/block_{i}.mmd', '-o', f'/tmp/block_{i}.svg'], capture_output=True)
+        if r.returncode != 0 or not Path(f'/tmp/block_{i}.svg').exists():
+            print(f'FAIL: {md} block#{i}')
+"
+```
+
+2. **For large repos, run in background with `nohup`** (mmdc starts a headless
+   browser per block — ~2s each, so batch in background):
+
+```bash
+nohup bash scripts/mermaid_validate.sh > /tmp/mermaid_results.txt 2>&1 &
+```
+
+3. **Fix ONLY the blocks that `mmdc` confirms as broken.** Do not touch working
+   diagrams — patterns like `[("text")]` (DB/cylinder shape), `[text/with/slash]`
+   (unquoted labels with `/`), and `subgraph Title` all render fine on GitHub
+   even though they look unusual.
+
+### Rules for workers
+
+- **Always use `-.->|label|`** for dotted arrows with labels. Never use
+  `-.label.>` or `-.label.->`.
+- **Quote edge labels containing `()`, `{}`, or `/`**: `|"GET /{key}"|` not
+  `|GET /{key}|`.
+- **Do NOT over-quote**: `[("text")]` DB shapes, `["text/with/slash"]` node
+  labels, and `|simple text|` edge labels all work fine unquoted. Only quote
+  when the label contains characters that mermaid interprets as syntax (`()`,
+  `{}`).
 
 ---
 

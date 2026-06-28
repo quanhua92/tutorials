@@ -1,0 +1,497 @@
+<!doctype html>
+<!--
+  suspense_patterns.html — Phase 3 concurrent React bundle #1.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  <Suspense> + throw-promise end-to-end. Companion: SUSPENSE_PATTERNS.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: when a component reads a resource that isn't ready, it THROWS A
+  PROMISE during render. React catches it, shows the nearest <Suspense fallback>,
+  and re-renders the suspended subtree when the promise resolves. This is the
+  declarative loading model: you say "render this, and if it's not ready, show
+  that" — no isLoading flags, no useEffect+setState wiring, no race conditions.
+
+  The three faces of Suspense:
+    1. React.lazy(component)     — suspends until the dynamic import() resolves.
+    2. use(promise)  (React 19)  — reads a promise during render; suspends if
+                                   pending. Replaces manual throw-promise code.
+    3. Resource cache + throw    — the classic pre-use() pattern; this demo
+                                   uses it because Babel-in-eval can't do real
+                                   dynamic import() for React.lazy.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer STYLE ANCHOR):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: Suspense, useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot (Suspense works natively)
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check observes
+  the Suspense fallback ("Loading…"), waits for the simulated 600ms fetch to
+  resolve, asserts "Loaded: Hello Suspense!" is in the DOM, clicks "Refetch"
+  (real click event → new resource → re-suspend → fallback → resolve), and
+  asserts "Loaded: Reload #2 OK" appears. This proves the throw-promise →
+  fallback → resolve round-trip end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Suspense Patterns — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Suspense &mdash; throw a promise, catch a fallback</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/SUSPENSE_PATTERNS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/SUSPENSE_PATTERNS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <code>useEffect</code> syncs with the world (imperative: "mount → fetch → setState").
+    <a href="../frontend/react/react_effects_lists.html">frontend/react: effects &amp; lists</a>
+    shows that manual dance; <b class="text-[#e6edf3]">Suspense waits for data declaratively</b> —
+    you say "render this, or that fallback if it isn't ready" and React handles the rest.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">the throw-promise mechanism</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A component <b class="text-[#e6edf3]">throws a promise</b> during render when the data it needs
+        isn't ready. React catches the thrown promise, walks UP the tree to the nearest
+        <code>&lt;Suspense&gt;</code>, and renders its <code>fallback</code> instead. When the promise
+        resolves, React re-renders the suspended subtree — now the data is there, so <code>read()</code>
+        returns it and the real UI paints. No <code>isLoading</code> flags, no <code>useEffect</code>+<code>setState</code>,
+        no race conditions: the loading state is a <b class="text-[#e6edf3]">property of the tree</b>, not a field you manage.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>API</th><th>what it suspends on</th><th>resolves when</th></tr>
+        <tr>
+          <td><code>React.lazy(() =&gt; import())</code></td>
+          <td>a component module</td>
+          <td>the dynamic <code>import()</code> promise settles</td>
+        </tr>
+        <tr>
+          <td><code>use(promise)</code> &nbsp;<span class="text-[#8b949e]">(React 19)</span></td>
+          <td>a Promise (or Context)</td>
+          <td>the awaited promise resolves</td>
+        </tr>
+        <tr>
+          <td><code>resource.read()</code> &nbsp;<span class="text-[#8b949e]">(this demo)</span></td>
+          <td>any cached promise</td>
+          <td>the wrapper flips status to <code>'success'</code></td>
+        </tr>
+        <tr>
+          <td><code>&lt;Suspense fallback&gt;</code></td>
+          <td>— (the catcher, not the thrower)</td>
+          <td>the nearest child stops suspending</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the resource cache you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var Suspense = React.Suspense;
+var fetchSeq = 0;
+
+// Simulated network: resolves after 600ms with a labeled string.
+function fetchData() {
+  fetchSeq = fetchSeq + 1;
+  var n = fetchSeq;
+  var label = n === 1 ? 'Hello Suspense!' : ('Reload #' + n + ' OK');
+  return new Promise(function (resolve) {
+    setTimeout(function () { resolve(label); }, 600);
+  });
+}
+
+// The resource cache: wraps a promise so read() THROWS it while pending.
+// React catches the thrown promise and shows the Suspense fallback.
+function createResource(promise) {
+  var status = 'pending';
+  var result;
+  var suspender = promise.then(
+    function (r) { status = 'success'; result = r; },
+    function (e) { status = 'error'; result = e; }
+  );
+  return {
+    read: function () {
+      if (status === 'pending') throw suspender;  // &lt;-- the throw
+      if (status === 'error') throw result;       // &lt;-- errors bypass Suspense to ErrorBoundary
+      return result;
+    }
+  };
+}
+
+// Reads the data. While pending, resource.read() throws -> Suspense catches.
+function DataViewer(props) {
+  var data = props.resource.read();
+  return (
+    &lt;div data-testid="data" className="p-4 bg-[#0d1117] rounded border border-[#30363d] text-[#e6edf3]"&gt;
+      Loaded: {data}
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  // Lazy initializer: create the resource ONCE on mount (no refetch on re-render).
+  var state = React.useState(function () {
+    return createResource(fetchData());
+  });
+  var resource = state[0];
+  var setResource = state[1];
+
+  function refetch() {
+    // New resource -> new promise -> re-suspend -> fallback -> resolve.
+    setResource(createResource(fetchData()));
+  }
+
+  return (
+    &lt;div className="max-w-md mx-auto"&gt;
+      &lt;Suspense fallback={
+        &lt;div data-testid="loading" className="p-4 bg-[#0d1117] rounded border border-[#30363d] text-[#8b949e]"&gt;
+          Loading…
+        &lt;/div&gt;
+      }&gt;
+        &lt;DataViewer resource={resource} /&gt;
+      &lt;/Suspense&gt;
+      &lt;button
+        data-testid="refetch"
+        className="mt-3 px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm"
+        onClick={refetch}
+      &gt;
+        Refetch
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;Suspense fallback={...}&gt;</code> becomes
+        <code>React.createElement(Suspense, {fallback: ...})</code>. The thrown promise is
+        invisible at the JSX level — it lives inside <code>resource.read()</code>, which Babel
+        leaves untouched as a plain function call.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the throw-promise round-trip, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        On mount, <code>DataViewer</code> calls <code>resource.read()</code> &mdash; the promise is pending,
+        so it throws. Suspense catches it and renders the <code>Loading…</code> fallback. ~600ms later the
+        promise resolves, React retries, and <code>Loaded: Hello Suspense!</code> paints. Click
+        <b class="text-[#e6edf3]">Refetch</b> to swap in a fresh resource and watch the round-trip again.
+        The <b class="text-[#e6edf3]">gold-check</b> automates all of this.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        state: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: fallback → "Hello Suspense!" → Refetch → "Reload #2 OK"
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → Suspense pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>lazy-load a component</td>
+          <td><code>const C = lazy(() =&gt; import('./C'))</code><br/><code>&lt;Suspense fallback={...}&gt;&lt;C/&gt;&lt;/Suspense&gt;</code></td>
+          <td>suspends until the chunk downloads; no waterfall on route change</td>
+        </tr>
+        <tr>
+          <td>read a promise during render</td>
+          <td><code>const data = use(promise)</code></td>
+          <td>React 19 native; throws the promise, Suspense catches — no manual cache needed if the promise is cached upstream</td>
+        </tr>
+        <tr>
+          <td>avoid refetch on every render</td>
+          <td><b>cache the promise</b> (<code>useState(() =&gt; createResource(fetch()))</code>)</td>
+          <td>Suspense re-renders the subtree; an uncached promise re-suspends forever</td>
+        </tr>
+        <tr>
+          <td>isolate loading regions</td>
+          <td><b>nest</b> <code>&lt;Suspense&gt;</code></td>
+          <td>the nearest ancestor's fallback wins; outer content stays interactive while a child loads</td>
+        </tr>
+        <tr>
+          <td>handle fetch errors</td>
+          <td><b>wrap</b> <code>&lt;ErrorBoundary&gt;</code> <b>around</b> <code>&lt;Suspense&gt;</code></td>
+          <td>a thrown error from a suspended component bypasses Suspense and bubbles to the boundary</td>
+        </tr>
+        <tr>
+          <td>keep showing old data while refetching</td>
+          <td><code>useTransition</code> + <code>&lt;Suspense&gt;</code></td>
+          <td>the transition holds the old UI until the new resource resolves; fallback only on first load</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK (async: poll with rAF across the fetch delay) ----
+      var MAX_FRAMES = 260; // ~4.3s at 60fps — enough for two 600ms fetches + slack
+      var sawFirstLoading = false;
+      var sawReloadLoading = false;
+
+      function runGoldCheck() {
+        sawFirstLoading = false;
+        sawReloadLoading = false;
+        waitingGoldCheck("[check] waiting for Suspense fallback…");
+        waitForContent(0);
+      }
+
+      // Phase 1: wait for the root to show EITHER the loading fallback OR data
+      // (proves <Suspense> committed something). Record if we caught the loading state.
+      function waitForContent(frame) {
+        var loading = root.querySelector('[data-testid="loading"]');
+        var data = root.querySelector('[data-testid="data"]');
+        if (loading || data) {
+          if (loading) sawFirstLoading = true;
+          readLive();
+          waitingGoldCheck("[check] fallback shown, waiting for data to resolve…");
+          waitForFirstData(0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForContent(frame + 1); });
+          return;
+        }
+        failGoldCheck("Suspense did not render loading or data");
+      }
+
+      // Phase 2: wait for "Loaded: Hello Suspense!" to appear after the fetch resolves.
+      function waitForFirstData(frame) {
+        readLive();
+        var dataEl = root.querySelector('[data-testid="data"]');
+        if (dataEl && dataEl.textContent.indexOf("Hello Suspense!") !== -1) {
+          readLive();
+          var refetchBtn = root.querySelector('[data-testid="refetch"]');
+          if (!refetchBtn) { failGoldCheck("refetch button not found"); return; }
+          refetchBtn.click(); // real click event -> new resource -> re-suspend
+          waitingGoldCheck("[check] initial data OK, clicked Refetch, waiting for reload…");
+          waitForReloadLoading(0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForFirstData(frame + 1); });
+          return;
+        }
+        failGoldCheck("'Hello Suspense!' never appeared");
+      }
+
+      // Phase 3a: after Refetch, confirm we re-enter the loading fallback.
+      function waitForReloadLoading(frame) {
+        var loading = root.querySelector('[data-testid="loading"]');
+        if (loading) { sawReloadLoading = true; readLive(); }
+        if (loading || frame > 5) { waitForReloadData(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForReloadLoading(frame + 1); });
+          return;
+        }
+        waitForReloadData(0);
+      }
+
+      // Phase 3b: wait for "Loaded: Reload #2 OK" to appear.
+      function waitForReloadData(frame) {
+        readLive();
+        var dataEl = root.querySelector('[data-testid="data"]');
+        if (dataEl && dataEl.textContent.indexOf("Reload #2 OK") !== -1) {
+          readLive();
+          passGoldCheck();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForReloadData(frame + 1); });
+          return;
+        }
+        failGoldCheck("'Reload #2 OK' never appeared after Refetch");
+      }
+
+      function readLive() {
+        var loading = root.querySelector('[data-testid="loading"]');
+        var data = root.querySelector('[data-testid="data"]');
+        if (data) countRead.textContent = data.textContent;
+        else if (loading) countRead.textContent = "(loading…)";
+        else countRead.textContent = "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        var parts = ["fallback", "Hello Suspense!", "Refetch", "Reload #2 OK"];
+        badge.textContent =
+          "[check] " +
+          (sawFirstLoading ? "fallback" : "(fast)") +
+          " → data → Refetch → " +
+          (sawReloadLoading ? "fallback" : "(fast)") +
+          " → reload. Suspense round-trip OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

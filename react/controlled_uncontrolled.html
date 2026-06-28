@@ -1,0 +1,572 @@
+<!doctype html>
+<!--
+  controlled_uncontrolled.html — React Deep Dive concept bundle.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  controlled-vs-uncontrolled distinction end-to-end.
+  Companion: CONTROLLED_UNCONTROLLED.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: a form input has TWO possible owners for its current value.
+  CONTROLLED — React state is the single source of truth. You render
+  `<input value={text} onChange={e => setText(e.target.value)} />`. Every keystroke
+  flows state → re-render → value prop. You can transform, validate, gate, or derive
+  from it freely because React sees every character.
+  UNCONTROLLED — the DOM itself owns the value. You render
+  `<input defaultValue="hello" ref={inputRef} />` and only read `inputRef.current.value`
+  when you need it (on submit). It behaves like a traditional HTML form: React does
+  NOT watch every keystroke. `<input type="file">` MUST be uncontrolled because the
+  browser forbids JS from setting a file input's value programmatically.
+
+  The escape hatch that resets EITHER pattern: change the component's `key` prop.
+  A new key tells React "this is a different component" — it unmounts the old tree
+  (wiping all its state, controlled or not) and mounts a fresh one.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, useRef, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check:
+    1. asserts the controlled input's value is "" and the live char counter reads 0.
+    2. types "hello" into the controlled input → asserts the displayed value is
+       "HELLO" (uppercase transform) and the char counter reads 5.
+    3. clicks the uncontrolled submit → asserts the read-back equals the defaultValue "hello".
+    4. types "abc" into the key-reset input, clicks "Reset via key" → asserts the
+       input value is wiped back to "" because a new key remounted the component.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Controlled vs Uncontrolled — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:280px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Controlled vs Uncontrolled &mdash; who owns the value?</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/CONTROLLED_UNCONTROLLED.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/CONTROLLED_UNCONTROLLED.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="./use_ref_dom.html">react: useRef &amp; the DOM</a>
+    (the ref mechanic the uncontrolled pattern leans on) and
+    <a href="../frontend/react/react_state_hooks.html">frontend/react: useState</a>
+    (the reactive model the controlled pattern is built from).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">who owns the input's value?</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Every form input has a current value. The question is <b class="text-[#e6edf3]">who holds it</b>:
+        React (in <code>useState</code>) or the DOM (read via <code>useRef</code> on demand). A
+        <b class="text-[#e6edf3]">controlled</b> input renders <code>{'{value: text, onChange: setText}'}</code>
+        so React sees every keystroke and can transform, validate, or gate it. An
+        <b class="text-[#e6edf3]">uncontrolled</b> input renders <code>{'{defaultValue, ref: inputRef}'}</code>
+        and behaves like a 1995 HTML form — React ignores it until you reach in and read
+        <code>inputRef.current.value</code>. The reset hatch for BOTH: change the component's
+        <code>key</code> to remount it fresh.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>dimension</th><th>controlled</th><th>uncontrolled</th></tr>
+        <tr>
+          <td><b>source of truth</b></td>
+          <td>React state (<code>useState</code>)</td>
+          <td>the DOM (read via <code>ref.current.value</code>)</td>
+        </tr>
+        <tr>
+          <td><b>props you pass</b></td>
+          <td><code>value</code> + <code>onChange</code></td>
+          <td><code>defaultValue</code> (initial) + <code>ref</code></td>
+        </tr>
+        <tr>
+          <td><b>every keystroke?</b></td>
+          <td>yes — React re-renders on each one</td>
+          <td>no — DOM updates silently, React uninvolved</td>
+        </tr>
+        <tr>
+          <td><b>validation / formatting</b></td>
+          <td>trivial — transform inside render</td>
+          <td>imperative — read on submit, then mutate</td>
+        </tr>
+        <tr>
+          <td><b>read on submit</b></td>
+          <td><code>text</code> is already in scope</td>
+          <td><code>inputRef.current.value</code></td>
+        </tr>
+        <tr>
+          <td><b>must be uncontrolled</b></td>
+          <td>—</td>
+          <td><code>&lt;input type="file"&gt;</code> (JS can't set file value)</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the three inputs you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// CONTROLLED — React state is the single source of truth.
+// value prop is derived from state; onChange pushes the next character back in.
+// We transform to UPPERCASE inside render — proves React sees every keystroke.
+function ControlledDemo() {
+  var state = React.useState('');
+  var text = state[0];
+  var setText = state[1];
+
+  return (
+    &lt;div data-testid="controlled" className="p-4 bg-[#0d1117] rounded-lg border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] uppercase mb-2"&gt;controlled · React owns value&lt;/div&gt;
+      &lt;input
+        data-testid="controlled-input"
+        value={text.toUpperCase()}
+        onChange={function (e) { setText(e.target.value); }}
+        placeholder="type here"
+        className="w-full px-3 py-2 bg-[#010409] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+      /&gt;
+      &lt;div data-testid="char-count" className="mt-2 text-xs text-[#8b949e]"&gt;
+        chars: &lt;span className="text-[#61dafb]"&gt;{text.length}&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// UNCONTROLLED — the DOM owns the value. defaultValue sets the initial text;
+// React never re-renders on typing. On submit we READ ref.current.value once.
+function UncontrolledDemo() {
+  var inputRef = React.useRef(null);
+  var state = React.useState('');
+  var msg = state[0];
+  var setMsg = state[1];
+
+  return (
+    &lt;div data-testid="uncontrolled" className="p-4 bg-[#0d1117] rounded-lg border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] uppercase mb-2"&gt;uncontrolled · DOM owns value&lt;/div&gt;
+      &lt;form
+        onSubmit={function (e) {
+          e.preventDefault();
+          setMsg('submitted: ' + inputRef.current.value);
+        }}
+      &gt;
+        &lt;input
+          data-testid="uncontrolled-input"
+          ref={inputRef}
+          defaultValue="hello"
+          className="w-full px-3 py-2 bg-[#010409] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+        /&gt;
+        &lt;button
+          data-testid="uncontrolled-submit"
+          type="submit"
+          className="mt-2 px-3 py-1.5 bg-[#61dafb] text-[#0d1117] rounded text-xs font-bold hover:opacity-80"
+        &gt;submit &amp; read&lt;/button&gt;
+      &lt;/form&gt;
+      &lt;div data-testid="uncontrolled-msg" className="mt-2 text-xs text-[#61dafb] break-all"&gt;{msg}&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// KEY-RESET — works for EITHER pattern. Changing the `key` prop tells React
+// "this is a different component"; it unmounts the old one (wiping state) and
+// mounts a fresh one. Here we use it on a controlled input, but it resets
+// uncontrolled state (defaultValue reapplied) too.
+function KeyedInput(props) {
+  var state = React.useState('');
+  var text = state[0];
+  var setText = state[1];
+
+  return (
+    &lt;input
+      key={props.k}
+      data-testid="keyreset-input"
+      value={text}
+      onChange={function (e) { setText(e.target.value); }}
+      placeholder="type, then reset"
+      className="w-full px-3 py-2 bg-[#010409] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+    /&gt;
+  );
+}
+
+function KeyResetDemo() {
+  var state = React.useState(0);
+  var key = state[0];
+  var setKey = state[1];
+
+  return (
+    &lt;div data-testid="keyreset" className="p-4 bg-[#0d1117] rounded-lg border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] uppercase mb-2"&gt;key-reset · remount wipes state&lt;/div&gt;
+      &lt;KeyedInput k={key} /&gt;
+      &lt;button
+        data-testid="reset-key"
+        onClick={function () { setKey(key + 1); }}
+        className="mt-2 px-3 py-1.5 border border-[#61dafb] text-[#61dafb] rounded text-xs font-bold hover:bg-[#61dafb] hover:text-[#0d1117]"
+      &gt;reset via key&lt;/button&gt;
+      &lt;div className="mt-2 text-xs text-[#8b949e]"&gt;key = &lt;span data-testid="key-val" className="text-[#61dafb]"&gt;{key}&lt;/span&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  return (
+    &lt;div className="grid grid-cols-1 md:grid-cols-3 gap-3"&gt;
+      &lt;ControlledDemo /&gt;
+      &lt;UncontrolledDemo /&gt;
+      &lt;KeyResetDemo /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;input value={"{text.toUpperCase()}"} onChange={...}/&gt;</code> becomes
+        <code>React.createElement('input', {'{ value: text.toUpperCase(), onChange: ... }'})</code>.
+        On every <code>setText</code>, React re-renders and pushes the new <code>value</code> prop to the DOM.
+        The uncontrolled input has no <code>value</code> prop at all — just <code>defaultValue</code> + <code>ref</code>.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the three patterns, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Type in the controlled box → it uppercases and the char counter ticks. Click
+        "submit &amp; read" on the uncontrolled box → it reads back the <code>defaultValue</code>.
+        Type in the key-reset box then click "reset via key" → the input is wiped because the
+        new <code>key</code> remounts it. The <b class="text-[#e6edf3]">gold-check</b> runs all four
+        assertions automatically below.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        status: <span id="status-read" class="text-[#61dafb]">—</span>
+        · gold: empty initially → type "hello" → HELLO + 5 chars → submit → reads "hello" → key-reset → cleared
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>validate / format each keystroke</td>
+          <td><code>value={text} onChange={'{e => setText(e.target.value)}'}</code></td>
+          <td>controlled — transform inside render, React sees every char</td>
+        </tr>
+        <tr>
+          <td>read once on submit, ignore typing</td>
+          <td><code>defaultValue="x" ref={inputRef}</code> + read <code>.current.value</code></td>
+          <td>uncontrolled — fewer re-renders, traditional HTML form feel</td>
+        </tr>
+        <tr>
+          <td>upload a file</td>
+          <td><code>&lt;input type="file" ref={fileRef}/&gt;</code></td>
+          <td>file inputs MUST be uncontrolled — JS can't set <code>.value</code> for security</td>
+        </tr>
+        <tr>
+          <td>reset a form field</td>
+          <td>controlled: <code>setText('')</code> · uncontrolled: <code>ref.current.value = ''</code></td>
+          <td>or change the parent's <code>key</code> to remount everything fresh</td>
+        </tr>
+        <tr>
+          <td>nuclear reset (wipe all state)</td>
+          <td><code>&lt;Form key={resetCounter}/&gt;</code>, increment on reset</td>
+          <td>new key unmounts old tree, mounts fresh — state of every child reset</td>
+        </tr>
+        <tr>
+          <td>mix initial value + control</td>
+          <td><code>useState(initialValue)</code> then render <code>value={state}</code></td>
+          <td>NEVER use <code>defaultValue</code> with <code>value</code> — pick one owner</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var statusRead  = document.getElementById("status-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // React tracks input value via its own prototype setter, so to "type" into a
+      // controlled input we must use the native setter + dispatch an `input` event.
+      function typeInto(inputEl, text) {
+        var setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value"
+        ).set;
+        setter.call(inputEl, text);
+        inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      function setStatus(msg) { statusRead.textContent = msg; }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render App…");
+        waitForMount(0);
+      }
+
+      function waitForMount(frame) {
+        var c = root.querySelector('[data-testid="controlled-input"]');
+        var u = root.querySelector('[data-testid="uncontrolled-submit"]');
+        var k = root.querySelector('[data-testid="reset-key"]');
+        if (c && u && k) { step1_assertEmpty(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForMount(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the three demos in time");
+      }
+
+      // Step 1: controlled input starts empty, char counter reads 0.
+      function step1_assertEmpty() {
+        var input = root.querySelector('[data-testid="controlled-input"]');
+        var count = root.querySelector('[data-testid="char-count"]');
+        var actualVal = input ? input.value : "<no input>";
+        var actualCount = count ? count.textContent : "<no count>";
+        if (actualVal === "" && /0/.test(actualCount)) {
+          setStatus("1/4 empty+0chars OK");
+          step2_typeHello();
+          return;
+        }
+        failGoldCheck("step1 expected value='' count~0, got value='" + actualVal + "' count='" + actualCount + "'");
+      }
+
+      // Step 2: type "hello" → controlled input displays "HELLO", char count is 5.
+      function step2_typeHello() {
+        var input = root.querySelector('[data-testid="controlled-input"]');
+        typeInto(input, "hello");
+        pollStep2(0);
+      }
+
+      function pollStep2(frame) {
+        var input = root.querySelector('[data-testid="controlled-input"]');
+        var count = root.querySelector('[data-testid="char-count"]');
+        if (input.value === "HELLO" && /5/.test(count.textContent)) {
+          setStatus("2/4 HELLO+5chars OK");
+          step3_submitUncontrolled();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollStep2(frame + 1); });
+          return;
+        }
+        failGoldCheck("step2 expected value='HELLO' count~5, got value='" + input.value + "' count='" + count.textContent + "'");
+      }
+
+      // Step 3: click uncontrolled submit → reads back defaultValue "hello".
+      function step3_submitUncontrolled() {
+        var submitBtn = root.querySelector('[data-testid="uncontrolled-submit"]');
+        submitBtn.click();
+        pollStep3(0);
+      }
+
+      function pollStep3(frame) {
+        var msg = root.querySelector('[data-testid="uncontrolled-msg"]');
+        if (msg && msg.textContent === "submitted: hello") {
+          setStatus("3/4 uncontrolled read 'hello' OK");
+          step4_keyReset();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollStep3(frame + 1); });
+          return;
+        }
+        failGoldCheck("step3 expected msg='submitted: hello', got '" + (msg && msg.textContent) + "'");
+      }
+
+      // Step 4: type into keyreset input, click reset-key → input wiped to "".
+      function step4_keyReset() {
+        var input = root.querySelector('[data-testid="keyreset-input"]');
+        typeInto(input, "abc");
+        // give React one frame to commit the typed value, then reset via key
+        requestAnimationFrame(function () {
+          var beforeReset = root.querySelector('[data-testid="keyreset-input"]');
+          if (!beforeReset || beforeReset.value !== "abc") {
+            failGoldCheck("step4 pre-condition: expected 'abc' before reset, got '" + (beforeReset && beforeReset.value) + "'");
+            return;
+          }
+          var resetBtn = root.querySelector('[data-testid="reset-key"]');
+          resetBtn.click();
+          pollStep4(0);
+        });
+      }
+
+      function pollStep4(frame) {
+        var input = root.querySelector('[data-testid="keyreset-input"]');
+        var keyVal = root.querySelector('[data-testid="key-val"]');
+        if (input && input.value === "" && keyVal && keyVal.textContent === "1") {
+          setStatus("4/4 key-reset cleared OK");
+          passGoldCheck();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollStep4(frame + 1); });
+          return;
+        }
+        failGoldCheck("step4 expected value='' key=1, got value='" + (input && input.value) + "' key='" + (keyVal && keyVal.textContent) + "'");
+      }
+
+      function passGoldCheck() {
+        badge.textContent = "[check] empty → HELLO+5 → uncontrolled 'hello' → key-reset cleared. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        setStatus("FAIL: " + reason);
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -18,13 +18,13 @@
 - [x] 07 `compound_components` — Compound pattern: implicit state via context
 - [x] 08 `render_props` — Render props & function-as-child
 - [x] 09 `headless_ui` — Headless UI: state reducer + prop getters
-- [ ] 10 `controlled_uncontrolled` — Controlled vs uncontrolled, key-based reset
-- [ ] 11 `error_boundaries` — Error boundaries: catching render errors
-- [ ] 12 `forward_ref` — forwardRef + useImperativeHandle
+- [x] 10 `controlled_uncontrolled` — Controlled vs uncontrolled, key-based reset
+- [x] 11 `error_boundaries` — Error boundaries: catching render errors
+- [x] 12 `forward_ref` — forwardRef + useImperativeHandle
 
 ## Phase 3 — Concurrent React & React 19 (5)
 
-- [ ] 13 `suspense_patterns` — Suspense: declarative loading, throw-promise
+- [x] 13 `suspense_patterns` — Suspense: declarative loading, throw-promise
 - [ ] 14 `use_transition` — useTransition: urgent vs non-urgent updates
 - [ ] 15 `use_deferred_value` — useDeferredValue: deferring expensive renders
 - [ ] 16 `use_external_store` — useSyncExternalStore: external subscriptions

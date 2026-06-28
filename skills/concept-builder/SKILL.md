@@ -76,6 +76,7 @@ graph TD
 ```
 {name}.{py|go|rs|ts|cpp}     ← GROUND TRUTH — the single source of truth
 {name}_output.txt            ← captured stdout (committed; re-derivable without running)
+{name}_reference.txt         ← web provenance log from Step 2 (URLs + what each verifies)
 {NAME}.md                    ← static guide; output pasted under "> From name.EXT Section X:" callouts
 {name}.html                  ← (interactive flavor only) recomputes in JS, gold-checked
 ```
@@ -133,7 +134,7 @@ is whether a 4th file (`.html`) is produced.
 
 | | **Non-interactive (runnable-only)** | **Interactive (with `.html`)** |
 |---|---|---|
-| Files | runnable + `_output.txt` + `.md` | + `name.html` |
+| Files | runnable + `_output.txt` + `_reference.txt` + `.md` | + `name.html` |
 | Interactive artifact | the runnable file itself — reader opens, edits, watches output change | a dark-palette `.html` with sliders/steppers that recomputes live |
 | When to choose | deep language/systems concepts where *running the code* is the point (Go, Rust, Python, TS, C++ language curricula) | interview patterns, system design, analytics — where a visual "aha" beats static text |
 | Extra rule | none | `.html` must be single-file zero-dep, gold-checked against a known runnable value |
@@ -203,7 +204,8 @@ graph LR
    preamble + each brief). Parallel + disjoint ownership = safe concurrency.
 5. **Sweep.** Run `just sweep` (or the equivalent loop) after the batch returns:
    run every file, count `[check] OK`, lint/format/typecheck, confirm
-   `_output.txt` present + byte-identical on re-run.
+   `_output.txt` present + byte-identical on re-run, and `_reference.txt` present
+   with >=2 URLs each carrying a "Verifies:" line.
 6. **Re-spawn failures.** One worker per failure. Paste its prior output + the
    exact failing check; ask it to fix ONLY that. Don't rewrite from scratch.
 7. **Tick + spot-check.** Mark `TODO.md` done; open 2–3 `.md` files and confirm
@@ -374,6 +376,7 @@ for name in {batch_stems}; do
   grep -c "\[check\]" /tmp/$name.out | xargs -I{} echo "  checks printed: {}"
   {lint} "$name" >/dev/null 2>&1 && echo "  lint: OK" || echo "  lint: FAIL"
   test -s "${name}_output.txt" && echo "  output.txt: present" || echo "  output.txt: MISSING"
+  test -s "${name}_reference.txt" && echo "  reference.txt: present" || echo "  reference.txt: MISSING"
   # interactive flavor: node --check the extracted <script>
 done
 ```
@@ -394,7 +397,7 @@ green. The full failure→fix dispatch table is in `brief_checklist.md` §4.
 | `[check]` count is 0 | worker skipped invariants | re-spawn: "add a `check(...)` for every invariant" |
 | gold-check `[check: FAIL]` | JS formula drifted from runnable | re-spawn: copy runnable formula verbatim into JS |
 | Numbers in `.md` ≠ `_output.txt` | worker hand-typed a table | regenerate, paste verbatim under callouts |
-| No `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional |
+| No `_reference.txt` / `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional; require >=2 URLs with "Verifies:" lines |
 | No pitfalls table | junior tutorial | re-spawn, cite the three-layer depth rule |
 | Mermaid diagram doesn't render on GitHub | syntax not supported by GitHub's renderer (see §15.1) | run mermaid sweep, fix only broken blocks |
 
@@ -528,7 +531,8 @@ The skeleton file (banner + check helpers) for each language is in
    workers.
 4. **The brief + the sweep are non-negotiable.** Front-load judgment; verify
    independently.
-5. **Mandatory web search** in every worker; cite ≥2 sources; flag uncertainty.
+5. **Mandatory web search** in every worker; cite >=2 sources; log every URL into
+   `{name}_reference.txt`; flag uncertainty.
 6. **Determinism over everything** — sorted maps, serialized threads, seeded RNG,
    `check()` not `assert`.
 7. **Every `.md` ends with a pitfalls table + cheat sheet + `## Sources`.**

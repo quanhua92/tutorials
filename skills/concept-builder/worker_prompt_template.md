@@ -68,10 +68,20 @@ Read these and quote real code/API/signatures, not paraphrases:
 === STEP 2: FACT-CHECK VIA WEB SEARCH (mandatory, do NOT skip) ===
 For every signature, version, formula, and behavioral claim: web-search the
 official docs and >=1 other authoritative source. Verify the EXACT fact in >=2
-places. Record every URL in a "## Sources" section at the bottom of {NAME}.md.
-NEVER guess a signature or a number. If you cannot verify a fact, search until
-you can, or flag it explicitly in your final report. Start your searches at:
+places. NEVER guess a signature or a number. If you cannot verify a fact, search
+until you can, or flag it explicitly in your final report. Start your searches at:
 {WEB_ANCHORS}
+
+LOG every reference into {name}_reference.txt (a committed provenance file), one
+entry per URL, in this exact format so the sweep can grep it:
+    [1] <full URL>
+        <source name + authority, e.g. "Rust Book ch.4 S1 (official)">
+        Verifies: <the exact claim/signature/value this source supports>
+    [2] <full URL>
+        ...
+THEN mirror a trimmed URL list into the "## Sources" section at the bottom of
+{NAME}.md (the reader-facing summary). {name}_reference.txt is the full log with
+provenance; ## Sources is its public face. Both are mandatory.
 
 === HARD RULES ({LANG}-specific) ===
 - {MANIFEST_RULE}
@@ -111,6 +121,8 @@ you can, or flag it explicitly in your final report. Start your searches at:
 - {PROJECT_ROOT}/{MEMBER_PATH}{name}{EXT}
 - {PROJECT_ROOT}/{MEMBER_PATH}{name}_output.txt
     (produce via:  {CAPTURE})
+- {PROJECT_ROOT}/{MEMBER_PATH}{name}_reference.txt
+    (web provenance log from STEP 2; one [N] entry per URL + what it verifies)
 - {PROJECT_ROOT}/{MEMBER_PATH}{NAME}.md
 {HTML_DELIVERABLE_CLAUSE}
 
@@ -121,7 +133,8 @@ images; mermaid renders natively on GitHub/GitLab and stays diffable); "> From
 {name}{EXT} Section X:" verbatim output blocks; a worked smallest-scale
 example; a pitfalls table (trap | symptom | fix); a cheat sheet; the {INTERNALS}
 analysis where relevant; cross-references to sibling bundles (each link with a
-one-line WHY it matters); and a "## Sources" section (URLs, web-verified >=2).
+one-line WHY it matters); and a "## Sources" section (mirrors {name}_reference.txt;
+URLs, web-verified >=2).
 
 === VERIFICATION (do ALL of these, then report) ===
 Run from {PROJECT_ROOT}/{SECTION}/ :
@@ -131,11 +144,13 @@ Run from {PROJECT_ROOT}/{SECTION}/ :
 3. {LINT} passes.
 4. Every "[check] ... OK" line in _output.txt is mirrored verbatim under a
    "> From {name}{EXT} Section X:" callout in the .md.
+5. {name}_reference.txt exists, non-empty, every entry has a URL line AND a
+   "Verifies:" line; distinct URLs >= 2 (the >=2-sources mandate).
 
 === REPORT BACK (your final message) ===
 - The file paths created.
 - Check result: how many "[check] ... OK" printed, and the {LINT} verdict.
-- Web sources used (list URLs).
+- Web sources used (count; the full provenance list is in {name}_reference.txt).
 - Any fact you could NOT verify (do not hide uncertainty).
 
 === YOUR CONCEPT BRIEF ===

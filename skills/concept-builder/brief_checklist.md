@@ -159,7 +159,7 @@ Don't rewrite from scratch unless the whole bundle is wrong.
 | `node --check` fails on `.html` `<script>` | unbalanced brace / JS typo | usually a 1-line fix; re-spawn with the error |
 | ASan/UBSan reports issues (cpp) | a real bug — **UB** (use-after-free, OOB, overflow, leak) | re-spawn — correctness failure, not a nit; fix the UB |
 | Numbers in `.md` ≠ `_output.txt` | worker hand-typed a table | regenerate via capture, paste verbatim under callouts |
-| No `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional |
+| No `{name}_reference.txt` / `## Sources` | worker skipped web search | re-spawn, make Step 2 non-optional; require the provenance file with >=2 URLs + "Verifies:" lines |
 | No pitfalls table | junior tutorial, no expert payoff | re-spawn, cite the three-layer depth rule (SKILL.md §12) |
 | Relative links in `.html`/`.md` | `.md`/runnable links must be full GitHub URLs; back-link must be `./index.html` | re-spawn citing the HTML-family rule |
 | `cargo check` can't find bin `X` (rust) | orchestrator didn't add `[[bin]]` | add `[[bin]] name="X" path="X.rs"` to the member Cargo.toml (orchestrator job) |
@@ -173,6 +173,8 @@ Don't rewrite from scratch unless the whole bundle is wrong.
 - [ ] Sweep + language gate green for all bundles in the batch.
 - [ ] Spot-checked 2–3 `.md` `> From … Section X:` callouts vs `_output.txt`
       byte-for-byte.
+- [ ] Each bundle's `{name}_reference.txt` exists with >=2 URLs and a "Verifies:"
+      line per entry.
 - [ ] For the interactive flavor, opened 1–2 `.html` in a browser; `[check: OK]`
       badge is green.
 - [ ] Re-spawned any failures (max 4 again).

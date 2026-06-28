@@ -1,0 +1,210 @@
+quant_types.py - GGUF block quantization dequant reference.
+Pure Python stdlib. Numbers below feed QUANT_TYPES.md.
+Sources: ggml/src/ggml-common.h structs + examples/quantize k-quants table.
+
+Three families: legacy Q4_0/Q4_1/Q8_0 -> K-quants Q4_K_M -> I-quants IQ3_S
+
+==========================================================================
+  SECTION A: Q4_0 - symmetric 4-bit, the original block quant
+==========================================================================
+Q4_0 block layout (verified: ggml/src/ggml-common.h block_q4_0):
+  QK4_0 = 32 weights per block
+  bytes = sizeof(ggml_half) + QK4_0/2 = 2 + 16 = 18 bytes
+  bits/weight = 18*8 / 32 = 4.5000
+
+Dequant formula (symmetric):
+  weight = d * (q - 8)     where d = fp16 scale, q = 4-bit value in 0..15
+  (q-8) maps 0..15 onto -8..+7, centered on zero -> SYMMETRIC)
+
+Hero block (8 of the 32 weights, for printability):
+  q (4-bit values) = [3, 7, 1, 6, 9, 2, 5, 8]
+  d (scale)        = 0.5
+
+| i | q  | q-8 |  d*(q-8)  |
+|---|----|-----|-----------|
+| 0 |  3 |  -5 |      -2.5 |
+| 1 |  7 |  -1 |      -0.5 |
+| 2 |  1 |  -7 |      -3.5 |
+| 3 |  6 |  -2 |      -1.0 |
+| 4 |  9 |   1 |      +0.5 |
+| 5 |  2 |  -6 |      -3.0 |
+| 6 |  5 |  -3 |      -1.5 |
+| 7 |  8 |   0 |      +0.0 |
+
+GOLD (for QUANT_TYPES.html):
+  dequant_q4_0(d=0.5, q=[3, 7, 1, 6, 9, 2, 5, 8])
+    = [-2.5, -0.5, -3.5, -1.0, +0.5, -3.0, -1.5, +0.0]
+[check] Q4_0 hero dequant matches spec :  OK  (got [-2.5, -0.5, -3.5, -1.0, +0.5, -3.0, -1.5, +0.0] expected [-2.5, -0.5, -3.5, -1.0, 0.5, -3.0, -1.5, 0.0])
+
+Why symmetric is weak: the range is forced to be centered on zero, so
+a block whose weights are all positive wastes half the codebook. Q4_1
+fixes this by adding an explicit min offset (Section B).
+
+==========================================================================
+  SECTION B: Q4_1 - asymmetric, adds an fp16 min offset
+==========================================================================
+Q4_1 block layout (verified: block_q4_1):
+  QK4_1 = 32 weights per block
+  bytes = 2*sizeof(ggml_half) + QK4_1/2 = 4 + 16 = 20 bytes
+  bits/weight = 20*8 / 32 = 5.0000
+
+Dequant formula (asymmetric affine):
+  weight = m + d * q     m = fp16 min (offset), q in 0..15
+  The min lets q=0 map to the block's actual minimum, so no codebook
+  range is wasted. Costs 2 extra bytes/block (the min) -> 5.0 bpw.
+
+Block: q=[0, 3, 7, 1, 6, 9, 2, 5], d=0.0999755859375, m=0.39990234375
+
+| i | q  | m + d*q   |
+|---|----|-----------|
+| 0 |  0 |   +0.3999 |
+| 1 |  3 |   +0.6998 |
+| 2 |  7 |   +1.0997 |
+| 3 |  1 |   +0.4999 |
+| 4 |  6 |   +0.9998 |
+| 5 |  9 |   +1.2997 |
+| 6 |  2 |   +0.5999 |
+| 7 |  5 |   +0.8998 |
+
+dequant = [0.3999, 0.6998, 1.0997, 0.4999, 0.9998, 1.2997, 0.5999, 0.8998]
+[check] Q4_1 q=0 maps to min m :  OK  (deq[0]=0.39990234375 m=0.39990234375)
+[check] Q4_1 block stays in range [m, m+15d] :  OK
+
+==========================================================================
+  SECTION C: Q8_0 - 8-bit reference, near-lossless
+==========================================================================
+Q8_0 block layout (verified: block_q8_0):
+  QK8_0 = 32 weights per block
+  bytes = sizeof(ggml_half) + QK8_0 = 2 + 32 = 34 bytes
+  bits/weight = 34*8 / 32 = 8.5000
+
+Dequant formula (symmetric int8):
+  weight = d * q     q = signed 8-bit (-128..127)
+  256 levels per weight -> quantization error ~ scale/256, tiny.
+  Q8_0 is the REFERENCE: it is what 'full quality' means locally, and
+  the error of every other type is measured against a Q8_0 baseline.
+
+orig   = [-0.72, 0.31, -0.05, 1.12, -0.88, 0.46, -1.2, 0.93]
+d      = 0.0094451904296875
+q8     = [-76, 33, -5, 119, -93, 49, -127, 98]
+deq    = [-0.7178, 0.3117, -0.0472, 1.124, -0.8784, 0.4628, -1.1995, 0.9256]
+abs err= [0.00217, 0.00169, 0.00277, 0.00398, 0.0016, 0.00281, 0.00046, 0.00437]
+
+max abs error = 0.00437  (vs Q4_0's ~scale/2 ceiling)
+[check] Q8_0 round-trip error < d/2 :  OK  (maxerr=0.00437 d/2=0.00472)
+
+==========================================================================
+  SECTION D: K-QUANTS - super-blocks + double-quantized scales
+==========================================================================
+Super-block layout (verified: QK_K = 256, block_q4_K):
+  A super-block = 256 weights = 8 sub-blocks of 32 weights each.
+  Each sub-block gets its OWN 6-bit scale (+ 6-bit min).
+  Those 6-bit sub-scales are re-scaled by a fp16 super-block d/dmin.
+  => DOUBLE quantization: the scales of the scales are quantized too.
+
+Q4_K pure block size = 2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2
+  = 4 + 12 + 128 = 144 bytes  -> 4.5000 bpw (pure Q4_K)
+
+Other K-quants (pure, same QK_K=256):
+  Q3_K = 110 bytes -> 3.4375 bpw  (16 sub-blocks of 16)
+  Q6_K = 210 bytes -> 6.5625 bpw  (6-bit, int8 sub-scales)
+
+The _M variants MIX types across layers (not a single block format):
+  Q4_K_M ~ 4.84 bpw because attention/embedding/output layers use the
+           higher-precision Q6_K, while the bulk MLP layers use Q4_K.
+  This is why Q4_K_M beats pure Q4_K on perplexity at a small size cost.
+
+Tiny super-block demo (2 sub-blocks of 4, same dequant math):
+  d=0.0200042724609375, dmin=0.01000213623046875
+  sub_scales6=[40, 55], sub_mins6=[10, 20]
+  quants=[2, 5, 1, 8, 3, 7, 0, 6]
+  sub-block 0: eff_scale=d*40=0.8002, eff_min=dmin*10=0.1000
+  sub-block 1: eff_scale=d*55=1.1002, eff_min=dmin*20=0.2000
+  dequant = [1.70036, 4.10088, 0.90019, 6.50139, 3.50075, 7.90169, 0.20004, 6.80145]
+[check] Q4_K sub-block 0 uses scale=d*40 :  OK
+[check] Q4_K dequant == min_j + scale_j*q :  OK
+
+==========================================================================
+  SECTION E: I-QUANTS - importance matrix + lookup tables
+==========================================================================
+I-quants (IQ2/IQ3/IQ4) add two things on top of K-quants:
+
+  1. IMPORTANCE MATRIX (imatrix): run a calibration set through the
+     FP16 model, accumulate the average |activation|^2 per row/column.
+     Rows that drive the output strongly get finer quantization; rows
+     that barely move the output get coarser. The error budget is
+     spent WHERE IT MATTERS, not uniformly.
+
+  2. LOOKUP TABLES (codebooks): instead of w = m + d*q (affine), the
+     packed index addresses a precomputed grid of 8-element vectors.
+     Non-linear -> fits the weight distribution better than any line.
+
+IQ3_S block layout (verified: block_iq3_s, QK_K=256):
+  d       : ggml_half (2 bytes)        super-block scale
+  qs      : 64 bytes             packed 2-bit+1-bit indices
+  qh      : 8 bytes             extra high bits
+  signs   : 32 bytes             1 sign bit per weight
+  scales  : 4 bytes             4-bit block scales
+  total   = 110 bytes -> 3.4375 bpw
+  (same SIZE as Q3_K = 110 bytes/256 = 3.4375 bpw, but much lower ppl)
+
+Conceptual codebook dequant (simplified):
+  1. gather the packed index for a group of 8 weights
+  2. look up the 8-float vector in iq3s_grid (2048-entry codebook)
+  3. apply sign bits + block scale + super-block d
+  4. the imatrix weights the per-layer d so sensitive layers shrink less
+
+weights     = [0.9, -0.8, 0.1, 2.5]
+importance  = [0.2, 0.3, 5.0, 0.1]  (col 2 drives output)
+uniform deq = [0.96, -0.8, 0.08, 2.5]
+abs err     = [0.06, 0.0, 0.02, 0.0]
+importance-weighted total error = 0.1120
+  -> I-quants shift the step boundaries so the high-importance column
+     quantizes with ~zero error, accepting more error on col 3 instead.
+[check] IQ3_S == Q3_K size (3.4375 bpw) :  OK  (IQ3_S=110 vs Q3_K=110)
+[check] IQ3_S bpw = 3.4375 :  OK
+
+==========================================================================
+  SECTION F: COMPARISON TABLE - bpw / quality / speed / use case
+==========================================================================
+Pure-format bpw (struct sizes, verified in sections A-E):
+
+| type     | block | bytes | bpw    | family   | scale model          |
+|----------|-------|-------|--------|----------|----------------------|
+| Q4_0     |    32 |    18 | 4.5000 | legacy   | 1 fp16 d, symmetric  |
+| Q4_1     |    32 |    20 | 5.0000 | legacy   | fp16 d + fp16 m      |
+| Q5_1     |    32 |    24 | 6.0000 | legacy   | fp16 d+m + 1 high bit |
+| Q8_0     |    32 |    34 | 8.5000 | legacy   | 1 fp16 d, int8       |
+| Q2_K     |   256 |    84 | 2.6250 | k-quant  | super d/dmin, 4-bit sub-scale |
+| Q3_K     |   256 |   110 | 3.4375 | k-quant  | super d, 6-bit sub-scale |
+| Q4_K     |   256 |   144 | 4.5000 | k-quant  | super d/dmin, 6-bit sub-scale+min |
+| Q5_K     |   256 |   176 | 5.5000 | k-quant  | super d/dmin, 6-bit + 1 high bit |
+| Q6_K     |   256 |   210 | 6.5625 | k-quant  | super d, int8 sub-scale |
+| IQ3_S    |   256 |   110 | 3.4375 | i-quant  | super d, 4-bit scale, codebook |
+
+Model-level bpw for the _M / _S MIXED variants (Llama-2-7B, k-quants README):
+
+| variant  | bpw   | note                                  |
+|----------|-------|---------------------------------------|
+| Q2_K     |  3.35 | 2-bit baseline, often degraded        |
+| Q3_K_S   |  3.50 | small 3-bit                           |
+| Q3_K_M   |  3.91 | medium 3-bit                          |
+| Q3_K_L   |  4.27 | large 3-bit, some Q5_K layers         |
+| Q4_K_S   |  4.58 | small 4-bit                           |
+| Q4_K_M   |  4.84 | DEFAULT: best quality/size tradeoff   |
+| Q5_K_S   |  5.52 | small 5-bit                           |
+| Q5_K_M   |  5.68 | medium 5-bit                          |
+| Q6_K     |  6.56 | near-lossless, ~Q8_0 quality smaller  |
+
+Picking rules of thumb (decode is bandwidth-bound, so bpw ~= speed):
+  - Most VRAM/RAM constrained:  IQ3_S  or  Q3_K_M   (3.4-3.9 bpw)
+  - Sweet spot (default):       Q4_K_M              (~4.8 bpw)
+  - Best quality that still saves space: Q6_K       (~6.6 bpw)
+  - Reference / calibration:    Q8_0                (8.5 bpw)
+[check] Q4_K_M bpw 4.84 in documented range :  OK
+[check] Q4_0 is 4.5 bpw exactly :  OK
+[check] Q8_0 is 8.5 bpw exactly :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

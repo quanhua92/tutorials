@@ -1,0 +1,156 @@
+ggml_backend.py - reference impl. All numbers below feed GGML_BACKEND.md.
+pure Python stdlib (no torch, no numpy). Mirrors ggml/include/ggml.h.
+
+========================================================================
+  SECTION A: ggml_tensor + ggml_cgraph (build a tiny graph)
+========================================================================
+The ggml_tensor struct (from ggml/include/ggml.h):
+  { type, ne[4], nb[4], op, op_params[], flags, src[10], data, name }
+  ne[0] is the contiguous (innermost) dim; src[] are the DAG edges.
+
+Lifecycle:  ggml_init(arena) -> build tensors+ops (record edges) ->
+  ggml_build_forward_expand (topo-sort) -> plan/allocate -> compute -> read
+
+Built tensors (note: op != NONE means the value is NOT computed yet):
+| name  | op      | type | ne   | nbytes | src            | flags   |
+|-------|---------|------|------|--------|----------------|---------|
+| A     | NONE    | F32  | [1]  | 4      | -              | INPUT   |
+| input | NONE    | F32  | [1]  | 4      | -              | INPUT   |
+| K     | NONE    | F32  | [1]  | 4      | -              | -       |
+| mul(A,input) | MUL     | F32  | [1]  | 4      | A,input        | -       |
+| add(mul(A,input),K) | ADD     | F32  | [1]  | 4      | mul(A,input),K | OUTPUT  |
+
+ggml_build_forward_expand(gf, C) -> post-order DFS from the output:
+  nodes (ops, in topo order): ['mul(A,input)', 'add(mul(A,input),K)']
+  leafs (params/inputs):      ['A', 'input', 'K']
+(every source is registered before the tensor that consumes it)
+
+After graph_compute, read the output:
+  B = mul(A,input) = 10.0
+  C = add(mul(A,input),K) = 13.0
+[check] B == mul(A=2.0, input=5.0) == 10.0: True -> OK
+[check] C == add(B=10.0, K=3.0) == 13.0: True -> OK
+
+========================================================================
+  SECTION B: topological sort (post-order DFS vs Kahn's algorithm)
+========================================================================
+ggml must run every op only AFTER its inputs are ready. Two ways to
+order a DAG, both produce a legal topological sort:
+
+DAG edges (src -> consumer):
+  A -> mul(A,input)
+  K -> add(mul(A,input),K)
+  input -> mul(A,input)
+  mul(A,input) -> add(mul(A,input),K)
+
+(1) post-order DFS (ggml_build_forward_expand):
+    ['mul(A,input)', 'add(mul(A,input),K)']
+
+(2) Kahn's algorithm (BFS, emit zero-in-degree first):
+    ['A', 'input', 'K', 'mul(A,input)', 'add(mul(A,input),K)']
+[check] post-order DFS is a legal topo order: True -> OK
+[check] Kahn's order is a legal topo order: True -> OK
+
+Note: the two orders differ in leaf placement, but BOTH respect every
+data dependency. ggml uses the DFS form because it is a single pass over
+src[] with no in-degree bookkeeping.
+
+========================================================================
+  SECTION C: backend dispatch (same graph, CPU vs Metal vs CUDA)
+========================================================================
+A ggml_cgraph is backend-agnostic. The backend decides, for each op:
+  * which KERNEL runs (SIMD vector loop vs GPU compute shader)
+  * the COMPUTE DTYPE (CPU=F32; GPU often downcasts to F16 for bandwidth)
+  * the DEVICE memory (RAM vs unified-memory GPU vs VRAM)
+
+Backend: ggml-cpu  (device=RAM, compute_dtype=F32)
+| tensor       | op   | kernel              | acceleration          |
+|--------------|------|---------------------|-----------------------|
+| mul(A,input) | MUL  | ggml_vec_mul_f32    | AVX2/AVX512/NEON SIMD |
+| add(mul(A,input),K) | ADD  | ggml_vec_add_f32    | AVX2/AVX512/NEON SIMD |
+| A            | NONE | (data)              | -                     |
+| input        | NONE | (data)              | -                     |
+| K            | NONE | (data)              | -                     |
+
+Backend: ggml-metal  (device=Apple GPU (unified memory), compute_dtype=F16)
+| tensor       | op   | kernel              | acceleration          |
+|--------------|------|---------------------|-----------------------|
+| mul(A,input) | MUL  | kernel_mul_f16      | Metal compute shader  |
+| add(mul(A,input),K) | ADD  | kernel_add_f16      | Metal compute shader  |
+| A            | NONE | (data)              | -                     |
+| input        | NONE | (data)              | -                     |
+| K            | NONE | (data)              | -                     |
+
+Backend: ggml-cuda  (device=NVIDIA GPU (VRAM), compute_dtype=F16)
+| tensor       | op   | kernel              | acceleration          |
+|--------------|------|---------------------|-----------------------|
+| mul(A,input) | MUL  | mul_f32             | CUDA elementwise kernel |
+| add(mul(A,input),K) | ADD  | add_f32             | CUDA elementwise kernel |
+| A            | NONE | (data)              | -                     |
+| input        | NONE | (data)              | -                     |
+| K            | NONE | (data)              | -                     |
+
+Key insight: the GRAPH IS IDENTICAL. Only the kernel table + dtype change.
+ggml_backend_sched can even SPLIT one graph: route the MUL_MAT to the GPU
+and a tiny reshape to the CPU, inserting a CPY (copy) edge at the boundary.
+
+MUL_MAT demo: W=[[1,2],[3,4]] @ X=I -> Y = [1.0, 2.0, 3.0, 4.0]
+[check] 2x2 matmul W@I == W: True -> OK
+
+========================================================================
+  SECTION D: op fusion (mul -> add -> silu in ONE kernel pass)
+========================================================================
+Consecutive ELEMENT-WISE ops can be fused: the intermediates stay in
+registers and never hit memory. Inference is bandwidth-bound, so this is
+the single biggest win on memory-bound layers.
+
+Separate kernels (one pass per op):
+| pass | op   | reads        | writes       | traffic |
+|------|------|--------------|--------------|---------|
+| MUL  | MUL  |  16B (a+x) |   8B (mul(a,x)) |   24B   |
+| ADD  | ADD  |  16B (mul(a,x)+b) |   8B (add(mul(a,x),b)) |   24B   |
+| SILU | SILU |   8B (add(mul(a,x),b)) |   8B (silu(add(mul(a,x),b))) |   16B   |
+  separate total traffic: 64B (T1 and T2 each written AND read back)
+
+Fused plan -> 1 kernel pass(es):
+  kernel #1: MUL -> ADD -> SILU
+             reads=24B (a+x+b), writes=8B (silu(add(mul(a,x),b)))
+  fused total traffic: 32B (T1, T2 never leave registers)
+
+Bandwidth saved: 64B -> 32B (50% reduction)
+
+[check] fused result == separate result (fusion is EXACT): True
+[check] 50% == 50% traffic reduction (2-elem chain): True
+
+========================================================================
+  SECTION G: GOLD lifecycle trace (the centerpiece)
+========================================================================
+Full lifecycle on the canonical 3-node graph:
+  A = const(2.0), input = 5.0, B = mul(A, input), K = const(3.0),
+  C = add(B, K)
+
+STEP 1  ggml_init(arena=64KiB)
+STEP 2  build tensors + ops (no computation, edges recorded)
+STEP 3  ggml_build_forward_expand(gf, C)  [topo-sort]
+        nodes = ['mul(A,input)', 'add(mul(A,input),K)']
+        leafs = ['A', 'input', 'K']
+STEP 4  plan + allocate (backend assigns each tensor a buffer)
+STEP 5  graph_compute (execute in topo order):
+| order | node | op   | src            | result |
+|-------|------|------|----------------|--------|
+| 1     | mul(A,input) | MUL  | A,input        | 10.0   |
+| 2     | add(mul(A,input),K) | ADD  | mul(A,input),K | 13.0   |
+STEP 6  read: B = 10.0,  C = 13.0
+
+[check] B == 10.0: True -> OK
+[check] C == 13.0: True -> OK
+[check] topo order is legal (deps before consumers): True -> OK
+
+GOLD (recomputed & badge-checked in ggml_backend.html):
+  topo order of op nodes = ['mul(A,input)', 'add(mul(A,input),K)']
+  B = 10.0
+  C = 13.0
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

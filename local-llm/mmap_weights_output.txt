@@ -1,0 +1,186 @@
+mmap_weights.py -- every value below is computed by this file.
+
+======================================================================
+SECTION A: mmap() maps a file into virtual address space (vs full read())
+======================================================================
+mmap(addr, length, prot, flags, fd, offset) maps `length` bytes of a
+file into the calling process's virtual address space. The file then
+appears as a flat array of bytes; the fd can be closed immediately.
+Nothing is read from disk yet -- only page-table entries are set up.
+
+  created model file: model.gguf  (8 pages x 4096 B = 32768 B)
+
+  full read() load: read all 32768 bytes into a bytes object
+    -> startup cost ~ file_size / disk_bw = sequential read of the whole file
+    -> RSS = 32768 bytes immediately (everything resident)
+
+  mmap(fd, 32768, PROT_READ, MAP_PRIVATE): mapped 32768 bytes
+    -> bytes transferred at mmap() return ~ 0 (page tables only)
+    -> RSS right after mmap ~ 0 file bytes resident
+
+  on-demand byte reads through the mapped view:
+    mm[0] = 108  (file byte = 108)
+    mm[4096] = 148  (file byte = 148)
+    mm[8197] = 76  (file byte = 76)
+    mm[32767] = 87  (file byte = 87)
+[check] mmap bytes match the file bytes at every sampled offset: OK
+
+  --> A pointer into the mmap'd region IS a pointer into the file.
+      Reading it lazily faults the 4 KiB page from disk; the rest of
+      the file stays un-read until (and unless) it is touched.
+
+======================================================================
+SECTION B: page faults -- pages are loaded on demand (lazy / demand paging)
+======================================================================
+After mmap() returns, every page is marked 'not present'. The first
+read of a byte on a page raises a page fault -> the kernel reads that
+4 KiB page from disk (a MAJOR fault), installs the PTE, and resumes.
+The next read of any byte on the SAME page is a direct load: no fault.
+
+  access plan (virtual page indices): [0, 0, 3, 3, 7, 0, 7, 12, 7, 12, 3]
+  step page  kind    major  minor  resident 
+  0    0     major   1      0      1        
+  1    0     hit     1      0      1        
+  2    3     major   2      0      2        
+  3    3     hit     2      0      2        
+  4    7     major   3      0      3        
+  5    0     hit     3      0      3        
+  6    7     hit     3      0      3        
+  7    12    major   4      0      4        
+  8    7     hit     4      0      4        
+  9    12    hit     4      0      4        
+  10   3     hit     4      0      4        
+[check] major faults == number of DISTINCT pages touched: OK
+[check] no page is read from disk twice (page cache): OK
+[check] repeated touches never fault: OK
+
+  project to a 4.0 GB model (page size = 4 KiB):
+    total pages         = 4.0 GB / 4096 B = 1,048,576
+    pages touched @ 40% = 419,430
+    resident (faulted)  = 419,430 pages = 1.60 GB
+    untouched & unloaded = 629,146 pages = 2.40 GB
+[check] 40% of a 4 GB model faulted in = 1.60 GB resident: OK
+
+  --> Lazy loading means RSS tracks what inference actually reads,
+      not the file size. Layers never executed (e.g. CPU-only layers
+      when everything fits on the GPU) may never fault in at all.
+
+======================================================================
+SECTION C: copy-on-write (MAP_PRIVATE) -- quantize/dequantize in place
+======================================================================
+MAP_PRIVATE (Python: ACCESS_COPY) gives a copy-on-write mapping. Reads
+SHARE the page-cache page (zero copy). The first WRITE to a page faults
+a PRIVATE copy into being; the on-disk file is never modified. This is
+how llama.cpp can dequantize or process a weight in place without
+corrupting the GGUF.
+
+  MAP_PRIVATE (ACCESS_COPY) write at offset 10:
+    in-mmap view : 205 -> 50
+    file on disk : 205 (unchanged)
+[check] COW write changes the in-memory view: OK
+[check] COW write does NOT change the file on disk: OK
+
+  copy-on-write cost: writing K of M pages triggers K COW faults
+    write  0/32 pages -> 0 COW copies (0% of model RAM duplicated)
+    write  4/32 pages -> 4 COW copies (12% of model RAM duplicated)
+    write 16/32 pages -> 16 COW copies (50% of model RAM duplicated)
+    write 32/32 pages -> 32 COW copies (100% of model RAM duplicated)
+[check] COW duplicates only written pages, not the whole file: OK
+
+  --> Writes are private. You can munge weights in memory (dequant,
+      reorder, pad) and the GGUF on disk stays byte-identical. RAM
+      grows by one page per page actually written.
+
+======================================================================
+SECTION D: multi-process sharing -- one physical page per (file, page)
+======================================================================
+The OS page cache stores each file page once in RAM. Every process that
+mmaps that page (read-only, or read of a MAP_PRIVATE/MAP_SHARED region)
+gets a PTE pointing at the SAME physical frame. So N processes loading
+the same GGUF share physical pages -- total RAM ~ file size, not N x it.
+
+  3 processes, each touches the same 30 pages:
+    pid 0: major=30 minor=0 resident=30 pages
+    pid 1: major=0 minor=30 resident=30 pages
+    pid 2: major=0 minor=30 resident=30 pages
+
+  logical sum of resident pages = 90 (3 x 30)
+  physical pages in page cache  = 30  (each page read from disk ONCE)
+  sharing ratio (logical/phys)  = 3.0x
+[check] 3 processes share 1 physical copy -> 3.0x logical/physical: OK
+[check] disk reads == distinct pages (not 3x): OK
+
+  project: 3 Ollama instances loading the SAME 4.0 GB GGUF
+    resident per instance (40% of model) = 1.60 GB
+    WITHOUT sharing (3 copies)           = 4.80 GB
+    WITH page-cache sharing (1 copy)     = 1.60 GB
+    RAM saved                            = 3.20 GB (67%)
+[check] sharing 3 instances saves 2/3 of the weight RAM: OK
+
+  --> The page cache is the sharing mechanism. mmap (MAP_SHARED or a
+      read-only MAP_PRIVATE) makes every process reference the single
+      cached frame instead of its own private copy.
+
+======================================================================
+SECTION E: pread() fallback -- explicit on-demand reads when mmap is absent
+======================================================================
+When mmap() is unavailable (some networked filesystems, sandboxes,
+locked-down runtimes), llama.cpp falls back to pread(): explicit,
+positional reads of just the byte range needed. The effect is the same
+lazy loading, but driven by explicit calls instead of transparent page
+faults. pread never gets the free multi-process page-cache sharing.
+
+  access plan: [0, 3, 3, 7, 0, 12, 7]
+  pread() syscalls issued   = 4  (one per DISTINCT page)
+  pread() bytes transferred = 16384  (4 x 4096)
+  pages resident in process = 4
+[check] pread loads each distinct page once (caller-side cache): OK
+[check] pread bytes = distinct pages x PAGE_SIZE: OK
+
+  mmap vs pread -- same lazy loading, different mechanism:
+    mechanism driver                      transparent?  shared across procs?
+    mmap      kernel page faults          yes           yes (page cache)
+    pread     explicit read() calls       no            no (caller buffer)
+[check] both mmap and pread achieve on-demand loading of only touched pages: OK
+
+  --> pread is the escape hatch. It loses transparent faulting and
+      cross-process sharing, but keeps the key win: don't read pages
+      you never use.
+
+======================================================================
+SECTION F: practical impact -- startup time and RSS (4 GB model)
+======================================================================
+Putting it together for a 4.0 GB GGUF: a full read() load must pull the
+entire file before the first token (startup ~ file_size / disk_bw, RSS
+= file_size at once). With mmap(), startup is page-table setup (~0.1 s)
+and RSS climbs only as pages fault in during inference.
+
+  model size             = 4.0 GB
+  disk seq read bandwidth= 0.333 GB/s (SATA SSD, cold/busy)
+  full read() startup    = 4.0 / 0.333 = 12.0 s
+  mmap() startup         = ~0.1 s (page-table setup only)
+  startup speedup        = 12.0 / 0.1 = 120x
+[check] 4 GB / (1/3 GB/s) = 12.0 s full-load startup: OK
+[check] mmap startup ~0.1 s: OK
+
+  RSS during inference:
+    full read() load RSS = 4.00 GB (whole file resident at t0)
+    mmap RSS @ 40% touched = 1.60 GB (only faulted pages)
+    RSS reduction        = 2.40 GB (60%)
+[check] 40% of 4 GB resident under mmap = 1.60 GB: OK
+
+  startup time across model sizes (mmap ~flat, read ~linear):
+    model     read() load     mmap()      speedup
+    1.0       3.0 s           0.1 s       30x
+    4.0       12.0 s          0.1 s       120x
+    8.0       24.0 s          0.1 s       240x
+    14.0      42.0 s          0.1 s       420x
+    40.0      120.0 s         0.1 s       1200x
+
+  --> mmap makes startup nearly independent of model size and bounds
+      RSS to the pages inference actually reads. The cost: page-fault
+      latency on first touch of each page (hidden by readahead).
+
+======================================================================
+SECTION DONE -- all sections printed
+======================================================================

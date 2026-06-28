@@ -1,0 +1,181 @@
+gguf_format.py - GGUF (GPT-Generated Unified Format) binary layout.
+Pure Python stdlib (struct only). Numbers below feed GGUF_FORMAT.md.
+Sources: gguf-py/gguf/gguf.py + ggml.h + HuggingFace GGUF docs.
+
+Four sections: header -> KV metadata -> tensor info -> aligned tensor_data.
+
+==========================================================================
+  SECTION A: HEADER - magic, version, counts (24 bytes fixed)
+==========================================================================
+GGUF header layout (verified: gguf-py/gguf/gguf.py GGUF_MAGIC/VERSION):
+  offset 0   magic             uint32 LE = 0x46554747 (ASCII 'GGUF')
+  offset 4   version           uint32 LE = 3
+  offset 8   tensor_count      uint64
+  offset 16  metadata_kv_count uint64
+  offset 24  ... metadata_kv[] / tensor_info[] / tensor_data ...
+
+Magic sanity: 0x46554747 little-endian = bytes 47475546 = ASCII 'GGUF'
+
+Built header (24 bytes):
+000000  47 47 55 46 03 00 00 00 01 00 00 00 00 00 00 00  |GGUF............|
+000010  02 00 00 00 00 00 00 00                          |........|
+
+Parsed back:
+  magic          = 0x46554747
+  version        = 3
+  tensor_count   = 1
+  kv_count       = 2
+
+[check] magic == 0x46554747 :  OK  (0x46554747)
+[check] version == 3 :  OK  (3)
+[check] header is exactly 24 bytes :  OK  (24)
+[check] cursor advanced to 24 after header :  OK  (pos=24)
+
+==========================================================================
+  SECTION B: KV METADATA - typed key/value pairs
+==========================================================================
+Every KV pair: key(string) + value_type(uint32) + value(type-dependent).
+Strings = uint64 length + UTF-8 bytes (NO null terminator).
+ARRAY = array_type(uint32) + array_len(uint64) + array_len scalars.
+
+GGUFValueType enum (the value_type uint32):
+   0  UINT8        1  INT8         2  UINT16       3  INT16     
+   4  UINT32       5  INT32        6  FLOAT32      7  BOOL      
+   8  STRING       9  ARRAY       10  UINT64      11  INT64     
+  12  FLOAT64   
+
+Building 5 KV pairs (showing the type system):
+  total KV bytes = 199
+
+key                          type     value
+------------------------------------------------------------
+general.architecture         STRING   'llama'
+general.file_type            UINT32   1
+tokenizer.ggml.bos           BOOL     True
+llama.context_length         UINT32   4096
+llama.embedding_length       ARRAY    [4096, 4096]
+
+[check] 5 KV pairs parsed fully (cursor at end) :  OK  (pos=199 len=199)
+[check] BOOL True survives round-trip as 1 byte :  OK
+[check] STRING has uint64 length prefix (8 bytes) + payload :  OK
+
+==========================================================================
+  SECTION C: TENSOR INFO TABLE - name, dims, type, offset
+==========================================================================
+Each tensor info entry:
+  name    : string
+  n_dims  : uint32
+  dims[]  : n_dims x uint64, row-major (dim[0] = outermost)
+  type    : uint32 (ggml_type enum: F32=0, F16=1, Q4_0=2, Q4_K=12, ...)
+  offset  : uint64, RELATIVE to the start of the tensor_data section
+           (NOT the file start - the padding in Section D is why)
+
+Built tensor info for 'token_embd.weight' dims=[4, 2] type=F32 offset=0:
+000000  11 00 00 00 00 00 00 00 74 6f 6b 65 6e 5f 65 6d  |........token_em|
+000010  62 64 2e 77 65 69 67 68 74 02 00 00 00 04 00 00  |bd.weight.......|
+000020  00 00 00 00 00 02 00 00 00 00 00 00 00 00 00 00  |................|
+000030  00 00 00 00 00 00 00 00 00                       |.........|
+  (57 bytes)
+
+Parsed back:
+  name      = token_embd.weight
+  dims      = [4, 2]
+  type_id   = 0 (F32)
+  offset    = 0
+
+  n_elements = 8
+  data bytes (F32) = 8 * 4 = 32
+[check] tensor name round-trips :  OK
+[check] dims round-trip :  OK
+[check] type F32==0 :  OK
+[check] offset round-trips :  OK
+[check] tensor info parsed fully :  OK
+
+==========================================================================
+  SECTION D: FULL BUILD - 2 KV + 1 tensor, alignment, round-trip
+==========================================================================
+Assemble a complete (tiny) valid GGUF file in memory, then parse it.
+This is the GOLD value for gguf_format.html.
+
+Layout:
+  header              [   0 ..  24)   24 bytes
+  metadata_kv         [ 24 .. 102)   78 bytes  (2 pairs)
+  tensor_info         [102 .. 159)   57 bytes  (1 tensor)
+  alignment padding   [159 .. 160)    1 bytes  (align_up(159,32)=160)
+  tensor_data         [160 .. 192)   32 bytes  (8 x F32)
+  TOTAL FILE SIZE     = 192 bytes
+
+Full hex dump:
+000000  47 47 55 46 03 00 00 00 01 00 00 00 00 00 00 00  |GGUF............|
+000010  02 00 00 00 00 00 00 00 14 00 00 00 00 00 00 00  |................|
+000020  67 65 6e 65 72 61 6c 2e 61 72 63 68 69 74 65 63  |general.architec|
+000030  74 75 72 65 08 00 00 00 05 00 00 00 00 00 00 00  |ture............|
+000040  6c 6c 61 6d 61 11 00 00 00 00 00 00 00 67 65 6e  |llama........gen|
+000050  65 72 61 6c 2e 66 69 6c 65 5f 74 79 70 65 04 00  |eral.file_type..|
+000060  00 00 01 00 00 00 11 00 00 00 00 00 00 00 74 6f  |..............to|
+000070  6b 65 6e 5f 65 6d 62 64 2e 77 65 69 67 68 74 02  |ken_embd.weight.|
+000080  00 00 00 04 00 00 00 00 00 00 00 02 00 00 00 00  |................|
+000090  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |................|
+0000a0  00 00 80 3f 00 00 00 40 00 00 40 40 00 00 80 40  |...?...@..@@...@|
+0000b0  00 00 a0 40 00 00 c0 40 00 00 e0 40 00 00 00 41  |...@...@...@...A|
+
+Section boundaries overlaid on the first bytes:
+  bytes  0..3   magic        = 47475546 = 'GGUF'
+  bytes  4..7   version      = 03000000 = 3
+
+Round-trip parse:
+  magic = 0x46554747, version = 3
+  KV general.architecture = llama
+  KV general.file_type = 1
+  tensor 'token_embd.weight' dims=[4, 2] type=F32 offset=0
+  weights = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+[check] magic == 0x46554747 :  OK  (0x46554747)
+[check] version == 3 :  OK  (3)
+[check] tensor_count == 1 :  OK
+[check] kv_count == 2 :  OK
+[check] KV[0] general.architecture == 'llama' :  OK
+[check] KV[1] general.file_type == 1 :  OK
+[check] tensor name == 'token_embd.weight' :  OK
+[check] tensor dims == [4,2] :  OK
+[check] tensor type == F32 (0) :  OK
+[check] tensor offset == 0 :  OK
+[check] weights round-trip exactly :  OK
+[check] tensor_data starts at a multiple of 32 :  OK  (160 % 32)
+[check] padding is correct :  OK
+
+GOLD (for gguf_format.html):
+  magic    = 0x46554747
+  version  = 3
+  file_len = 192
+  tensor_data_offset = 160
+  weights  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+==========================================================================
+  SECTION E: LINEAGE - GGML (flat) -> GGUF (why each step)
+==========================================================================
+WHY GGUF exists: the old GGML format was a flat dump of tensors with
+NO self-describing metadata. Adding a new model architecture meant
+editing the C loader code and bumping a breaking format version.
+
+GGUF fixes this with a versioned schema + a typed KV section that can
+describe ANY architecture / tokenizer / chat template from inside the
+file. One loader, many models, backward compatible.
+
+stage            what changed                                   why
+------------------------------------------------------------------------------
+GGML (old flat)  tensors only, no metadata, breaking change per architecture every new model = a code change + a new loader
+GGUF v1/v2       + KV metadata + version field + single-file layout architecture/tokenizer described IN the file
+GGUF v3 (now)    + general.alignment KV + tokenizer.ggml.* + chat template KV, mmap-friendly aligned tensor_data one loader runs every architecture; mmap loads weights lazily
+
+The mmap win: tensor_data is aligned to a multiple of 32, so the OS can mmap it directly. On a 4 GB
+model that is the difference between a ~12 s eager load and a ~0.1 s
+lazy startup (pages are faulted in on first access).
+See MMAP_WEIGHTS.md for the page-fault / copy-on-write mechanics.
+[check] GGUF magic is ASCII 'GGUF' :  OK
+[check] current version is 3 :  OK
+[check] default alignment is 32 :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

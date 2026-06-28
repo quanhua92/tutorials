@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GGUF Format &mdash; Interactive Hex Viewer</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0a0e14; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --border:#30363d;
+    --accent:#f97316;        /* orange accent (header) */
+    --green:#27ae60;         /* tensor_data */
+    --red:#c0392b;
+    --blue:#58a6ff;          /* metadata_kv */
+    --gold:#f1c40f;          /* tensor_info */
+    --purple:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem;line-height:1.5}
+  a{color:var(--accent)}
+  h1{font-size:1.32rem;margin:.2rem 0 .1rem}
+  h2{font-size:1rem;color:var(--muted);margin:1.7rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem;display:flex;align-items:center;gap:.5rem}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem;max-width:980px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.95rem 1.05rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.76rem;line-height:1.55;margin-bottom:.5rem}
+  .badge{display:inline-block;background:#3a2a14;color:var(--accent);border:1px solid var(--accent);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.4rem;
+         text-decoration:none}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+     background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);
+     font-size:.82rem;color:var(--muted);line-height:1.5}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+
+  /* legend */
+  .legend{display:flex;flex-wrap:wrap;gap:.7rem 1.2rem;margin:.2rem 0 .8rem;font-size:.74rem;color:var(--muted)}
+  .legend .sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px;border:1px solid rgba(255,255,255,.15)}
+
+  /* hex grid */
+  .hexwrap{display:grid;grid-template-columns:1fr;gap:0;overflow-x:auto}
+  table.hex{border-collapse:collapse;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+            font-size:.74rem;font-variant-numeric:tabular-nums;width:100%}
+  table.hex td{border:0;padding:0;vertical-align:top}
+  table.hex .off{color:var(--muted);padding-right:14px;white-space:nowrap;user-select:none}
+  table.hex .cell{display:inline-block;width:21px;text-align:center;color:var(--ink);
+                  cursor:pointer;border-radius:3px;padding:1px 0;margin:0 1px}
+  table.hex .cell:hover{outline:1px solid var(--ink)}
+  table.hex .ascii{color:var(--muted);padding-left:12px;white-space:nowrap;user-select:text}
+  table.hex .ach{display:inline-block;width:11px;text-align:center;cursor:pointer}
+  /* section tints (light, on dark bg) */
+  .s-header      {background:rgba(249,115,22,.30)}   .ach.header{color:var(--accent)}
+  .s-kv          {background:rgba(88,166,255,.26)}   .ach.kv{color:var(--blue)}
+  .s-tensor_info {background:rgba(241,196,15,.24)}   .ach.tensor_info{color:var(--gold)}
+  .s-padding     {background:rgba(139,148,158,.20)}  .ach.padding{color:var(--muted)}
+  .s-tensor_data {background:rgba(39,174,96,.28)}    .ach.tensor_data{color:var(--green)}
+  .sel{outline:2px solid #fff !important;background:rgba(255,255,255,.18) !important}
+
+  /* decode readout */
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem .85rem;margin-top:.5rem;
+           white-space:pre-wrap;min-height:2.2rem}
+  .readout b{color:var(--accent)}
+  .readout .k{color:var(--blue)}
+  .readout .g{color:var(--green)}
+  .readout .y{color:var(--gold)}
+  .readout .dim{color:var(--muted)}
+
+  /* structure tree */
+  .tree{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.76rem}
+  .tree .grp{color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-size:.68rem;
+             margin:.55rem 0 .15rem;border-bottom:1px solid var(--grid);padding-bottom:2px}
+  .tree .row{display:flex;gap:.5rem;align-items:center;padding:2px 4px;border-radius:4px;cursor:pointer;color:var(--ink)}
+  .tree .row:hover{background:var(--panel2)}
+  .tree .row.act{background:var(--panel2);outline:1px solid var(--border)}
+  .tree .row .rng{color:var(--muted);font-size:.68rem;min-width:96px}
+  .tree .row .nm{flex:1}
+  .tree .row .dot{width:8px;height:8px;border-radius:2px;flex:0 0 8px;border:1px solid rgba(255,255,255,.15)}
+
+  /* stat chips */
+  .chips{display:flex;flex-wrap:wrap;gap:.5rem;margin:.5rem 0 .2rem}
+  .chip{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;
+        font-family:ui-monospace,monospace;font-size:.76rem;font-variant-numeric:tabular-nums}
+  .chip b{color:var(--accent)}
+  .chip.g b{color:var(--green)}
+  .chip.y b{color:var(--gold)}
+
+  #check{display:inline-block;border:1px solid var(--green);border-radius:6px;padding:5px 12px;
+         font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;color:var(--green)}
+  #check.fail{border-color:var(--red);color:var(--red)}
+  .formula{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.55rem .8rem;
+           margin:.4rem 0;font-family:ui-monospace,monospace;font-size:.74rem;color:var(--ink);
+           white-space:pre-wrap;overflow-x:auto;line-height:1.5}
+  .formula b{color:var(--accent)}
+  .note{font-size:.74rem;color:var(--muted);font-style:italic;margin-top:.4rem}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&#8592; back to Local LLM dashboard</a>
+  <h1>GGUF Format &mdash; <span style="color:#f97316">interactive hex viewer</span>
+    <a class="badge md" title="Full guide — lineage, layout, pitfalls, cheat sheet" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/GGUF_FORMAT.md">&#128214; GGUF_FORMAT.md</a>
+    <a class="badge" title="Ground-truth source code (pure Python stdlib)" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/gguf_format.py">&#128196; gguf_format.py</a>
+  </h1>
+  <div class="sub">
+    A tiny valid GGUF file built byte-by-byte in JavaScript (identical logic to <code>gguf_format.py</code> Section D).
+    Click any byte &mdash; or any row in the structure tree &mdash; to see which field it belongs to and how it decodes.
+    The four sections: <b style="color:#f97316">header</b> (magic/version/counts) &rarr;
+    <b style="color:#58a6ff">metadata KV</b> (typed key/value) &rarr;
+    <b style="color:#f1c40f">tensor info</b> (name/dims/type/offset) &rarr;
+    <span style="color:#8b949e">padding</span> &rarr;
+    <b style="color:#27ae60">tensor data</b> (the aligned weight blob). The gold-check pins <code>magic</code> to the exact <code>.py</code> output.
+  </div>
+  <div class="guide-callout">&#128214; <a href="https://github.com/quanhua92/tutorials/blob/main/local-llm/GGUF_FORMAT.md">Read the full guide</a> &mdash; the GGML&rarr;GGUF lineage, binary-layout mermaid, killer pitfalls (offset vs file offset, little-endian, alignment), and the cheat sheet. This page is the interactive companion.</div>
+  <p><span id="check">check: ...</span></p>
+
+  <div class="chips" id="chips"></div>
+
+  <!-- ===== PANEL 1: hex viewer ===== -->
+  <h2><span class="n">&#9312;</span> Hex dump &mdash; click a byte to decode its field</h2>
+  <div class="panel">
+    <div class="legend">
+      <span><span class="sw" style="background:rgba(249,115,22,.55)"></span>header (24 B)</span>
+      <span><span class="sw" style="background:rgba(88,166,255,.5)"></span>metadata KV (78 B)</span>
+      <span><span class="sw" style="background:rgba(241,196,15,.5)"></span>tensor info (57 B)</span>
+      <span><span class="sw" style="background:rgba(139,148,158,.45)"></span>alignment padding (1 B)</span>
+      <span><span class="sw" style="background:rgba(39,174,96,.55)"></span>tensor data (32 B)</span>
+    </div>
+    <div class="hexwrap" id="hexwrap"></div>
+    <div class="note">Every byte is shaded by the section it belongs to. All integers are little-endian; strings are uint64 length + UTF-8 bytes (no null terminator).</div>
+    <div id="decode" class="readout">Click a byte above (or a field below) to decode it&hellip;</div>
+  </div>
+
+  <!-- ===== PANEL 2: structure tree ===== -->
+  <h2><span class="n">&#9313;</span> Structure tree &mdash; every field, clickable</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the same 192 bytes as an annotated field list. Byte ranges are <code>[start .. end)</code>.
+      The gap between tensor info and tensor data is the alignment padding (align_up to 32).</div>
+    <div class="tree" id="tree"></div>
+  </div>
+
+  <!-- ===== PANEL 3: layout formula ===== -->
+  <h2><span class="n">&#9314;</span> Layout formula &mdash; how the offsets add up</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the arithmetic that places tensor_data. Identical to <code>align_up(pos, 32)</code> in <code>gguf_format.py</code>.</div>
+    <div class="formula" id="formula"></div>
+    <div class="note">The padding exists so <code>tensor_data</code> starts at a multiple of <b>general.alignment</b> (default 32) &mdash; that is what lets the OS mmap the weight blob directly. See MMAP_WEIGHTS.md.</div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================
+   Reproduce gguf_format.py Section D's tiny GGUF build identically
+   in JS: build the 192-byte buffer field by field, then parse it
+   back to gold-check magic==0x46554747 and version==3.
+   ============================================================ */
+
+var MAGIC = 0x46554747;
+var VERSION = 3;
+var ALIGN = 32;
+
+/* --- little-endian packers (match struct '<I','<Q','<f') --- */
+function leU32(v){
+  return [v & 0xff, (v>>>8) & 0xff, (v>>>16) & 0xff, (v>>>24) & 0xff];
+}
+function leU64(v){
+  var lo = v >>> 0;     // values here are tiny (< 2^32), high 32 bits = 0
+  return [lo & 0xff, (lo>>>8) & 0xff, (lo>>>16) & 0xff, (lo>>>24) & 0xff, 0,0,0,0];
+}
+function leF32(v){
+  var buf = new ArrayBuffer(4);
+  new DataView(buf).setFloat32(0, v, true);
+  var u = new Uint8Array(buf);
+  return [u[0], u[1], u[2], u[3]];
+}
+function strBytes(s){
+  var a = [];
+  for (var i = 0; i < s.length; i++) a.push(s.charCodeAt(i) & 0xff);
+  return a;
+}
+
+/* --- build the tiny GGUF with field-by-field annotation --- */
+function buildTinyGGUF(){
+  var bytes = [];          // byte values
+  var fields = [];         // {start, end, section, label, value}
+  var p = 0;
+
+  function emit(arr, section, label, value){
+    var start = p;
+    for (var i = 0; i < arr.length; i++) bytes.push(arr[i]);
+    p += arr.length;
+    fields.push({start:start, end:p, section:section, label:label, value:value});
+  }
+
+  /* HEADER (24 bytes) */
+  emit(leU32(MAGIC), "header", "magic  (uint32 LE)", "0x46554747  = \"GGUF\"");
+  emit(leU32(VERSION), "header", "version  (uint32 LE)", "3");
+  emit(leU64(1), "header", "tensor_count  (uint64)", "1");
+  emit(leU64(2), "header", "metadata_kv_count  (uint64)", "2");
+
+  /* KV 1: general.architecture = STRING "llama" */
+  var k1 = "general.architecture";
+  emit(leU64(k1.length), "kv", "KV1 key length  (uint64)", "20");
+  emit(strBytes(k1), "kv", "KV1 key  \"general.architecture\"", k1);
+  emit(leU32(8), "kv", "KV1 value_type  (uint32)", "8 = STRING");
+  var v1 = "llama";
+  emit(leU64(v1.length), "kv", "KV1 value length  (uint64)", "5");
+  emit(strBytes(v1), "kv", "KV1 value  \"llama\"", v1);
+
+  /* KV 2: general.file_type = UINT32 1 */
+  var k2 = "general.file_type";
+  emit(leU64(k2.length), "kv", "KV2 key length  (uint64)", "17");
+  emit(strBytes(k2), "kv", "KV2 key  \"general.file_type\"", k2);
+  emit(leU32(4), "kv", "KV2 value_type  (uint32)", "4 = UINT32");
+  emit(leU32(1), "kv", "KV2 value  (uint32)", "1");
+
+  /* TENSOR INFO: token_embd.weight dims=[4,2] type=F32 offset=0 */
+  var tn = "token_embd.weight";
+  emit(leU64(tn.length), "tensor_info", "tensor name length  (uint64)", "17");
+  emit(strBytes(tn), "tensor_info", "tensor name  \"token_embd.weight\"", tn);
+  emit(leU32(2), "tensor_info", "n_dims  (uint32)", "2");
+  emit(leU64(4), "tensor_info", "dims[0]  (uint64, row-major)", "4");
+  emit(leU64(2), "tensor_info", "dims[1]  (uint64)", "2");
+  emit(leU32(0), "tensor_info", "type  (uint32, ggml_type)", "0 = F32");
+  emit(leU64(0), "tensor_info", "offset  (uint64, rel. to tensor_data)", "0");
+
+  /* PADDING: align_up to ALIGN */
+  var infoEnd = p;
+  var dataStart = Math.ceil(infoEnd / ALIGN) * ALIGN;
+  var pad = dataStart - infoEnd;
+  var padArr = []; for (var i = 0; i < pad; i++) padArr.push(0);
+  emit(padArr, "padding", "alignment padding  (align_up to " + ALIGN + ")", pad + " byte(s)");
+
+  /* TENSOR DATA: 8 x F32 */
+  var weights = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+  for (var j = 0; j < weights.length; j++){
+    emit(leF32(weights[j]), "tensor_data", "weight[" + j + "]  (float32)", weights[j] + "f");
+  }
+
+  return {bytes:bytes, fields:fields, infoEnd:infoEnd, dataStart:dataStart, total:p};
+}
+
+var G = buildTinyGGUF();
+var BYTES = G.bytes;
+var FIELDS = G.fields;
+
+/* find which field a given byte index belongs to */
+function fieldAt(idx){
+  for (var i = 0; i < FIELDS.length; i++){
+    if (idx >= FIELDS[i].start && idx < FIELDS[i].end) return FIELDS[i];
+  }
+  return null;
+}
+
+/* --- render the hex grid (16 bytes per row) --- */
+function renderHex(){
+  var WIDTH = 16;
+  var rows = Math.ceil(BYTES.length / WIDTH);
+  var html = "";
+  var sectionColor = {"header":"#f97316","kv":"#58a6ff","tensor_info":"#f1c40f",
+                      "padding":"#8b949e","tensor_data":"#27ae60"};
+  for (var r = 0; r < rows; r++){
+    var base = r * WIDTH;
+    html += '<tr><td class="off">' + base.toString(16).padStart(4,"0") + '</td><td>';
+    for (var c = 0; c < WIDTH; c++){
+      var idx = base + c;
+      if (idx >= BYTES.length) break;
+      var f = fieldAt(idx);
+      var sec = f ? f.section : "padding";
+      var hl = (f && f === SEL) ? " sel" : "";
+      html += '<span class="cell s-' + sec + hl + '" data-i="' + idx + '" data-start="' +
+              (f?f.start:-1) + '">' + BYTES[idx].toString(16).padStart(2,"0") + '</span>';
+    }
+    html += '</td><td class="ascii">';
+    for (var c2 = 0; c2 < WIDTH; c2++){
+      var idx2 = base + c2;
+      if (idx2 >= BYTES.length) break;
+      var b = BYTES[idx2];
+      var f2 = fieldAt(idx2);
+      var sec2 = f2 ? f2.section : "padding";
+      var ch = (b >= 32 && b < 127) ? String.fromCharCode(b) : ".";
+      html += '<span class="ach ' + sec2 + '" data-i="' + idx2 + '">' + ch + '</span>';
+    }
+    html += '</td></tr>';
+  }
+  document.getElementById("hexwrap").innerHTML =
+    '<table class="hex">' + html + '</table>';
+
+  /* wire clicks */
+  var cells = document.querySelectorAll(".cell, .ach");
+  cells.forEach(function(el){
+    el.addEventListener("click", function(){
+      var i = parseInt(el.getAttribute("data-i"), 10);
+      var f = fieldAt(i);
+      if (f) selectField(f);
+    });
+  });
+}
+
+/* --- render the structure tree --- */
+function renderTree(){
+  var groups = [
+    {key:"header",      label:"HEADER (24 bytes)"},
+    {key:"kv",          label:"METADATA KV (2 pairs)"},
+    {key:"tensor_info", label:"TENSOR INFO (1 tensor)"},
+    {key:"padding",     label:"ALIGNMENT PADDING"},
+    {key:"tensor_data", label:"TENSOR DATA (8 x F32)"}
+  ];
+  var secColor = {"header":"#f97316","kv":"#58a6ff","tensor_info":"#f1c40f",
+                  "padding":"#8b949e","tensor_data":"#27ae60"};
+  var html = "";
+  groups.forEach(function(g){
+    html += '<div class="grp">' + g.label + '</div>';
+    FIELDS.forEach(function(f){
+      if (f.section !== g.key) return;
+      var act = (f === SEL) ? " act" : "";
+      html += '<div class="row' + act + '" data-start="' + f.start + '">' +
+              '<span class="dot" style="background:' + secColor[g.key] + '"></span>' +
+              '<span class="rng">[' + f.start + '..' + f.end + ')</span>' +
+              '<span class="nm">' + f.label + ' = <b style="color:' + secColor[g.key] + '">' +
+              f.value + '</b></span></div>';
+    });
+  });
+  document.getElementById("tree").innerHTML = html;
+  document.querySelectorAll("#tree .row").forEach(function(el){
+    el.addEventListener("click", function(){
+      var st = parseInt(el.getAttribute("data-start"), 10);
+      for (var i = 0; i < FIELDS.length; i++){
+        if (FIELDS[i].start === st){ selectField(FIELDS[i]); break; }
+      }
+    });
+  });
+}
+
+/* --- selected field handling --- */
+var SEL = null;
+function selectField(f){
+  SEL = f;
+  renderHex();
+  renderTree();
+  var secColor = {"header":"#f97316","kv":"#58a6ff","tensor_info":"#f1c40f",
+                  "padding":"#8b949e","tensor_data":"#27ae60"};
+  var d = document.getElementById("decode");
+  var nbytes = f.end - f.start;
+  var raw = [];
+  for (var i = f.start; i < f.end; i++) raw.push(BYTES[i].toString(16).padStart(2,"0"));
+  d.innerHTML =
+    '<span class="dim">section:</span> <span style="color:' + secColor[f.section] + '"><b>' +
+    f.section + '</b></span>\n' +
+    '<span class="dim">offset :</span> [' + f.start + ' .. ' + f.end + ')  (' + nbytes +
+    ' byte' + (nbytes===1?"":"s") + ')\n' +
+    '<span class="dim">field  :</span> ' + f.label + '\n' +
+    '<span class="dim">value  :</span> <b>' + f.value + '</b>\n' +
+    '<span class="dim">raw    :</span> ' + raw.join(" ");
+}
+
+/* --- stat chips + layout formula --- */
+function renderChips(){
+  document.getElementById("chips").innerHTML =
+    '<span class="chip">file size: <b>' + G.total + '</b> bytes</span>' +
+    '<span class="chip">tensor_data_offset: <b>' + G.dataStart + '</b></span>' +
+    '<span class="chip g">alignment: <b>' + ALIGN + '</b></span>' +
+    '<span class="chip y">padding: <b>' + (G.dataStart - G.infoEnd) + '</b> byte(s)</span>';
+  document.getElementById("formula").innerHTML =
+    '<b>header</b>            24 bytes\n' +
+    '<b>+ metadata_kv</b>     ' + (fieldByLabelContains("KV2 value  (uint32)").end - 24) + ' bytes   (2 KV pairs)\n' +
+    '<b>+ tensor_info</b>     ' + (G.infoEnd - (fieldByLabelContains("KV2 value  (uint32)").end)) + ' bytes   (1 tensor)\n' +
+    '<b>= pos after info</b>  ' + G.infoEnd + '\n' +
+    '<b>align_up(' + G.infoEnd + ', ' + ALIGN + ')</b> = ' + G.dataStart + '   &rarr; padding = ' +
+    (G.dataStart - G.infoEnd) + ' byte(s)\n' +
+    '<b>+ tensor_data</b>     ' + (G.total - G.dataStart) + ' bytes   (8 x F32)\n' +
+    '<b>= total file</b>      ' + G.total + ' bytes';
+}
+function fieldByLabelContains(s){
+  for (var i = 0; i < FIELDS.length; i++) if (FIELDS[i].label.indexOf(s) >= 0) return FIELDS[i];
+  return null;
+}
+
+/* --- GOLD-CHECK: parse the built buffer back, verify magic + version --- */
+function goldCheck(){
+  var dv = new DataView(new Uint8Array(BYTES).buffer);
+  var magic = dv.getUint32(0, true);        // little-endian
+  var version = dv.getUint32(4, true);
+  var tensorCount = dv.getUint32(8, true) >>> 0;
+  var kvCount = dv.getUint32(16, true) >>> 0;
+  var ok = (magic === MAGIC) && (version === VERSION) &&
+           (tensorCount === 1) && (kvCount === 2) &&
+           (G.dataStart % ALIGN === 0) && (G.total === 192);
+  var el = document.getElementById("check");
+  if (ok){
+    el.textContent = "[check: OK]  magic=0x46554747, version=3, tensor_data_offset=" +
+                     G.dataStart + " (matches gguf_format.py)";
+    el.className = "";
+  } else {
+    el.textContent = "[check: FAIL]  magic=0x" + magic.toString(16) +
+                     ", version=" + version;
+    el.className = "fail";
+  }
+}
+
+/* --- init --- */
+function renderAll(){ renderHex(); renderTree(); renderChips(); goldCheck(); }
+renderAll();
+</script>
+</body>
+</html>

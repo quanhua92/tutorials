@@ -1,0 +1,592 @@
+<!doctype html>
+<!--
+  router_nested_context.html — React deep dive, router bundle (nested routes + Outlet + context).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving how nested
+  route matching builds the rendered component chain and how `beforeLoad` context
+  accumulates down that chain. Companion: NESTED_CONTEXT.md (guide). No .py.
+
+  The lesson: a matched URL resolves to a LEAF route, but the leaf is never rendered
+  alone. TanStack Router walks the leaf's ANCESTOR CHAIN (Root → … → leaf) and renders
+  every ancestor's `component` as a wrapping LAYOUT. Each layout places an `<Outlet/>`
+  where the next route in the chain renders — that is nested rendering. In parallel,
+  each route's `beforeLoad` returns a context object that is MERGED into the route
+  context top-down, so the leaf ends up with the UNION of every ancestor's context:
+    /admin/users/$id  ⇒  Root{theme,user} ∪ Admin{adminMode} ∪ Users{userFilter} ∪ UserDetail{detailTab}
+  This bundle makes that mechanism tangible: click a route, see the chain, see the
+  merged context, see the `<Outlet/>` composition.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<NestedContextDemo/>), the gold-check
+  waits for 4 route nodes, asserts the default path "/admin/users/42" yields the chain
+  [Root, Admin, Users, UserDetail] with all 5 context keys, then CLICKS the "/admin"
+  route node and asserts the chain collapses to [Root, Admin] with exactly
+  {theme, user, adminMode} (no userFilter/detailTab). This proves matching, chain
+  construction, and context accumulation all work end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nested Routes &amp; Context — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:300px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Nested &amp; Context &mdash; the outlet + beforeLoad model</h1>
+    <span id="goldcheck" class="goldcheck">[check: &hellip;]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/NESTED_CONTEXT.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/NESTED_CONTEXT.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/tanstack-start/nested_outlet_context.html">frontend/tanstack-start: Nested &amp; Context</a>
+    — the basics of <code>&lt;Outlet&gt;</code> + context. This bundle goes to the full
+    hierarchy and context accumulation mechanism: the ancestor chain, how
+    <code>beforeLoad</code> merges top-down, and parent→child loader dependencies.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">a match is a chain, not a single component</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        When TanStack Router matches <code>/admin/users/42</code>, it does not render one component.
+        It resolves the leaf (<code>UserDetail</code>) and walks its <b class="text-[#e6edf3]">ancestor chain</b>:
+        <code>[Root, Admin, Users, UserDetail]</code>. Each ancestor renders as a <b class="text-[#e6edf3]">layout</b>
+        with an <code>&lt;Outlet/&gt;</code> placeholder, and the next route in the chain renders inside it —
+        nested rendering. At the same time, each route's <code>beforeLoad</code> returns a context object that is
+        <b class="text-[#e6edf3]">merged down</b> the chain, so the leaf receives the union of every ancestor's context.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>route</th><th>beforeLoad provides</th><th>component renders</th><th>inherited at this level</th></tr>
+        <tr>
+          <td><code>/</code> Root</td>
+          <td><code>{'{ theme, user }'}</code></td>
+          <td>header + <code>&lt;Outlet/&gt;</code></td>
+          <td><code>{'{ theme, user }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>/admin</code></td>
+          <td><code>{'{ adminMode }'}</code></td>
+          <td>sidebar + <code>&lt;Outlet/&gt;</code></td>
+          <td><code>{'{ theme, user, adminMode }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>/admin/users</code></td>
+          <td><code>{'{ userFilter }'}</code></td>
+          <td>UserList</td>
+          <td><code>{'{ theme, user, adminMode, userFilter }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>/admin/users/$id</code></td>
+          <td><code>{'{ detailTab }'}</code></td>
+          <td>UserDetail</td>
+          <td><code>{'{ theme, user, adminMode, userFilter, detailTab }'}</code></td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[12px] mt-2">
+        The chain only includes ancestors of the matched leaf. Navigate to <code>/admin</code> and the chain collapses
+        to <code>[Root, Admin]</code> — Users and UserDetail never mount, so <code>userFilter</code>/<code>detailTab</code>
+        are absent from context.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the nested-context visualizer (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// ── Route hierarchy: each node provides context + renders a layout/leaf ──
+//   parent links form the ancestor chain; contextProvided merges top-down.
+var routeHierarchy = [
+  { path: '/', name: 'Root', parent: null,
+    contextProvided: { theme: 'dark', user: 'admin' },
+    renders: 'Layout (header + Outlet)' },
+  { path: '/admin', name: 'Admin', parent: 'Root',
+    contextProvided: { adminMode: true },
+    renders: 'AdminLayout (sidebar + Outlet)' },
+  { path: '/admin/users', name: 'Users', parent: 'Admin',
+    contextProvided: { userFilter: 'active' },
+    renders: 'UserList' },
+  { path: '/admin/users/$id', name: 'UserDetail', parent: 'Users',
+    contextProvided: { detailTab: 'overview' },
+    renders: 'UserDetail' }
+];
+
+// matchPath: a $param segment matches exactly ONE url segment (like TanStack).
+function matchPath(pattern, pathname) {
+  var patternParts = pattern.split('/').filter(Boolean);
+  var pathParts = pathname.split('/').filter(Boolean);
+  if (patternParts.length !== pathParts.length) return false;
+  for (var i = 0; i &lt; patternParts.length; i++) {
+    if (patternParts[i].charAt(0) === '$') continue; // $id skips the segment
+    if (patternParts[i] !== pathParts[i]) return false;
+  }
+  return true;
+}
+
+// The deepest route whose pattern fits the pathname = the matched LEAF.
+// Walk the ranked list top-down; first (deepest) match wins.
+function findLeaf(pathname) {
+  for (var i = routeHierarchy.length - 1; i &gt;= 0; i--) {
+    if (matchPath(routeHierarchy[i].path, pathname)) return routeHierarchy[i];
+  }
+  return routeHierarchy[0];
+}
+
+// Walk parents upward → ordered [Root, …, leaf]. This is the rendered chain.
+function buildChain(leaf) {
+  var chain = [];
+  var node = leaf;
+  while (node) {
+    chain.unshift(node);
+    var pname = node.parent;
+    node = pname
+      ? routeHierarchy.filter(function (r) { return r.name === pname; })[0]
+      : null;
+  }
+  return chain;
+}
+
+// Each level adds its context to the inherited parent context (top-down merge).
+function accumulateContext(chain) {
+  var ctx = {};
+  chain.forEach(function (route) {
+    Object.keys(route.contextProvided).forEach(function (k) {
+      ctx[k] = route.contextProvided[k];
+    });
+  });
+  return ctx;
+}
+
+// Tree depth = how many ancestors (for indentation).
+function depthOf(route) {
+  var d = 0;
+  var node = route;
+  while (node.parent) {
+    d++;
+    node = routeHierarchy.filter(function (r) { return r.name === node.parent; })[0];
+  }
+  return d;
+}
+
+function NestedContextDemo() {
+  var state = React.useState('/admin/users/42');
+  var activePath = state[0];
+  var setActivePath = state[1];
+
+  var leaf = findLeaf(activePath);
+  var chain = buildChain(leaf);
+  var ctx = accumulateContext(chain);
+  var chainNames = chain.map(function (r) { return r.name; });
+  var ctxKeys = Object.keys(ctx);
+
+  return (
+    &lt;div className="max-w-3xl mx-auto space-y-4"&gt;
+
+      {/* active path readout */}
+      &lt;div data-testid="active-path" data-path={activePath} className="text-xs text-[#8b949e]"&gt;
+        current path: &lt;span className="text-[#61dafb] font-bold"&gt;{activePath}&lt;/span&gt;
+      &lt;/div&gt;
+
+      {/* 1 · route tree — click to navigate, matched chain is highlighted */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;route tree (click a route)&lt;/div&gt;
+        &lt;div className="bg-[#0d1117] border border-[#30363d] rounded p-3 space-y-1"&gt;
+          {routeHierarchy.map(function (route) {
+            var d = depthOf(route);
+            var inChain = chainNames.indexOf(route.name) &gt;= 0;
+            var isLeaf = route.name === leaf.name;
+            return (
+              &lt;div
+                key={route.path}
+                data-testid="route-node"
+                data-path={route.path}
+                data-name={route.name}
+                className={"px-3 py-2 rounded text-sm cursor-pointer transition-colors border " + (inChain ? 'border-[#61dafb] bg-[#61dafb]/10' : 'border-transparent bg-[#161b22] hover:border-[#30363d]')}
+                style={{ paddingLeft: 12 + d * 22 }}
+                onClick={function () { setActivePath(route.path); }}
+              &gt;
+                &lt;span className={"font-bold " + (inChain ? 'text-[#61dafb]' : 'text-[#e6edf3]')}&gt;{route.name}&lt;/span&gt;
+                {' '}
+                &lt;code className="text-[#8b949e]"&gt;{route.path}&lt;/code&gt;
+                {isLeaf ? &lt;span className="ml-2 text-[10px] text-[#2ecc71]"&gt;← matched leaf&lt;/span&gt; : null}
+                {inChain ? &lt;span className="ml-2 text-[10px] text-[#61dafb]"&gt;✓ in chain&lt;/span&gt; : null}
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 2 · matched chain (Root → leaf) */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;matched chain (ancestor chain = rendered layout stack)&lt;/div&gt;
+        &lt;div data-testid="chain" data-chain={chainNames.join(' &gt; ')} className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-sm flex flex-wrap items-center gap-1"&gt;
+          {chain.map(function (r, i) {
+            var isLast = i === chain.length - 1;
+            return (
+              &lt;span key={r.name} className="flex items-center gap-1"&gt;
+                &lt;span className={"px-2 py-1 rounded " + (isLast ? 'bg-[#61dafb] text-[#0d1117] font-bold' : 'text-[#61dafb] border border-[#30363d]')}&gt;{r.name}&lt;/span&gt;
+                {isLast ? null : &lt;span className="text-[#8b949e]"&gt;→&lt;/span&gt;}
+              &lt;/span&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 3 · accumulated context — merged top-down */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;accumulated route context (beforeLoad merged down the chain)&lt;/div&gt;
+        &lt;div data-testid="context" data-json={JSON.stringify(ctx)} className="bg-[#0d1117] border border-[#30363d] rounded p-3 text-sm"&gt;
+          &lt;span className="text-[#8b949e]"&gt;{'{'}&lt;/span&gt;
+          &lt;div className="ml-4 space-y-1"&gt;
+            {ctxKeys.map(function (k) {
+              var who = chain.filter(function (r) { return typeof r.contextProvided[k] !== 'undefined'; })[0];
+              return (
+                &lt;div key={k}&gt;
+                  &lt;span className="text-[#61dafb]"&gt;{k}&lt;/span&gt;
+                  &lt;span className="text-[#8b949e]"&gt;: &lt;/span&gt;
+                  &lt;span className="text-[#2ecc71]"&gt;{JSON.stringify(ctx[k])}&lt;/span&gt;
+                  &lt;span className="text-[#8b949e] text-[11px]"&gt;  ← {who ? who.name : '?'}&lt;/span&gt;
+                &lt;/div&gt;
+              );
+            })}
+          &lt;/div&gt;
+          &lt;span className="text-[#8b949e]"&gt;{'}'}&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* 4 · <Outlet/> composition — parent layout wraps the child */}
+      &lt;div&gt;
+        &lt;div className="text-xs uppercase tracking-wide text-[#61dafb] mb-2"&gt;{'<Outlet/>'} composition (parent renders layout + Outlet, child renders inside)&lt;/div&gt;
+        &lt;div className="bg-[#0d1117] border border-[#30363d] rounded p-3"&gt;
+          {chain.map(function (r, i) {
+            var isLast = i === chain.length - 1;
+            var keys = Object.keys(r.contextProvided);
+            return (
+              &lt;div key={r.name} className="border border-[#30363d] rounded p-2 mb-2" style={{ marginLeft: i * 16 }}&gt;
+                &lt;div className="flex items-center gap-2 text-xs"&gt;
+                  &lt;span className="text-[#61dafb] font-bold"&gt;{r.name}&lt;/span&gt;
+                  &lt;span className="text-[#8b949e]"&gt;{r.renders}&lt;/span&gt;
+                &lt;/div&gt;
+                &lt;div className="text-[11px] text-[#8b949e] mt-1"&gt;
+                  provides: {keys.length ? keys.map(function (k) { return k + '=' + JSON.stringify(r.contextProvided[k]); }).join(', ') : '(none)'}
+                &lt;/div&gt;
+                {isLast ? null : &lt;div className="text-[11px] text-[#61dafb] mt-1"&gt;{'<Outlet/>'} ↓&lt;/div&gt;}
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;NestedContextDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;NestedContextDemo/&gt;</code> becomes <code>React.createElement(NestedContextDemo)</code>.
+        Clicking a route calls <code>setActivePath</code> → re-render → <code>findLeaf</code> +
+        <code>buildChain</code> + <code>accumulateContext</code> rebuild the chain and merged context from scratch.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (nested chain + context accumulation, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click any route in the tree. The <b class="text-[#e6edf3]">gold-check</b> drives it directly: default
+        <code>/admin/users/42</code> → asserts chain <code>[Root, Admin, Users, UserDetail]</code> with all 5 context
+        keys, then CLICKS <code>/admin</code> → asserts the chain collapses to <code>[Root, Admin]</code> and the
+        context loses <code>userFilter</code>/<code>detailTab</code>. That proves matching, chain construction, and
+        the top-down context merge all work.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        routes: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: /admin/users/42→[Root,Admin,Users,UserDetail]{5 keys} → /admin→[Root,Admin]{3 keys}
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>wrap child routes in a layout</td>
+          <td>parent <code>component</code> renders <code>&lt;Outlet/&gt;</code></td>
+          <td>the Outlet is where the matched child renders — that is nested rendering</td>
+        </tr>
+        <tr>
+          <td>provide data to a route + descendants</td>
+          <td><code>beforeLoad: ({'{ context }'}) =&gt; ({'{ ...context, ... }}')</code></td>
+          <td>spread inherited context then add your keys — returns the merged object</td>
+        </tr>
+        <tr>
+          <td>read parent data in a child loader</td>
+          <td><code>loader: ({'{ context }'}) =&gt; fetchUsers(context.adminMode)</code></td>
+          <td>context is already merged by the time the loader runs</td>
+        </tr>
+        <tr>
+          <td>opt OUT of nesting</td>
+          <td>name the file <code>_path.tsx</code> (pathless layout) or un-nest via <code>_</code></td>
+          <td>renders its own component without the parent layout / Outlet</td>
+        </tr>
+        <tr>
+          <td>access the accumulated context</td>
+          <td><code>Route.useMatch().context</code> / <code>useLoaderData()</code></td>
+          <td>type is the union of every ancestor's <code>beforeLoad</code> return type</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render the route tree…");
+        waitForTree(0);
+      }
+
+      function waitForTree(frame) {
+        var nodes = root.querySelectorAll('[data-testid="route-node"]');
+        if (nodes.length === 4) { step1_defaultChain(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForTree(frame + 1); });
+          return;
+        }
+        failGoldCheck("route tree did not render 4 nodes (got " + nodes.length + ")");
+      }
+
+      // Step 1: default "/admin/users/42" → chain [Root, Admin, Users, UserDetail] + 5 context keys
+      function step1_defaultChain() {
+        pollChain("Root > Admin > Users > UserDetail", 0, function () {
+          var json = readContextJson();
+          var need = ["theme", "user", "adminMode", "userFilter", "detailTab"];
+          var missing = need.filter(function (k) { return json.indexOf('"' + k + '"') < 0; });
+          if (missing.length) {
+            failGoldCheck("leaf context missing keys: " + missing.join(", "));
+            return;
+          }
+          step2_clickAdmin();
+        });
+      }
+
+      // Step 2: CLICK "/admin" → chain collapses to [Root, Admin], context loses userFilter/detailTab
+      function step2_clickAdmin() {
+        var adminNode = root.querySelector('[data-testid="route-node"][data-path="/admin"]');
+        if (!adminNode) { failGoldCheck("/admin route node not found"); return; }
+        adminNode.click();
+        pollChain("Root > Admin", 0, function () {
+          var json = readContextJson();
+          if (json.indexOf('"userFilter"') >= 0 || json.indexOf('"detailTab"') >= 0) {
+            failGoldCheck("/admin context should NOT contain userFilter/detailTab (got " + json + ")");
+            return;
+          }
+          var need = ["theme", "user", "adminMode"];
+          var missing = need.filter(function (k) { return json.indexOf('"' + k + '"') < 0; });
+          if (missing.length) {
+            failGoldCheck("/admin context missing keys: " + missing.join(", "));
+            return;
+          }
+          passGoldCheck();
+        });
+      }
+
+      function pollChain(expect, frame, done) {
+        readLive();
+        var el = root.querySelector('[data-testid="chain"]');
+        if (el && el.getAttribute("data-chain") === expect) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollChain(expect, frame + 1, done); });
+          return;
+        }
+        var actual = el ? el.getAttribute("data-chain") : "(none)";
+        failGoldCheck('expected chain "' + expect + '" but DOM shows "' + actual + '"');
+      }
+
+      function readContextJson() {
+        var el = root.querySelector('[data-testid="context"]');
+        return el ? (el.getAttribute("data-json") || "") : "";
+      }
+
+      function readLive() {
+        var nodes = root.querySelectorAll('[data-testid="route-node"]');
+        countRead.textContent = nodes.length;
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] /admin/users/42→[Root,Admin,Users,UserDetail]{5} · /admin→[Root,Admin]{3}. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

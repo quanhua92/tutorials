@@ -50,10 +50,10 @@
 - [x] 27 `router_fundamentals` — Route tree, history, matching — the mental model
 - [x] 28 `router_route_tree` — Compilation, linearization, matching algorithm
 - [x] 29 `router_type_inference` — How definitions propagate types
-- [ ] 30 `router_search_validation` — Zod/Valibot schemas, defaults
-- [ ] 31 `router_loader_lifecycle` — beforeLoad → loader → component, caching
-- [ ] 32 `router_navigation_preload` — Intent-based preloading, dedup, prefetch
-- [ ] 33 `router_nested_context` — Nested routes, Outlet, context flow
+- [x] 30 `router_search_validation` — Zod/Valibot schemas, defaults
+- [x] 31 `router_loader_lifecycle` — beforeLoad → loader → component, caching
+- [x] 32 `router_navigation_preload` — Intent-based preloading, dedup, prefetch
+- [x] 33 `router_nested_context` — Nested routes, Outlet, context flow
 - [ ] 34 `router_code_splitting` — createLazy, route-level splitting, Suspense
 - [ ] 35 `router_advanced_patterns` — Auth routes, navigation blocking, masking
 - [ ] 36 `router_devtools` — DevTools: route tree viz, inspector, profiling

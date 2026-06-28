@@ -1,0 +1,709 @@
+<!doctype html>
+<!--
+  router_navigation_preload.html — Phase 6 router bundle #6 (the preloading engine).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground that simulates
+  TanStack Router's intent-based preloading pipeline (trigger → dedup → cache →
+  instant navigation). Companion: ROUTER_NAVIGATION_PRELOAD.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: a normal click is "fetch on demand" — the user clicks, then waits
+  for the route's loader/beforeLoad/JS chunk to resolve, THEN the page paints.
+  Preloading flips the timeline: the router STARTS that work the moment a <Link>
+  signals intent (hover / tap / scrolls into view), so by the time the click
+  lands the data is already cached → the navigation is INSTANT.
+
+    trigger     →  dedup     →  cache      →  navigate
+    hover/tap/     one in-       staleTime+    click reuses
+    viewport       flight per    gcTime        cached result
+                   route key
+
+  TanStack Router's real API (v1, verified 2026-06):
+    <Link preload="intent"    // false | 'intent' | 'viewport'
+          preloadDelay={0}    // ms before intent fires (default 0)
+          staleTime={5000}    // preload data fresh for 5s (default 30_000)
+          gcTime={300000}>    // unused preload kept 5min (default 5min)
+    router.options.defaultPreload = 'intent'   // app-wide default
+    router.preloadRoute({ to: '/users/$id', params: { id: 42 } })  // manual
+
+  'intent' = ONE strategy that listens for BOTH mouseenter (desktop hover) AND
+  pointerdown/touchstart (mobile tap). This demo splits hover/tap into separate
+  strategies for teaching — in real TanStack they share the 'intent' code path.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, useEffect, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<NavigationDemo/>), the gold-check
+  asserts: strategy defaults to "hover"; dispatching mouseover on the Users link
+  produces a "PRELOAD START" log entry for /users, then after ~500ms a "PRELOAD DONE"
+  entry; clicking Users navigates INSTANT (cache hit). Then it switches strategy to
+  "none", hovers Settings (asserts NO preload log for /settings), clicks Settings
+  (asserts LOADING cold fetch). This proves the trigger → dedup → cache → reuse
+  pipeline end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Navigation &amp; Preloading — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; --warn:#f39c12; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:340px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Navigation &amp; Preloading &mdash; the instant-click engine</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_NAVIGATION_PRELOAD.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_NAVIGATION_PRELOAD.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/tanstack-start/navigation_links.html">frontend/tanstack-start: Navigation &amp; Links</a>
+    (the basics of links + active state — this bundle goes to the preloading engine).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">fetch on click vs. fetch on intent</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A normal <code>&lt;Link&gt;</code> is "click then fetch" &mdash; the user clicks, the router runs the
+        route's <code>beforeLoad → loader</code>, downloads the JS chunk, THEN paints. <b class="text-[#e6edf3]">Preloading</b>
+        inverts the timeline: the router starts that work the instant a link signals <b class="text-[#e6edf3]">intent</b>
+        (hover / tap / enters viewport). By the time the click lands, the result is already in the cache and the
+        navigation is <b class="text-[#e6edf3]">INSTANT</b>. Same data, same loaders &mdash; just moved earlier.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>default</th></tr>
+        <tr>
+          <td><code>preload</code></td>
+          <td>trigger policy on <code>&lt;Link&gt;</code>: <code>false</code> | <code>'intent'</code> | <code>'viewport'</code></td>
+          <td><code>false</code> (opt-in)</td>
+        </tr>
+        <tr>
+          <td><code>'intent'</code></td>
+          <td>preload on <code>mouseenter</code> (desktop hover) + <code>pointerdown</code>/<code>touchstart</code> (mobile tap), after <code>preloadDelay</code> ms</td>
+          <td>delay <code>0</code>ms</td>
+        </tr>
+        <tr>
+          <td><code>'viewport'</code></td>
+          <td>preload via <code>IntersectionObserver</code> the moment the link scrolls into view</td>
+          <td>eager &mdash; all visible links</td>
+        </tr>
+        <tr>
+          <td><code>staleTime</code></td>
+          <td>how long a preloaded entry is considered fresh (no refetch on navigate)</td>
+          <td><code>30_000</code>ms (navigations: <code>0</code>)</td>
+        </tr>
+        <tr>
+          <td><code>gcTime</code></td>
+          <td>how long an unused preloaded entry survives in memory before garbage collection</td>
+          <td><code>300_000</code>ms (5min)</td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[13px] mt-3 mb-0 leading-relaxed">
+        <b class="text-[#e6edf3]">Deduplication</b> is free: two links to the same route share one in-flight
+        preload; if a preload is mid-flight when the click arrives, the result is reused &mdash; no double fetch.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the preloading pipeline (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// ---- Route table (in real TanStack these come from the route tree) ----
+var ROUTES = [
+  { path: '/',         label: 'Home',     hue: '#61dafb' },
+  { path: '/users',    label: 'Users',    hue: '#2ecc71' },
+  { path: '/settings', label: 'Settings', hue: '#f39c12' },
+  { path: '/posts',    label: 'Posts',    hue: '#9b59b6' }
+];
+var STRATEGIES = ['none', 'hover', 'tap', 'viewport'];
+
+// ---- Module-scoped preload cache (dedup happens here) ----
+// Each route path is the dedup key. 'loading' = in-flight, 'cached' = resolved.
+var cache = {};
+var logSeq = 0;
+var FETCH_MS = 400;   // simulate the route's loader/beforeLoad latency
+
+function NavigationDemo() {
+  var stratState = React.useState('hover');
+  var strategy = stratState[0];
+  var setStrategy = stratState[1];
+
+  var logState = React.useState([]);
+  var logs = logState[0];
+  var setLogs = logState[1];
+
+  var cacheSnapState = React.useState({});
+  var cacheSnap = cacheSnapState[0];
+  var setCacheSnap = cacheSnapState[1];
+
+  var curRouteState = React.useState('/');
+  var currentRoute = curRouteState[0];
+  var setCurrentRoute = curRouteState[1];
+
+  var navStatusState = React.useState(null);
+  var navStatus = navStatusState[0];
+  var setNavStatus = navStatusState[1];
+
+  // ---- push a log row + snapshot the cache so the UI re-renders ----
+  function pushLog(entry) {
+    entry.id = ++logSeq;
+    setLogs(function (prev) { return prev.concat([entry]); });
+  }
+  function sync() { setCacheSnap(Object.assign({}, cache)); }
+
+  // ---- the preload fn: dedup → start → async resolve ----
+  function startPreload(path, intent) {
+    // DEDUP: already loading or cached? → reuse, no new fetch
+    if (cache[path]) {
+      pushLog({ route: path, action: 'CACHE HIT', intent: intent });
+      return;
+    }
+    cache[path] = 'loading';
+    pushLog({ route: path, action: 'PRELOAD START', intent: intent });
+    sync();
+    setTimeout(function () {
+      cache[path] = 'cached';
+      pushLog({ route: path, action: 'PRELOAD DONE', intent: intent });
+      sync();
+    }, FETCH_MS);
+  }
+
+  // ---- intent handler: only fires when strategy matches the intent ----
+  function onIntent(path, intent) {
+    if (strategy === 'none') return;       // preloading disabled
+    if (strategy === 'viewport') return;   // viewport preloads on mount, not on hover/tap
+    if (strategy === intent) startPreload(path, intent);
+  }
+
+  // ---- 'viewport' strategy: IntersectionObserver stand-in — preload every
+  //      visible link as soon as the strategy is active (eager by design) ----
+  React.useEffect(function () {
+    if (strategy !== 'viewport') return;
+    ROUTES.forEach(function (r) {
+      if (r.path !== '/' && !cache[r.path]) startPreload(r.path, 'viewport');
+    });
+  }, [strategy]);
+
+  // ---- click = navigate. cache hit → INSTANT, miss → LOADING ----
+  function navigate(path) {
+    setCurrentRoute(path);
+    if (cache[path] === 'cached') {
+      setNavStatus('INSTANT');
+      pushLog({ route: path, action: 'NAVIGATE', intent: 'click', result: 'instant' });
+    } else if (cache[path] === 'loading') {
+      // preload in-flight → reuse it, still effectively instant
+      setNavStatus('INSTANT (reused)');
+      pushLog({ route: path, action: 'NAVIGATE', intent: 'click', result: 'reuse' });
+    } else {
+      setNavStatus('LOADING');
+      pushLog({ route: path, action: 'NAVIGATE', intent: 'click', result: 'cold' });
+      cache[path] = 'loading';
+      sync();
+      setTimeout(function () {
+        cache[path] = 'cached';
+        pushLog({ route: path, action: 'FETCH DONE', intent: 'click' });
+        sync();
+      }, FETCH_MS);
+    }
+  }
+
+  function clearAll() {
+    cache = {};
+    logSeq = 0;
+    setLogs([]);
+    setCacheSnap({});
+    setNavStatus(null);
+  }
+
+  return (
+    &lt;div className="max-w-3xl mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-1"&gt;Preload Strategy Visualizer&lt;/h2&gt;
+      &lt;p className="text-[#8b949e] text-xs mb-4"&gt;
+        Pick a strategy, hover/tap the links, then click. Watch the cache + log.
+      &lt;/p&gt;
+
+      {/* strategy selector */}
+      &lt;div data-testid="strategy-bar" className="flex flex-wrap items-center gap-2 mb-4 p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;span className="text-[#8b949e] text-xs uppercase mr-2"&gt;strategy&lt;/span&gt;
+        {STRATEGIES.map(function (s) {
+          var active = s === strategy;
+          return (
+            &lt;button
+              key={s}
+              data-testid="strategy"
+              data-strategy={s}
+              onClick={function () { setStrategy(s); }}
+              className={"px-3 py-1 rounded text-xs font-mono border transition " + (active ? "bg-[#61dafb] text-[#0d1117] border-[#61dafb] font-bold" : "bg-transparent text-[#61dafb] border-[#30363d] hover:border-[#61dafb]")}
+            &gt;
+              {s}
+            &lt;/button&gt;
+          );
+        })}
+        &lt;span data-testid="strategy-active" className="ml-auto text-[#61dafb] text-xs font-mono"&gt;active: {strategy}&lt;/span&gt;
+      &lt;/div&gt;
+
+      {/* the links (Home / Users / Settings / Posts) */}
+      &lt;div className="mb-4"&gt;
+        &lt;div className="text-[#8b949e] text-xs uppercase mb-2"&gt;Links &amp;mdash; hover / tap / click&lt;/div&gt;
+        &lt;div className="grid grid-cols-2 sm:grid-cols-4 gap-2"&gt;
+          {ROUTES.map(function (r) {
+            var state = cacheSnap[r.path];
+            var isCurrent = currentRoute === r.path;
+            return (
+              &lt;a
+                key={r.path}
+                href={r.path}
+                data-testid="link"
+                data-path={r.path}
+                data-label={r.label}
+                data-cached={state === 'cached' ? 'true' : 'false'}
+                onClick={function (e) { e.preventDefault(); navigate(r.path); }}
+                onMouseEnter={function () { onIntent(r.path, 'hover'); }}
+                onPointerDown={function () { onIntent(r.path, 'tap'); }}
+                className="block px-3 py-3 rounded border text-sm font-mono cursor-pointer select-none transition"
+                style={{
+                  background: isCurrent ? r.hue + '22' : '#0d1117',
+                  borderColor: isCurrent ? r.hue : '#30363d',
+                  color: state === 'cached' ? r.hue : '#e6edf3'
+                }}
+              &gt;
+                &lt;div className="font-bold"&gt;{r.label}&lt;/div&gt;
+                &lt;div className="text-[10px] text-[#8b949e] mt-0.5"&gt;{r.path}&lt;/div&gt;
+                &lt;div className="text-[10px] mt-1"&gt;
+                  {state === 'loading' ? '⟳ loading…' : state === 'cached' ? '✓ cached' : '○ idle'}
+                &lt;/div&gt;
+              &lt;/a&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* nav status */}
+      &lt;div className="grid grid-cols-2 gap-3 mb-4"&gt;
+        &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+          &lt;div className="text-[#8b949e] text-xs uppercase mb-1"&gt;Current Route&lt;/div&gt;
+          &lt;div data-testid="current-route" className="text-[#61dafb] text-sm font-mono break-all"&gt;{currentRoute}&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+          &lt;div className="text-[#8b949e] text-xs uppercase mb-1"&gt;Last Navigation&lt;/div&gt;
+          &lt;div data-testid="nav-status" data-result={navStatus || ''} className={"text-sm font-mono font-bold " + (navStatus === 'LOADING' ? 'text-[#e74c3c]' : navStatus ? 'text-[#2ecc71]' : 'text-[#8b949e]')}&gt;
+            {navStatus || '—'}
+          &lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* cache state */}
+      &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d] mb-4"&gt;
+        &lt;div className="text-[#8b949e] text-xs uppercase mb-2"&gt;Cache State&lt;/div&gt;
+        &lt;div data-testid="cache" className="flex flex-wrap gap-2"&gt;
+          {ROUTES.map(function (r) {
+            var st = cacheSnap[r.path];
+            return (
+              &lt;span
+                key={r.path}
+                data-testid="cache-chip"
+                data-path={r.path}
+                data-state={st || 'empty'}
+                className={"px-2 py-1 rounded text-xs font-mono border " + (st === 'cached' ? 'border-[#2ecc71]/60 text-[#2ecc71] bg-[#2ecc71]/10' : st === 'loading' ? 'border-[#f39c12]/60 text-[#f39c12] bg-[#f39c12]/10' : 'border-[#30363d] text-[#8b949e]')}
+              &gt;
+                {r.path}: {st || 'empty'}
+              &lt;/span&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      {/* preload log (reverse chronological) */}
+      &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d] mb-4"&gt;
+        &lt;div className="flex items-center justify-between mb-2"&gt;
+          &lt;span className="text-[#8b949e] text-xs uppercase"&gt;Preload Log&lt;/span&gt;
+          &lt;button data-testid="clear" onClick={clearAll} className="text-[10px] text-[#8b949e] hover:text-[#e74c3c] border border-[#30363d] rounded px-2 py-0.5"&gt;clear cache&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;div data-testid="log" className="space-y-1 max-h-44 overflow-y-auto"&gt;
+          {logs.length === 0 ? (
+            &lt;div className="text-[#8b949e] text-xs italic"&gt;(no activity yet — hover a link)&lt;/div&gt;
+          ) : logs.slice().reverse().map(function (row) {
+            var color = row.action.indexOf('START') &gt; -1 ? '#f39c12'
+              : row.action.indexOf('DONE') &gt; -1 ? '#2ecc71'
+              : row.action === 'CACHE HIT' ? '#61dafb'
+              : row.action === 'NAVIGATE' ? (row.result === 'cold' ? '#e74c3c' : '#2ecc71')
+              : '#8b949e';
+            return (
+              &lt;div
+                key={row.id}
+                data-testid="log-row"
+                data-action={row.action}
+                data-route={row.route}
+                data-intent={row.intent}
+                data-result={row.result || ''}
+                className="text-xs font-mono flex gap-3"
+              &gt;
+                &lt;span className="text-[#8b949e] w-8"&gt;#{row.id}&lt;/span&gt;
+                &lt;span style={{color: color}} className="font-bold w-32"&gt;{row.action}&lt;/span&gt;
+                &lt;span className="text-[#e6edf3] w-20"&gt;{row.route}&lt;/span&gt;
+                &lt;span className="text-[#8b949e]"&gt;intent={row.intent}{row.result ? ' result=' + row.result : ''}&lt;/span&gt;
+              &lt;/div&gt;
+            );
+          })}
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;NavigationDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;NavigationDemo/&gt;</code> becomes <code>React.createElement(NavigationDemo)</code>.
+        Hovering a link calls <code>onIntent(path,'hover')</code> → if strategy matches, <code>startPreload</code>
+        dedups against <code>cache[path]</code>, kicks the <code>setTimeout</code> "fetch", and the log + cache
+        snapshot re-render. A later click reads the same <code>cache[path]</code> &mdash; hit → INSTANT.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the preloading pipeline, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Hover a link to fire intent (with <code>hover</code> selected), then click it &mdash; the navigation is
+        INSTANT because the cache already holds the result. Switch to <code>none</code>, hover a fresh link &mdash;
+        nothing preloads; clicking it shows LOADING. The <b class="text-[#e6edf3]">gold-check</b> runs this whole
+        sequence automatically and asserts every step.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        live: <span id="status-read" class="text-[#61dafb]">—</span>
+        · gold: hover Users → preload → click INSTANT · none → hover Settings (no preload) → click LOADING
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">trigger → dedup → cache → navigate</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>scenario</th><th>what happens</th><th>why</th></tr>
+        <tr>
+          <td><code>preload="intent"</code> + hover</td>
+          <td>mouseenter → after <code>preloadDelay</code> → <code>preloadRoute()</code></td>
+          <td>hover ≈ "I'm about to click" — cheapest signal with real intent</td>
+        </tr>
+        <tr>
+          <td><code>preload="intent"</code> + tap</td>
+          <td>pointerdown/touchstart → preload starts (same code path as hover)</td>
+          <td>mobile has no hover; <code>intent</code> covers both event types</td>
+        </tr>
+        <tr>
+          <td><code>preload="viewport"</code></td>
+          <td>IntersectionObserver fires → preload every link in view</td>
+          <td>eager — best for landing pages, costs bandwidth on link farms</td>
+        </tr>
+        <tr>
+          <td>two links, same route</td>
+          <td>only the first triggers a fetch; second logs CACHE HIT</td>
+          <td>dedup key = route path; in-flight promise is shared</td>
+        </tr>
+        <tr>
+          <td>click while preloading</td>
+          <td>navigation awaits the in-flight preload → reuses result</td>
+          <td>no double fetch; click never cancels the preload</td>
+        </tr>
+        <tr>
+          <td>click after <code>staleTime</code></td>
+          <td>entry is stale → refetch in background (or block, per <code>staleReloadMode</code>)</td>
+          <td>freshness window balances latency vs. data currency</td>
+        </tr>
+        <tr>
+          <td>link leaves viewport, unused</td>
+          <td>after <code>gcTime</code> (default 5min) the entry is garbage-collected</td>
+          <td>preloads don't leak memory forever</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var statusRead  = document.getElementById("status-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render NavigationDemo…");
+        waitForRender(0);
+      }
+
+      function waitForRender(frame) {
+        var bar = root.querySelector('[data-testid="strategy-active"]');
+        if (bar) { phase1AssertDefaults(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForRender(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the strategy bar in time");
+      }
+
+      // helper: dispatch a bubbling mouseover (React synthesizes onMouseEnter from it)
+      function fireHover(el) {
+        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window }));
+      }
+
+      function readLive() {
+        var nav = root.querySelector('[data-testid="nav-status"]');
+        var cur = root.querySelector('[data-testid="current-route"]');
+        var navTxt = nav ? (nav.getAttribute("data-result") || nav.textContent.trim()) : "—";
+        var curTxt = cur ? cur.textContent.trim() : "—";
+        statusRead.textContent = curTxt + " · " + navTxt;
+      }
+
+      function logHas(action, route) {
+        return !!root.querySelector(
+          '[data-testid="log-row"][data-action="' + action + '"][data-route="' + route + '"]'
+        );
+      }
+
+      // Phase 1: assert defaults — strategy "hover", current route "/", no nav yet
+      function phase1AssertDefaults() {
+        readLive();
+        var active = root.querySelector('[data-testid="strategy-active"]');
+        var txt = active ? active.textContent.trim() : "";
+        if (txt.indexOf("hover") === -1) {
+          failGoldCheck('expected default strategy "hover" but got "' + txt + '"');
+          return;
+        }
+        // Phase 2: hover the Users link → expect PRELOAD START for /users
+        var usersLink = root.querySelector('[data-testid="link"][data-path="/users"]');
+        if (!usersLink) { failGoldCheck("Users link not found"); return; }
+        fireHover(usersLink);
+        pollLog("PRELOAD START", "/users", 0, function () {
+          // Phase 3: wait for PRELOAD DONE (the simulated 400ms fetch)
+          pollLog("PRELOAD DONE", "/users", 0, function () {
+            // Phase 4: click Users → expect INSTANT navigation (cache hit)
+            usersLink.click();
+            pollNavResult("INSTANT", 0, function () {
+              // Phase 5: switch strategy to "none"
+              var noneBtn = root.querySelector('[data-testid="strategy"][data-strategy="none"]');
+              if (!noneBtn) { failGoldCheck("strategy=none button not found"); return; }
+              noneBtn.click();
+              pollStrategy("none", 0, function () {
+                // Phase 6: hover Settings → expect NO preload log for /settings
+                var settingsLink = root.querySelector('[data-testid="link"][data-path="/settings"]');
+                if (!settingsLink) { failGoldCheck("Settings link not found"); return; }
+                fireHover(settingsLink);
+                // give the (absent) preload a moment to NOT fire
+                setTimeout(function () {
+                  if (logHas("PRELOAD START", "/settings")) {
+                    failGoldCheck("strategy=none should NOT preload /settings on hover");
+                    return;
+                  }
+                  // Phase 7: click Settings → expect LOADING (cold fetch)
+                  settingsLink.click();
+                  pollNavResult("LOADING", 0, passGoldCheck);
+                }, 120);
+              });
+            });
+          });
+        });
+      }
+
+      function pollLog(action, route, frame, done) {
+        readLive();
+        if (logHas(action, route)) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollLog(action, route, frame + 1, done); });
+          return;
+        }
+        failGoldCheck('expected log "' + action + '" for ' + route + " but it never appeared");
+      }
+
+      function pollNavResult(expectPrefix, frame, done) {
+        readLive();
+        var nav = root.querySelector('[data-testid="nav-status"]');
+        var res = nav ? nav.getAttribute("data-result") : "";
+        if (res && res.indexOf(expectPrefix) === 0) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollNavResult(expectPrefix, frame + 1, done); });
+          return;
+        }
+        failGoldCheck('expected navigation "' + expectPrefix + '…" but nav-status was "' + res + '"');
+      }
+
+      function pollStrategy(expect, frame, done) {
+        var active = root.querySelector('[data-testid="strategy-active"]');
+        var txt = active ? active.textContent.trim() : "";
+        if (txt.indexOf(expect) > -1) { done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollStrategy(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck('expected strategy "' + expect + '" but active was "' + txt + '"');
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] hover→preload→click INSTANT; none→hover(no preload)→click LOADING. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

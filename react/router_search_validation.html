@@ -1,0 +1,619 @@
+<!doctype html>
+<!--
+  router_search_validation.html — Phase 6 TanStack Router bundle #4 (SEARCH VALIDATION).
+  STYLE ANCHOR: use_reducer.html (same CDN, styling, JSX-in-textarea, gold-check).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground that SIMULATES
+  TanStack Router's validateSearch pipeline. We are in plain JS (no Zod), so we
+  implement a minimal schema validator from scratch that mirrors the real engine:
+    (1) a SCHEMA (the single source of truth — like z.object({...})),
+    (2) validateSearch(rawInput, schema) -> { data, errors }, running the pipeline
+        parse -> coerce -> validate constraints -> apply defaults,
+    (3) editable "URL search params" (page / sort / filter) the user edits,
+    (4) a live verdict: valid data + URL string, or a list of validation errors.
+  Companion: ROUTER_SEARCH_VALIDATION.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: a URL search string (?page=2&sort=desc) is raw text — every value is
+  a string, nothing is checked, nothing has a default. TanStack Router's
+  validateSearch turns that into a typed, validated, defaulted object. You declare
+  ONE schema (Zod/Valibot/ArkType); the router PARSEs the URL, COERCEs strings to
+  the declared types (z.number() turns "2" into 2), VALIDATEs constraints
+  (min/enum), and applies DEFAULTS for missing keys. The component then reads
+  route.useSearch() and gets { page: number, sort: 'asc'|'desc', filter?: string }
+  — never a raw string again. Invalid URLs are rejected, not silently passed.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<SearchValidationDemo/>), the
+  gold-check (1) asserts the schema rendered 3 params and the initial input
+  {page:"2", sort:"desc", filter:"react"} validates to data page===2, (2) sets
+  page="invalid" and asserts a "must be a number" error, (3) sets sort="unknown"
+  and asserts an enum error naming "asc, desc", (4) clears all fields and asserts
+  the result goes valid again with page defaulted to 1. This proves the full
+  parse -> coerce -> validate -> default pipeline end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Search Param Validation — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:300px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Search Param Validation &mdash; TanStack Router&rsquo;s killer feature</h1>
+    <span id="goldcheck" class="goldcheck">[check: &hellip;]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_SEARCH_VALIDATION.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live validator with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/ROUTER_SEARCH_VALIDATION.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/tanstack-start/path_search_params.html">frontend/tanstack-start: path &amp; search params</a>
+    (the basics of path/search params — this bundle goes to the validation schema engine).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">raw URLSearchParams → typed, validated, defaulted</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A URL search string like <code>?page=2&amp;sort=desc</code> is raw text —
+        <code>URLSearchParams</code> hands you <code>{{page:"2", sort:"desc"}}</code>:
+        everything is a <b class="text-[#e6edf3]">string</b>, nothing is checked, nothing
+        has a default. TanStack Router&rsquo;s <code>validateSearch</code> replaces that
+        with a <b class="text-[#e6edf3]">schema</b> (Zod / Valibot / ArkType). The router
+        runs a pipeline &mdash; <b class="text-[#e6edf3]">parse &rarr; coerce &rarr; validate &rarr; default</b>
+        &mdash; and the component reads <code>route.useSearch()</code> to get a real
+        <code>{'{ page: number, sort: "asc"|"desc", filter?: string }'}</code>. Invalid
+        URLs are rejected (or recovered with fallbacks), never silently passed through.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>stage</th><th>what happens</th><th>example</th></tr>
+        <tr>
+          <td><code>parse</code></td>
+          <td>URL search string &rarr; object of raw strings</td>
+          <td><code>?page=2</code> &rarr; <code>{'{ page:"2" }'}</code></td>
+        </tr>
+        <tr>
+          <td><code>coerce</code></td>
+          <td>declared type converts the string</td>
+          <td><code>z.number()</code>: <code>"2"</code> &rarr; <code>2</code></td>
+        </tr>
+        <tr>
+          <td><code>validate</code></td>
+          <td>constraints checked; reject on failure</td>
+          <td><code>.min(1)</code>, <code>z.enum([...])</code></td>
+        </tr>
+        <tr>
+          <td><code>default</code></td>
+          <td>missing key &rarr; schema default</td>
+          <td>no <code>page</code> &rarr; <code>1</code></td>
+        </tr>
+        <tr>
+          <td><code>type</code></td>
+          <td>validator return type flows to consumers</td>
+          <td><code>route.useSearch()</code> is fully typed</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the schema validator you write (edit me)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>searchSchema</code> is the single source of truth (this stands in for
+        <code>z.object({'{...}'})</code>). <code>validateSearch()</code> is the engine:
+        it walks each field, coerces numbers, checks enum/min constraints, and fills
+        defaults for missing keys &mdash; returning <code>{'{ data, errors }'}</code>,
+        exactly like a Zod parse result.
+      </p>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Schema — the single source of truth (stands in for z.object({...})).
+// In real TanStack Router: validateSearch: zodValidator(searchSchema)
+var searchSchema = {
+  page:   { type: 'number', default: 1, min: 1, coerce: true },
+  sort:   { type: 'enum', values: ['asc', 'desc'], default: 'asc' },
+  filter: { type: 'string', optional: true }
+};
+
+// validateSearch: (rawInput, schema) -> { data, errors }
+//   pipeline: parse -> coerce -> validate constraints -> apply defaults.
+//   Mirrors Zod's .parse(): returns the typed data, or a list of issues.
+function validateSearch(rawInput, schema) {
+  var result = { data: null, errors: [] };
+  var data = {};
+
+  Object.keys(schema).forEach(function (key) {
+    var field = schema[key];
+    var raw = rawInput[key];
+
+    // parse: missing or empty
+    if (raw === undefined || raw === null || raw === '') {
+      if (field.optional) return;                                  // omit optional
+      if (field.default !== undefined) { data[key] = field.default; return; }
+      result.errors.push(key + ': required');
+      return;
+    }
+
+    // coerce: URL gives strings; z.number() coerces
+    if (field.type === 'number' && field.coerce) {
+      raw = Number(raw);
+      if (isNaN(raw)) { result.errors.push(key + ': must be a number'); return; }
+    }
+
+    // validate: constraints
+    if (field.type === 'number') {
+      if (field.min !== undefined && raw < field.min) {
+        result.errors.push(key + ': must be >= ' + field.min); return;
+      }
+    }
+    if (field.type === 'enum') {
+      if (field.values.indexOf(raw) < 0) {
+        result.errors.push(key + ': must be one of ' + field.values.join(', ')); return;
+      }
+    }
+
+    data[key] = raw;
+  });
+
+  result.data = result.errors.length === 0 ? data : null;
+  return result;
+}
+
+// serializeUrl: the reverse of parse (data -> ?query string).
+function serializeUrl(data) {
+  var parts = Object.keys(data).map(function (k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(data[k]);
+  });
+  return parts.length ? ('?' + parts.join('&')) : '(no params)';
+}
+
+function SearchValidationDemo() {
+  var _React$useState = React.useState({ page: '2', sort: 'desc', filter: 'react' }),
+      input = _React$useState[0], setInput = _React$useState[1];
+
+  function setField(key, value) {
+    var next = {}; next[key] = value;
+    setInput(Object.assign({}, input, next));
+  }
+
+  var result = validateSearch(input, searchSchema);
+  var keys = Object.keys(searchSchema);
+
+  return (
+    &lt;div&gt;
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2"&gt;Schema definition (the single source of truth)&lt;/h3&gt;
+      &lt;div style={{ overflowX: 'auto', minWidth: 0 }}&gt;
+        &lt;table&gt;
+          &lt;tr&gt;&lt;th&gt;param&lt;/th&gt;&lt;th&gt;type&lt;/th&gt;&lt;th&gt;constraints&lt;/th&gt;&lt;th&gt;default&lt;/th&gt;&lt;/tr&gt;
+          {keys.map(function (k) {
+            var f = searchSchema[k];
+            var cons = [];
+            if (f.type === 'enum') cons.push('one of [' + f.values.join(', ') + ']');
+            if (f.min !== undefined) cons.push('&gt;= ' + f.min);
+            if (f.coerce) cons.push('coerce');
+            if (f.optional) cons.push('optional');
+            return (
+              &lt;tr data-testid="schema-row" key={k}&gt;
+                &lt;td&gt;&lt;code&gt;{k}&lt;/code&gt;&lt;/td&gt;
+                &lt;td className="text-[#8b949e]"&gt;{f.type}&lt;/td&gt;
+                &lt;td className="text-[#8b949e]"&gt;{cons.join(' · ') || '—'}&lt;/td&gt;
+                &lt;td className="text-[#8b949e]"&gt;{f.default !== undefined ? JSON.stringify(f.default) : '—'}&lt;/td&gt;
+              &lt;/tr&gt;
+            );
+          })}
+        &lt;/table&gt;
+      &lt;/div&gt;
+
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2 mt-4"&gt;URL search params (edit me)&lt;/h3&gt;
+      &lt;div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3"&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;page (number)&lt;/label&gt;
+          &lt;input
+            data-testid="input-page"
+            value={input.page}
+            onChange={function (e) { setField('page', e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm font-mono"
+          /&gt;
+        &lt;/div&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;sort (enum)&lt;/label&gt;
+          &lt;input
+            data-testid="input-sort"
+            value={input.sort}
+            onChange={function (e) { setField('sort', e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm font-mono"
+          /&gt;
+        &lt;/div&gt;
+        &lt;div&gt;
+          &lt;label className="block text-xs text-[#8b949e] mb-1"&gt;filter (optional string)&lt;/label&gt;
+          &lt;input
+            data-testid="input-filter"
+            value={input.filter}
+            onChange={function (e) { setField('filter', e.target.value); }}
+            className="w-full px-2 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm font-mono"
+          /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+
+      &lt;div
+        data-testid="verdict"
+        data-valid={result.data ? 'true' : 'false'}
+        className={'p-3 rounded border ' + (result.data ? 'bg-[rgba(46,204,113,.08)] border-[#2ecc71]' : 'bg-[rgba(231,76,60,.08)] border-[#e74c3c]')}
+      &gt;
+        {result.data ? (
+          &lt;div&gt;
+            &lt;div className="text-[#2ecc71] font-bold mb-1"&gt;✓ Valid — coerced, validated, defaults applied&lt;/div&gt;
+            &lt;div className="text-[#e6edf3] text-sm"&gt;
+              page: &lt;span data-testid="data-page" className="text-[#61dafb] font-bold"&gt;{String(result.data.page)}&lt;/span&gt;
+              {' · '}sort: &lt;span className="text-[#61dafb] font-bold"&gt;{String(result.data.sort)}&lt;/span&gt;
+              {' · '}filter: &lt;span className="text-[#61dafb] font-bold"&gt;{result.data.filter !== undefined ? String(result.data.filter) : '(omitted)'}&lt;/span&gt;
+            &lt;/div&gt;
+            &lt;div className="text-[#8b949e] text-xs mt-2"&gt;
+              URL: &lt;code data-testid="url-preview"&gt;{serializeUrl(result.data)}&lt;/code&gt;
+            &lt;/div&gt;
+          &lt;/div&gt;
+        ) : (
+          &lt;div&gt;
+            &lt;div className="text-[#e74c3c] font-bold mb-1"&gt;✗ Validation error(s):&lt;/div&gt;
+            &lt;ul data-testid="errors" className="list-disc ml-5 text-[#e74c3c] text-sm"&gt;
+              {result.errors.map(function (er, i) { return &lt;li key={i}&gt;{er}&lt;/li&gt;; })}
+            &lt;/ul&gt;
+          &lt;/div&gt;
+        )}
+      &lt;/div&gt;
+
+      &lt;h3 className="text-[#e6edf3] text-sm font-bold mb-2 mt-4"&gt;Pipeline: parse → coerce → validate → default&lt;/h3&gt;
+      &lt;pre className="src"&gt;
+{'?page=2&sort=desc&filter=react\n' +
+ '   │  parse    (URLSearchParams → { page:"2", sort:"desc", filter:"react" })\n' +
+ '   ▼\n' +
+ '   │  coerce   (Number("2") → 2)\n' +
+ '   ▼\n' +
+ '   │  validate (2 >= min(1) ✓ · "desc" ∈ [asc,desc] ✓)\n' +
+ '   ▼\n' +
+ '   │  default  (missing keys → schema defaults)\n' +
+ '   ▼\n' +
+ '{ page: 2 (number), sort: "desc" (enum), filter: "react" (string) }'}
+      &lt;/pre&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;SearchValidationDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;SearchValidationDemo/&gt;</code> becomes
+        <code>React.createElement(SearchValidationDemo)</code>. The schema + validator
+        run as plain JS on every keystroke; React only re-renders the verdict when the
+        parsed <code>input</code> changes.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live search-param validator (proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Edit <code>page</code> / <code>sort</code> / <code>filter</code> above and watch the
+        verdict flip. Try <code>page=invalid</code> (number error), <code>sort=unknown</code>
+        (enum error), or clear a field (default applied). The <b class="text-[#e6edf3]">gold-check</b>
+        drives all four cases automatically.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        schema params: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: valid(2) → number error → enum error → defaults(1)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → schema pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>required number param</td>
+          <td><code>z.number().int().min(1)</code></td>
+          <td>rejects non-numbers and out-of-range; no silent <code>"2"</code></td>
+        </tr>
+        <tr>
+          <td>default when missing</td>
+          <td><code>.default(1)</code></td>
+          <td>applied only when the key is absent (parse-level)</td>
+        </tr>
+        <tr>
+          <td>recover when invalid</td>
+          <td><code>fallback(z.number(), 1)</code> / <code>.catch(1)</code></td>
+          <td>keeps the route alive instead of throwing to errorComponent</td>
+        </tr>
+        <tr>
+          <td>constrain to a set</td>
+          <td><code>z.enum(['asc','desc'])</code></td>
+          <td>type narrows to the union; unknown value &rarr; error</td>
+        </tr>
+        <tr>
+          <td>optional param</td>
+          <td><code>.optional()</code></td>
+          <td>omitted key &rarr; <code>undefined</code> (not an error)</td>
+        </tr>
+        <tr>
+          <td>read in a component</td>
+          <td><code>route.useSearch()</code></td>
+          <td>typed by the schema&rsquo;s output; never raw strings</td>
+        </tr>
+        <tr>
+          <td>handle invalid URL</td>
+          <td><code>errorComponent: ({{ error }}) =&gt; ...</code></td>
+          <td>shown when validation throws; reset via <code>router.navigate</code></td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. drive a React controlled input the reliable way ----
+      function setNativeValue(el, value) {
+        var proto = HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      // ---- 4. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for the validator to render…");
+        waitForSchema(0);
+      }
+
+      // Step 0: schema table renders 3 params + initial verdict is valid
+      function waitForSchema(frame) {
+        readLive();
+        var rows = root.querySelectorAll('[data-testid="schema-row"]');
+        var verdict = root.querySelector('[data-testid="verdict"]');
+        if (rows.length === 3 && verdict && verdict.getAttribute("data-valid") === "true") {
+          assertInitialValid();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForSchema(frame + 1); });
+          return;
+        }
+        failGoldCheck("validator did not render 3 params + valid verdict");
+      }
+
+      // Step 1: initial {page:"2", sort:"desc", filter:"react"} -> valid, page===2
+      function assertInitialValid() {
+        var pageEl = root.querySelector('[data-testid="data-page"]');
+        var verdict = root.querySelector('[data-testid="verdict"]');
+        var valid = verdict && verdict.getAttribute("data-valid") === "true";
+        if (valid && pageEl && pageEl.textContent === "2") {
+          breakPageNumber();
+          return;
+        }
+        failGoldCheck("initial input did not validate to page===2");
+      }
+
+      // Step 2: page -> "invalid" -> data-valid=false, error mentions "number"
+      function breakPageNumber() {
+        setNativeValue(root.querySelector('[data-testid="input-page"]'), "invalid");
+        pollVerdict(false, 0, function () {
+          var errs = root.querySelector('[data-testid="errors"]');
+          var txt = errs ? errs.textContent : "";
+          if (/number/i.test(txt)) breakSortEnum();
+          else failGoldCheck("expected a number error, saw: " + (txt || "(none)"));
+        });
+      }
+
+      // Step 3: sort -> "unknown" -> error names the enum values "asc, desc"
+      function breakSortEnum() {
+        setNativeValue(root.querySelector('[data-testid="input-sort"]'), "unknown");
+        pollVerdict(false, 0, function () {
+          var errs = root.querySelector('[data-testid="errors"]');
+          var txt = errs ? errs.textContent : "";
+          if (/asc/i.test(txt) && /desc/i.test(txt)) applyDefaults();
+          else failGoldCheck("expected an enum error naming asc/desc, saw: " + (txt || "(none)"));
+        });
+      }
+
+      // Step 4: clear all -> defaults applied -> valid, page defaulted to 1
+      function applyDefaults() {
+        setNativeValue(root.querySelector('[data-testid="input-page"]'), "");
+        setNativeValue(root.querySelector('[data-testid="input-sort"]'), "");
+        setNativeValue(root.querySelector('[data-testid="input-filter"]'), "");
+        pollVerdict(true, 0, function () {
+          var pageEl = root.querySelector('[data-testid="data-page"]');
+          if (pageEl && pageEl.textContent === "1") passGoldCheck();
+          else failGoldCheck("default page should be 1, saw: " + (pageEl ? pageEl.textContent : "(none)"));
+        });
+      }
+
+      function pollVerdict(expectValid, frame, done) {
+        readLive();
+        var box = root.querySelector('[data-testid="verdict"]');
+        var valid = box && box.getAttribute("data-valid") === (expectValid ? "true" : "false");
+        if (valid) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollVerdict(expectValid, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("verdict did not settle to " + (expectValid ? "valid" : "invalid"));
+      }
+
+      function readLive() {
+        var rows = root.querySelectorAll('[data-testid="schema-row"]');
+        countRead.textContent = rows.length;
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] valid(2) → number error → enum error → default(1). OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

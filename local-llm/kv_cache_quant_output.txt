@@ -1,0 +1,199 @@
+kv_cache_quant.py - KV cache quantization (Q8_0 / Q4_0) for memory savings.
+Pure Python stdlib. Numbers below feed KV_CACHE_QUANT.md.
+Sources: llama.cpp PR #2832 (KV cache quant) + GGML block format spec.
+GB convention: binary (GiB = 1024^3 bytes), matching VRAM / .gguf sizes.
+
+Lineage: FP16 KV (default) -> Q8_0 KV (~2x savings) -> Q4_0 KV (~4x savings).
+
+==========================================================================
+  SECTION A: THE KV CACHE FORMULA - why it dominates at long context
+==========================================================================
+The KV cache stores K and V tensors for every position in context,
+for every KV head, in every layer. It grows LINEARLY with n_ctx.
+
+Formula:
+  bytes = n_layers x 2 x n_ctx x n_kv_heads x head_dim x bytes_per_element
+           ^^^^^^^^  ^        ^^^^^^^^^^   ^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^
+           per layer K+V      GQA heads    head width   FP16=2, Q8=1.0625, Q4=0.5625
+
+At short context the weights dominate. At long context the KV cache can
+exceed the weights - this is why you OOM at 32K even though the model
+'fits' at 4K. Quantizing the cache is the cheapest way to extend context.
+
+KV cache growth for Llama-3-8B (FP16, 2 B/E):
+| context  | n_elems (K+V)   | KV bytes       | KV (GB)  |
+|----------|----------------|----------------|----------|
+|     4096 |    268,435,456 |    536,870,912 |  0.50 GB |
+|     8192 |    536,870,912 |  1,073,741,824 |  1.00 GB |
+|    16384 |  1,073,741,824 |  2,147,483,648 |  2.00 GB |
+|    32768 |  2,147,483,648 |  4,294,967,296 |  4.00 GB |
+|    65536 |  4,294,967,296 |  8,589,934,592 |  8.00 GB |
+
+  -> context x8 (4K->32K) => KV x8 (strictly linear in n_ctx)
+[check] KV is linear in context (32K/4K == 8x) :  OK
+
+The key insight: the bytes_per_element multiplier is the ONLY knob that
+does not trade quality for architecture. Drop it from 2.0 (FP16) to 1.0625
+(Q8_0) and you nearly halve the cache - with under 1% quality loss.
+
+==========================================================================
+  SECTION B: BLOCK QUANT FORMAT - how Q8_0 / Q4_0 pack the cache
+==========================================================================
+KV cache quantization reuses the SAME block format as weight quantization
+(cross-ref quant_types). Each block of 32 elements shares one fp16 scale.
+
+Block layout (GGML Q8_0 / Q4_0):
+  [fp16 scale: 2 bytes] [32 x data elements]
+
+| format | data bits | data bytes/32 | scale | block bytes | B/E     | savings vs FP16 |
+|--------|-----------|----------------|-------|-------------|---------|-----------------|
+| FP16   |        16 |             64 |     0  |          64 |  2.0000 |        baseline |
+| Q4_0   |         4 |             16 |     2  |          18 |  0.5625 |           71.9% |
+| Q8_0   |         8 |             32 |     2  |          34 |  1.0625 |           46.9% |
+
+Worked: one block of 32 elements
+  FP16 : 32 x 2 bytes            = 64 bytes
+  Q8_0 : 32 x 1 byte + 2 (scale) = 34 bytes  (1.0625 B/E)
+  Q4_0 : 32 x 0.5 byte + 2       = 18 bytes  (0.5625 B/E)
+
+[check] Q8_0 block = 34 bytes :  OK
+[check] Q4_0 block = 18 bytes :  OK
+[check] Q8_0 bpe = 1.0625 :  OK
+[check] Q4_0 bpe = 0.5625 :  OK
+[check] FP16 bpe = 2.0 :  OK
+
+The 2-byte fp16 scale per 32 elements is the overhead floor: it prevents Q4_0
+from reaching the theoretical 8x savings (4 bits vs 16 bits). At 0.5625 B/E
+the real savings is ~3.6x, not 4x. But the scale is what PRESERVES quality:
+each block gets its own dynamic range, so outliers are not crushed.
+
+==========================================================================
+  SECTION C: GOLD - Llama-3-8B at 32K context (the canonical example)
+==========================================================================
+Model: Llama-3-8B  (32 layers, 8 KV heads, head_dim=128, GQA 4x)
+Context: 32,768 tokens
+Total K+V elements: 2,147,483,648
+
+| format | bytes_per_elem | total bytes    | KV (GB) | savings |
+|--------|----------------|----------------|---------|---------|
+| FP16   |         2.0000 |  4,294,967,296 | 4.00 GB | baseline |
+| Q8_0   |         1.0625 |  2,281,701,376 | 2.13 GB |     47% |
+| Q4_0   |         0.5625 |  1,207,959,552 | 1.13 GB |     72% |
+
+GOLD VALUES (pinned in kv_cache_quant.html):
+  FP16 KV = 4.00 GB
+  Q8_0 KV = 2.13 GB  (47% saved)
+  Q4_0 KV = 1.13 GB  (72% saved)
+
+[check] FP16 KV @ 32K = 4.00 GB :  OK  (got 4.000000)
+[check] Q8_0 KV @ 32K = 2.13 GB :  OK  (got 2.125000)
+[check] Q4_0 KV @ 32K = 1.13 GB :  OK  (got 1.125000)
+[check] Q8_0 savings ~= 47% :  OK  (got 0.468750)
+[check] Q4_0 savings ~= 72% :  OK  (got 0.718750)
+[check] FP16 bytes = 2^32 :  OK
+
+Interpretation: at 32K context, a Llama-3-8B in Q4_K_M (~4.5 GB weights)
+has a 4.00 GB FP16 KV cache - the cache is nearly as big as the weights!
+Switching to Q8_0 KV frees 1.87 GB. Q4_0 KV frees 2.88 GB. The weights
+stay at Q4_K_M (no quality loss on weights); only the ephemeral cache drops.
+
+==========================================================================
+  SECTION D: CROSS-MODEL COMPARISON - KV cache by model x context x quant
+==========================================================================
+The same FP16 -> Q8_0 -> Q4_0 savings apply to every model, but the
+ABSOLUTE GB saved depends on n_layers, n_kv_heads, and head_dim.
+GQA models (small n_kv_heads) have smaller caches to begin with.
+
+=== KV cache (GB) by model x context x quant ===
+| model        | ctx    | FP16   | Q8_0   | Q4_0   | Q8 saved | Q4 saved |
+|--------------|--------|--------|--------|--------|----------|----------|
+| Llama-2-13B  | 4K     | 3.13 GB | 1.66 GB | 0.88 GB |      47% |      72% |
+| Llama-2-13B  | 32K    | 25.00 GB | 13.28 GB | 7.03 GB |      47% |      72% |
+| Llama-3-70B  | 4K     | 1.25 GB | 0.66 GB | 0.35 GB |      47% |      72% |
+| Llama-3-70B  | 32K    | 10.00 GB | 5.31 GB | 2.81 GB |      47% |      72% |
+| Llama-3-8B   | 4K     | 0.50 GB | 0.27 GB | 0.14 GB |      47% |      72% |
+| Llama-3-8B   | 32K    | 4.00 GB | 2.13 GB | 1.13 GB |      47% |      72% |
+| Qwen2.5-7B   | 4K     | 0.22 GB | 0.12 GB | 0.06 GB |      47% |      72% |
+| Qwen2.5-7B   | 32K    | 1.75 GB | 0.93 GB | 0.49 GB |      47% |      72% |
+
+The savings PERCENTAGES are identical across all models (46.875% for Q8_0,
+71.875% for Q4_0) because they depend only on the B/E ratio, not the model.
+But the ABSOLUTE GB saved is proportional to the model's cache size.
+
+  Llama-2-13B @32K: Q4_0 KV frees 17.97 GB (huge MHA cache)
+  Llama-3-8B  @32K: Q4_0 KV frees 2.88 GB (small GQA cache)
+[check] MHA saves more absolute GB than GQA at same ctx :  OK
+[check] savings % identical for all models :  OK
+
+==========================================================================
+  SECTION E: QUALITY TRADE-OFF - perplexity increase (approximate)
+==========================================================================
+KV cache quantization trades precision for memory. The quality impact is
+MEASURED (not computed from a formula) and varies by model and task.
+Below: approximate perplexity RATIO (1.000 = FP16 baseline) from llama.cpp
+benchmarks and community reports. Treat as guidance, not exact values.
+
+| format | ppl ratio (approx) | perplexity increase | quality      |
+|--------|--------------------|---------------------|--------------|
+| FP16   |              1.000 |                  0% | lossless     |
+| Q8_0   |              1.006 |                 <1% | negligible   |
+| Q4_0   |              1.050 |               2%-8% | moderate     |
+
+Rules of thumb:
+  - Q8_0 KV is nearly free: <1% perplexity increase across all models.
+    Use it whenever the cache is even slightly tight. No reason not to.
+  - Q4_0 KV is the aggressive option: 2-8% perplexity increase. Acceptable
+    for chat / long-context retrieval where exact precision matters less.
+    Avoid for code generation or math where token-level precision is critical.
+  - The quality hit is CONTEXT-DEPENDENT: longer contexts spread the error
+    across more positions, so the relative impact per token is smaller.
+
+[check] Q8_0 ppl increase < 1% :  OK
+[check] Q4_0 ppl increase < Q8_0 x10 :  OK
+
+==========================================================================
+  SECTION F: LLAMA.CPP FLAGS - how to enable it
+==========================================================================
+KV cache quantization is controlled by two flags in llama.cpp:
+
+  --cache-type-k <type>   (or -ctk <type>)
+  --cache-type-v <type>   (or -ctv <type>)
+
+Common combinations:
+  # Q8_0 KV cache (~2x savings, <1% quality loss) - RECOMMENDED
+  ./llama-cli -m model.gguf --cache-type-k q8_0 --cache-type-v q8_0
+  ./llama-cli -m model.gguf -ctk q8_0 -ctv q8_0
+
+  # Q4_0 KV cache (~4x savings, moderate quality loss)
+  ./llama-cli -m model.gguf --cache-type-k q4_0 --cache-type-v q4_0
+  ./llama-cli -m model.gguf -ctk q4_0 -ctv q4_0
+
+  # FP16 KV cache (default, no flags needed)
+  ./llama-cli -m model.gguf
+
+Ollama / LM Studio expose this as a setting (Ollama: num_ctx + KV quant in
+the Modelfile; LM Studio: 'KV Cache Type' dropdown in advanced settings).
+
+You CAN mix K and V precisions (e.g. -ctk q8_0 -ctv q4_0) but the quality
+hit is dominated by the lower precision, so symmetric is the common choice.
+
+IMPORTANT: the KV cache type is INDEPENDENT of the weight quant type.
+A Q4_K_M model with Q8_0 KV keeps Q4_K_M weights (good quality) and only
+quantizes the ephemeral cache. This is the standard local-LLM configuration.
+
+==========================================================================
+  GOLD VALUE - the canonical number the HTML must reproduce
+==========================================================================
+Llama-3-8B, 32,768 context, KV cache by format:
+
+  FP16: 32x2x32768x8x128x2.0 = 4,294,967,296 bytes = 4.00 GB
+  Q8_0: 32x2x32768x8x128x1.0625 = 2,281,701,376 bytes = 2.13 GB  (47% saved)
+  Q4_0: 32x2x32768x8x128x0.5625 = 1,207,959,552 bytes = 1.13 GB  (72% saved)
+
+  GOLD (pinned in kv_cache_quant.html):
+    Q8_0 KV (Llama-3-8B, 32K) = 2.13 GB
+[check] gold Q8_0 KV = 2.13 GB :  OK  (got 2.125000)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

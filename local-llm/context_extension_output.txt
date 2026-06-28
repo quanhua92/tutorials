@@ -1,0 +1,169 @@
+context_extension.py - RoPE context-extension scaling reference.
+Pure Python stdlib. Numbers below feed CONTEXT_EXTENSION.md.
+Sources: NTK-aware (reddit r/LocalLLaMA), YaRN paper arXiv:2309.00071.
+
+Four methods: linear -> NTK-aware -> YaRN -> dynamic NTK
+
+==========================================================================
+  SECTION A: the RoPE frequency ladder (what we are scaling)
+==========================================================================
+RoPE base theta = 10000 (default), head_dim D = 4
+freq_d = 1 / theta^(2d/D), for d in 0..D/2-1. angle_i_d = i * freq_d
+
+| d | exponent 2d/D | theta^(2d/D) |   freq_d   | wavelength 2pi/freq |
+|---|---------------|--------------|------------|----------------------|
+| 0 |        0.0000 |         1.00 |   1.000000 |               6.2832 |
+| 1 |        0.5000 |       100.00 |   0.010000 |             628.3185 |
+
+freqs = [+1.0000, +0.0100]
+d=0 is the HIGHEST frequency (wavelength ~6.3 positions): it encodes
+LOCAL token-to-token structure. d=1 is lower (wavelength ~628): it
+encodes LONG-RANGE structure. Every scaling method trades these off.
+
+The extrapolation problem: at position i the model saw angle i*freq
+only up to i = L_orig = 4096. Beyond that the angle is UNSEEN. The
+angle at i = 4096 is the trained CEILING for each dim:
+
+| d | freq_d   | angle at L_orig=4096 |
+|---|----------|----------------------|
+| 0 |   1.0000 |            4096.0000 |
+| 1 |   0.0100 |              40.9600 |
+[check] freq_0 = 1.0 for any theta :  OK
+[check] freq_1 = 0.01 for theta=10000, D=4 :  OK  (got 0.01)
+
+==========================================================================
+  SECTION B: LINEAR scaling (Position Interpolation) - divide positions
+==========================================================================
+scale = L_target / L_orig = 4  (4096 -> 16384)
+Method:  position_eff = position / scale   (apply to ALL positions)
+Effect:  effective freq_d becomes freq_d / scale for EVERY dim.
+
+| d | original freq | linear freq  | ratio |
+|---|---------------|--------------|-------|
+| 0 |        1.0000 |       0.2500 |  0.25 |
+| 1 |        0.0100 |       0.0025 |  0.25 |
+
+original = [+1.0000, +0.0100]
+linear   = [+0.2500, +0.0025]
+
+The HIGH-freq dim d=0 is ALSO divided by 4 (1.0 -> 0.25). That blurs
+local structure: two adjacent tokens that used to differ by a full
+rotation now differ by only a quarter. Quality degrades hard >4x.
+
+At L_target=16384, linear angle_d = 16384*freq/4 = 4096*freq (the ORIGINAL ceiling):
+| d | linear freq | angle at L_target | original ceiling | match? |
+|---|-------------|-------------------|------------------|--------|
+| 0 |      0.2500 |         4096.0000 |        4096.0000 |    YES |
+| 1 |      0.0025 |           40.9600 |          40.9600 |    YES |
+[check] linear divides every freq by scale :  OK
+[check] linear maps L_target angle back to original ceiling :  OK
+
+==========================================================================
+  SECTION C: NTK-AWARE - adjust the base frequency  *** GOLD ***
+==========================================================================
+theta_new = theta * scale^(D/(D-2))
+         = 10000 * 4^(4/(4-2))
+         = 10000 * 4^2
+         = 10000 * 16
+         = 160000
+
+| d | original freq | NTK freq     | ratio freq_new/freq |
+|---|---------------|--------------|---------------------|
+| 0 |        1.0000 |     1.000000 |            1.000000 |
+| 1 |        0.0100 |     0.002500 |            0.250000 |
+
+original = [+1.0000, +0.0100]
+NTK      = [+1.000000, +0.002500]
+
+KEY: d=0 (highest freq) is UNCHANGED (ratio 1.0) -> local structure
+preserved. Only d=1 (low freq) is stretched (0.01 -> 0.0025). This is
+why NTK beats linear: it never blurs the local dims.
+
+GOLD (for context_extension.html):
+  theta=10000, D=4, scale=4 -> theta_new = 160000
+  freq_1: 0.0100 -> 0.002500
+
+[check] NTK theta_new = 160000 for D=4, scale=4 :  OK  (got 160000.0)
+[check] NTK preserves high-freq dim d=0 (freq_0 = 1.0) :  OK  (got 1.0)
+[check] NTK stretches low-freq dim d=1 (0.01 -> 0.0025) :  OK  (got 0.0025)
+
+==========================================================================
+  SECTION D: YaRN - band-wise scaling (piecewise, with a ramp)
+==========================================================================
+YaRN needs several dim pairs to show its bands, so D=8 here ((4 freq pairs). Same theta=10000, scale=4).
+
+Each dim is classified by how many full rotations its wavelength
+completes over L_orig=4096:
+  beta_fast=32 rotations  -> high-freq boundary (above = extrapolation)
+  beta_slow=1  rotation   -> low-freq boundary  (below = interpolation)
+
+| d | original | w_d (interp weight) | band        | YaRN freq  | linear | NTK freq |
+|---|----------|---------------------|-------------|------------|--------|----------|
+| 0 |   1.0000 |              0.0000 | extrapolation |   1.000000 | 0.2500 | 1.000000 |
+| 1 |   0.1000 |              0.0000 | extrapolation |   0.100000 | 0.0250 | 0.062996 |
+| 2 |   0.0100 |              0.4591 | ramp (blend) |   0.006557 | 0.0025 | 0.003969 |
+| 3 |   0.0010 |              1.0000 | interpolation |   0.000250 | 0.0003 | 0.000250 |
+
+original = [+1.0000, +0.1000, +0.0100, +0.0010]
+YaRN     = [+1.000000, +0.100000, +0.006557, +0.000250]
+linear   = [+0.2500, +0.0250, +0.0025, +0.0003]  (reference: uniform /scale)
+NTK      = [+1.000000, +0.062996, +0.003969, +0.000250]  (reference: smooth base stretch)
+
+YaRN preserves BOTH high-freq dims (d=0,1 unchanged, like NTK but a
+SHARPER boundary), fully interpolates the lowest dim (d=3 = linear),
+and blends the middle (d=2). YaRN also multiplies the attention logits
+by an attention_factor ~ sqrt(1 + ln(scale)/ln(L_orig)) to compensate
+for the distribution shift. Best quality at 8x-32x extension.
+
+[check] YaRN keeps highest-freq d=0 unchanged :  OK  (got 1.0 vs 1.0)
+[check] YaRN fully interpolates lowest-freq d=last (= linear) :  OK  (got 0.00025 vs 0.00025)
+[check] YaRN middle dim is between original and linear :  OK  (yarn[2]=0.006556971521129435 orig=0.01 lin=0.0025)
+
+==========================================================================
+  SECTION E: DYNAMIC NTK - scale grows per-token (streaming)
+==========================================================================
+For streaming (unknown final length) recompute theta each token:
+  scale_t = max(1, current_position / L_orig), capped at target scale
+  theta_t = theta * scale_t ^ (D/(D-2))
+
+Within L_orig: scale=1 -> original theta (zero degradation). Past
+L_orig theta grows gradually until it reaches the full NTK value.
+
+| position | scale_t | theta_t  | freq_1 (low-freq dim) |
+|----------|---------|----------|-----------------------|
+|     2048 |  1.0000 |    10000 |              0.010000 |
+|     4096 |  1.0000 |    10000 |              0.010000 |
+|     8192 |  2.0000 |    40000 |              0.005000 |
+|    12288 |  3.0000 |    90000 |              0.003333 |
+|    16384 |  4.0000 |   160000 |              0.002500 |
+
+At p=4096 (the trained boundary) theta is still 10000 (unchanged). The
+model only starts stretching once it actually exceeds L_orig. This gives
+gradual degradation instead of a fixed scale applied from token 0.
+[check] dynamic NTK theta == original at p=L_orig :  OK  (got 10000.0)
+[check] dynamic NTK theta == full NTK at p=L_target :  OK  (got 160000.0 vs 160000.0)
+
+==========================================================================
+  SECTION F: comparison - which method, which scale
+==========================================================================
+| method      | what it scales      | high-freq (local) | quality @4x | quality @8x+ | use case              |
+|-------------|---------------------|-------------------|-------------|--------------|-----------------------|
+| linear/PI   | positions (/scale)  | blurred (/scale)  | OK          | degrades     | simplest, old models  |
+| NTK-aware   | base theta          | preserved (~1.0)  | good        | soft drop    | one-shot, no finetune |
+| YaRN        | bands + attention factor | preserved         | best        | best         | extreme 8x-32x, finetuned |
+| dynamic NTK | base theta per-token | preserved early   | good        | gradual      | streaming, unknown len |
+
+llama.cpp / HF rope_scaling flags:
+  HF:       rope_scaling={'type':'linear','factor':4}
+            rope_scaling={'type':'ntk','factor':4}
+            rope_scaling={'type':'yarn','factor':8}
+  llama.cpp: --rope-scale 4  (linear)
+             --rope-freq-base 160000  (manual NTK base for D~128)
+             --rope-scaling yarn --rope-scale 8
+
+[check] linear is the only method that scales high-freq :  OK
+[check] YaRN is best at extreme extension :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

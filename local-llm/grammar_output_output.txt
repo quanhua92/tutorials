@@ -1,0 +1,133 @@
+grammar_output.py - reference impl. All numbers feed GRAMMAR_OUTPUT.md.
+pure Python stdlib (no torch, no numpy). Tiny GBNF parser + derivative
+token-mask simulator. Models llama.cpp's --grammar constrained sampling.
+
+========================================================================
+  SECTION A: parse GBNF text into a grammar (the tiny parser)
+========================================================================
+GBNF source (the GOLD grammar):
+    # GOLD grammar:  {  <one or more letters>  }
+    root   ::= "{" letter+ "}"
+    letter ::= [abehlo]
+
+Parsed rules (recursive-descent parser -> AST nodes):
+    letter  ::= [abehlo]
+    root    ::= (('{' letter+) '}')
+[check] root rule parsed: True -> OK
+[check] letter rule is a class: True -> OK
+
+========================================================================
+  SECTION B: the grammar state = Brzozowski derivative
+========================================================================
+The state IS the residual grammar after consuming the output so far.
+derive(state, c) returns the residual after eating one char `c`;
+  Null  = forbidden here (masked);  anything else = accepted.
+
+start state        = (('{' letter+) '}')
+  valid_chars      = ['{']
+  nullable (accept)= False
+
+  derive(state, '{' ) = (letter+ '}')                      ACCEPTED
+  derive(state, 'h' ) = (letter* '}')                      ACCEPTED
+  derive(state, 'e' ) = (letter* '}')                      ACCEPTED
+  derive(state, 'l' ) = (letter* '}')                      ACCEPTED
+  derive(state, 'l' ) = (letter* '}')                      ACCEPTED
+  derive(state, 'o' ) = (letter* '}')                      ACCEPTED
+  derive(state, '}' ) = (done)                             ACCEPTED
+
+final state        = (done)  (nullable -> output complete & valid)
+[check] input '{hello}' drives state to accepting (Eps): True -> OK
+[check] derive(root, '9') is Null (9 is out of class): True -> OK
+
+========================================================================
+  SECTION C: token mask = THE GOLD VALUE
+========================================================================
+Vocabulary (10 single-char tokens; x and 9 are distractors):
+    '{', 'a', 'b', 'h', 'e', 'l', 'o', '}', 'x', '9'
+
+STATE 0  (start, before any token):
+    valid   = ['{']
+    invalid = ['a', 'b', 'h', 'e', 'l', 'o', '}', 'x', '9']
+    -> only '{' can be sampled; the sampler sees all other logits as 0.
+
+STATE 1  (after sampling '{'):
+    valid   = ['a', 'b', 'h', 'e', 'l', 'o']
+    invalid = ['{', '}', 'x', '9']
+    -> the in-class letters are live; '}', 'x', '9', '{' are masked.
+
+[check] STATE 0 valid == ['{']: True -> OK
+[check] STATE 1 valid == ['a','b','h','e','l','o']: True -> OK
+[check] STATE 1 invalid contains '{','}','x','9': True -> OK
+
+========================================================================
+  SECTION D: constrained generation trace (seeded sampler)
+========================================================================
+At every step the mask is rebuilt, a valid token is picked (seeded
+RNG over the valid set), and the grammar state advances. The output
+is GUARANTEED to parse against the grammar - free sampling is not.
+
+| step | grammar state (residual)            | picked | output so far |
+|------|-------------------------------------|--------|---------------|
+| 0    | (('{' letter+) '}')                 | {      |               |
+| 1    | (letter+ '}')                       | h      | '{'           |
+| 2    | (letter* '}')                       | o      | '{h'          |
+| 3    | (letter* '}')                       | o      | '{ho'         |
+| 4    | (letter* '}')                       | }      | '{hoo'        |
+| 5    | (done)                              | (stop) | '{hoo}'       |
+
+Final output: '{hoo}'   (always matches  '{' letter+ '}')
+
+[check] generated output parses against the grammar (ends accepting): True -> OK
+[check] generated output starts with '{' and ends with '}': True -> OK
+
+========================================================================
+  SECTION E: a richer grammar (JSON object) + multi-char tokens
+========================================================================
+GBNF source (a tiny {"name": "..."} object grammar):
+    # a tiny JSON-ish object:  {"name": "..."}  with optional whitespace
+    root   ::= "{" ws "\"name\"" ws ":" ws string ws "}"
+    ws     ::= [ \t\n]*
+    string ::= "\"" [^"]* "\""
+
+Parsed rules:
+    root    ::= (((((((('{' ws) '"name"') ws) ':') ws) string) ws) '}')
+    string  ::= (('"' [^"]*) '"')
+    ws      ::= [ \t\n]*
+
+START state valid_chars (note whitespace is allowed first):
+    ['{']
+
+multi-char vocab: ['{', '{"name"', '{"', 'name', '"name"', ':', '"hi"', '"', '}', ' ', '9']
+  valid   = ['{', '{"name"', '{"']
+  invalid = ['name', '"name"', ':', '"hi"', '"', '}', ' ', '9']
+  -> '{"name"' and '{"' are valid (the whole token fits the state);
+     '{\"name\"' even pre-types the key. '{\"' alone is the minimal
+
+STATE after consuming '{"' :
+  valid   = ['name']
+  invalid = ['{', '{"name"', '{"', '"name"', ':', '"hi"', '"', '}', ' ', '9']
+  -> only 'name' (continuing the key) or the rest of the key is live.
+[check] '{"name"' accepted at start (whole token fits): True -> OK
+[check] '9' masked at start (not allowed by grammar): True -> OK
+[check] after '{"', '"name"' is NOT yet valid (key incomplete): True -> OK
+
+========================================================================
+  SECTION G: GOLD mask trace (the centerpiece)
+========================================================================
+GOLD grammar : root ::= "{" letter+ "}"   letter ::= [abehlo]
+Vocabulary   : '{', 'a', 'b', 'h', 'e', 'l', 'o', '}', 'x', '9'
+
+STATE 0 (start)        valid = ['{']
+STATE 1 (after '{')    valid = ['a', 'b', 'h', 'e', 'l', 'o']
+STATE 1 (after '{')    invalid= ['{', '}', 'x', '9']
+[check] GOLD state-0 valid == ['{']: True -> OK
+[check] GOLD state-1 valid == ['a','b','h','e','l','o']: True -> OK
+[check] GOLD state-1 invalid contains '{','}','x','9': True -> OK
+
+GOLD (recomputed & badge-checked in grammar_output.html):
+  state-0 valid   = ['{']
+  state-1 valid   = ['a', 'b', 'h', 'e', 'l', 'o']
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

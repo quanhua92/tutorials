@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KV Cache Quantization &mdash; FP16 vs Q8_0 vs Q4_0 (live memory meter)</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0a0e14; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --border:#30363d;
+    --accent:#f97316;
+    --green:#27ae60; --red:#c0392b; --blue:#58a6ff; --gold:#f1c40f; --purple:#a78bfa;
+    --fp16:#58a6ff; --q8:#27ae60; --q4:#f97316;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem;line-height:1.5}
+  a{color:var(--accent)}
+  h1{font-size:1.32rem;margin:.2rem 0 .1rem}
+  h2{font-size:1rem;color:var(--muted);margin:1.7rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem;display:flex;align-items:center;gap:.5rem}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem;max-width:920px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.95rem 1.05rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.76rem;line-height:1.55;margin-bottom:.4rem}
+  label{color:var(--muted);font-size:.8rem;display:flex;gap:.45rem;align-items:center;flex-wrap:wrap}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin:.3rem 0 .6rem}
+  select{background:var(--panel2);color:var(--ink);
+     border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:.82rem;font-family:inherit}
+  input[type=range]{accent-color:var(--accent);width:200px}
+  .badge{display:inline-block;background:#3a2a14;color:var(--accent);border:1px solid var(--accent);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.4rem;
+         text-decoration:none}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+     background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);
+     font-size:.82rem;color:var(--muted);line-height:1.5}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem .85rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--accent)}
+  .readout .fp16{color:var(--blue)}
+  .readout .q8{color:var(--green)}
+  .readout .q4{color:var(--accent)}
+  .readout .good{color:var(--green)}
+  .readout .dim{color:var(--muted)}
+  #check{display:inline-block;border:1px solid var(--green);border-radius:6px;padding:5px 12px;
+         font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;color:var(--green)}
+  #check.fail{border-color:var(--red);color:var(--red)}
+  .formula{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.55rem .8rem;
+           margin:.4rem 0;font-family:ui-monospace,monospace;font-size:.76rem;color:var(--ink);white-space:pre-wrap;overflow-x:auto}
+  .formula b{color:var(--accent)}
+
+  /* --- KV memory meter (3 bars) --- */
+  .meter{margin:.6rem 0}
+  .meter-row{display:flex;align-items:center;gap:.6rem;margin:.5rem 0}
+  .meter-row .lab{width:70px;font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;display:flex;align-items:center;gap:.3rem}
+  .meter-row .lab .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .meter-row .track{flex:1;height:30px;background:var(--panel2);border:1px solid var(--border);border-radius:5px;position:relative;overflow:hidden}
+  .meter-row .fill{height:100%;transition:width .2s ease;display:flex;align-items:center;justify-content:flex-end;
+       padding-right:7px;font-size:.72rem;color:#0d1117;font-weight:700;font-family:ui-monospace,monospace;white-space:nowrap}
+  .meter-row .fill.fp16{background:var(--fp16)}
+  .meter-row .fill.q8{background:var(--q8)}
+  .meter-row .fill.q4{background:var(--q4)}
+  .meter-row .save{width:80px;text-align:right;font-size:.74rem;font-variant-numeric:tabular-nums;color:var(--green);font-weight:600}
+  .meter-row .save.base{color:var(--muted);font-weight:400}
+
+  /* --- savings bar chart --- */
+  .bars{display:flex;gap:1.5rem;justify-content:center;align-items:flex-end;height:180px;margin:1rem 0 .5rem;padding:0 .5rem}
+  .bcol{display:flex;flex-direction:column;align-items:center;gap:.3rem;flex:1;max-width:120px}
+  .bcol .bval{font-size:.78rem;font-weight:700;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
+  .bcol .bbar{width:100%;border-radius:4px 4px 0 0;transition:height .2s ease;display:flex;align-items:flex-start;justify-content:center;
+       padding-top:4px;font-size:.68rem;color:#0d1117;font-weight:700;min-height:2px}
+  .bcol .blab{font-size:.72rem;color:var(--muted);font-family:ui-monospace,monospace}
+  .bcol .bsave{font-size:.7rem;color:var(--green);font-weight:600}
+
+  /* --- perplexity bars --- */
+  .ppl-bars{display:flex;gap:1.5rem;justify-content:center;align-items:flex-end;height:160px;margin:1rem 0 .5rem;padding:0 .5rem}
+  .note{font-size:.74rem;color:var(--muted);font-style:italic;margin-top:.4rem}
+
+  /* --- block format viz --- */
+  .block-viz{display:flex;gap:.4rem;align-items:center;margin:.5rem 0;font-family:ui-monospace,monospace;font-size:.72rem}
+  .block-viz .seg{padding:4px 8px;border-radius:3px;color:#0d1117;font-weight:600;text-align:center}
+  .block-viz .seg.scale{background:var(--gold)}
+  .block-viz .seg.d8{background:#4a8a5a;color:#e6edf3}
+  .block-viz .seg.d4{background:#8a5a2a;color:#e6edf3}
+  .block-viz .seg.d16{background:#3a6a9a;color:#e6edf3}
+  .block-viz .plus{color:var(--muted)}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&#8592; back to Local LLM dashboard</a>
+  <h1>KV Cache Quantization &mdash; <span style="color:#f97316">FP16 vs Q8_0 vs Q4_0</span>
+    <a class="badge md" title="Full guide — formulas, block format, pitfalls, cheat sheet" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/KV_CACHE_QUANT.md">&#128214; KV_CACHE_QUANT.md</a>
+    <a class="badge" title="Ground-truth source code (pure Python stdlib)" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/kv_cache_quant.py">&#128196; kv_cache_quant.py</a>
+  </h1>
+  <div class="sub">
+    The KV cache stores K and V for every token, every KV head, every layer. At long context it dominates VRAM.
+    Quantize it from <b style="color:#58a6ff">FP16</b> (2 B/E) to <b style="color:#27ae60">Q8_0</b> (1.0625 B/E, ~47% saved) or
+    <b style="color:#f97316">Q4_0</b> (0.5625 B/E, ~72% saved) &mdash; independently of the weight quant. Drag the context slider
+    and watch all three bars shrink. The gold-check pins Llama-3-8B Q8_0 KV at 32K to the exact <code>.py</code> output.
+  </div>
+  <div class="guide-callout">&#128214; <a href="https://github.com/quanhua92/tutorials/blob/main/local-llm/KV_CACHE_QUANT.md">Read the full guide</a> &mdash; the block format, the cross-model comparison, the perplexity trade-off, and the pitfalls table. This page is the interactive companion.</div>
+  <span id="check" style="margin-top:.6rem">check: ...</span>
+
+  <!-- ===== PANEL 1: KV memory meter ===== -->
+  <h2><span class="n">&#9312;</span> KV memory meter &mdash; toggle quant, slide context</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the KV cache size for the selected model + context, in all three formats simultaneously.
+      Same formula as <code>kv_cache_quant.py</code>: <code>n_layers &times; 2 &times; ctx &times; n_kv_heads &times; head_dim &times; B/E</code>.
+      Drag context to watch the bars grow linearly. The green "saved" column shows how much Q8_0/Q4_0 frees vs FP16.</div>
+    <div class="controls">
+      <label>model:
+        <select id="model"></select>
+      </label>
+      <label>context:
+        <input type="range" id="ctx" min="1024" max="131072" step="1024" value="32768">
+        <span id="ctxval" style="color:var(--ink);font-family:ui-monospace,monospace;font-size:.82rem">32768</span>
+      </label>
+      <button id="goldBtn" style="background:var(--accent);color:#0d1117;border:none;border-radius:6px;padding:5px 12px;font-weight:600;cursor:pointer">load gold (Llama-3-8B 32K)</button>
+    </div>
+    <div class="formula" id="formula"></div>
+    <div class="meter" id="meter"></div>
+    <div id="ro" class="readout"></div>
+    <div class="note">GB uses binary units (GiB = 1024&sup3;), matching VRAM and .gguf file sizes. Savings % are convention-independent (depend only on B/E ratio).</div>
+  </div>
+
+  <!-- ===== PANEL 2: savings comparison ===== -->
+  <h2><span class="n">&#9313;</span> Savings comparison &mdash; FP16 vs Q8_0 vs Q4_0</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> side-by-side bar chart of KV cache GB for the selected model + context. Q8_0 nearly halves; Q4_0 nearly quarters.
+      The block format adds a small overhead (2-byte fp16 scale per 32 elements), so Q4_0 is 3.6&times; not 4&times;.</div>
+    <div class="bars" id="bars"></div>
+    <div class="block-viz" id="blockviz"></div>
+    <div class="note">Block layout: <span style="color:var(--gold);font-weight:600">fp16 scale (2 B)</span> + data. Q8_0 = 32&times;int8 (34 B/block), Q4_0 = 32&times;int4 (18 B/block). Same GGML block format as weight quants.</div>
+  </div>
+
+  <!-- ===== PANEL 3: perplexity trade-off ===== -->
+  <h2><span class="n">&#9314;</span> Quality trade-off &mdash; perplexity increase (approximate)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> approximate perplexity ratio (1.000 = FP16 baseline) from llama.cpp benchmarks and community reports.
+      <b style="color:#27ae60">Q8_0 is nearly free</b> (&lt;1% increase). <b style="color:#f97316">Q4_0 is moderate</b> (2&ndash;8%). These are empirical, model-dependent values &mdash; not computed from a formula.</div>
+    <div class="ppl-bars" id="pplbars"></div>
+    <div class="note">Rules of thumb: Q8_0 KV &rarr; always on (free). Q4_0 KV &rarr; chat/retrieval OK, avoid for code/math. Longer contexts spread the error, so relative impact per token is smaller.</div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================
+   Reproduce kv_cache_quant.py's KV cache math identically in JS,
+   then gold-check the pinned Llama-3-8B Q8_0 KV value at 32K.
+   ============================================================ */
+
+var GIB = 1024 * 1024 * 1024;
+
+/* --- model configs (1:1 with kv_cache_quant.py MODELS) --- */
+var MODELS = {
+  "Llama-3-8B":  {params:8.03,  layers:32, n_heads:32, n_kv_heads:8,  head_dim:128},
+  "Qwen2.5-7B":  {params:7.62,  layers:28, n_heads:28, n_kv_heads:4,  head_dim:128},
+  "Llama-2-13B": {params:13.02, layers:40, n_heads:40, n_kv_heads:40, head_dim:128},
+  "Llama-3-70B": {params:70.0,  layers:80, n_heads:64, n_kv_heads:8,  head_dim:128}
+};
+
+/* --- KV formats: bytes per element (1:1 with kv_cache_quant.py) --- */
+var KV = {
+  "FP16": {bpe:2.0,     color:"#58a6ff", label:"FP16"},
+  "Q8_0": {bpe:34/32,   color:"#27ae60", label:"Q8_0"},
+  "Q4_0": {bpe:18/32,   color:"#f97316", label:"Q4_0"}
+};
+
+/* --- approximate perplexity ratios (empirical, from .py PPL_RATIO) --- */
+var PPL = {
+  "FP16": {lo:1.000, hi:1.000, label:"lossless"},
+  "Q8_0": {lo:1.003, hi:1.008, label:"negligible"},
+  "Q4_0": {lo:1.02,  hi:1.08,  label:"moderate"}
+};
+
+/* --- formulas: identical to kv_cache_quant.py --- */
+function kvBytes(m, ctx, bpe){
+  return m.layers * 2 * ctx * m.n_kv_heads * m.head_dim * bpe;
+}
+function kvGB(m, ctx, bpe){
+  return kvBytes(m, ctx, bpe) / GIB;
+}
+function savingsPct(fp16Bytes, quantBytes){
+  return 1.0 - quantBytes / fp16Bytes;
+}
+
+/* --- round-half-up formatting (matches .py fmt_gb / fmt_pct) --- */
+function fmtGB(x){
+  var v = Math.floor(x * 100 + 0.5) / 100;
+  return v.toFixed(2) + " GB";
+}
+function fmtPct(x){
+  return Math.floor(x * 100 + 0.5) + "%";
+}
+
+/* --- populate model dropdown --- */
+(function(){
+  var ms = document.getElementById("model");
+  Object.keys(MODELS).forEach(function(name){
+    var o = document.createElement("option");
+    o.value = name; o.textContent = name + "  (" + MODELS[name].params + "B)";
+    ms.appendChild(o);
+  });
+  ms.value = "Llama-3-8B";
+})();
+
+/* --- render panel 1: KV memory meter --- */
+function renderMeter(){
+  var name = document.getElementById("model").value;
+  var ctx = parseInt(document.getElementById("ctx").value, 10);
+  var m = MODELS[name];
+  document.getElementById("ctxval").textContent = ctx;
+
+  var fp16B = kvBytes(m, ctx, KV.FP16.bpe);
+  var fp16G = kvGB(m, ctx, KV.FP16.bpe);
+  var maxGB = fp16G;
+
+  document.getElementById("formula").innerHTML =
+    '<b>KV bytes</b> = n_layers &times; 2 &times; ctx &times; n_kv_heads &times; head_dim &times; B/E\n' +
+    '           = ' + m.layers + ' &times; 2 &times; ' + ctx + ' &times; ' + m.n_kv_heads +
+    ' &times; ' + m.head_dim + ' &times; B/E\n' +
+    '<span class="dim">  FP16 B/E=2.0  |  Q8_0 B/E=1.0625  |  Q4_0 B/E=0.5625</span>';
+
+  var html = "";
+  ["FP16","Q8_0","Q4_0"].forEach(function(k){
+    var f = KV[k];
+    var gb = kvGB(m, ctx, f.bpe);
+    var pct = gb / maxGB * 100;
+    var sav = k === "FP16" ? null : savingsPct(fp16B, kvBytes(m, ctx, f.bpe));
+    var savHtml = sav !== null
+      ? '<span class="save">' + fmtPct(sav) + ' saved</span>'
+      : '<span class="save base">baseline</span>';
+    html += '<div class="meter-row">' +
+      '<span class="lab"><span class="dot" style="background:' + f.color + '"></span>' + f.label + '</span>' +
+      '<span class="track">' +
+        '<div class="fill" style="width:' + Math.min(pct,100) + '%;background:' + f.color + '">' +
+          (pct > 12 ? fmtGB(gb) : "") +
+        '</div>' +
+      '</span>' +
+      savHtml +
+    '</div>';
+  });
+  document.getElementById("meter").innerHTML = html;
+
+  var q8G = kvGB(m, ctx, KV.Q8_0.bpe);
+  var q4G = kvGB(m, ctx, KV.Q4_0.bpe);
+  var q8sav = savingsPct(fp16B, kvBytes(m, ctx, KV.Q8_0.bpe));
+  var q4sav = savingsPct(fp16B, kvBytes(m, ctx, KV.Q4_0.bpe));
+  document.getElementById("ro").innerHTML =
+    '<span class="dim">model         = </span>' + name + '  (' + m.params + 'B, ' + m.layers + ' layers, GQA ' + (m.n_heads/m.n_kv_heads).toFixed(0) + 'x, ' + m.n_kv_heads + ' KV heads)\n' +
+    '<span class="dim">context       = </span>' + ctx.toLocaleString() + ' tokens\n' +
+    '<span class="fp16">FP16 KV       = ' + fmtGB(fp16G) + '</span>   <span class="dim">(2.0 B/E)</span>\n' +
+    '<span class="q8">Q8_0 KV       = ' + fmtGB(q8G) + '</span>   <span class="dim">(1.0625 B/E) &mdash; ' + fmtPct(q8sav) + ' saved</span>\n' +
+    '<span class="q4">Q4_0 KV       = ' + fmtGB(q4G) + '</span>   <span class="dim">(0.5625 B/E) &mdash; ' + fmtPct(q4sav) + ' saved</span>\n' +
+    '<span class="dim">llama.cpp:    </span><b>-ctk q8_0 -ctv q8_0</b>  <span class="dim">(or q4_0)</span>';
+}
+
+/* --- render panel 2: savings bar chart + block viz --- */
+function renderBars(){
+  var name = document.getElementById("model").value;
+  var ctx = parseInt(document.getElementById("ctx").value, 10);
+  var m = MODELS[name];
+  var fp16G = kvGB(m, ctx, KV.FP16.bpe);
+  var maxG = fp16G;
+
+  var html = "";
+  ["FP16","Q8_0","Q4_0"].forEach(function(k){
+    var f = KV[k];
+    var gb = kvGB(m, ctx, f.bpe);
+    var h = gb / maxG * 150;
+    var sav = k === "FP16" ? "" : fmtPct(savingsPct(kvBytes(m,ctx,KV.FP16.bpe), kvBytes(m,ctx,f.bpe))) + " saved";
+    html += '<div class="bcol">' +
+      '<div class="bval">' + fmtGB(gb) + '</div>' +
+      '<div class="bbar" style="height:' + h + 'px;background:' + f.color + '">' + (h>24?f.bpe+" B/E":"") + '</div>' +
+      '<div class="blab">' + f.label + '</div>' +
+      '<div class="bsave">' + sav + '</div>' +
+    '</div>';
+  });
+  document.getElementById("bars").innerHTML = html;
+
+  /* block format viz */
+  document.getElementById("blockviz").innerHTML =
+    '<span class="seg scale">fp16 scale (2B)</span>' +
+    '<span class="plus">+</span>' +
+    '<span class="seg d8">32&times;int8 (32B)</span>' +
+    '<span class="plus">=</span>' +
+    '<span style="color:#27ae60;font-weight:600">Q8_0: 34 B/block</span>' +
+    '<span style="color:var(--muted);margin:0 .5rem">|</span>' +
+    '<span class="seg scale">fp16 scale (2B)</span>' +
+    '<span class="plus">+</span>' +
+    '<span class="seg d4">32&times;int4 (16B)</span>' +
+    '<span class="plus">=</span>' +
+    '<span style="color:#f97316;font-weight:600">Q4_0: 18 B/block</span>';
+}
+
+/* --- render panel 3: perplexity bars --- */
+function renderPpl(){
+  var html = "";
+  ["FP16","Q8_0","Q4_0"].forEach(function(k){
+    var p = PPL[k];
+    var f = KV[k];
+    var mid = (p.lo + p.hi) / 2;
+    var increase = mid - 1.0;
+    /* bar height: map 1.0..1.10 to 10..150 px */
+    var h = 10 + increase / 0.10 * 140;
+    h = Math.min(h, 150);
+    var incStr = k === "FP16" ? "0%" : "<" + fmtPct(p.hi - 1.0);
+    if (k === "Q4_0") incStr = fmtPct(p.lo - 1.0) + "&ndash;" + fmtPct(p.hi - 1.0);
+    html += '<div class="bcol">' +
+      '<div class="bval">' + mid.toFixed(3) + '</div>' +
+      '<div class="bbar" style="height:' + h + 'px;background:' + f.color + '">' + (h>20?p.label:"") + '</div>' +
+      '<div class="blab">' + f.label + '</div>' +
+      '<div class="bsave">' + incStr + ' ppl</div>' +
+    '</div>';
+  });
+  document.getElementById("pplbars").innerHTML = html;
+}
+
+/* --- GOLD-CHECK: Llama-3-8B Q8_0 KV @ 32K must match kv_cache_quant.py exactly --- */
+function goldCheck(){
+  var m = MODELS["Llama-3-8B"];
+  var ctx = 32768;
+  /* Q8_0 KV = 32*2*32768*8*128*1.0625 / 1024^3 = 2.125 GB -> "2.13 GB" (round half up) */
+  var GOLD_Q8 = kvGB(m, ctx, KV.Q8_0.bpe);
+  var GOLD_FP16 = kvGB(m, ctx, KV.FP16.bpe);
+  var GOLD_Q4 = kvGB(m, ctx, KV.Q4_0.bpe);
+  var q8Ok = Math.abs(GOLD_Q8 - 2.125) < 1e-9;
+  var fp16Ok = Math.abs(GOLD_FP16 - 4.0) < 1e-9;
+  var q4Ok = Math.abs(GOLD_Q4 - 1.125) < 1e-9;
+  var q8SavOk = Math.abs(savingsPct(kvBytes(m,ctx,KV.FP16.bpe), kvBytes(m,ctx,KV.Q8_0.bpe)) - 0.46875) < 1e-9;
+  var el = document.getElementById("check");
+  if (q8Ok && fp16Ok && q4Ok && q8SavOk){
+    el.textContent = "[check: OK]  Llama-3-8B @32K: FP16=" + fmtGB(GOLD_FP16) +
+      ", Q8_0=" + fmtGB(GOLD_Q8) + " (47% saved), Q4_0=" + fmtGB(GOLD_Q4) + " (72% saved)  (matches kv_cache_quant.py)";
+    el.className = "";
+  } else {
+    el.textContent = "[check: FAIL]  got FP16=" + GOLD_FP16 + ", Q8=" + GOLD_Q8 + ", Q4=" + GOLD_Q4;
+    el.className = "fail";
+  }
+}
+
+/* --- wire up --- */
+function renderAll(){ renderMeter(); renderBars(); renderPpl(); goldCheck(); }
+["model","ctx"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", renderAll);
+});
+document.getElementById("goldBtn").addEventListener("click", function(){
+  document.getElementById("model").value = "Llama-3-8B";
+  document.getElementById("ctx").value = 32768;
+  renderAll();
+});
+
+renderAll();
+</script>
+</body>
+</html>

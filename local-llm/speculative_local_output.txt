@@ -1,0 +1,243 @@
+speculative_local.py - reference impl. All numbers feed SPECULATIVE_LOCAL.md.
+pure Python stdlib (no torch, no numpy). Simulates llama.cpp spec decoding.
+layer model: d=4096, Q4_0 weights (0.5 B/elem).
+
+========================================================================
+  SECTION A: decode is memory-bound (why batch N ~= batch 1)
+========================================================================
+A decode forward pass is dominated by STREAMING THE WEIGHT MATRIX from
+RAM. The weight term is the SAME for batch=1 and batch=gamma+1; only the
+tiny activation grows. So a batched verify of gamma+1 tokens costs barely
+more than generating ONE token. This is the whole premise of spec decode.
+
+Layer [d=4096,d=4096] Q4_0 weights (0.5 B/elem):
+
+| pass        | batch | weight mem | activation mem | total mem   | vs batch 1 |
+|-------------|-------|------------|----------------|-------------|------------|
+| vanilla     | 1     | 8388608    | 8192           | 8396800     | 1.000x     |
+| spec verify | 5     | 8388608    | 40960          | 8429568     | 1.004x     |
+
+Verifying 5 tokens costs 1.004x a single-token pass --
+i.e. 5 tokens for ~the price of 1. The weight read (which dominates)
+is amortised across the whole batch.
+
+[check] batch gamma+1 cost < 1.01x batch 1 (memory-bound): True -> OK
+[check] weight mem >> activation mem (batch 5): True -> OK
+[check] compute grows 5x but is hidden (memory-bound): True -> OK
+
+========================================================================
+  SECTION B: the draft-propose-verify-accept/reject cycle
+========================================================================
+Per speculative step:
+
+  1. DRAFT model generates gamma candidate tokens autoregressively.
+  2. TARGET model processes all gamma+1 tokens in ONE parallel forward pass.
+  3. Accept draft tokens until the FIRST mismatch; sample the corrected
+     token from the target's distribution there (rejection sampling).
+  4. You ALWAYS get >= 1 token (the target's verified/bonus token).
+
+gamma = 4, acceptance = 0.75  (e.g. Llama-3.2-1B drafting Llama-3.1-8B)
+
+Probability of producing exactly n tokens in one step:
+| tokens | probability | bar                  |
+|--------|-------------|----------------------|
+| 1      | 0.25000     | ############         |
+| 2      | 0.18750     | #########            |
+| 3      | 0.14062     | #######              |
+| 4      | 0.10547     | #####                |
+| 5      | 0.31641     | ###############      |
+
+E[tokens/step] = 1 + p + p^2 + p^3 + p^4
+               = 1 + 0.75 + 0.56250 + 0.42188 + 0.31641
+               = 3.05078  (analytic)
+               = 3.04870  (Monte-Carlo, 200k steps)
+
+Step-by-step trace (first 8 steps, acceptance=0.75, seeded):
+| step | draft proposed        | accepted          | tokens |
+|------|-----------------------|-------------------|--------|
+| 1    | A,B,C,D               | A,B,C,D +[bonus]  | 5      |
+| 2    | E,F,G,H               | E,F,G,H +[bonus]  | 5      |
+| 3    | I,J,K,L               | I,J,K,L +[bonus]  | 5      |
+| 4    | M,N                   | M +[corrected]    | 2      |
+| 5    | Q,R,S,T               | Q,R,S +[corrected] | 4      |
+| 6    | U,V,W                 | U,V +[corrected]  | 3      |
+| 7    | Y,Z                   | Y +[corrected]    | 2      |
+| 8    | C,D,E,F               | C,D,E,F +[bonus]  | 5      |
+
+8 steps produced 31 tokens -> 3.88 tokens/step (converges to 3.05).
+
+[check] analytic ~= empirical (within 1%): True -> OK
+[check] always >= 1 token per step: True -> OK
+[check] expected tokens/step == 3.05078: True -> OK
+[check] sum of distribution == 1.0: True -> OK
+
+========================================================================
+  SECTION C: what drives the acceptance rate
+========================================================================
+Acceptance = fraction of draft tokens whose argmax matches the target.
+It depends ENTIRELY on how well the draft's next-token distribution
+tracks the target's. Same family -> high; different family -> low.
+
+| draft model             | target model  | relationship            | acceptance |
+|-------------------------|---------------|-------------------------|------------|
+| Llama-3.2-1B            | Llama-3.1-8B  | same family             | 0.75       |
+| Llama-3.2-0.5B          | Llama-3.1-8B  | same family (tiny)      | 0.65       |
+| Qwen2.5-1.5B            | Llama-3.1-8B  | different family        | 0.45       |
+| Llama-3.2-1B (EAGLE-3)  | Llama-3.1-8B  | EAGLE-3 (hidden state)  | 0.85       |
+| 0.5B n-gram (no model)  | Llama-3.1-8B  | n-gram (repetitive)     | 0.55       |
+
+Key drivers:
+  * SAME tokenizer + family: the draft learned similar token transitions.
+  * EAGLE-3 reads the target's HIDDEN STATES -> it 'cheats' -> ~85%+.
+  * n-gram: no learned model -> only matches repeated patterns (~55%).
+  * Below ~40% acceptance, the draft overhead usually exceeds the gains.
+
+Expected tokens/step by acceptance (gamma=4):
+
+| acceptance | tokens/step | net speedup (0.5B/8B) | verdict      |
+|------------|-------------|-----------------------|--------------|
+| 0.35       | 1.53        | 1.22                  | skip         |
+| 0.45       | 1.78        | 1.42                  | OK           |
+| 0.55       | 2.11        | 1.68                  | OK           |
+| 0.65       | 2.53        | 2.01                  | GREAT        |
+| 0.75       | 3.05        | 2.43                  | GREAT        |
+| 0.85       | 3.71        | 2.96                  | GREAT        |
+| 0.90       | 4.10        | 3.27                  | GREAT        |
+
+[check] same family (0.75) > different family (0.45): True -> OK
+[check] EAGLE-3 highest acceptance: True -> OK
+
+========================================================================
+  SECTION D: speedup analysis (effective vs net)
+========================================================================
+Two speedup notions -- do not confuse them:
+
+  EFFECTIVE (naive): tokens/step if the draft were FREE.
+    = 1 + sum_{k=1}^gamma p^k   (exact geometric series)
+    (the loose quote  gamma*p + (1-p)  slightly overestimates this)
+
+  NET (real): accounts for the draft model's own forward passes.
+
+gamma=4, p=0.75, draft=0.5B (ratio 0.0625 of 8B target):
+
+  effective tokens/step   = 3.051  (exact geometric series)
+  loose approx gamma*p+(1-p) = 3.250  (overestimate)
+  net speedup (w/ draft cost) = 2.43x
+
+The draft cost erodes the effective gain: 3.05 effective -> 2.43 net.
+A LARGER draft (1B instead of 0.5B) is more accurate but costs more:
+
+| draft ratio | example          | net speedup (gamma=4,p=0.75) |
+|-------------|------------------|----------------------------------|
+| 0.03125     | 0.25B/8B         | 2.70                             |
+| 0.06250     | 0.5B/8B          | 2.43                             |
+| 0.12500     | 1B/8B            | 2.03                             |
+| 0.25000     | 2B/8B            | 1.52                             |
+| 0.50000     | 4B/8B            | 1.02                             |
+
+Sweet spot: smallest draft that still gives >60% acceptance. A 0.5B-1B
+draft for an 8B target is the typical default.
+
+Sweep gamma (p=0.75, draft_ratio=0.0625):
+| gamma | tokens/step | net speedup | note                    |
+|-------|-------------|-------------|-------------------------|
+| 1     | 1.75        | 1.65        |                         |
+| 2     | 2.31        | 2.05        |                         |
+| 3     | 2.73        | 2.30        |                         |
+| 4     | 3.05        | 2.43        | <-- typical default     |
+| 5     | 3.29        | 2.50        |                         |
+| 6     | 3.47        | 2.51        |                         |
+| 7     | 3.60        | 2.49        |                         |
+| 8     | 3.70        | 2.45        |                         |
+
+Diminishing returns past gamma~5-6: each extra draft token adds a draft
+pass AND a marginally-lower acceptance token, while the effective gain
+shrinks (the geometric tail p^k decays).
+
+[check] net < effective (draft cost > 0): True -> OK
+[check] loose approx > exact (overestimate): True -> OK
+[check] net speedup > 1.5x for good acceptance: True -> OK
+
+========================================================================
+  SECTION E: practical config (llama.cpp flags)
+========================================================================
+Enable speculative decoding with a draft model in llama.cpp:
+
+  --spec-type draft-simple     enable draft-model speculation
+                               (legacy alias: --draft)
+  -md, --model-draft FNAME     the small draft model (.gguf)
+  --spec-draft-n-max N         max draft tokens per step (gamma)
+                               (legacy alias: --draft-max N; default 3)
+  --spec-draft-ngl N           GPU layers for the draft model
+                               (keep the draft FULLY on GPU -- it's tiny)
+  -td, --threads-draft N       CPU threads for the draft model
+
+Typical invocations:
+
+  # 8B target + 0.5B draft, gamma=4 (the canonical setup)
+  llama-server -m Llama-3.1-8B.gguf \
+      -md Llama-3.2-0.5B.gguf \
+      --spec-type draft-simple --spec-draft-n-max 4 \
+      --spec-draft-ngl 99
+
+  # EAGLE-3 draft (reads target hidden states -> ~85% acceptance)
+  llama-server -m Llama-3.1-8B.gguf \
+      -md EAGLE3-LLaMA3.1-8B.gguf \
+      --spec-type draft-eagle3 --spec-draft-n-max 8
+
+  # n-gram speculation (NO draft model -- free, best for repetitive text)
+  llama-server -m model.gguf --spec-type ngram-simple --spec-draft-n-max 32
+
+KV cache behaviour on rejection:
+  * the draft model has its OWN KV cache (filled during proposal).
+  * the target builds KV for the gamma+1 verified positions.
+  * on rejection at position i, BOTH caches REWIND to position i
+    (just move the write pointer back -- same as normal decode truncate).
+  * the corrected token seeds the next step's draft proposal.
+
+Verification output (llama.cpp prints acceptance stats):
+  draft acceptance rate = 0.57576 (171 accepted / 297 generated)
+  statistics draft: #calls = 10, #gen tokens = 110, #acc tokens = 98
+
+Presets:
+| setup                        | gamma | expected speedup |
+|------------------------------|-------|------------------|
+| 0.5B draft for 8B (same family) | 4     | 2.43             |
+| 1B draft for 8B (same family) | 4     | 2.15             |
+| EAGLE-3 for 8B               | 8     | 3.40             |
+| n-gram (repetitive text)     | 16    | 2.22             |
+| cross-family draft           | 4     | 1.19             |
+
+[check] default gamma range 4-8: True -> OK
+[check] EAGLE-3 speedup > plain draft: True -> OK
+
+========================================================================
+  SECTION G: GOLD speedup table (the centerpiece)
+========================================================================
+Canonical setup: gamma=4, acceptance=0.75, 0.5B draft for 8B target (ratio 0.0625).
+
+| metric                       | value     |
+|------------------------------|-----------|
+| gamma (draft tokens/step)    | 4         |
+| acceptance rate              | 0.75      |
+| accepted draft tokens (E)    | 2.0508    |
+| + bonus token (verify pass)  | 1         |
+| tokens/step (effective)      | 3.0508    |
+| batch(gamma+1)/batch(1) cost | 1.004     |
+| net speedup (w/ draft cost)  | 2.43      |
+
+GOLD (recomputed & badge-checked in speculative_local.html):
+  accepted draft tokens = p + p^2 + p^3 + p^4
+                        = 0.75 + 0.5625 + 0.4219 + 0.3164 = 2.0508
+  + 1 bonus token (target verify pass) -> 3.0508 tokens/step
+  net speedup (0.5B/8B) = 2.43x
+
+[check] accepted draft tokens == 2.0508: True -> OK
+[check] tokens/step == 3.0508 (1 + geometric series): True -> OK
+[check] net speedup == 2.43x (w/ draft cost): True -> OK
+[check] net < effective (draft not free): True -> OK
+[check] always >= 1 token/step (target guarantees): True -> OK
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

@@ -1,0 +1,440 @@
+<!doctype html>
+<!--
+  use_external_store.html — Phase 2 hooks bundle (useSyncExternalStore).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  useSyncExternalStore end-to-end. Companion: USE_EXTERNAL_STORE.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: Context is React-internal state. useSyncExternalStore is for
+  EXTERNAL state — browser APIs, a custom store, Zustand, Redux, any source
+  that lives outside React's tree. It returns a snapshot of that external
+  world and re-renders the component whenever the store fires a notification.
+  It also solves the "tearing" problem: during a concurrent render pass, every
+  component that calls getSnapshot() sees the SAME value, so the UI can never
+  show two inconsistent snapshots of one store.
+
+  Three arguments:
+    subscribe(callback)      — register a listener, return unsubscribe
+    getSnapshot()            — return the current IMMUTABLE snapshot
+    getServerSnapshot()      — return the SSR snapshot (optional)
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useSyncExternalStore, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check asserts
+  the counter shows "Count: 0", clicks "+1" three times (3 real click events),
+  asserting "Count: 1", "Count: 2", "Count: 3" after each — then asserts a SECOND
+  component (Mirror) subscribing to the same store is in sync. This proves the
+  subscribe + getSnapshot contract and the no-tearing guarantee end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useSyncExternalStore — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useSyncExternalStore &mdash; the external-store bridge</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_EXTERNAL_STORE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_EXTERNAL_STORE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <b>Context is React-internal state &mdash; useSyncExternalStore is for external state.</b>
+    Compare with <a href="./use_context.html">use_context</a> (the broadcast model for in-tree state).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">external state, safely synced</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        <code>useState</code>/<code>useReducer</code> own state <i>inside</i> React.
+        <code>useSyncExternalStore</code> is for the world <i>outside</i> React &mdash; a
+        custom store, <code>window.innerWidth</code>, <code>navigator.onLine</code>,
+        Zustand, Redux, a WebSocket. You hand it a <code>subscribe</code> function and a
+        <code>getSnapshot</code> function; it reads the snapshot, subscribes, and re-renders
+        the moment the store notifies. Crucially, during one concurrent render pass every
+        component reads the <b class="text-[#e6edf3]">same</b> snapshot &mdash; so the UI can
+        never <b class="text-[#e6edf3]">tear</b> (show two inconsistent views of one store).
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>subscribe(cb)</code></td>
+          <td>register a listener; <b>return</b> an unsubscribe function</td>
+          <td>hand the store your phone number &mdash; and a way to hang up</td>
+        </tr>
+        <tr>
+          <td><code>getSnapshot()</code></td>
+          <td>return the current snapshot &mdash; must be <b>immutable &amp; cached</b></td>
+          <td>the photo of state taken right now</td>
+        </tr>
+        <tr>
+          <td><code>getServerSnapshot()</code></td>
+          <td>initial snapshot for SSR / hydration (optional, 3rd arg)</td>
+          <td>the photo taken before the page is interactive</td>
+        </tr>
+        <tr>
+          <td>snapshot stability</td>
+          <td>same data &rarr; same reference (<code>Object.is</code>)</td>
+          <td>break this &rarr; infinite re-render loop</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the store you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// A minimal external store (like a mini-Zustand): state + a Set of listeners.
+function createStore(initialState) {
+  var state = initialState;
+  var listeners = new Set();
+
+  return {
+    getState: function () { return state; },
+    setState: function (updater) {
+      state = typeof updater === 'function' ? updater(state) : updater;
+      listeners.forEach(function (l) { l(); });
+    },
+    subscribe: function (listener) {
+      listeners.add(listener);
+      return function () { listeners.delete(listener); };
+    }
+  };
+}
+
+var store = createStore({ count: 0, clicks: 0 });
+
+// Component A — the source of truth, subscribed to the store.
+function StoreCounter() {
+  var state = React.useSyncExternalStore(store.subscribe, store.getState);
+  return (
+    &lt;div data-testid="counter" className="text-3xl font-bold text-[#61dafb]"&gt;
+      Count: {state.count}
+    &lt;/div&gt;
+  );
+}
+
+// Component B — a SEPARATE component subscribing to the SAME store.
+// No props, no context. Both see the exact same snapshot — no tearing.
+function Mirror() {
+  var state = React.useSyncExternalStore(store.subscribe, store.getState);
+  return (
+    &lt;div data-testid="mirror" className="mt-3 text-sm text-[#8b949e]"&gt;
+      mirror: {state.count} · clicks: {state.clicks}
+    &lt;/div&gt;
+  );
+}
+
+function App() {
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;external store&lt;/h2&gt;
+      &lt;StoreCounter /&gt;
+      &lt;Mirror /&gt;
+      &lt;button
+        data-testid="inc"
+        className="mt-4 px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm hover:opacity-80"
+        onClick={function () {
+          store.setState(function (s) {
+            return { count: s.count + 1, clicks: s.clicks + 1 };
+          });
+        }}
+      &gt;
+        +1
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;App/&gt;</code> becomes <code>React.createElement(App)</code>.
+        Each <code>store.setState(...)</code> fires every listener &rarr; React reads
+        <code>store.getState()</code> again &rarr; re-renders <b>all</b> subscribers with one
+        consistent snapshot.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the subscribe/getSnapshot contract, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click "+1" &mdash; it calls <code>store.setState()</code>, which notifies the listeners
+        React registered. <code>StoreCounter</code> and <code>Mirror</code> are independent
+        components reading the <b class="text-[#e6edf3]">same</b> store; both update in lockstep.
+        The <b class="text-[#e6edf3]">gold-check</b> does this automatically: assert
+        <code>Count: 0</code>, click +1 three times, assert <code>1 → 2 → 3</code>, then confirm
+        the mirror is in sync.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        counter: <span id="count-read" class="text-[#61dafb]">—</span>
+        · mirror: <span id="mirror-read" class="text-[#61dafb]">—</span>
+        · gold: 0 → click+1×3 → 1,2,3 + mirror in sync
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>subscribe to a custom store</td>
+          <td><code>useSyncExternalStore(store.subscribe, store.getState)</code></td>
+          <td>React registers a listener; re-renders when the store notifies</td>
+        </tr>
+        <tr>
+          <td>subscribe to a browser API</td>
+          <td><code>useSyncExternalStore(subResize, () =&gt; window.innerWidth)</code></td>
+          <td>reactive <code>innerWidth</code>/<code>onLine</code>/media-query without manual <code>useEffect</code></td>
+        </tr>
+        <tr>
+          <td>cache the snapshot</td>
+          <td>store a stable ref; return it unchanged when data is the same</td>
+          <td>if <code>getSnapshot</code> returns a new ref each call &rarr; infinite loop</td>
+        </tr>
+        <tr>
+          <td>server-side rendering</td>
+          <td>pass <code>getServerSnapshot</code> as the 3rd argument</td>
+          <td>consistent first paint before hydration; avoids hydration mismatch</td>
+        </tr>
+        <tr>
+          <td>mutate the store</td>
+          <td><code>store.setState(s =&gt; ({...s, count: s.count+1}))</code> + notify</td>
+          <td>every subscriber reads the new immutable snapshot in one render pass</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var mirrorRead  = document.getElementById("mirror-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render StoreCounter…");
+        pollText("counter", "Count: 0", 0, function () {
+          // Step 1: click +1 → expect "Count: 1"
+          clickInc();
+          pollText("counter", "Count: 1", 0, function () {
+            // Step 2: click +1 → expect "Count: 2"
+            clickInc();
+            pollText("counter", "Count: 2", 0, function () {
+              // Step 3: click +1 → expect "Count: 3"
+              clickInc();
+              pollText("counter", "Count: 3", 0, function () {
+                // Bonus: the SECOND subscriber must be in sync (no tearing).
+                var mirror = root.querySelector('[data-testid="mirror"]');
+                if (mirror && mirror.textContent.indexOf("mirror: 3") !== -1) {
+                  passGoldCheck();
+                } else {
+                  failGoldCheck("mirror not in sync with counter");
+                }
+              });
+            });
+          });
+        });
+      }
+
+      function clickInc() {
+        var btn = root.querySelector('[data-testid="inc"]');
+        if (btn) btn.click();
+      }
+
+      function pollText(testid, expected, frame, done) {
+        readLive();
+        var el = root.querySelector('[data-testid="' + testid + '"]');
+        if (el && el.textContent === expected) { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollText(testid, expected, frame + 1, done); });
+          return;
+        }
+        var actual = el ? el.textContent : "(missing)";
+        failGoldCheck('expected ' + testid + '="' + expected + '" but DOM shows "' + actual + '"');
+      }
+
+      function readLive() {
+        var c = root.querySelector('[data-testid="counter"]');
+        var m = root.querySelector('[data-testid="mirror"]');
+        countRead.textContent = c ? c.textContent : "—";
+        mirrorRead.textContent = m ? m.textContent : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] Count 0→1→2→3 + mirror in sync: OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,488 @@
+<!doctype html>
+<!--
+  use_transition.html — Phase 3 concurrent React bundle.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  useTransition end-to-end. Companion: USE_TRANSITION.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: not every state update is equally urgent. Typing in an input,
+  clicking, scrolling — these must be instant (URGENT / high priority).
+  Filtering a 200-row list, switching tabs, recomputing a chart — these can
+  wait a few milliseconds (NON-URGENT / low priority). useTransition lets you
+  mark a state update as non-urgent. React keeps the current UI on screen
+  (typing stays snappy) while it computes the expensive update in the
+  background. It returns [isPending, startTransition]:
+    - isPending: true while the deferred render is in flight → show a spinner.
+    - startTransition(fn): run fn's setStates at transition priority.
+
+  React 18 made this opt-in. React 19 keeps the same API and extends the
+  concurrent rendering model (Suspense, useDeferredValue, Actions).
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useTransition, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<TransitionDemo/>), the
+  gold-check (1) asserts the initial list rendered all 200 items, (2) types
+  "Item 1" via a real `input` event (asserting the URGENT input value updated
+  instantly), (3) waits for the transition to finish, (4) asserts the list
+  shrank (filtered by "Item 1"), and (5) asserts the isPending indicator was
+  observed during filtering (recorded by a pending-witness sentinel). This
+  proves urgent vs non-urgent scheduling end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useTransition — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { display:inline-block; width:12px; height:12px; border-radius:50%;
+      border:2px solid rgba(97,218,251,.3); border-top-color:var(--accent);
+      animation: spin .6s linear infinite; vertical-align:-2px; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useTransition &mdash; urgent vs non-urgent updates</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_TRANSITION.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_TRANSITION.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/react/react_state_hooks.html">frontend/react: useState &amp; hooks</a>
+    (the synchronous render model this makes concurrent).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">synchronous → concurrent: split updates by urgency</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        By default every <code>setState</code> is urgent — React must render it before the
+        browser can paint the next frame. That blocks typing when the render is heavy.
+        <code>useTransition</code> returns a pair
+        <b class="text-[#e6edf3]">[isPending, startTransition]</b>: wrap the expensive
+        <code>setState</code> in <code>startTransition(fn)</code> and React schedules it at
+        <b class="text-[#e6edf3]">transition priority</b> — interruptible, deferred, and shown
+        only when ready. The urgent update (the input) paints immediately; the non-urgent
+        update (the filtered list) catches up in the background.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>startTransition</code></td>
+          <td>runs a callback whose setStates are marked low priority</td>
+          <td>the "later" tray — React processes it when the urgent queue is empty</td>
+        </tr>
+        <tr>
+          <td><code>isPending</code></td>
+          <td><code>true</code> while the deferred render is computing</td>
+          <td>the loading light — on while the background work is in flight</td>
+        </tr>
+        <tr>
+          <td>urgent setState</td>
+          <td>normal <code>setState</code> outside <code>startTransition</code></td>
+          <td>the "now" tray — must paint before the next frame</td>
+        </tr>
+        <tr>
+          <td>interruption</td>
+          <td>a new urgent update cancels the in-progress transition</td>
+          <td>an interrupting phone call — drop the tray, handle the call, resume after</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the transition you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// 200 items — enough rows that filtering is non-trivial work.
+var ALL_ITEMS = [];
+for (var i = 0; i &lt; 200; i++) {
+  ALL_ITEMS.push('Item ' + (i + 1) + ' — ' + Math.random().toString(36).substring(7));
+}
+
+function TransitionDemo() {
+  // URGENT state — the input value. Typing must always be instant.
+  var inputState = React.useState('');
+  var input = inputState[0];
+  var setInput = inputState[1];
+
+  // The transition hook: [isPending, startTransition].
+  var transition = React.useTransition();
+  var isPending = transition[0];
+  var startTransition = transition[1];
+
+  // NON-URGENT state — the filter the list actually uses.
+  var filterState = React.useState('');
+  var filter = filterState[0];
+  var setFilter = filterState[1];
+
+  // Witness: remember whether isPending was ever true (for the gold-check).
+  var sawPendingRef = React.useRef(false);
+  React.useEffect(function () {
+    if (isPending) sawPendingRef.current = true;
+  }, [isPending]);
+
+  function handleChange(e) {
+    var val = e.target.value;
+    setInput(val);            // urgent — paints now, input stays responsive
+    startTransition(function () {
+      setFilter(val);         // non-urgent — list re-filtering can wait
+    });
+  }
+
+  var filtered = ALL_ITEMS.filter(function (item) {
+    return item.toLowerCase().indexOf(filter.toLowerCase()) &gt;= 0;
+  });
+
+  return (
+    &lt;div className="max-w-lg mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-1"&gt;
+        Search {isPending &amp;&amp; &lt;span className="spin" /&gt;}
+      &lt;/h2&gt;
+      &lt;p className="text-xs text-[#8b949e] mb-3"&gt;
+        {filtered.length} of {ALL_ITEMS.length} items
+        {isPending ? ' · filtering…' : ' · ready'}
+      &lt;/p&gt;
+      &lt;input
+        data-testid="input"
+        value={input}
+        onChange={handleChange}
+        className="w-full px-3 py-2 mb-3 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+        placeholder="Type to filter — input stays responsive, list catches up"
+      /&gt;
+      &lt;ul data-testid="list" className="max-h-64 overflow-auto space-y-1"&gt;
+        {filtered.map(function (item, idx) {
+          return (
+            &lt;li
+              key={idx}
+              data-testid="item"
+              className={"px-3 py-1.5 rounded text-sm border " + (isPending ? 'bg-[#0d1117] border-[#30363d] text-[#8b949e] opacity-70' : 'bg-[#0d1117] border-[#30363d] text-[#e6edf3]')}
+            &gt;
+              {item}
+            &lt;/li&gt;
+          );
+        })}
+      &lt;/ul&gt;
+      {/* hidden sentinel — lets the gold-check assert isPending was observed */}
+      &lt;div
+        data-testid="pending-witness"
+        data-seen={sawPendingRef.current ? 'true' : 'false'}
+        data-pending={isPending ? 'true' : 'false'}
+        style={{ display: 'none' }}
+      /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;TransitionDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;TransitionDemo/&gt;</code> becomes <code>React.createElement(TransitionDemo)</code>.
+        <code>setInput</code> runs at urgent priority (input updates now);
+        <code>setFilter</code> inside <code>startTransition</code> runs at transition
+        priority (list updates when React is idle). <code>isPending</code> flips
+        <code>true</code> the moment the transition is scheduled.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (urgent vs non-urgent, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Type fast in the box. The <b class="text-[#e6edf3]">input</b> updates every keystroke
+        (urgent); the <b class="text-[#e6edf3]">list</b> is re-filtered inside a transition, so
+        it dims and catches up — the spinner shows while <code>isPending</code> is true.
+        The <b class="text-[#e6edf3]">gold-check</b> does this automatically: types "Item 1",
+        asserts the input is instant, waits for the list to shrink, and confirms the pending
+        indicator fired.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        items: <span id="count-read" class="text-[#61dafb]">—</span>
+        · pending: <span id="pending-read" class="text-[#61dafb]">—</span>
+        · gold: 200 items → type "Item 1" → list shrinks, pending observed
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>keep typing responsive while a heavy list filters</td>
+          <td><code>setInput(v); startTransition(() =&gt; setFilter(v))</code></td>
+          <td>input is urgent (paints now); filter is non-urgent (deferred)</td>
+        </tr>
+        <tr>
+          <td>show a spinner during the deferred work</td>
+          <td><code>{isPending &amp;&amp; &lt;Spinner/&gt;}</code></td>
+          <td><code>isPending</code> is true until the transition commits</td>
+        </tr>
+        <tr>
+          <td>switch tabs without blocking the click</td>
+          <td><code>startTransition(() =&gt; setTab(next))</code></td>
+          <td>the old tab stays interactive until the new one is ready</td>
+        </tr>
+        <tr>
+          <td>you control the value, not the update</td>
+          <td>use <code>useDeferredValue</code> instead</td>
+          <td>defer at the consumption site (read-side), not the producer</td>
+        </tr>
+        <tr>
+          <td>urgent work must never be wrapped</td>
+          <td>keep typing/clicking/scroll setState OUTSIDE <code>startTransition</code></td>
+          <td>wrapping urgent updates makes the UI feel frozen</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var pendingRead = document.getElementById("pending-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 240;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render TransitionDemo…");
+        waitForInitialList(0);
+      }
+
+      // Step 0: assert initial list rendered all 200 items
+      function waitForInitialList(frame) {
+        readLive();
+        var items = root.querySelectorAll('[data-testid="item"]');
+        if (items.length === 200) { typeQuery(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForInitialList(frame + 1); });
+          return;
+        }
+        failGoldCheck("initial list did not render 200 items (got " + items.length + ")");
+      }
+
+      // Step 1: type "Item 1" via a real `input` event
+      function typeQuery() {
+        var inputEl = root.querySelector('[data-testid="input"]');
+        if (!inputEl) { failGoldCheck("input not found after initial render"); return; }
+        var setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value"
+        ).set;
+        setter.call(inputEl, "Item 1");
+        inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+
+        // Assert URGENT update: the input value is "Item 1" right now.
+        if (inputEl.value !== "Item 1") {
+          failGoldCheck("urgent input value is not 'Item 1' (got '" + inputEl.value + "')");
+          return;
+        }
+        waitForFiltered(0);
+      }
+
+      // Step 2: wait for the transition to complete and the list to shrink
+      function waitForFiltered(frame) {
+        readLive();
+        var items = root.querySelectorAll('[data-testid="item"]');
+        if (items.length < 200 && items.length > 0) { checkWitness(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForFiltered(frame + 1); });
+          return;
+        }
+        failGoldCheck("filtered list did not shrink after typing (still " + items.length + ")");
+      }
+
+      // Step 3: assert the isPending indicator was observed during filtering
+      function checkWitness(frame) {
+        readLive();
+        var witness = root.querySelector('[data-testid="pending-witness"]');
+        var seen = witness && witness.getAttribute("data-seen") === "true";
+        if (seen) {
+          var items = root.querySelectorAll('[data-testid="item"]');
+          passGoldCheck("200 → type 'Item 1': list now " + items.length + ", pending observed. OK");
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { checkWitness(frame + 1); });
+          return;
+        }
+        failGoldCheck("isPending indicator was never observed (witness data-seen=false)");
+      }
+
+      function readLive() {
+        var items = root.querySelectorAll('[data-testid="item"]');
+        countRead.textContent = items.length;
+        var witness = root.querySelector('[data-testid="pending-witness"]');
+        pendingRead.textContent = witness ? witness.getAttribute("data-pending") : "—";
+      }
+
+      function passGoldCheck(msg) {
+        readLive();
+        badge.textContent = "[check] " + msg;
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

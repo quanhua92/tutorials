@@ -25,10 +25,10 @@
 ## Phase 3 — Concurrent React & React 19 (5)
 
 - [x] 13 `suspense_patterns` — Suspense: declarative loading, throw-promise
-- [ ] 14 `use_transition` — useTransition: urgent vs non-urgent updates
-- [ ] 15 `use_deferred_value` — useDeferredValue: deferring expensive renders
-- [ ] 16 `use_external_store` — useSyncExternalStore: external subscriptions
-- [ ] 17 `react19_actions` — useActionState, useFormStatus, useOptimistic
+- [x] 14 `use_transition` — useTransition: urgent vs non-urgent updates
+- [x] 15 `use_deferred_value` — useDeferredValue: deferring expensive renders
+- [x] 16 `use_external_store` — useSyncExternalStore: external subscriptions
+- [x] 17 `react19_actions` — useActionState, useFormStatus, useOptimistic
 
 ## Phase 4 — Performance (4)
 

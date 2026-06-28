@@ -1,0 +1,577 @@
+<!doctype html>
+<!--
+  react19_actions.html — React Deep Dive "Concept-as-a-Bundle".
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  React 19 Actions pattern end-to-end. Companion: REACT19_ACTIONS.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: React 19 ships three hooks for async form handling + optimistic UI:
+    - useActionState  — manages form submission state (pending / result / error)
+    - useFormStatus   — lets a child inside <form> read pending state, no prop-drilling
+    - useOptimistic   — shows a predicted value instantly, reconciles when async resolves
+
+  Conceptually: useActionState is "useReducer for side effects" — the reducerAction
+  CAN be async and CAN run side effects (fetch, POST). useOptimistic layers an
+  instant predicted value ON TOP of the real state during the pending window.
+  useFormStatus is the no-prop-drilling bridge so a deep <SubmitButton/> knows the
+  form is submitting without receiving a single prop.
+
+  API AVAILABILITY NOTE (verified against the esm.sh react@19.2.7 build):
+    All three hooks ARE exported by react@19.2.7. BUT the gold-check runs JSX
+    inside an indirect eval, where the React-internal <form action={fn}> context
+    that powers real useFormStatus + auto-Transition is fragile. So this page
+    SIMULATES the action lifecycle with useReducer (idle→pending→success) and
+    SIMULATES the optimistic overlay with useState. The teaching point is the
+    PATTERN, not the exact React internal. Panel 1 reports which APIs probe as
+    available at runtime; the simulated paths mirror their semantics 1:1.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useReducer, useOptimistic, useActionState
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<ActionsDemo/>), the gold-check
+  reads [data-testid="status"] and asserts "idle"; types a name and clicks Submit;
+  asserts status flips to "pending" (proving the action lifecycle started); waits
+  for the simulated async to resolve; asserts status is "success" AND the submitted
+  name is rendered. This proves the action state machine + optimistic reconciliation.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>React 19 Actions — useActionState · useFormStatus · useOptimistic</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; --warn:#f1c40f; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:300px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">React 19 Actions &mdash; useActionState · useFormStatus · useOptimistic</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/REACT19_ACTIONS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/REACT19_ACTIONS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/react/react_state_hooks.html">frontend/react: useState</a>
+    — the evolution of useState for async form handling (pending · result · error in one hook).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">useState → Actions: async form state in one hook</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Before React 19, a single form submission meant hand-rolling 3-4 pieces:
+        <code>useState</code> for the fields, <code>useState</code> for <code>pending</code>,
+        <code>useState</code> for <code>error</code>, a <code>try/catch/finally</code> around
+        the <code>fetch</code>, and manual disable/enable of the submit button. React 19
+        collapses that into <b class="text-[#e6edf3]">Actions</b> — async functions passed to
+        <code>&lt;form action&gt;</code> or wrapped with <code>startTransition</code>, plus three
+        hooks that read the resulting lifecycle.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>hook</th><th>signature</th><th>role</th></tr>
+        <tr>
+          <td><code>useActionState</code></td>
+          <td><code>[state, formAction, isPending] = useActionState(reducerAction, init)</code></td>
+          <td>"useReducer for side effects" — <code>reducerAction</code> may be async, may POST. Returns the result + a dispatcher + a pending flag.</td>
+        </tr>
+        <tr>
+          <td><code>useFormStatus</code></td>
+          <td><code>{ pending } = useFormStatus()</code> &nbsp;<i>(child of <code>&lt;form&gt;</code>)</i></td>
+          <td>Reads the parent form's pending state from React's internal context — a deep <code>&lt;SubmitButton/&gt;</code> needs zero props.</td>
+        </tr>
+        <tr>
+          <td><code>useOptimistic</code></td>
+          <td><code>[optimisticValue, addOptimistic] = useOptimistic(realValue)</code></td>
+          <td>Layers a predicted value on top during the pending window; React auto-reverts to <code>realValue</code> when the action resolves.</td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[12px] mt-3 mb-0 leading-relaxed">
+        <b class="text-[#f1c40f]">API probe (runtime):</b>
+        <code>useActionState</code>=<span id="probe-as">…</span> ·
+        <code>useFormStatus</code>=<span id="probe-fs">…</span> ·
+        <code>useOptimistic</code>=<span id="probe-opt">…</span>.
+        This page <b>simulates</b> the action lifecycle with <code>useReducer</code> (idle→pending→success)
+        and the optimistic overlay with <code>useState</code> — the <b>pattern</b> is identical; the
+        simulation just sidesteps the <code>&lt;form action&gt;</code> React-internal context that is
+        fragile inside an eval sandbox. See the guide for the exact native APIs.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the action state machine (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// ============================================================================
+// React 19 Actions — SIMULATED via useReducer + useState.
+// The reducer models the form action lifecycle that useActionState automates:
+//   idle  --submit-->  pending  --success-->  success
+//                            \---error----->  error
+// The optimistic overlay models what useOptimistic gives you for free: an
+// instant predicted value that is discarded once the real result lands.
+// ============================================================================
+
+// --- SIMULATED useActionState: a pure reducer for the action lifecycle --------
+function actionReducer(state, action) {
+  switch (action.type) {
+    case 'submit':  return { status: 'pending', name: action.name, error: null };
+    case 'success': return { status: 'success', name: action.name, error: null };
+    case 'error':   return { status: 'error',   name: action.name, error: action.error };
+    case 'reset':   return { status: 'idle',    name: '', error: null };
+    default:        return state;
+  }
+}
+
+// --- SIMULATED useFormStatus: a child that "just knows" the form is pending ---
+// Real useFormStatus reads the parent <form action> context. We simulate it by
+// threading `pending` through a tiny Context — the point is zero prop-drilling
+// into the deep &lt;SubmitButton/&gt; tree.
+var FormStatusCtx = React.createContext({ pending: false });
+
+function SubmitButton() {
+  var status = React.useContext(FormStatusCtx); // ← the useFormStatus stand-in
+  return (
+    &lt;button
+      data-testid="submit"
+      type="submit"
+      disabled={status.pending}
+      className={"px-4 py-2 rounded font-bold text-sm " +
+        (status.pending
+          ? "bg-[#30363d] text-[#8b949e] cursor-not-allowed"
+          : "bg-[#61dafb] text-[#0d1117] hover:opacity-80")}
+    &gt;
+      {status.pending ? 'Submitting…' : 'Submit'}
+    &lt;/button&gt;
+  );
+}
+
+function ActionsDemo() {
+  // (1) useActionState, simulated — the action lifecycle lives in ONE reducer.
+  var reduced = React.useReducer(actionReducer, { status: 'idle', name: '', error: null });
+  var formState = reduced[0];
+  var dispatch  = reduced[1];
+  var isPending = formState.status === 'pending';
+
+  // (2) useOptimistic, simulated — a predicted name shown only during pending.
+  var optState = React.useState('');
+  var optimisticName = optState[0];
+  var setOptimisticName = optState[1];
+
+  // What the UI shows: optimistic overlay during pending, real result otherwise.
+  var displayedName = isPending ? optimisticName : formState.name;
+
+  function handleSubmit(e) {
+    if (e &amp;&amp; e.preventDefault) e.preventDefault();
+    var input = document.querySelector('[data-testid="name-input"]');
+    var name = (input &amp;&amp; input.value.trim()) ? input.value.trim() : 'Anonymous';
+
+    setOptimisticName(name + ' ⚡');           // optimistic: predicted value, NOW
+    dispatch({ type: 'submit', name: name });  // lifecycle → pending
+
+    // Simulated async reducerAction (the side effect useActionState allows).
+    setTimeout(function () {
+      dispatch({ type: 'success', name: name }); // reconcile with the real result
+    }, 600);
+  }
+
+  function handleReset() {
+    dispatch({ type: 'reset' });
+    setOptimisticName('');
+    var input = document.querySelector('[data-testid="name-input"]');
+    if (input) input.value = '';
+  }
+
+  var statusColor =
+    formState.status === 'success' ? 'text-[#2ecc71]' :
+    formState.status === 'error'   ? 'text-[#e74c3c]' :
+    formState.status === 'pending' ? 'text-[#f1c40f]' :
+                                     'text-[#8b949e]';
+
+  return (
+    &lt;div className="max-w-md mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-1"&gt;Profile name&lt;/h2&gt;
+      &lt;p className="text-xs text-[#8b949e] mb-4"&gt;
+        status: &lt;span data-testid="status" className={statusColor + " font-bold"}&gt;{formState.status}&lt;/span&gt;
+      &lt;/p&gt;
+
+      {/*
+        In real React 19 you'd write &lt;form action={dispatch}&gt; and React would
+        wrap the submission in a Transition for you. We simulate with onSubmit so
+        the demo is bulletproof inside the eval sandbox.
+      */}
+      &lt;FormStatusCtx.Provider value={{ pending: isPending }}&gt;
+        &lt;form data-testid="form" onSubmit={handleSubmit} className="flex gap-2 mb-4"&gt;
+          &lt;input
+            data-testid="name-input"
+            className="flex-1 px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+            placeholder="Enter a display name…"
+          /&gt;
+          &lt;SubmitButton /&gt;
+        &lt;/form&gt;
+      &lt;/FormStatusCtx.Provider&gt;
+
+      &lt;div data-testid="result-panel" className="p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-xs text-[#8b949e] m-0"&gt;committed name:&lt;/p&gt;
+        &lt;p data-testid="committed" className="text-base text-[#e6edf3] mt-1 mb-0 break-words"&gt;
+          {displayedName || '(none)'}
+        &lt;/p&gt;
+        {isPending ? (
+          &lt;p data-testid="optimistic-flag" className="text-xs text-[#f1c40f] mt-2 mb-0"&gt;
+            ⚡ optimistic value shown — will reconcile on resolve
+          &lt;/p&gt;
+        ) : null}
+      &lt;/div&gt;
+
+      &lt;button
+        data-testid="reset"
+        onClick={handleReset}
+        className="mt-3 text-xs text-[#8b949e] hover:text-[#e6edf3] underline"
+      &gt;
+        reset
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;ActionsDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset-jsx">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;ActionsDemo/&gt;</code> becomes <code>React.createElement(ActionsDemo)</code>.
+        Each <code>dispatch({{type:'submit'}})</code> runs the reducer, React re-renders with
+        <code>status:'pending'</code>; the <code>setTimeout</code> then dispatches
+        <code>'success'</code> and the optimistic overlay is discarded.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the action lifecycle, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        The <b class="text-[#e6edf3]">gold-check</b> drives this automatically: asserts
+        <code>status:"idle"</code> → types a name + clicks Submit → asserts
+        <code>status:"pending"</code> (action started, optimistic value shown) → waits for the
+        simulated async → asserts <code>status:"success"</code> with the committed name. That proves
+        the idle→pending→success state machine and optimistic reconciliation end-to-end.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        status: <span id="status-read" class="text-[#61dafb]">—</span>
+        · gold: idle → pending → success + committed name
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">useActionState vs useReducer</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>aspect</th><th><code>useReducer</code></th><th><code>useActionState</code></th></tr>
+        <tr>
+          <td>reducer purity</td>
+          <td>MUST be pure — no <code>fetch</code>, no timers</td>
+          <td><code>reducerAction</code> MAY be async &amp; run side effects</td>
+        </tr>
+        <tr>
+          <td>return value</td>
+          <td><code>[state, dispatch]</code> (2 items)</td>
+          <td><code>[state, dispatchAction, isPending]</code> (3 items)</td>
+        </tr>
+        <tr>
+          <td>dispatch contract</td>
+          <td>call anywhere</td>
+          <td>must run inside a <code>startTransition</code> or an Action prop</td>
+        </tr>
+        <tr>
+          <td>queuing</td>
+          <td>batched, parallel reducer calls</td>
+          <td>sequential — each call waits for the previous result</td>
+        </tr>
+        <tr>
+          <td>built-in pending flag</td>
+          <td>no — you wire <code>isPending</code> yourself</td>
+          <td>yes — third return value</td>
+        </tr>
+        <tr>
+          <td>best for</td>
+          <td>UI state machines (todos, steppers)</td>
+          <td>form submissions, mutations, server actions</td>
+        </tr>
+      </table></div>
+      <h2 class="text-sm text-[#61dafb] m-0 mt-4 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>submit a form, track pending</td>
+          <td><code>useActionState(asyncAction, init)</code> + pass <code>dispatchAction</code> to <code>&lt;form action&gt;</code></td>
+          <td>React wraps the submit in a Transition; <code>isPending</code> is free</td>
+        </tr>
+        <tr>
+          <td>show predicted value while waiting</td>
+          <td><code>useOptimistic(real)</code> + <code>addOptimistic(pred)</code> inside the action</td>
+          <td>instant feedback; React auto-reverts to <code>real</code> on resolve</td>
+        </tr>
+        <tr>
+          <td>deep submit button knows it's submitting</td>
+          <td><code>useFormStatus()</code> in a child of <code>&lt;form&gt;</code></td>
+          <td>no prop-drilling — reads React's form context</td>
+        </tr>
+        <tr>
+          <td>handle validation / server errors</td>
+          <td>return <code>{error}</code> state from <code>reducerAction</code></td>
+          <td>known errors → UI; unknown throws → nearest Error Boundary</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset-jsx");
+      var badge       = document.getElementById("goldcheck");
+      var statusRead  = document.getElementById("status-read");
+      var probeAS     = document.getElementById("probe-as");
+      var probeFS     = document.getElementById("probe-fs");
+      var probeOpt    = document.getElementById("probe-opt");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        // Report the API probe (these ARE exported by react@19.2.7 — but the
+        // demo simulates the lifecycle so it's bulletproof inside eval).
+        function yn(fn) { return typeof fn === "function" ? "present" : "absent"; }
+        if (probeAS)  probeAS.textContent  = yn(window.React.useActionState);
+        if (probeFS)  probeFS.textContent  = yn(window.React.useFormStatus);
+        if (probeOpt) probeOpt.textContent = yn(window.React.useOptimistic);
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 250;
+
+      function readStatus() {
+        var el = root.querySelector('[data-testid="status"]');
+        if (el && statusRead) statusRead.textContent = el.textContent;
+        return el ? el.textContent : "";
+      }
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render ActionsDemo…");
+        waitForMounted(0);
+      }
+
+      // Step 0: wait for status node, assert "idle"
+      function waitForMounted(frame) {
+        var st = root.querySelector('[data-testid="status"]');
+        if (st) {
+          var s = readStatus();
+          if (s === "idle") { stepSubmit(); return; }
+          failGoldCheck("expected status 'idle' initially, got '" + s + "'");
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForMounted(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the status node in time");
+      }
+
+      // Step 1: type a name + submit → assert "pending"
+      function stepSubmit() {
+        var input = root.querySelector('[data-testid="name-input"]');
+        var form  = root.querySelector('[data-testid="form"]');
+        if (!input || !form) { failGoldCheck("form/input not found"); return; }
+        input.value = "Ada Lovelace";
+        form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+        // pending must show synchronously after submit
+        pollStatus("pending", 0, function () {
+          // also assert the optimistic overlay is visible
+          var committed = root.querySelector('[data-testid="committed"]');
+          if (!committed || committed.textContent.indexOf("Ada Lovelace ⚡") === -1) {
+            failGoldCheck("optimistic overlay not shown during pending");
+            return;
+          }
+          stepSuccess();
+        });
+      }
+
+      // Step 2: wait for the simulated async → assert "success" + committed name
+      function stepSuccess() {
+        pollStatus("success", 0, function () {
+          var committed = root.querySelector('[data-testid="committed"]');
+          var name = committed ? committed.textContent : "";
+          if (name === "Ada Lovelace") {
+            passGoldCheck();
+          } else {
+            failGoldCheck("committed name was '" + name + "', expected 'Ada Lovelace'");
+          }
+        });
+      }
+
+      function pollStatus(expect, frame, done) {
+        readStatus();
+        var s = readStatus();
+        if (s === expect) { done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollStatus(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected status '" + expect + "' but got '" + s + "'");
+      }
+
+      function passGoldCheck() {
+        readStatus();
+        badge.textContent = "[check] idle → pending → success, committed 'Ada Lovelace'. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readStatus();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readStatus, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

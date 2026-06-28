@@ -1,0 +1,487 @@
+<!doctype html>
+<!--
+  use_deferred_value.html — Phase 1 hooks bundle (rendered ground truth).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  useDeferredValue end-to-end. Companion: USE_DEFERRED_VALUE.md (guide).
+
+  The lesson: useDeferredValue defers RE-RENDERING for a value. React first
+  renders with the OLD value (keeping the UI responsive), then re-renders with
+  the NEW value in the background when ready. It is the declarative sibling of
+  useTransition: useTransition is IMPERATIVE (you mark an update non-urgent with
+  startTransition); useDeferredValue is DECLARATIVE (you hand React a value and
+  it decides when to apply the new version). Use the latter when the value comes
+  from props or a library you don't control.
+
+  The two-step render:
+    1. Urgent render: new `query`, OLD `deferredQuery` → input feels instant.
+    2. Background render: new `deferredQuery` → the slow list catches up.
+  Pair it with React.memo + useMemo so the urgent render is cheap: while
+  deferredQuery is unchanged, useMemo returns the SAME rows array, React.memo
+  skips the list, and only the background render pays the filter cost.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useDeferredValue, useMemo, memo
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<SearchApp/>), the gold-check
+  asserts 300 items on first paint, types "Item 5" via a native input event,
+  asserts the IMMEDIATE value is "Item 5" right away, then waits for the DEFERRED
+  value to catch up and asserts the list re-filtered to 11 items. This proves the
+  deferral pipeline end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useDeferredValue — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:280px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useDeferredValue &mdash; defer the re-render</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_DEFERRED_VALUE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_DEFERRED_VALUE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ The declarative sibling of
+    <a href="./use_transition.html">useTransition</a>:
+    <code>useTransition</code> marks an <b>update</b> non-urgent (imperative);
+    <code>useDeferredValue</code> marks a <b>value</b> lag-behind (declarative).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">useTransition → useDeferredValue: the same idea, two entry points</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Both hooks split a render into an <b class="text-[#e6edf3]">urgent</b> part
+        (must paint now) and a <b class="text-[#e6edf3]">deferrable</b> part (can lag).
+        <code>useTransition</code> hands you <code>startTransition</code> so <b>you</b>
+        wrap the state update. <code>useDeferredValue</code> instead takes a value and
+        returns a <b>lagging copy</b> of it — React renders with the old copy first,
+        then re-renders in the background once the new value is ready. Reach for it
+        when the value arrives from props or a library you can't wrap in a transition.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>value</code></td>
+          <td>the input you hand to the hook</td>
+          <td>the live needle on a speedometer</td>
+        </tr>
+        <tr>
+          <td><code>deferredValue</code></td>
+          <td>a lagging copy React returns (old on the urgent render, new on the background render)</td>
+          <td>the smoothed-out needle that catches up a beat later</td>
+        </tr>
+        <tr>
+          <td>urgent render</td>
+          <td>new <code>value</code>, OLD <code>deferredValue</code></td>
+          <td>the dashboard repaints instantly; the heavy chart is frozen on the previous frame</td>
+        </tr>
+        <tr>
+          <td>background render</td>
+          <td>new <code>value</code> AND new <code>deferredValue</code> (interruptible)</td>
+          <td>the chart re-renders quietly and swaps in when done</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the deferred-value component you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var ITEMS = [];
+(function () {
+  for (var i = 1; i &lt;= 300; i++) ITEMS.push({ id: i, label: 'Item ' + i });
+})();
+
+// React.memo lets the URGENT render skip the list: while deferredQuery is
+// unchanged, useMemo returns the SAME rows array, so props are identical.
+var FilteredList = React.memo(function FilteredList(props) {
+  return (
+    &lt;ul data-testid="list" className="divide-y divide-[#30363d] border border-[#30363d] rounded"&gt;
+      {props.rows.map(function (r) {
+        return (
+          &lt;li data-testid="item" key={r.id} className="px-3 py-1 text-xs text-[#e6edf3]"&gt;
+            {r.label}
+          &lt;/li&gt;
+        );
+      })}
+    &lt;/ul&gt;
+  );
+});
+
+function SearchApp() {
+  var s = React.useState('');
+  var query = s[0], setQuery = s[1];
+  // The star of the show: a lagging copy of `query`.
+  var deferredQuery = React.useDeferredValue(query);
+
+  // Expensive filter only recomputes when deferredQuery actually changes.
+  var rows = React.useMemo(function () {
+    if (!deferredQuery) return ITEMS;
+    var q = deferredQuery.toLowerCase();
+    return ITEMS.filter(function (it) {
+      return it.label.toLowerCase().indexOf(q) !== -1;
+    });
+  }, [deferredQuery]);
+
+  // isStale is true between the urgent render and the background render.
+  var isStale = query !== deferredQuery;
+
+  return (
+    &lt;div className="max-w-md mx-auto"&gt;
+      &lt;input
+        data-testid="input"
+        className="w-full px-3 py-2 bg-[#0d1117] border border-[#30363d] rounded text-[#e6edf3] text-sm outline-none focus:border-[#61dafb]"
+        value={query}
+        placeholder="Filter 300 items…"
+        onChange={function (e) { setQuery(e.target.value); }}
+      /&gt;
+      &lt;div className="flex items-center gap-3 mt-3 text-xs flex-wrap"&gt;
+        &lt;span className="text-[#8b949e]"&gt;immediate:&lt;/span&gt;
+        &lt;span data-testid="immediate-value" className="text-[#61dafb] font-bold"&gt;{query || '(empty)'}&lt;/span&gt;
+        &lt;span className="text-[#8b949e]"&gt;deferred:&lt;/span&gt;
+        &lt;span data-testid="deferred-value" className={isStale ? 'text-[#f1c40f] font-bold' : 'text-[#2ecc71] font-bold'}&gt;
+          {deferredQuery || '(empty)'}
+        &lt;/span&gt;
+        {isStale ? &lt;span className="text-[#f1c40f]"&gt;⏳ stale — list catching up…&lt;/span&gt; : null}
+      &lt;/div&gt;
+      &lt;p data-testid="count" className="mt-3 text-xs text-[#8b949e]"&gt;
+        showing {rows.length} of {ITEMS.length} items
+      &lt;/p&gt;
+      &lt;div className="mt-2 max-h-64 overflow-auto"&gt;
+        &lt;FilteredList rows={rows} /&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;SearchApp/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;SearchApp/&gt;</code> becomes <code>React.createElement(SearchApp)</code>.
+        Each keystroke fires <code>setQuery</code> → React re-renders with the OLD
+        <code>deferredQuery</code> first, then schedules a background render with the new one.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the deferred render, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Type in the box: the <b class="text-[#e6edf3]">immediate</b> value snaps to your
+        keystroke at once, while the <b class="text-[#e6edf3]">deferred</b> value lags
+        behind and the list re-filters when it catches up. The
+        <b class="text-[#e6edf3]">gold-check</b> does this automatically: asserts 300 items
+        on first paint, types "Item 5", asserts the immediate value is "Item 5" right away,
+        then waits for the deferred value to catch up and the list to re-filter to 11 items.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        items: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: 300 items → type "Item 5" → immediate="Item 5" → deferred catches up → 11 items
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>keep an input snappy while a heavy list re-filters</td>
+          <td><code>var d = useDeferredValue(q)</code> + pass <code>d</code> to the slow child</td>
+          <td>urgent render keeps the old <code>d</code>; list lags, input stays instant</td>
+        </tr>
+        <tr>
+          <td>make the urgent render actually cheap</td>
+          <td>wrap child in <code>React.memo</code> + <code>useMemo(() =&gt; filter(d), [d])</code></td>
+          <td>while <code>d</code> is unchanged, rows ref is identical → memo skips</td>
+        </tr>
+        <tr>
+          <td>signal that the visible data is stale</td>
+          <td><code>var isStale = q !== d</code> → dim with <code>opacity</code></td>
+          <td>user sees the list is catching up, not frozen/broken</td>
+        </tr>
+        <tr>
+          <td>defer a value that arrives on first paint too</td>
+          <td><code>useDeferredValue(q, initialQ)</code> (React 19)</td>
+          <td><code>initialValue</code> is used for the initial render only</td>
+        </tr>
+        <tr>
+          <td>show old data while new data loads (Suspense)</td>
+          <td>pass <code>d</code> into a <code>&lt;Suspense&gt;</code> subtree</td>
+          <td>no fallback flash — old deferred value stays until new resolves</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 240;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render SearchApp…");
+        waitForInput(0);
+      }
+
+      // Set a React controlled <input> value and fire the event React listens to.
+      function typeInto(el, value) {
+        var setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value"
+        ).set;
+        setter.call(el, value);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      function waitForInput(frame) {
+        var input = root.querySelector('[data-testid="input"]');
+        if (input) { assertInitial(input); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForInput(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the input in time");
+      }
+
+      // Step 1: on first paint the deferred value equals the value (''), so all 300 show.
+      function assertInitial(input, frame) {
+        readLive();
+        var items = root.querySelectorAll('[data-testid="item"]');
+        if (items.length === 300) {
+          // Step 2: type "Item 5" — the immediate value must snap at once.
+          typeInto(input, "Item 5");
+          pollImmediate("Item 5", 0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { assertInitial(input, frame + 1); });
+          return;
+        }
+        failGoldCheck("expected 300 items on first paint but DOM shows " + items.length);
+      }
+
+      function pollImmediate(expect, frame) {
+        readLive();
+        var imm = root.querySelector('[data-testid="immediate-value"]');
+        if (imm && imm.textContent === expect) {
+          // Step 3: wait for the DEFERRED value to catch up (the background render).
+          pollDeferred(expect, 0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollImmediate(expect, frame + 1); });
+          return;
+        }
+        failGoldCheck('immediate value never became "' + expect + '"');
+      }
+
+      function pollDeferred(expect, frame) {
+        readLive();
+        var def = root.querySelector('[data-testid="deferred-value"]');
+        if (def && def.textContent === expect) {
+          // Step 4: the list must have re-filtered with the deferred value.
+          assertFiltered(expect, 0);
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollDeferred(expect, frame + 1); });
+          return;
+        }
+        failGoldCheck('deferred value never caught up to "' + expect + '"');
+      }
+
+      function assertFiltered(expect, frame) {
+        readLive();
+        var items = root.querySelectorAll('[data-testid="item"]');
+        // "Item 5" matches id 5 and ids 50..59 → 11 items.
+        if (items.length === 11) {
+          passGoldCheck('300 items → type "Item 5" → immediate="Item 5" → deferred catches up → 11 items. OK');
+          return;
+        }
+        // Retry a few frames: the background render may commit the value before the list.
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { assertFiltered(expect, frame + 1); });
+          return;
+        }
+        failGoldCheck("expected 11 filtered items but DOM shows " + items.length);
+      }
+
+      function readLive() {
+        var items = root.querySelectorAll('[data-testid="item"]');
+        countRead.textContent = items.length;
+      }
+
+      function passGoldCheck(msg) {
+        readLive();
+        badge.textContent = "[check] " + msg;
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

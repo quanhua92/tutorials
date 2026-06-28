@@ -1,0 +1,474 @@
+<!doctype html>
+<!--
+  compound_components.html — Phase 2 component patterns #1.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  compound component pattern end-to-end. Companion: COMPOUND_COMPONENTS.md (guide).
+
+  The lesson: HTML gives you `<select>` and `<option>` — two tags that cooperate
+  implicitly. The `<select>` owns the open/selected state; the `<option>` never
+  receives a prop yet reflects that state. React has no built-in pairing like that,
+  so we build it: ONE parent component holds state and publishes it through a
+  React Context; related sub-components (attached as static properties like
+  `Tabs.Tab`, `Tabs.TabPanel`) consume that context via `useContext`. The consumer
+  writes `<Tabs><Tabs.TabList><Tabs.Tab/></Tabs.TabList><Tabs.TabPanel/></Tabs>`
+  and never passes a single state prop — exactly the clean `<select>/<option>`
+  ergonomics. This is the pattern behind Radix UI, Headless UI, Reach UI, and the
+  MUI Select.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: createContext, useContext, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<CompoundDemo/>), the gold-check
+  asserts tab-0 is active (data-active="true") and panel-0 shows "Overview content",
+  clicks tab-1 → asserts tab-1 active + tab-0 inactive + panel-1 visible, clicks
+  tab-2 → asserts tab-2 active + panel-2 visible, then clicks tab-0 → asserts the
+  tabs returned to overview. This proves the Context-as-glue, implicit-state flow
+  end-to-end with real click events.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Compound Components — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Compound Components &mdash; implicit state via context</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/COMPOUND_COMPONENTS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/COMPOUND_COMPONENTS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ The <a href="./use_context.html">Context API</a> is the foundation — compound
+    components are the pattern built on top.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">&lt;select&gt;/&lt;option&gt; in React: the compound pattern</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        In HTML, <code>&lt;select&gt;</code> and <code>&lt;option&gt;</code> cooperate
+        with zero props between them — the select owns the state, each option reflects it.
+        React gives you no built-in pairing, so you build one: a parent component holds the
+        state and publishes it through a <b class="text-[#e6edf3]">Context</b>; related
+        sub-components (attached as static properties, <code>Tabs.Tab</code>,
+        <code>Tabs.TabPanel</code>) read it with <code>useContext</code>. The consumer writes
+        <code>&lt;Tabs&gt;&lt;Tabs.Tab/&gt;&lt;/Tabs&gt;</code> and never passes a state prop —
+        exactly the clean ergonomics of <code>&lt;select&gt;</code>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>Context</code></td>
+          <td>the shared channel, created once via <code>createContext</code></td>
+          <td>the invisible air between <code>&lt;select&gt;</code> and <code>&lt;option&gt;</code> that carries state</td>
+        </tr>
+        <tr>
+          <td>Parent (<code>Tabs</code>)</td>
+          <td>holds state + wraps children in the <code>Provider</code></td>
+          <td>the <code>&lt;select&gt;</code> element — it alone owns open/selected</td>
+        </tr>
+        <tr>
+          <td>Static assignment (<code>Tabs.Tab =</code>)</td>
+          <td>attaches sub-components as properties of the parent</td>
+          <td>how the DOM "knows" <code>&lt;option&gt;</code> belongs to <code>&lt;select&gt;</code></td>
+        </tr>
+        <tr>
+          <td>Child consumer (<code>useContext</code>)</td>
+          <td>reads the shared state — no props passed in</td>
+          <td>the <code>&lt;option&gt;</code> reflecting "selected" without being told</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the compound Tabs you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">var TabsContext = React.createContext({});
+
+function Tabs(props) {
+  var activeState = React.useState(props.defaultActive || 0);
+  var active = activeState[0];
+  var setActive = activeState[1];
+  var ctx = React.useMemo(function () {
+    return { active: active, setActive: setActive };
+  }, [active]);
+  return React.createElement(TabsContext.Provider, { value: ctx },
+    React.createElement('div', { className: 'border border-[#30363d] rounded-lg overflow-hidden' }, props.children)
+  );
+}
+
+Tabs.TabList = function TabList(props) {
+  return React.createElement('div', {
+    className: 'flex border-b border-[#30363d] bg-[#0d1117]',
+    'data-testid': 'tablist'
+  }, props.children);
+};
+
+Tabs.Tab = function Tab(props) {
+  var ctx = React.useContext(TabsContext);
+  var isActive = ctx.active === props.index;
+  return React.createElement('button', {
+    'data-testid': 'tab-' + props.index,
+    'data-active': isActive ? 'true' : 'false',
+    onClick: function () { ctx.setActive(props.index); },
+    className: 'px-4 py-2 text-sm font-bold ' + (isActive ? 'text-[#61dafb] border-b-2 border-[#61dafb]' : 'text-[#8b949e]')
+  }, props.children);
+};
+
+Tabs.TabPanel = function TabPanel(props) {
+  var ctx = React.useContext(TabsContext);
+  if (ctx.active !== props.index) return null;
+  return React.createElement('div', {
+    'data-testid': 'panel-' + props.index,
+    className: 'p-4 bg-[#0d1117] text-sm'
+  }, props.children);
+};
+
+// Usage — clean, NO state props threaded down!
+function CompoundDemo() {
+  return (
+    &lt;Tabs defaultActive={0}&gt;
+      &lt;Tabs.TabList&gt;
+        &lt;Tabs.Tab index={0}&gt;Overview&lt;/Tabs.Tab&gt;
+        &lt;Tabs.Tab index={1}&gt;Details&lt;/Tabs.Tab&gt;
+        &lt;Tabs.Tab index={2}&gt;Reviews&lt;/Tabs.Tab&gt;
+      &lt;/Tabs.TabList&gt;
+      &lt;Tabs.TabPanel index={0}&gt;
+        &lt;p data-testid="content"&gt;Overview content — the starting tab&lt;/p&gt;
+      &lt;/Tabs.TabPanel&gt;
+      &lt;Tabs.TabPanel index={1}&gt;
+        &lt;p data-testid="content"&gt;Details content — click to see&lt;/p&gt;
+      &lt;/Tabs.TabPanel&gt;
+      &lt;Tabs.TabPanel index={2}&gt;
+        &lt;p data-testid="content"&gt;Reviews content — click to see&lt;/p&gt;
+      &lt;/Tabs.TabPanel&gt;
+    &lt;/Tabs&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;CompoundDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;Tabs.Tab index={0}&gt;</code> becomes
+        <code>React.createElement(Tabs.Tab, {"{index:0}"})</code> — the member expression
+        resolves to the statically-attached function. Each click calls <code>ctx.setActive</code>,
+        the Provider republishes, and every consumer re-renders with the new value.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (implicit state, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click a tab heading — no props are passed between <code>Tabs</code> and <code>Tabs.Tab</code>;
+        the active index flows through Context. The <b class="text-[#e6edf3]">gold-check</b> drives
+        this automatically: assert tab-0 active, click tab-1 → tab-2 → tab-0, asserting the right
+        panel mounts and the active flag moves each time.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        active tab: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: tab-0 → click 1 → click 2 → click 0, panel + data-active match each step
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>share state implicitly</td>
+          <td><code>var Ctx = createContext({})</code> + <code>Provider</code> in parent</td>
+          <td>avoids prop-drilling through N intermediate levels</td>
+        </tr>
+        <tr>
+          <td>attach a sub-component</td>
+          <td><code>Tabs.Tab = function (props) {"{...}"}</code></td>
+          <td>static property → consumer writes <code>Tabs.Tab</code>, clean namespaced API</td>
+        </tr>
+        <tr>
+          <td>read the shared state</td>
+          <td><code>var ctx = useContext(Ctx)</code> inside a child</td>
+          <td>no props passed; child stays decoupled from parent internals</td>
+        </tr>
+        <tr>
+          <td>conditionally mount a panel</td>
+          <td><code>if (ctx.active !== index) return null</code></td>
+          <td>only the active panel is in the tree — lazy-friendly</td>
+        </tr>
+        <tr>
+          <td>keep the context value stable</td>
+          <td><code>useMemo(() ={"("} {"{active, setActive}"} {")"}, [active])</code></td>
+          <td>prevents every consumer re-rendering on unrelated parent renders</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render CompoundDemo…");
+        waitForTabs(0);
+      }
+
+      function waitForTabs(frame) {
+        var tab0 = root.querySelector('[data-testid="tab-0"]');
+        if (tab0) { assertStartState(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForTabs(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the tabs in time");
+      }
+
+      // Step 1: tab-0 active + panel-0 visible ("Overview content")
+      function assertStartState(frame) {
+        readLive();
+        var tab0   = root.querySelector('[data-testid="tab-0"]');
+        var panel0 = root.querySelector('[data-testid="panel-0"]');
+        var ok0 = tab0 && tab0.getAttribute("data-active") === "true"
+               && panel0 && /Overview content/.test(panel0.textContent);
+        if (ok0) { clickTab1(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { assertStartState(frame + 1); });
+          return;
+        }
+        failGoldCheck("initial state not tab-0 active / panel-0 visible");
+      }
+
+      // Step 2: click tab-1 → tab-1 active, tab-0 inactive, panel-1 visible
+      function clickTab1(frame) {
+        var tab1 = root.querySelector('[data-testid="tab-1"]');
+        if (!tab1) { failGoldCheck("tab-1 not found"); return; }
+        tab1.click();
+        pollActive(1, function () {
+          var tab0  = root.querySelector('[data-testid="tab-0"]');
+          var panel1 = root.querySelector('[data-testid="panel-1"]');
+          var ok = tab0 && tab0.getAttribute("data-active") === "false"
+                && panel1 && /Details content/.test(panel1.textContent);
+          if (ok) { clickTab2(0); }
+          else { failGoldCheck("after tab-1 click: tab-0 inactive / panel-1 mismatch"); }
+        }, frame);
+      }
+
+      // Step 3: click tab-2 → tab-2 active, panel-2 visible
+      function clickTab2(frame) {
+        var tab2 = root.querySelector('[data-testid="tab-2"]');
+        if (!tab2) { failGoldCheck("tab-2 not found"); return; }
+        tab2.click();
+        pollActive(2, function () {
+          var panel2 = root.querySelector('[data-testid="panel-2"]');
+          var ok = panel2 && /Reviews content/.test(panel2.textContent);
+          if (ok) { clickTab0Back(0); }
+          else { failGoldCheck("after tab-2 click: panel-2 mismatch"); }
+        }, frame);
+      }
+
+      // Step 4: click tab-0 again → back to overview
+      function clickTab0Back(frame) {
+        var tab0 = root.querySelector('[data-testid="tab-0"]');
+        if (!tab0) { failGoldCheck("tab-0 not found on return"); return; }
+        tab0.click();
+        pollActive(0, function () {
+          var panel0 = root.querySelector('[data-testid="panel-0"]');
+          var ok = panel0 && /Overview content/.test(panel0.textContent);
+          if (ok) { passGoldCheck(); }
+          else { failGoldCheck("after return to tab-0: panel-0 mismatch"); }
+        }, frame);
+      }
+
+      // Poll until the tab with index `n` reports data-active="true".
+      function pollActive(n, done, frame) {
+        readLive();
+        var tab = root.querySelector('[data-testid="tab-' + n + '"]');
+        if (tab && tab.getAttribute("data-active") === "true") { readLive(); done(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollActive(n, done, frame + 1); });
+          return;
+        }
+        failGoldCheck("tab-" + n + " did not become active after click");
+      }
+
+      function readLive() {
+        var activeTab = root.querySelector('[data-testid^="tab-"][data-active="true"]');
+        countRead.textContent = activeTab ? activeTab.getAttribute("data-testid") : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] tab-0→1→2→0: active flag + panel move each step. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -11,13 +11,13 @@
 - [x] 03 `use_memo_callback` — useMemo & useCallback: memoization, referential equality
 - [x] 04 `use_context` — Context API: Provider/Consumer, context splits
 - [x] 05 `custom_hooks` — Custom hooks: useDebounce, useLocalStorage, useFetch
-- [ ] 06 `use_layout_effect` — useLayoutEffect vs useEffect: paint timing
+- [x] 06 `use_layout_effect` — useLayoutEffect vs useEffect: paint timing
 
 ## Phase 2 — Component Patterns (6)
 
-- [ ] 07 `compound_components` — Compound pattern: implicit state via context
-- [ ] 08 `render_props` — Render props & function-as-child
-- [ ] 09 `headless_ui` — Headless UI: state reducer + prop getters
+- [x] 07 `compound_components` — Compound pattern: implicit state via context
+- [x] 08 `render_props` — Render props & function-as-child
+- [x] 09 `headless_ui` — Headless UI: state reducer + prop getters
 - [ ] 10 `controlled_uncontrolled` — Controlled vs uncontrolled, key-based reset
 - [ ] 11 `error_boundaries` — Error boundaries: catching render errors
 - [ ] 12 `forward_ref` — forwardRef + useImperativeHandle

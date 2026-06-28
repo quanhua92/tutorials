@@ -1,0 +1,487 @@
+<!doctype html>
+<!--
+  use_layout_effect.html — React Deep Dive (concept bundle).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving
+  useLayoutEffect end-to-end. Companion: USE_LAYOUT_EFFECT.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: useEffect and useLayoutEffect have the SAME signature —
+  (setup, deps). The difference is TIMING:
+    - useEffect       runs AFTER the browser paints (asynchronous)
+    - useLayoutEffect runs synchronously AFTER DOM mutation, BEFORE paint
+
+  The render cycle:
+    1. React renders  (computes virtual DOM)
+    2. React commits  (updates real DOM)
+    3. useLayoutEffect runs synchronously  ← can read/measure DOM, setState
+    4. Browser paints  (user sees the result)
+    5. useEffect runs asynchronously      ← after paint
+
+  If useLayoutEffect calls setState, React re-renders synchronously BEFORE
+  paint — so the user never sees the intermediate (flicker) state.
+
+  Warning: useLayoutEffect BLOCKS painting. Use it sparingly — only when
+  you must measure/mutate the DOM before the user sees it. Otherwise use
+  useEffect.
+
+  CDN setup (same React 19 ESM + Babel pattern as frontend/react/react_via_cdn):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useLayoutEffect
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<LayoutEffectDemo/>), the
+  gold-check asserts the initial dimensions read "Measured: 100×100px" (set
+  synchronously by useLayoutEffect before paint), clicks "Grow +50" twice
+  (asserting 150×150 then 200×200), then clicks "Shrink −50" (asserting
+  150×150). This proves useLayoutEffect measured the DOM and updated state
+  before the browser painted — no flicker.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>useLayoutEffect — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">useLayoutEffect &mdash; measure before paint</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/USE_LAYOUT_EFFECT.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/USE_LAYOUT_EFFECT.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Sibling of
+    <a href="../frontend/react/react_effects_lists.html">frontend/react: useEffect</a>
+    — same signature, different timing. useEffect fires AFTER paint (async);
+    useLayoutEffect fires BEFORE paint (sync).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">useEffect vs useLayoutEffect: same signature, different timing</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        Both hooks share the signature <code>useXxxEffect(setup, deps)</code>. The
+        ONLY difference is <b class="text-[#e6edf3]">when the setup function runs</b>
+        relative to the browser paint. <code>useEffect</code> is asynchronous — the
+        browser paints first, THEN the effect runs, so the user may briefly see a
+        stale DOM. <code>useLayoutEffect</code> is synchronous — it runs after DOM
+        mutation but BEFORE paint, so any <code>setState</code> inside it produces
+        a re-render that the user sees as one flicker-free frame.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>phase</th><th>what happens</th><th>which hook runs</th></tr>
+        <tr>
+          <td>1. render</td>
+          <td>React calls your component, computes the virtual DOM</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>2. commit</td>
+          <td>React mutates the real DOM to match the virtual DOM</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>3. layout</td>
+          <td><code>useLayoutEffect</code> setup runs synchronously — can read layout (<code>offsetWidth</code>, <code>getBoundingClientRect</code>), can <code>setState</code></td>
+          <td><code>useLayoutEffect</code></td>
+        </tr>
+        <tr>
+          <td>4. paint</td>
+          <td>browser paints pixels to the screen — user sees the frame</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>5. passive</td>
+          <td><code>useEffect</code> setup runs asynchronously — non-blocking, the user already saw the painted DOM</td>
+          <td><code>useEffect</code></td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the measure-before-paint hook (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">function LayoutEffectDemo() {
+  var boxRef = React.useRef(null);
+  var widthState = React.useState(0);
+  var width = widthState[0];
+  var setWidth = widthState[1];
+  var heightState = React.useState(0);
+  var height = heightState[0];
+  var setHeight = heightState[1];
+  var sizeState = React.useState(100);
+  var size = sizeState[0];
+  var setSize = sizeState[1];
+
+  // useLayoutEffect: measure BEFORE paint — no flicker
+  React.useLayoutEffect(function () {
+    if (boxRef.current) {
+      setWidth(boxRef.current.offsetWidth);
+      setHeight(boxRef.current.offsetHeight);
+    }
+  }, [size]); // re-measure when size changes
+
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;
+        useLayoutEffect: measure before paint
+      &lt;/h2&gt;
+
+      {/*
+        The box we measure. Its style.width/height come from `size` state,
+        so changing `size` triggers a re-render AND a re-measure.
+      */}
+      &lt;div
+        ref={boxRef}
+        data-testid="box"
+        className="bg-[#61dafb] rounded mb-4 flex items-center justify-center text-[#0d1117] font-bold"
+        style={{ width: size + 'px', height: size + 'px' }}
+      &gt;
+        {size}×{size}
+      &lt;/div&gt;
+
+      {/* Measured dimensions (set by useLayoutEffect, no flicker) */}
+      &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d] text-sm"&gt;
+        &lt;p data-testid="dimensions"&gt;Measured: {width}×{height}px&lt;/p&gt;
+      &lt;/div&gt;
+
+      {/* Controls */}
+      &lt;div className="flex gap-2 mt-3"&gt;
+        &lt;button
+          data-testid="grow"
+          onClick={function () { setSize(function (s) { return s + 50; }); }}
+          className="px-3 py-1 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs"
+        &gt;
+          Grow +50
+        &lt;/button&gt;
+        &lt;button
+          data-testid="shrink"
+          onClick={function () { setSize(function (s) { return Math.max(50, s - 50); }); }}
+          className="px-3 py-1 bg-[#30363d] text-[#e6edf3] rounded font-bold text-xs"
+        &gt;
+          Shrink −50
+        &lt;/button&gt;
+      &lt;/div&gt;
+
+      &lt;p className="mt-3 text-xs text-[#8b949e]"&gt;
+        Width/height update synchronously — no flicker because useLayoutEffect runs before paint.
+      &lt;/p&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;LayoutEffectDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;LayoutEffectDemo/&gt;</code> becomes
+        <code>React.createElement(LayoutEffectDemo)</code>. After commit,
+        React fires <code>useLayoutEffect</code> synchronously — it reads
+        <code>boxRef.current.offsetWidth</code>, calls <code>setWidth</code>,
+        and React re-renders BEFORE the browser paints.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (measure-before-paint, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click <b class="text-[#e6edf3]">Grow +50</b> / <b class="text-[#e6edf3]">Shrink −50</b>:
+        the <code>Measured: W×Hpx</code> line updates in the SAME frame as the box resize.
+        The <b class="text-[#e6edf3]">gold-check</b> asserts the sync pipeline:
+        initial 100×100 → Grow 150×150 → Grow 200×200 → Shrink 150×150.
+        If we used <code>useEffect</code> instead, you would see one painted frame
+        with a stale measurement before it corrected.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        dimensions: <span id="dim-read" class="text-[#61dafb]">—</span>
+        · gold: 100×100 → Grow → 150×150 → Grow → 200×200 → Shrink → 150×150
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → hook</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>hook</th><th>why</th></tr>
+        <tr>
+          <td>data fetching, subscriptions, logging</td>
+          <td><code>useEffect</code></td>
+          <td>non-blocking; user shouldn't wait on a network round-trip before paint</td>
+        </tr>
+        <tr>
+          <td>measure element size/position before showing it</td>
+          <td><code>useLayoutEffect</code></td>
+          <td>reads <code>offsetWidth</code>/<code>getBoundingClientRect</code> before paint — no flicker</td>
+        </tr>
+        <tr>
+          <td>scroll to a position right after content mounts</td>
+          <td><code>useLayoutEffect</code></td>
+          <td>sets <code>scrollTop</code> before the user sees the wrong scroll offset</td>
+        </tr>
+        <tr>
+          <td>position a tooltip/popover relative to an anchor</td>
+          <td><code>useLayoutEffect</code></td>
+          <td>measures the anchor box, computes coords, paints once — no jump</td>
+        </tr>
+        <tr>
+          <td>animate from <code>0</code> to a measured value</td>
+          <td><code>useLayoutEffect</code> + <code>useState</code></td>
+          <td>read the target size, then animate; otherwise the first frame is wrong</td>
+        </tr>
+        <tr>
+          <td>SSR (no real DOM)</td>
+          <td><code>useEffect</code> or <code>useInsertionEffect</code></td>
+          <td><code>useLayoutEffect</code> warns on the server — wrap in <code>typeof window !== 'undefined'</code> or use a <code>useIsomorphicLayoutEffect</code> shim</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var dimRead     = document.getElementById("dim-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function readDim() {
+        var el = root.querySelector('[data-testid="dimensions"]');
+        if (el) dimRead.textContent = el.textContent.replace(/^Measured:\s*/, "");
+        else dimRead.textContent = "—";
+      }
+
+      function getDimText() {
+        var el = root.querySelector('[data-testid="dimensions"]');
+        return el ? el.textContent : "";
+      }
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for useLayoutEffect to set dimensions…");
+        waitForBox(0);
+      }
+
+      function waitForBox(frame) {
+        var box = root.querySelector('[data-testid="box"]');
+        var dim = root.querySelector('[data-testid="dimensions"]');
+        if (box && dim) { assertInitial(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForBox(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the box/dimensions in time");
+      }
+
+      // Step 1: assert initial dimensions show "Measured: 100×100px"
+      function assertInitial(frame) {
+        readDim();
+        var text = getDimText();
+        if (text.indexOf("Measured: 100") !== -1 && text.indexOf("100px") !== -1) {
+          // Step 2: click "Grow +50" → expect 150×150px
+          var grow = root.querySelector('[data-testid="grow"]');
+          if (!grow) { failGoldCheck("Grow button not found"); return; }
+          grow.click();
+          pollDim("150", "150px", 0, function () {
+            // Step 3: click "Grow +50" again → expect 200×200px
+            grow.click();
+            pollDim("200", "200px", 0, function () {
+              // Step 4: click "Shrink −50" → expect 150×150px
+              var shrink = root.querySelector('[data-testid="shrink"]');
+              if (!shrink) { failGoldCheck("Shrink button not found"); return; }
+              shrink.click();
+              pollDim("150", "150px", 0, passGoldCheck);
+            });
+          });
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { assertInitial(frame + 1); });
+          return;
+        }
+        failGoldCheck("expected initial 'Measured: 100×100px' but got '" + text + "'");
+      }
+
+      function pollDim(expectW, expectH, frame, done) {
+        readDim();
+        var text = getDimText();
+        if (text.indexOf("Measured: " + expectW) !== -1 && text.indexOf(expectH) !== -1) {
+          readDim();
+          done();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollDim(expectW, expectH, frame + 1, done); });
+          return;
+        }
+        failGoldCheck("expected 'Measured: " + expectW + "×" + expectH +
+          "' but got '" + text + "'");
+      }
+
+      function passGoldCheck() {
+        readDim();
+        badge.textContent = "[check] 100×100 → Grow 150 → Grow 200 → Shrink 150. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readDim();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readDim, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

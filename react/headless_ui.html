@@ -1,0 +1,488 @@
+<!doctype html>
+<!--
+  headless_ui.html — Phase 2 patterns bundle (headless UI pattern).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  headless UI pattern end-to-end. Companion: HEADLESS_UI.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: a headless component owns STATE and BEHAVIOR plumbing (event
+  handling, ARIA, keyboard, focus) but hands RENDERING to the consumer. Two
+  mechanisms make it possible:
+    1. STATE REDUCER — the consumer can pass its own reducer to OVERRIDE any
+       state transition (inversion of control via useReducer).
+    2. PROP GETTERS — the component exposes getToggleButtonProps()/getMenuProps()/
+       getItemProps() that bundle the right a11y + event props; the consumer
+       spreads them onto the right DOM node without knowing the internals.
+
+  Pioneered by Kent C. Dodds (the state reducer pattern, downshift), now the
+  backbone of react-table, Radix UI, Headless UI (@headlessui/react), TanStack
+  Table. This builds directly on ./use_reducer.html — it is useReducer repackaged
+  so the consumer steers the next state.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useReducer, useRef
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<HeadlessDemo/>), the gold-check
+  reads state-1 (default toggle), asserts "closed", clicks toggle-btn, asserts "open",
+  clicks again, asserts "closed". This proves the prop-getter spread pipeline and the
+  state reducer (default path) work end-to-end through real DOM click events.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Headless UI Pattern — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:280px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Headless UI Pattern &mdash; logic without markup</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/HEADLESS_UI.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/HEADLESS_UI.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="./use_reducer.html">use_reducer.html</a>: the state reducer pattern IS
+    <code>useReducer</code> turned inside-out so the consumer decides the next state.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">what is "headless"? logic vs rendering</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A <b class="text-[#e6edf3]">headless</b> component owns the <b class="text-[#e6edf3]">plumbing</b>
+        — state, keyboard handling, ARIA wiring, focus management — but never renders a single
+        <code>&lt;div&gt;</code>. The consumer owns the <b class="text-[#e6edf3]">DOM</b>. Two halves
+        connect them: a <b class="text-[#e6edf3]">state reducer</b> (override any transition) and
+        <b class="text-[#e6edf3]">prop getters</b> (spread the right props onto the right element).
+        Invented by Kent C. Dodds, now powering react-table, downshift, Radix UI, Headless UI.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>half</th><th>who owns it</th><th>what it gives the consumer</th></tr>
+        <tr>
+          <td><code>state reducer</code></td>
+          <td>consumer passes a custom <code>(state, action) → newState</code></td>
+          <td>control over EVERY state transition — intercept, block, or rewrite changes</td>
+        </tr>
+        <tr>
+          <td><code>prop getters</code></td>
+          <td>component exposes <code>getXxxProps(extra)</code> helpers</td>
+          <td>spread the right a11y + event props without knowing internals</td>
+        </tr>
+        <tr>
+          <td><code>render</code></td>
+          <td>consumer writes the JSX, picks tags &amp; classes</td>
+          <td>100% styling freedom — Tailwind, CSS-in-JS, plain CSS, anything</td>
+        </tr>
+        <tr>
+          <td><code>plumbing</code></td>
+          <td>component keeps it (a11y, keyboard, focus, IDs)</td>
+          <td>correctness the consumer doesn't have to think about</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the headless useToggle hook (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// useToggle is a HEADLESS hook: it owns state + the reducer contract + the
+// prop getter, but never renders. The consumer controls behavior (via the
+// reducer arg) and appearance (via the returned JSX).
+function useToggle(reducer) {
+  // The component's reducer defers to the consumer's reducer if provided.
+  // Default contract: accept the proposed `changes` object as the new state.
+  var innerReducer = React.useCallback(function (state, action) {
+    if (reducer) {
+      return reducer(state, action);
+    }
+    return action.changes;
+  }, [reducer]);
+
+  var statePair = React.useReducer(innerReducer, { isOpen: false });
+  var innerState = statePair[0];
+  var dispatch = statePair[1];
+
+  // toggle dispatches the proposed next state. The reducer may accept or veto it.
+  var toggle = React.useCallback(function () {
+    dispatch({ type: 'TOGGLE', changes: { isOpen: !innerState.isOpen } });
+  }, [innerState.isOpen]);
+
+  // PROP GETTER: bundle the right a11y + event props, let the consumer override.
+  // Object.assign(baseProps, extra) → consumer's `extra` always wins.
+  var getToggleButtonProps = React.useCallback(function (extra) {
+    return Object.assign({
+      'data-testid': 'toggle-btn',
+      type: 'button',
+      'aria-expanded': innerState.isOpen,
+      'aria-pressed': innerState.isOpen,
+      onClick: toggle,
+      className: 'px-4 py-2 rounded font-bold text-sm ' +
+        (innerState.isOpen ? 'bg-[#61dafb] text-[#0d1117]' : 'bg-[#30363d] text-[#e6edf3]')
+    }, extra || {});
+  }, [innerState.isOpen, toggle]);
+
+  return {
+    isOpen: innerState.isOpen,
+    toggle: toggle,
+    getToggleButtonProps: getToggleButtonProps
+  };
+}
+
+function HeadlessDemo() {
+  // (1) Default behavior — no custom reducer, accept every change.
+  var toggle1 = useToggle(null);
+
+  // (2) Custom reducer — the consumer overrides transitions. Here: after the
+  //     button has been OPENED 3 times, the reducer vetoes the next close.
+  var opensCount = React.useRef(0);
+  var lockReducer = React.useCallback(function (state, action) {
+    if (action.type === 'TOGGLE') {
+      // count an "open" when transitioning closed → open
+      if (!state.isOpen &amp;&amp; action.changes.isOpen) {
+        opensCount.current = opensCount.current + 1;
+      }
+      // after 3 opens, block every close: keep it open forever
+      if (!action.changes.isOpen &amp;&amp; opensCount.current >= 3) {
+        return state; // VETO — return current state, ignore proposed changes
+      }
+    }
+    return action.changes; // default: accept
+  }, []);
+  var toggle2 = useToggle(lockReducer);
+
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;Headless UI Pattern&lt;/h2&gt;
+
+      {/* DEFAULT: spread the prop getter, render whatever we want */}
+      &lt;div className="mb-4 p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-xs text-[#8b949e] mb-2"&gt;Default toggle (no custom reducer):&lt;/p&gt;
+        &lt;button {...toggle1.getToggleButtonProps({})}&gt;
+          {toggle1.isOpen ? 'OPEN' : 'CLOSED'}
+        &lt;/button&gt;
+        &lt;p data-testid="state-1" className="mt-2 text-xs text-[#8b949e]"&gt;
+          State: {toggle1.isOpen ? 'open' : 'closed'}
+        &lt;/p&gt;
+      &lt;/div&gt;
+
+      {/* CUSTOM REDUCER: same hook, consumer-steered behavior */}
+      &lt;div className="p-3 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+        &lt;p className="text-xs text-[#8b949e] mb-2"&gt;Custom reducer (locks open after 3 opens):&lt;/p&gt;
+        &lt;button {...toggle2.getToggleButtonProps({ 'data-testid': 'toggle-btn-2' })}&gt;
+          {toggle2.isOpen ? 'OPEN' : 'CLOSED'}
+        &lt;/button&gt;
+        &lt;p data-testid="state-2" className="mt-2 text-xs text-[#8b949e]"&gt;
+          State: {toggle2.isOpen ? 'open' : 'closed'} · opens: {opensCount.current}
+        &lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;HeadlessDemo /&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        The JSX spread <code>{'{...getToggleButtonProps({})}'}</code> becomes a
+        <code>_extends(...)</code> call merging props into <code>React.createElement</code>.
+        Clicking dispatches <code>{'{type:"TOGGLE", changes:{isOpen:...}}'}</code> — the
+        consumer reducer decides whether those <code>changes</code> survive.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the pattern, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        The <b class="text-[#e6edf3]">gold-check</b> clicks the default toggle twice
+        (closed → open → closed) and asserts the state text after each click. That proves the
+        prop-getter spread pipeline and the default state reducer work through real DOM events.
+        Try the bottom button yourself: open it 3 times and watch the custom reducer veto the close.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        state-1: <span id="state-read" class="text-[#61dafb]">—</span>
+        · gold: click toggle-btn → expect closed→open→closed
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">prop getter convention</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>render the trigger</td>
+          <td><code>&lt;button {...getToggleButtonProps()}&gt;</code></td>
+          <td>gets aria-expanded, onClick, type=button, role in one spread</td>
+        </tr>
+        <tr>
+          <td>render the listbox/menu</td>
+          <td><code>&lt;ul {...getMenuProps()}&gt;</code></td>
+          <td>gets role=listbox, aria-labelledby, keyboard handler</td>
+        </tr>
+        <tr>
+          <td>render an option</td>
+          <td><code>&lt;li {...getItemProps({item, index})}&gt;</code></td>
+          <td>gets role=option, aria-selected, id, onClick, onMouseDown</td>
+        </tr>
+        <tr>
+          <td>override a prop</td>
+          <td><code>getXxxProps({ className: 'mine', onClick: fn })</code></td>
+          <td>extra props win via Object.assign — consumer styling/behavior composes</td>
+        </tr>
+        <tr>
+          <td>veto a transition</td>
+          <td><code>if (...) return state;</code> in custom reducer</td>
+          <td>return current state to ignore proposed changes</td>
+        </tr>
+        <tr>
+          <td>rewrite a transition</td>
+          <td><code>return { ...action.changes, extra: true }</code></td>
+          <td>return a modified changes object — full control of next state</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var stateRead   = document.getElementById("state-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      // Simplified, falsifiable proof: default toggle goes closed→open→closed
+      // through two real DOM clicks. That proves the prop-getter spread and the
+      // default state reducer work end-to-end.
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render HeadlessDemo…");
+        waitForState1(0);
+      }
+
+      function waitForState1(frame) {
+        var el = root.querySelector('[data-testid="state-1"]');
+        if (el) { step1AssertClosed(el); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForState1(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render state-1 in time");
+      }
+
+      // Step 1: assert initial state shows "closed"
+      function step1AssertClosed(stateEl) {
+        readLive();
+        var txt = stateEl.textContent || "";
+        if (txt.indexOf("closed") !== -1) {
+          step2ClickToOpen(0);
+        } else {
+          failGoldCheck('initial state-1 should be "closed", got: ' + txt);
+        }
+      }
+
+      // Step 2: click toggle-btn → expect "open"
+      function step2ClickToOpen(frame) {
+        var btn = root.querySelector('[data-testid="toggle-btn"]');
+        if (!btn) { failGoldCheck("toggle-btn not found"); return; }
+        btn.click();
+        pollState("open", frame, step3ClickToClose);
+      }
+
+      // Step 3: click toggle-btn again → expect "closed"
+      function step3ClickToClose(frame) {
+        var btn = root.querySelector('[data-testid="toggle-btn"]');
+        if (!btn) { failGoldCheck("toggle-btn not found on re-click"); return; }
+        btn.click();
+        pollState("closed", frame, passGoldCheck);
+      }
+
+      function pollState(expect, frame, done) {
+        readLive();
+        var el = root.querySelector('[data-testid="state-1"]');
+        var txt = el ? (el.textContent || "") : "";
+        if (txt.indexOf(expect) !== -1) { readLive(); done(0); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollState(expect, frame + 1, done); });
+          return;
+        }
+        failGoldCheck('expected state-1 "' + expect + '" but DOM shows: ' + txt);
+      }
+
+      function readLive() {
+        var el = root.querySelector('[data-testid="state-1"]');
+        if (stateRead && el) {
+          var t = el.textContent || "";
+          stateRead.textContent = t.replace(/^State:\s*/, "");
+        }
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] toggle closed→open→closed via prop-getter: OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

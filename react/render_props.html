@@ -1,0 +1,496 @@
+<!doctype html>
+<!--
+  render_props.html — React Deep Dive (component patterns).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  render-props pattern end-to-end. Companion: RENDER_PROPS.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: a render prop is a function prop that a component calls to know
+  what to render. Instead of passing static children, the consumer passes a
+  function that receives the component's state and returns JSX. The component
+  owns the state; the consumer owns the rendering — this is *inversion of
+  control*. Two equivalent forms: `props.render(state)` (the classic) and
+  `props.children(state)` (used by react-spring, downshift, react-motion).
+
+  Historical note: before hooks (React 16.8), render props and HOCs were THE
+  patterns for sharing stateful logic. Hooks replaced most use cases, but
+  render props remain useful for libraries that expose state to consumers,
+  dynamic rendering decisions, and component injection.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<RenderPropsDemo/>), the
+  gold-check asserts the mouse position text starts at "Position: 0, 0", the
+  counter starts at "0", then clicks "+" twice (→ 1, → 2), clicks "−" once (→ 1),
+  and clicks "Reset" (→ 0). This proves both the `render` prop and the
+  children-as-function form work end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Render Props — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Render Props &mdash; inversion of control</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/RENDER_PROPS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/RENDER_PROPS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/react/react_components_props.html">frontend/react: components &amp; props</a>
+    (props can be functions too — this is the foundation).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">the idea: a prop that is a function</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A normal child is <b class="text-[#e6edf3]">static JSX</b>: the parent decides what to draw.
+        A <b class="text-[#e6edf3]">render prop</b> flips that — the component owns the state and
+        calls <code>props.render(state)</code> (or <code>props.children(state)</code>) to let the
+        consumer decide what to draw with that state. The component is in charge of <i>what data
+        exists</i>; the consumer is in charge of <i>how to show it</i>. This is
+        <b class="text-[#e6edf3]">inversion of control</b> — the same trick React itself uses for
+        <code>Array.map(item =&gt; &lt;li/&gt;)</code> and <code>&lt;Context.Consumer&gt;{value =&gt; ...}&lt;/Context.Consumer&gt;</code>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>form</th><th>shape</th><th>who uses it</th></tr>
+        <tr>
+          <td><code>render</code> prop</td>
+          <td><code>&lt;X render={state =&gt; &lt;p/&gt;}/&gt;</code></td>
+          <td>the classic form from the React docs (React &lt; 16.3 MouseTracker example)</td>
+        </tr>
+        <tr>
+          <td><code>children</code> as function</td>
+          <td><code>&lt;X&gt;{state =&gt; &lt;p/&gt;}&lt;/X&gt;</code></td>
+          <td>react-spring, react-motion, downshift, Framer Motion (idiomatic since 2017)</td>
+        </tr>
+        <tr>
+          <td>multi-arg render</td>
+          <td><code>render={(state, helpers) =&gt; ...}</code></td>
+          <td>downshift <code>{({getItemProps, highlightedIndex}) =&gt; ...}</code></td>
+        </tr>
+        <tr>
+          <td>prop injection</td>
+          <td><code>&lt;List row={item =&gt; &lt;Card item={item}/&gt;}/&gt;</code></td>
+          <td>virtualized lists, data tables — consumer supplies the row renderer</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the components you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// Pattern 1: render prop — component owns state, delegates rendering
+function MouseTracker(props) {
+  var posState = React.useState({ x: 0, y: 0 });
+  var pos = posState[0];
+  var setPos = posState[1];
+
+  function handleMove(e) {
+    var x = (e &amp;&amp; e.clientX) ? Math.round(e.clientX) : 0;
+    var y = (e &amp;&amp; e.clientY) ? Math.round(e.clientY) : 0;
+    setPos({ x: x, y: y });
+  }
+
+  return (
+    &lt;div
+      data-testid="tracker"
+      onMouseMove={handleMove}
+      className="p-6 bg-[#0d1117] border border-[#30363d] rounded-lg min-h-[120px]"
+    &gt;
+      {props.render(pos)}
+    &lt;/div&gt;
+  );
+}
+
+// Pattern 2: children as a function (same inversion, different prop name)
+function Counter(props) {
+  var countState = React.useState(0);
+  var count = countState[0];
+  var setCount = countState[1];
+
+  var helpers = {
+    increment: function () { setCount(function (c) { return c + 1; }); },
+    decrement: function () { setCount(function (c) { return c - 1; }); },
+    reset:     function () { setCount(0); }
+  };
+
+  return props.children(count, helpers);
+}
+
+function RenderPropsDemo() {
+  return (
+    &lt;div className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;Render Props&lt;/h2&gt;
+
+      {/* Pattern 1: render prop */}
+      &lt;div className="mb-4"&gt;
+        &lt;p className="text-xs text-[#8b949e] mb-1"&gt;render prop (mouse tracker):&lt;/p&gt;
+        &lt;MouseTracker render={function (pos) {
+          return React.createElement(
+            'p',
+            { 'data-testid': 'mouse-pos', className: 'text-sm text-[#61dafb]' },
+            'Position: ' + pos.x + ', ' + pos.y
+          );
+        }} /&gt;
+      &lt;/div&gt;
+
+      {/* Pattern 2: children as function */}
+      &lt;div&gt;
+        &lt;p className="text-xs text-[#8b949e] mb-1"&gt;children as function (counter):&lt;/p&gt;
+        &lt;Counter&gt;
+          {function (count, helpers) {
+            return (
+              &lt;div data-testid="counter-display" className="p-4 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+                &lt;p className="text-2xl font-bold text-[#61dafb] mb-2" data-testid="count-val"&gt;{count}&lt;/p&gt;
+                &lt;div className="flex gap-2"&gt;
+                  &lt;button data-testid="rp-inc" onClick={helpers.increment} className="px-3 py-1 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs"&gt;+&lt;/button&gt;
+                  &lt;button data-testid="rp-dec" onClick={helpers.decrement} className="px-3 py-1 bg-[#30363d] text-[#e6edf3] rounded font-bold text-xs"&gt;−&lt;/button&gt;
+                  &lt;button data-testid="rp-reset" onClick={helpers.reset} className="px-3 py-1 border border-[#30363d] text-[#8b949e] rounded font-bold text-xs"&gt;Reset&lt;/button&gt;
+                &lt;/div&gt;
+              &lt;/div&gt;
+            );
+          }}
+        &lt;/Counter&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;RenderPropsDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;RenderPropsDemo/&gt;</code> becomes
+        <code>React.createElement(RenderPropsDemo)</code>. Inside, the consumer's function is
+        passed as a prop and called by the component — Babel just turns the JSX sugar into nested
+        <code>createElement</code> calls. The render-prop call site
+        (<code>props.render(pos)</code>) is plain JS, untouched.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (inversion of control, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>MouseTracker</code> calls your <code>render</code> function with mouse coordinates.
+        <code>Counter</code> calls your <code>children</code> function with the count and helpers.
+        Click <b class="text-[#e6edf3]">+</b> / <b class="text-[#e6edf3]">−</b> /
+        <b class="text-[#e6edf3]">Reset</b> — the <b class="text-[#e6edf3]">gold-check</b> does
+        this automatically and asserts the counter walks 0 → 1 → 2 → 1 → 0.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        count: <span id="count-read" class="text-[#61dafb]">—</span>
+        · mouse: <span id="mouse-read" class="text-[#61dafb]">—</span>
+        · gold: 0 → + → 1 → + → 2 → − → 1 → Reset → 0
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>expose internal state to consumer</td>
+          <td><code>&lt;X render={s =&gt; &lt;p/&gt;}/&gt;</code></td>
+          <td>component owns state, consumer owns rendering — full inversion of control</td>
+        </tr>
+        <tr>
+          <td>idiomatic / "library style"</td>
+          <td><code>&lt;X&gt;{s =&gt; &lt;p/&gt;}&lt;/X&gt;</code></td>
+          <td>children-as-function reads naturally; used by react-spring, downshift</td>
+        </tr>
+        <tr>
+          <td>pass state AND actions</td>
+          <td><code>{(state, helpers) =&gt; ...}</code></td>
+          <td>downshift ships <code>{getItemProps, highlightedIndex}</code> this way</td>
+        </tr>
+        <tr>
+          <td>inject a row renderer</td>
+          <td><code>&lt;List row={item =&gt; &lt;Card item={item}/&gt;}/&gt;</code></td>
+          <td>the list manages keys/virtualization; you supply the visual</td>
+        </tr>
+        <tr>
+          <td>prefer hooks instead</td>
+          <td><code>function useMouse() { ... } return useMouse()</code></td>
+          <td>when you don't need to control rendering — hooks replaced ~80% of render props</td>
+        </tr>
+        <tr>
+          <td>perf: function identity</td>
+          <td>wrap consumer's render fn in <code>useCallback</code></td>
+          <td>inline <code>{() =&gt; ...}</code> breaks <code>React.memo</code> / <code>PureComponent</code></td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var mouseRead   = document.getElementById("mouse-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render RenderPropsDemo…");
+        waitForRender(0);
+      }
+
+      // Step 0: wait for the counter display to exist (proves React mounted)
+      function waitForRender(frame) {
+        var display = root.querySelector('[data-testid="counter-display"]');
+        if (display) { step1_assertInitial(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForRender(frame + 1); });
+          return;
+        }
+        failGoldCheck("React did not render the counter display in time");
+      }
+
+      // Step 1: assert initial state — mouse "Position: 0, 0", count "0"
+      function step1_assertInitial() {
+        readLive();
+        var mouseEl = root.querySelector('[data-testid="mouse-pos"]');
+        var countEl = root.querySelector('[data-testid="count-val"]');
+        var mouseText = mouseEl ? mouseEl.textContent : "";
+        var countText = countEl ? countEl.textContent : "";
+        if (mouseText === "Position: 0, 0" && countText === "0") {
+          step2_clickInc(1, "1");
+          return;
+        }
+        failGoldCheck('expected "Position: 0, 0" + count "0" but got "' +
+                      mouseText + '" / "' + countText + '"');
+      }
+
+      // Step 2: click "+" once → expect "1", then again → expect "2"
+      function step2_clickInc(timesLeft, expected) {
+        var incBtn = root.querySelector('[data-testid="rp-inc"]');
+        if (!incBtn) { failGoldCheck("increment button not found"); return; }
+        incBtn.click();
+        pollCountValue(expected, function () {
+          if (timesLeft > 1) {
+            step2_clickInc(timesLeft - 1, "2");
+          } else {
+            step3_clickDec("1");
+          }
+        });
+      }
+
+      // Step 3: click "−" → expect "1"
+      function step3_clickDec(expected) {
+        var decBtn = root.querySelector('[data-testid="rp-dec"]');
+        if (!decBtn) { failGoldCheck("decrement button not found"); return; }
+        decBtn.click();
+        pollCountValue(expected, function () {
+          step4_clickReset("0");
+        });
+      }
+
+      // Step 4: click "Reset" → expect "0"
+      function step4_clickReset(expected) {
+        var resetBtn = root.querySelector('[data-testid="rp-reset"]');
+        if (!resetBtn) { failGoldCheck("reset button not found"); return; }
+        resetBtn.click();
+        pollCountValue(expected, passGoldCheck);
+      }
+
+      function pollCountValue(expect, done) {
+        readLive();
+        var countEl = root.querySelector('[data-testid="count-val"]');
+        if (countEl && countEl.textContent === expect) { readLive(); done(); return; }
+        if (countEl && countEl.dataset._gcFrame === undefined) countEl.dataset._gcFrame = 0;
+        var frame = countEl ? Number(countEl.dataset._gcFrame || 0) : 0;
+        if (frame < MAX_FRAMES) {
+          if (countEl) countEl.dataset._gcFrame = frame + 1;
+          requestAnimationFrame(function () { pollCountValue(expect, done); });
+          return;
+        }
+        if (countEl) delete countEl.dataset._gcFrame;
+        var actual = countEl ? countEl.textContent : "(none)";
+        failGoldCheck("expected count " + expect + " but DOM shows " + actual);
+      }
+
+      function readLive() {
+        var countEl = root.querySelector('[data-testid="count-val"]');
+        var mouseEl = root.querySelector('[data-testid="mouse-pos"]');
+        countRead.textContent = countEl ? countEl.textContent : "—";
+        mouseRead.textContent = mouseEl ? mouseEl.textContent : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] 0 → 1 → 2 → 1 → 0 (render prop + children-as-fn both work). OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

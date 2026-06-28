@@ -1,0 +1,221 @@
+whisper_stt.py - reference impl. All numbers feed WHISPER_STT.md.
+pure Python stdlib (no torch, no numpy). Real DFT + mel filterbank demo.
+audio model: 16000 Hz mono, FFT=400 (25 ms), hop=160 (10 ms), 80 mel bands.
+
+========================================================================
+  SECTION A: audio -> log-mel spectrogram (30 s = 3000 frames)
+========================================================================
+Whisper is hard-coded to 16 kHz mono. The waveform is chopped into
+25 ms windows (400 samples) every 10 ms (160 samples), FFT'd,
+collapsed to 80 mel bands, then log'd. The encoder sees an
+'image' of size 80 x <frames>.
+
+frames/s = sample_rate / hop = 16000 / 160 = 100
+30 s of audio -> 3000 mel frames (= 300 x 10)
+mel grid for 30 s = 80 bands x 3000 frames = 240000 values
+
+Tiny live demo (real DFT + mel filterbank, pure Python):
+  synthetic 0.12s vowel signal, FFT=64, hop=128, mel bands=8
+
+  mel band (high ^)            frames (time ->)
+   7  |.. .  . ... ...
+   6  |--::.::.:::::-:
+   5  |####**+-=====*#
+   4  |%%%%%%%####%%%%
+   3  |**###%%%%%%@%%%
+   2  |*#%%%%%%%#*##%%
+   1  |%%%%%%#*++==-+*
+   0  |%%##*+==-=-::==
+      +---------------  (low v)
+
+Energy rises from low to high mel bands over time -- the synthetic
+formant transition. Real speech produces a far richer 80x3000 grid.
+
+[check] 30 s -> exactly 3000 mel frames: True -> OK
+[check] frames/s == 100 (10 ms hop): True -> OK
+[check] mel grid 80 x 3000 = 240000 values: True -> OK
+[check] demo spectrogram produced frames: True -> OK
+
+========================================================================
+  SECTION B: encoder-decoder + special tokens (autoregressive decode)
+========================================================================
+The ENCODER reads the mel spectrogram -> hidden states (audio features).
+The DECODER is autoregressive: it emits ONE text token per step, each
+conditioned on the encoder output + all tokens generated so far.
+
+Special tokens SELECT the behaviour of the SAME weights:
+  <|startoftranscript|>    begin (also used for language detection)
+  <|en|> / <|vi|> / ...        the detected/source language
+  <|transcribe|>   transcribe in the source language
+  <|translate|>    translate to English
+  <|endoftranscript|>  done
+  <|nospeech|>  no speech detected (skip the clip)
+
+Autoregressive decode trace (phrase = 'the quick brown fox'):
+
+| step | emitted token                | conditioned on (mel + tokens so far)        |
+|------|------------------------------|----------------------------------------------|
+| 1    | <|startoftranscript|>        | (mel context)                                |
+| 2    | <|en|>                       | <|startoftranscript|>                        |
+| 3    | <|transcribe|>               | <|startoftranscript|> <|en|>                 |
+| 4    | the                          | <|startoftranscript|> <|en|> <|transcribe|>  |
+| 5    | quick                        | <|startoftranscript|> <|en|> <|transcribe... |
+| 6    | brown                        | <|startoftranscript|> <|en|> <|transcribe... |
+| 7    | fox                          | <|startoftranscript|> <|en|> <|transcribe... |
+| 8    | <|endoftranscript|>          | <|startoftranscript|> <|en|> <|transcribe... |
+
+Full emitted sequence:
+  <|startoftranscript|> <|en|> <|transcribe|> the quick brown fox <|endoftranscript|>
+
+Each row is one decoder forward pass (KV-cached after the first). The
+encoder runs ONCE; the decoder runs once per output token.
+
+[check] sequence starts with SOT: True -> OK
+[check] sequence ends with EOT: True -> OK
+[check] transcribe task present: True -> OK
+[check] translate task selectable: True -> OK
+[check] steps == 1 (SOT) + 1 (lang) + 1 (task) + len(text) + 1 (EOT): True -> OK
+
+========================================================================
+  SECTION C: the model size ladder (tiny -> large-v3)
+========================================================================
+Whisper ships as 5 sizes. Bigger = more accurate + slower + more VRAM.
+
+| model    | params (M) | VRAM (GB) | rel speed | best for       |
+|----------|------------|-----------|-----------|----------------|
+| tiny     | 39         | 1         | 32        | testing        |
+| base     | 74         | 1         | 16        | quick draft    |
+| small    | 244        | 2         | 6         | good quality   |
+| medium   | 769        | 5         | 2         | high quality   |
+| large-v3 | 1550       | 10        | 1         | best quality   |
+
+All sizes share the SAME architecture (encoder-decoder) and mel front-
+end; only the layer counts / widths differ. large-v3 is the current
+best-quality checkpoint (supersedes large-v1/v2).
+
+[check] large-v3 = 1550M params: True -> OK
+[check] large-v3 ~10GB VRAM: True -> OK
+[check] speeds are descending powers-ish: True -> OK
+[check] params increase monotonically: True -> OK
+
+========================================================================
+  SECTION D: faster-whisper (CTranslate2) -- 4x faster, 50% less VRAM
+========================================================================
+faster-whisper runs the SAME Whisper weights on CTranslate2: an
+optimised C++ Transformer runtime (int8/FP16, fused kernels, no Python
+per-token overhead). Default precision is int8 with FP16 compute.
+
+Weight-memory comparison (FP16 OpenAI vs int8 faster-whisper):
+
+| model    | params (M) | FP16 MB | int8 MB | memory of FP16 | reduction |
+|----------|------------|---------|---------|----------------|-----------|
+| tiny     | 39         | 78      | 39      | 0.50          | 50%       |
+| base     | 74         | 148     | 74      | 0.50          | 50%       |
+| small    | 244        | 488     | 244     | 0.50          | 50%       |
+| medium   | 769        | 1538    | 769     | 0.50          | 50%       |
+| large-v3 | 1550       | 3100    | 1550    | 0.50          | 50%       |
+
+int8 weights are exactly HALF of FP16 -> ~50% less memory. Combined
+with CTranslate2's fused kernels, the net effect is ~4x faster for the
+SAME model and (for greedy decoding) bit-identical transcripts.
+
+[check] int8 large-v3 == 1550 MB: True -> OK
+[check] int8 is 50% of FP16 memory: True -> OK
+[check] memory reduction == 50%: True -> OK
+[check] FP16 large-v3 == 3100 MB: True -> OK
+[check] int8 < FP16 for every size: True -> OK
+
+========================================================================
+  SECTION E: distil-whisper (knowledge distillation)
+========================================================================
+distil-whisper trains a STUDENT with fewer decoder layers to mimic the
+large teacher. distil-large-v3 keeps the teacher's encoder, distils the
+32-layer decoder down to 2 layers.
+
+distil-large-v3: 756M params (48.8% of large-v3)
+reduction = 1 - 756/1550 = 51.2% fewer params (~49-51% smaller)
+speed: ~6x faster than the teacher (fewer decoder layers per token)
+quality: WER within ~1% of large-v3 on English (distillation loss
+         keeps the student's distribution close to the teacher's)
+
+Trade-off: distil is great for English transcription at speed, but it
+trims multilingual coverage -- for non-English use the full model.
+
+[check] distil-large-v3 = 756M params: True -> OK
+[check] distil < large-v3 params: True -> OK
+[check] distil retains < 50% of params: True -> OK
+[check] ~49-51% smaller: True -> OK
+
+========================================================================
+  SECTION F: real-time factor (RTF) + word error rate (WER)
+========================================================================
+RTF = processing_time / audio_duration.
+  RTF < 1.0  => faster than real-time (can transcribe LIVE)
+  RTF > 1.0  => slower than real-time
+
+| setup                       | hardware       | RTF   | x real-time | 30s clip in |
+|-----------------------------|----------------|-------|-------------|-------------|
+| faster-whisper large-v3     | RTX 4090       | 0.03  | 33.3        | 0.9      s  |
+| faster-whisper large-v3     | Apple M1 Pro   | 0.10  | 10.0        | 3.0      s  |
+| faster-whisper medium       | Apple M1 Pro   | 0.15  | 6.7         | 4.5      s  |
+| faster-whisper small        | Apple M1 Pro   | 0.35  | 2.9         | 10.5     s  |
+| OpenAI whisper large        | CPU (8-core)   | 3.00  | 0.3         | 90.0     s  |
+
+On an RTX 4090, faster-whisper large-v3 transcribes 30 s of audio in
+~0.9 s -- 33x real-time. Even an M1 Pro laptop runs medium at 6x real-
+time. The official OpenAI model on CPU (RTF ~2-4) CANNOT keep up live.
+
+WER benchmarks (lower is better):
+  large-v3 (English)       : ~5-8%  on clean speech
+  large-v3 (multilingual)  : ~10-15%
+  distil-large-v3          : ~6-9%  (within ~1% of teacher)
+
+Worked WER example (word-level Levenshtein):
+  ref : the quick brown fox jumps over the lazy dog
+  hyp : the quick brown fox jump over a lazy dog
+  S=2  D=0  I=0   WER = (2+0+0)/9 = 0.2222 (22.2%)
+
+[check] RTX 4090 RTF == 0.03: True -> OK
+[check] RTF 0.03 -> 33.3x real-time: True -> OK
+[check] 30s clip @ RTF 0.03 -> 0.9s: True -> OK
+[check] CPU large RTF > 1 (cannot do live): True -> OK
+[check] M1 Pro medium RTF < 1 (can do live): True -> OK
+[check] WER example correct: True -> OK
+[check] WER example within [0,1]: True -> OK
+
+========================================================================
+  SECTION G: GOLD pipeline table (the centerpiece)
+========================================================================
+Canonical clip: 30 s of 16 kHz mono audio through faster-whisper large-v3.
+
+| stage / metric                  | value                |
+|---------------------------------|----------------------|
+| sample rate                     | 16000 Hz            |
+| mel bands                       | 80                  |
+| frames/s (10 ms hop)            | 100                   |
+| 30 s -> mel frames              | 3000                 |
+| mel grid shape                  | 80 x 3000            |
+| large-v3 params                 | 1550M                |
+| large-v3 VRAM (practical)       | ~10 GB               |
+| int8 weights (faster-whisper)   | 1550 MB (50% of FP16) |
+| faster-whisper vs OpenAI        | ~4x faster, 50% VRAM |
+| RTF (RTX 4090, large-v3)        | 0.03                 |
+| real-time speedup (1/RTF)       | 33.3x                |
+| 30 s clip processing time       | 0.9 s                  |
+
+GOLD (recomputed & badge-checked in whisper_stt.html):
+  30 s -> 3000 mel frames  (30 * 100)
+  int8 large-v3 = 1550M * 1 byte = 1550 MB = 0.50 of FP16 (3100 MB)
+  RTF 0.03 -> 1/0.03 = 33.3x real-time
+  30 s clip -> 0.9 s wall clock
+
+[check] 30 s -> 3000 mel frames: True -> OK
+[check] int8 = 50% of FP16 memory: True -> OK
+[check] int8 large-v3 = 1550 MB: True -> OK
+[check] RTF 0.03 -> 33.3x real-time: True -> OK
+[check] 30 s @ RTF 0.03 -> 0.9 s: True -> OK
+[check] mel grid 80 x 3000: True -> OK
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

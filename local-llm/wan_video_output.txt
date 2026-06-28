@@ -1,0 +1,188 @@
+wan_video.py - Wan 2.2 (14B) optimization stack (GGUF Q4 + Lightning +
+TeaCache + compile). Pure Python stdlib. Numbers below feed WAN_VIDEO.md.
+Sources: docs.comfy.org (Wan 2.2), Comfy-Org/Wan_2.2 repackaged, bullerwins/
+QuantStack GGUFs, lightx2v Lightning LoRA, TeaCache + sage attention.
+
+Lineage: Wan 14B naive (28GB, 300s) -> +GGUF Q4 + Lightning + TeaCache +
+compile (8.5GB, 12.3s, ~24x faster).
+
+==========================================================================
+  SECTION A: THE OPTIMIZATION STACK - four layers, four cost axes
+==========================================================================
+Wan 2.2 14B is 7x heavier than LTX-Video 2B (14B vs 2B params). Naive
+inference (30 steps, FP16, full attention) takes ~5 minutes AND needs 28GB -
+it does NOT fit on any consumer GPU. The optimization stack attacks four
+ORTHOGONAL cost axes, so the speedups MULTIPLY:
+
+  axis            optimization           what it does              speedup
+  --------------- ---------------------- ------------------------- --------
+  WEIGHTS (mem)   GGUF Q4 quantization   28GB -> 8.5GB (fits 12GB) enabler*
+  STEPS (loop)    Lightning distillation 30 steps -> 4 steps       7.5x
+  PER-STEP (flop) TeaCache               reuse cached attention   2.5x
+  KERNEL (dispatch) torch.compile/sage   fuse kernels             1.3x
+
+  * GGUF Q4 is the ENABLER (shrinks weights so the model fits), not a
+    wall-clock multiplier in the gold speedup chain. The speed chain is
+    Lightning x TeaCache x compile (see Section B).
+
+Each layer's mechanism:
+  - Lightning  (step distillation): Train a student to produce in 4 steps what the teacher takes 30 for.
+  - TeaCache   (temporal-aware cache): Attention outputs barely change between consecutive timesteps; cache and
+  - GGUF Q4    (weight quantization): Block-quantize the 14B weights Q4_K_M: 28GB FP16 -> 8.5GB. Fits 12GB GPU.
+  - compile    (kernel fusion): torch.compile / sage attention fuse kernels, cut Python dispatch overhead.
+[check] Lightning is 30->4 = 7.5x fewer steps :  OK  (got 7.5)
+[check] TeaCache factor is ~2.5x :  OK
+[check] compile factor is ~1.3x :  OK
+
+==========================================================================
+  SECTION B: CUMULATIVE SPEEDUP - the gold chain (300s -> 12.3s)
+==========================================================================
+Apply each speed layer to the previous result. The multipliers stack
+because they attack orthogonal costs (steps x per-step x kernels).
+
+  Base (naive)          30 steps, full attn, FP16   =  300.00 s   (1.0x)
+  +GGUF Q4              28GB -> 8.5GB (fits 12GB)   =  300.00 s   (1.0x speed; enabler)
+  +Lightning (4 steps)  300 x (4/30)                =   40.00 s   (7.5x)
+  +TeaCache (2.5x)      40 / 2.5                    =   16.00 s   (18.75x)
+  +compile (1.3x)       16 / 1.3                    =   12.31 s   (24.4x)
+
+  TOTAL SPEEDUP = 300 / 12.3  =  24.4x   (often quoted ~25-30x)
+
+Per-layer marginal speedup (vs the previous layer):
+| layer                 | vs previous | cumulative |
+|-----------------------|-------------|------------|
+| Base (naive)          |    1.0x     |    1.0x    |
+| +GGUF Q4 (enabler)    |    1.0x*    |    1.0x    |
+| +Lightning (4 steps)  |    7.5x     |    7.5x    |
+| +TeaCache (2.5x)      |    2.5x     |   18.75x   |
+| +compile (1.3x)       |    1.3x     |   24.4x    |
+  * GGUF Q4 is a memory enabler (fits the GPU), not a time multiplier here.
+
+[check] Lightning time = 40s :  OK  (got 40.0)
+[check] TeaCache time = 16s :  OK  (got 16.0)
+[check] compile time ~= 12.3s :  OK  (got 12.307692307692307)
+[check] total speedup ~= 24.4x :  OK  (got 24.375000000000004)
+[check] marginal multipliers multiply: 7.5 x 2.5 x 1.3 = 24.375 :  OK  (got 24.375)
+
+==========================================================================
+  SECTION C: VRAM - why GGUF Q4 is the enabler (28GB -> 8.5GB)
+==========================================================================
+The 14B model in FP16 is 28GB - it does NOT fit on ANY consumer GPU
+(the biggest consumer card is 24GB, and you also need activations).
+GGUF Q4_K_M block-quantization shrinks the weights ~3.3x so the model
+fits a 12GB GPU (RTX 3060 12GB / RTX 4070) with room for activations.
+
+| format       | bpw  | weights  | 24GB GPU? | 16GB? | 12GB? |
+|--------------|------|----------|-----------|-------|-------|
+| GGUF_Q4      | 4.85 |   8.49 GB |    FIT     |  FIT   |  FIT   |
+| FP8_scaled   | 8.00 |  14.00 GB |    FIT     |  FIT   |  no   |
+| FP16         | 16.00 |  28.00 GB |    no     |  no   |  no   |
+
+  FP16 weights = 14.0B x 16 / 8 = 28.0 GB   (fits no consumer GPU)
+  GGUF Q4     = 14.0B x 4.85 / 8 = 8.49 GB   (fits 12GB)
+  VRAM compression = 28.0 / 8.49 = 3.30x
+
+  ~2% quality drop (barely noticeable). The same GGUF block-quant concept
+  applies to image models - see flux_gguf. TeaCache + Lightning add the
+  SPEED; GGUF Q4 adds the FIT. You need both to run 14B locally.
+[check] FP16 = 28.0 GB :  OK  (got 28.0)
+[check] GGUF Q4 ~= 8.5 GB :  OK  (got 8.487499999999999)
+[check] GGUF Q4 fits a 12GB GPU :  OK  (got 8.487499999999999)
+[check] FP16 does NOT fit 24GB (weights alone) :  OK  (got 28.0)
+
+==========================================================================
+  SECTION D: QUALITY TRADEOFF - what each layer costs in fidelity
+==========================================================================
+Speed is not free. Each optimization has a quality signature:
+
+| optimization        | speedup | quality drop | reversible? |
+|---------------------|---------|--------------|-------------|
+| GGUF Q4             | ~ varies |       2.0%  | no (baked in) |
+| Lightning (4 steps) | ~ varies |       7.5%  | no (baked in) |
+| TeaCache            | ~ varies |       0.0%  | yes (toggle off) |
+| compile             | ~ varies |       0.0%  | yes (toggle off) |
+
+  Combined worst-case quality drop ~=   9.5% (sum of independent drops;
+  in practice errors partially cancel, so perceived drop is lower).
+
+  - GGUF Q4: ~2% (block quantization; near-lossless for diffusion).
+  - Lightning: ~5-10% (fewer steps = less refinement; the distillation LoRA
+    recovers most of it, but fine detail / temporal coherence softens).
+  - TeaCache: 0% at conservative threshold (aggressive -> flicker/artifacts).
+  - compile: 0% (bit-exact same math, just faster kernels).
+[check] TeaCache is lossless at default threshold :  OK
+[check] compile is lossless :  OK
+[check] GGUF Q4 drop is small (<3%) :  OK
+[check] Lightning is the biggest fidelity cost :  OK
+
+==========================================================================
+  SECTION E: IMAGE-TO-VIDEO CONDITIONING - lock frame 0, animate rest
+==========================================================================
+Wan 2.2 supports image-to-video: provide a starting frame (encoded via
+the VAE), the model generates MOTION for the remaining frames. The first
+frame stays consistent with the input image. Same DiT, same step count -
+only the INITIAL latent changes (frame 0 = image latent, locked; the rest
+start as noise and get denoised). Same optimization stack applies.
+
+Tiny demo (seeded). Latent grid 4(frames) x 2(h) x 2(w), 1 channel:
+  I2V initial latent:
+    frame 0: [[0.4, 0.5], [0.7, 0.8]]  [LOCKED image]
+    frame 1: [[-0.93, -0.21], [1.11, 0.42]]
+    frame 2: [[1.04, 0.25], [0.39, 0.19]]
+    frame 3: [[-1.67, 0.86], [0.51, 0.5]]
+
+After denoising: frame 0 = the input image (consistent); frames 1..3 are
+generated motion. This is how Wan animates a still image into a clip.
+[check] I2V locks frame 0 to the image latent :  OK
+
+==========================================================================
+  SECTION F: WAN 14B vs LTX 2B - quality vs speed tradeoff
+==========================================================================
+Same target clip (~720x480x121, a 5s video). Wan 14B is higher quality
+(better temporal coherence, more detail) but 7x heavier. The optimization
+stack closes the speed gap while keeping most of the quality edge.
+
+| config                          | params | VRAM   | gen      | quality |
+|---------------------------------|--------|--------|----------|---------|
+| LTX-Video 2B (Q8, distilled)    |    2B  |  6.0GB |   44.0 s | good    |
+| Wan 14B (naive 30 steps FP16)   |   14B  | 28.0GB |  300.0 s | highest |
+| Wan 14B (GGUF Q4, naive steps)  |   14B  |  8.5GB |  300.0 s | fits but slow |
+| Wan 14B (FULL stack)            |   14B  |  8.5GB |   12.3 s | high    |
+
+  Full-stack Wan: 12s on a 12GB card, ~24x faster than naive.
+  vs LTX 2B: 44s on an 8GB card. The stack is so effective that
+  full-stack Wan (12s) is FASTER than LTX here - while keeping the
+  14B quality edge. Tradeoff: Wan needs >=12GB; LTX runs on 8GB. Pick LTX for
+  the smallest card; pick full-stack Wan for best quality at similar speed.
+[check] Full-stack Wan fits 12GB :  OK
+[check] Full-stack Wan ~ 24x faster than naive :  OK
+[check] Full-stack Wan is faster than (or ~ LTX) reference numbers :  OK
+[check] LTX uses less VRAM (runs on a smaller card) :  OK
+
+==========================================================================
+  GOLD VALUE - the canonical numbers the HTML must reproduce
+==========================================================================
+Speed chain (identical to Section B):
+  base        = 300 s   (30 steps)
+  +Lightning  = 300.0 x (4/30) = 40.0 s
+  +TeaCache   = 40 / 2.5 = 16.0 s
+  +compile    = 16 / 1.3 = 12.3 s
+  SPEEDUP     = 300 / 12.3 = 24.4x
+
+VRAM:
+  FP16     = 14.0B x 16 / 8 = 28.0 GB
+  GGUF Q4  = 14.0B x 4.85 / 8 = 8.49 GB  (~8.5)
+
+  GOLD (pinned in wan_video.html):
+    final time   = 12.3 s   (to 1 dp)
+    total speedup= 24.4x  (to 1 dp)
+    FP16 VRAM    = 28.0 GB
+    GGUF Q4 VRAM = 8.49 GB  (~8.5)
+[check] gold final time ~= 12.3s :  OK  (got 12.307692307692307)
+[check] gold speedup ~= 24.4x :  OK  (got 24.375000000000004)
+[check] gold FP16 = 28.0 GB :  OK  (got 28.0)
+[check] gold GGUF Q4 ~= 8.5 GB :  OK  (got 8.487499999999999)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

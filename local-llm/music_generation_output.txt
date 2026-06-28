@@ -1,0 +1,165 @@
+music_generation.py - local music gen: codecs + ACE-Step + YuE.
+Pure Python stdlib. Numbers below feed MUSIC_GENERATION.md.
+Sources: EnCodec arXiv:2210.13838, ACE-Step arXiv:2506.00045,
+         github.com/ace-step/ACE-Step, github.com/multimodal-art-projection/YuE.
+
+Raw audio is huge -> codec compresses to tokens (RVQ) -> model generates.
+
+==========================================================================
+  SECTION A: WHY MUSIC IS HARDER THAN SPEECH
+==========================================================================
+Speech: single speaker, seconds-long, limited acoustic patterns.
+Music : many instruments + vocals, minutes-long, harmony + rhythm.
+Direct autoregressive generation on RAW audio is intractable: every
+sample must be predicted in sequence, and there are millions of them.
+
+Raw audio budget (CD quality, 44.1kHz stereo):
+| clip            |  samples   | 16-bit PCM |  fp32     |
+|-----------------|------------|------------|-----------|
+| 1 s             |     88,200 |   0.18 MB |   0.35 MB |
+| 10 s            |    882,000 |   1.76 MB |   3.53 MB |
+| 1 min           |  5,292,000 |  10.58 MB |  21.17 MB |
+| 3 min           | 15,876,000 |  31.75 MB |  63.50 MB |
+
+GOLD (for music_generation.html):
+  3-min song samples (44.1kHz stereo) = 15,876,000  (~15.88M)
+  16-bit PCM  = 31,752,000 bytes  (30.28 MiB)
+  fp32        = 63,504,000 bytes  (60.56 MiB)
+  => a model predicting raw samples would need 15,876,000 sequential
+     steps for ONE song. This is why audio codecs exist (Section B).
+[check] 3-min 44.1kHz stereo = 15,876,000 samples :  OK  (got 15876000)
+[check] fp32 song is ~2x the 16-bit PCM size :  OK
+[check] 10s of speech (16kHz mono) is ~99x smaller than a 3-min song :  OK  (99x)
+
+  For scale: a 3-min song is ~99x more samples than a 10s speech clip. Music needs compression.
+
+==========================================================================
+  SECTION B: NEURAL AUDIO CODECS - raw audio -> discrete tokens (RVQ)
+==========================================================================
+EnCodec / SoundStream compress raw audio to discrete tokens via
+RESIDUAL VECTOR QUANTIZATION (RVQ):
+  1. encoder strides the waveform (downsample 320x at 24kHz)
+  2. each frame is quantized by N codebooks IN SERIES
+     - codebook 1: coarse structure  (big residual removed)
+     - codebook 2: residual of 1     (finer detail)
+     - ... up to codebook 8:          (fine texture / noise floor)
+  3. decoder reconstructs audio from the N indices per frame
+
+EnCodec 24kHz config: stride = 320  ->  frame rate = 24000/320 = 75 frames/s
+  with 8 RVQ codebooks:  600 tokens/s  (24000/75 = 320x downsample on the time axis)
+
+Token budget vs raw audio (3-minute clip):
+| representation                |   values   | vs raw stereo |
+|-------------------------------|------------|---------------|
+| raw 44.1kHz stereo (samples)  | 15,876,000 |           1x fewer |
+| raw 24kHz mono (samples)      |  4,320,000 |           4x fewer |
+| EnCodec frames (75Hz)         |     13,500 |        1176x fewer |
+| EnCodec tokens (x8 codebooks) |    108,000 |         147x fewer |
+
+GOLD (for music_generation.html):
+  frame rate       = 75 frames/s   (stride 320)
+  3-min frames     = 13,500
+  3-min tokens     = 108,000   (75 * 180 * 8)
+  tokens vs raw    = 147x fewer things to predict
+[check] EnCodec frame rate = 75 Hz (24000/320) :  OK  (got 75.0)
+[check] 3-min EnCodec = 13,500 frames :  OK  (got 13500)
+[check] 3-min EnCodec = 108,000 tokens (x8) :  OK  (got 108000)
+
+RVQ simulation: 8 independent codebook layers quantize a 16-frame
+signal. Each layer uses its OWN codebook (finer than the last) and
+quantizes the residual the previous layers left behind.
+  signal (16 frames) = [0.82, -0.31, 0.55, -0.74, 0.18, -0.92, 0.41, 0.67, -0.15, 0.89, -0.58, 0.26, -0.43, 0.71, -0.09, 0.34]
+  signal energy      = 5.1457
+  layer codebook steps (halving) = [0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625]
+
+  | layer | role         | step      | residual energy | % of signal left |
+  |-------|--------------|-----------|-----------------|------------------|
+  |     1 | coarse structure |   0.50000 |        0.385700 |            7.50% |
+  |     2 | main residual |   0.25000 |        0.088200 |            1.71% |
+  |     3 | mid detail   |   0.12500 |        0.027575 |            0.54% |
+  |     4 | fine detail  |   0.06250 |        0.005075 |            0.10% |
+  |     5 | texture      |   0.03125 |        0.001481 |            0.03% |
+  |     6 | fine texture |   0.01562 |        0.000387 |            0.01% |
+  |     7 | noise floor  |   0.00781 |        0.000082 |            0.00% |
+  |     8 | ultra-fine   |   0.00391 |        0.000023 |            0.00% |
+  Each codebook layer captures finer detail; residual energy -> 0.
+  (Real codebooks hold 1024 VECTORS each, not these uniform scalars.)
+[check] RVQ residual energy is non-increasing across layers :  OK
+[check] layer 1 removes most energy (coarse layer) :  OK
+[check] layer 8 reaches < 0.5% of signal energy :  OK  (0.000%)
+
+  layer-1 token stream (codebook indices) = [4, 1, 3, 1, 2, 0, 3, 3, 2, 4, 1, 3, 1, 3, 2, 3]
+  These indices ARE the 'tokens' a music LLM learns to generate.
+[check] all codes are valid codebook indices :  OK
+
+==========================================================================
+  SECTION C: ACE-STEP vs YuE - the two SOTA open-source paths
+==========================================================================
+Both turn text (genre/mood/instruments) + lyrics into a full song
+(vocals + accompaniment). Very different compute profiles:
+
+  ACE-Step (3.5B): FLOW-MATCHING. Denoises the whole song latent in
+    PARALLEL over a fixed number of ODE steps (~27-60). Not token-by-
+    token. => ~2.2 s/min on A100. Min VRAM 8 GB. Beats Suno v5 on
+    melody/harmony/rhythm benchmarks. Supports remix/repaint/edit.
+
+  YuE (7B): TWO-STAGE AUTOREGRESSIVE cascade. Stage 1 (semantic) turns
+    lyrics -> semantic tokens one at a time; stage 2 (acoustic) expands
+    them to codec tokens. Great lyric alignment, but slow (sequential).
+
+Model comparison (verified from GitHub READMEs):
+| model            | params | VRAM    | architecture              | license    |
+|------------------|--------|---------|---------------------------|------------|
+| ACE-Step         |   3.5B | 8-10    | flow-matching, parallel ODE steps (27-60) | Apache 2.0 |
+| YuE              |     7B | 8-14    | two-stage cascade: semantic -> acoustic (autoregressive) | Apache 2.0 |
+| Stable Audio Open |   1.2B | 6-8     | diffusion (DiT), latent   | CC-BY-NC (non-commercial) |
+| MusicGen (Meta)  |   3.3B | 8-16    | autoregressive EnCodec tokens, mono | CC-BY-NC   |
+| DiffRhythm       |     2B | 8-10    | diffusion over full-song latent | Apache 2.0 |
+
+ACE-Step real hardware performance (27 denoising steps, RTF=real-time
+factor; RTF 27x = 1 min of audio in 60/27 = 2.2 s):
+| device           | RTF (27 steps) | time / minute of audio |
+|------------------|----------------|------------------------|
+| NVIDIA RTX 4090  |       34.48x   |   1.74 s                |
+| NVIDIA A100      |       27.27x   |   2.20 s                |
+| NVIDIA RTX 3090  |       12.76x   |   4.70 s                |
+| MacBook M2 Max   |        2.27x   |  26.43 s                |
+
+GOLD (for music_generation.html):
+  ACE-Step A100 (27 steps): RTF = 27.27x  ->  2.20 s / min
+  => a 4-minute full song ~ 8.8 s on A100 (parallel, not 4 separate minutes of autoregression)
+[check] ACE-Step A100 ~ 2.20 s per minute (RTF 27.27) :  OK  (got 2.200)
+[check] RTX 4090 is faster than A100 for ACE-Step (27 steps) :  OK
+[check] ACE-Step (3.5B) is ~half the params of YuE (7B) :  OK
+[check] both ACE-Step and YuE are Apache 2.0 (verified from GitHub) :  OK
+
+==========================================================================
+  SECTION D: THE PIPELINE - text + lyrics -> full song
+==========================================================================
+Both ACE-Step and YuE share the same high-level flow; they differ in
+stage 4 (how the latent/tokens are produced):
+
+  [1] prompt encode : text tags (genre/mood/instruments) + lyrics
+                       -> text embeddings (T5/CLAP-style)
+  [2] lyrics align   : syllable/line timestamps (YuE explicit;
+                       ACE-Step implicit via REPA alignment)
+  [3] latent space   : audio codec (DCAE/EnCodec) frames the model
+                       operates in (75 Hz, 8 codebooks)
+  [4] GENERATE       : ACE-Step = parallel flow-matching (~27 steps)
+                       YuE      = autoregressive cascade (semantic->
+                                   acoustic, token-by-token)
+  [5] codec decode   : tokens/latent -> raw waveform (codec decoder)
+  [6] post           : vocals + accompaniment mixed -> stereo song
+
+For a 3-min song the model produces 13,500 frames (108,000 tokens) in stage 4, then the codec decoder
+turns them back into ~4.32M samples (24kHz mono) of audio.
+
+Why ACE-Step is fast: stage 4 visits a FIXED ~27 ODE steps, each
+touching the ENTIRE song latent at once. YuE must emit ~108,000 tokens
+sequentially. Parallel (fixed steps) >> sequential (~100k steps).
+[check] 3-min codec decode = 4.32M samples (24kHz mono) :  OK  (got 4320000)
+[check] YuE emits ~4000x more sequential steps than ACE-Step's 27 :  OK  (4000x)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

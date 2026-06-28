@@ -1,0 +1,269 @@
+tts_kokoro.py - Kokoro-82M text-to-speech pipeline simulation.
+Pure Python stdlib. Numbers below feed TTS_KOKORO.md.
+Sources: https://huggingface.co/hexgrad/Kokoro-82M (Model Facts),
+         StyleTTS2 arxiv:2306.07691, ISTFTNet arxiv:2203.02395.
+
+Pipeline: normalize -> phonemize -> prosody -> mel-spectrogram -> vocoder.
+
+==========================================================================
+  SECTION A: THE 5-STAGE TTS PIPELINE (text -> waveform)
+==========================================================================
+Stage 1 - TEXT NORMALIZATION
+  raw   = 'I have $5.'
+  rules = $5 -> five dollars, & -> and, % -> percent, ...
+  out   = 'I have five dollars.'
+
+Stage 2 - PHONEMIZATION (G2P via `misaki`)
+  words     = ['I', 'have', 'five', 'dollars']
+  phonemes  = ['/aɪ/', '/h/', '/æ/', '/v/', '/f/', '/aɪ/', '/v/', '/d/', '/ɑ/', '/l/', '/ɚ/', '/z/']  (12 IPA symbols)
+
+Stage 3 - PROSODY PREDICTION (duration per phoneme, in mel frames)
+  durations = [22, 5, 14, 6, 7, 22, 6, 7, 16, 8, 12, 9]  -> total 134 frames
+
+Stage 4 - ACOUSTIC MODEL (phonemes + prosody -> mel-spectrogram)
+  mel shape = 134 frames x 80 bands
+  (each frame = 80 floats = a frequency snapshot)
+
+Stage 5 - VOCODER (mel-spectrogram -> waveform, ISTFTNet)
+  samples   = 34304
+  seconds   = 1.4293  (= samples / 24000)
+
+[check] stage1 keeps word count plausible :  OK  (words=['I', 'have', 'five', 'dollars'])
+[check] stage2 emits IPA phonemes :  OK
+[check] stage3 duration frames = sum of per-phoneme :  OK
+[check] stage4 mel has 80 bands :  OK
+[check] stage5 samples = frames * hop :  OK  (samples=34304 expected=34304)
+
+==========================================================================
+  SECTION B: GOLD EXAMPLE - 'hello' -> 0.64s of audio
+==========================================================================
+The hero example tts_kokoro.html reproduces. The /oʊ/ diphthong is
+split into onset /o/ + glide /ʊ/ so the duration predictor can model
+the two phases separately (standard in many TTS duration heads).
+
+  text       = 'hello'
+  phonemes   = ['/h/', '/ə/', '/l/', '/o/', '/ʊ/']  (5 segments)
+  durations  = [5, 12, 8, 15, 20]  (mel frames per segment)
+  sum        = 60 frames
+  samples    = 60 * 256 = 15360
+  seconds    = 15360 / 24000 = 0.6400
+
+| segment | phoneme | dur (frames) | dur (ms)  |
+|---------|---------|--------------|-----------|
+| 0       | /h/     |            5 |   53.33   |
+| 1       | /ə/     |           12 |  128.00   |
+| 2       | /l/     |            8 |   85.33   |
+| 3       | /o/     |           15 |  160.00   |
+| 4       | /ʊ/     |           20 |  213.33   |
+| total   |         |           60 |  640.00   |
+
+[check] hello -> 60 mel frames total :  OK  (got 60 expected 60)
+[check] hello -> 15360 samples :  OK  (got 15360 expected 15360)
+[check] hello -> 0.64 seconds :  OK  (got 0.64)
+
+GOLD (for tts_kokoro.html):
+  durations='hello' = [5, 12, 8, 15, 20]
+  total_frames = 60, samples = 15360, seconds = 0.6400
+
+==========================================================================
+  SECTION C: AUDIO FUNDAMENTALS - sample rate, hop, mel frames
+==========================================================================
+Kokoro audio config (verified: Model Facts + ISTFTNet):
+  sample_rate = 24000 Hz  (24000 samples per second)
+  hop_length  = 256 samples per mel frame
+  fft_size    = 1024 samples (STFT window)
+  n_mel_bands = 80 frequency bands
+
+mel frames per second = sample_rate / hop_length
+                     = 24000 / 256 = 93.75
+                     ~ 94 frames/sec
+
+1 second of audio:
+  samples    = 24000
+  mel frames = 93.75  (≈ 94)
+  floats     = 93 frames * 80 bands = 7440 mel values
+
+Per mel frame: 80 floats = a snapshot of frequency content
+  -> frame covers 256 samples = 10.67 ms of audio
+
+Duration in seconds from frames:
+  seconds = frames * hop / sample_rate
+
+| frames | samples  | seconds  |
+|--------|----------|----------|
+|      1 |      256 |   0.0107 |
+|     10 |     2560 |   0.1067 |
+|     60 |    15360 |   0.6400 |
+|     94 |    24064 |   1.0027 |
+|    200 |    51200 |   2.1333 |
+|    500 |   128000 |   5.3333 |
+
+[check] 24000/256 = 93.75 mel frames/sec :  OK  (got 93.75)
+[check] ~94 frames/sec rounding :  OK
+[check] 1 mel frame = 10.67 ms :  OK
+[check] 1 second = 24000 samples :  OK
+
+==========================================================================
+  SECTION D: MEL-SPECTROGRAM - the acoustic model's output
+==========================================================================
+Each phoneme has a characteristic formant profile (energy across the
+80 mel bands). The duration predictor REPEATS that profile
+across the phoneme's frames, producing horizontal stripes. This is the
+classic look of a TTS mel-spectrogram.
+
+Input : phonemes=['/h/', '/ə/', '/l/', '/o/', '/ʊ/'], durations=[5, 12, 8, 15, 20]
+Output: mel-spectrogram = 60 frames x 80 bands
+
+Downsampled to 10 band-groups (ASCII heatmap, frames as rows):
+  band-groups: low freq <----> high freq
+   /h/  /ə/  /l/  /o/  /ʊ/
+  frame 0   : % @ @ @ @ @ @ @ @ %   (segment 0 /h/ dur=5)
+  frame 5   :   = @ @ @ % :         (segment 1 /ə/ dur=12)
+  frame 17  : . @ @ @ + . + @ @ :   (segment 2 /l/ dur=8)
+  frame 25  : : @ @ % .             (segment 3 /o/ dur=15)
+  frame 40  : = @ @ :               (segment 4 /ʊ/ dur=20)
+
+| segment | phoneme | frames | mean energy | peak band |
+|---------|---------|--------|-------------|-----------|
+| 0       | /h/     |      5 |      0.6859 |        40 |
+| 1       | /ə/     |     12 |      0.3008 |        30 |
+| 2       | /l/     |      8 |      0.4206 |        62 |
+| 3       | /o/     |     15 |      0.2096 |        19 |
+| 4       | /ʊ/     |     20 |      0.1792 |        15 |
+
+mel-spectrogram size: 60 x 80 = 4800 floats
+[check] mel frame count = sum of durations :  OK
+[check] every mel frame has 80 bands :  OK
+[check] mel values are non-negative (energies) :  OK
+
+==========================================================================
+  SECTION E: VOCODER - mel-spectrogram -> waveform
+==========================================================================
+The vocoder (ISTFTNet in Kokoro) inverts the mel-spectrogram into a
+1D waveform of audio samples. One mel frame expands to hop_length
+(256) consecutive samples.
+
+mel-spectrogram: 60 frames
+waveform       : 15360 samples (= 60 frames * 256 hop)
+duration       : 0.6400 s (= 15360 / 24000)
+
+First 8 waveform samples (segment 0, /h/, breathy onset):
+| i | sample    |
+|---|-----------|
+| 0 |  +0.00000 |
+| 1 |  +0.03228 |
+| 2 |  +0.06449 |
+| 3 |  +0.09656 |
+| 4 |  +0.12842 |
+| 5 |  +0.15999 |
+| 6 |  +0.19120 |
+| 7 |  +0.22199 |
+
+CPU real-time factor ~ 3.0x
+  generate 0.6400s of audio in ~0.2133s compute
+
+[check] waveform length = frames * hop :  OK  (got 15360 expected 15360)
+[check] waveform samples in [-amp, +amp] :  OK
+[check] hello waveform = 0.64s :  OK
+
+==========================================================================
+  SECTION F: STYLETTS 2 ARCHITECTURE (what Kokoro inherits)
+==========================================================================
+Kokoro's architecture = StyleTTS 2 (arxiv:2306.07691) + ISTFTNet
+vocoder (arxiv:2203.02395). Decoder only: NO diffusion, NO released
+encoder. Five components, all sharing one backbone:
+
+  1. STYLE ENCODER
+     extracts a speaking-style vector from reference audio (or a
+     learned 256-dim vector per voice). This single vector
+     carries identity + prosody style across the whole utterance.
+
+  2. TEXT ENCODER
+     phonemes -> hidden representations (the phoneme embedding +
+     transformer/conv stack). Pre-computed phoneme embeddings keep
+     the embedding table tiny.
+
+  3. DURATION PREDICTOR
+     predicts how many mel frames each phoneme spans (alignment).
+     No external alignment labels needed.
+
+  4. DECODER (NON-AUTOREGRESSIVE)
+     aligned text + style -> mel-spectrogram. PARALLEL: all frames
+     generated at once, not one-at-a-time. This is the speed win.
+
+  5. VOCODER (ISTFTNet)
+     mel-spectrogram -> waveform via inverse short-time Fourier
+     transform. Cheaper than HiFi-GAN, lighter than diffusion.
+
+The trick: ADVERSARIAL TRAINING + STYLE DIFFUSION. A discriminator
+judges generated mel vs real mel; a diffusion process samples the
+style vector. Together they yield natural prosody WITHOUT explicit
+duration/pitch labels during training.
+
+Voice storage: 54 voices * 256-dim * 4 bytes
+             = 55296 bytes = 54.0 KB (negligible)
+[check] StyleTTS2 + ISTFTNet are the two cited arch papers :  OK
+[check] decoder is non-autoregressive (parallel frames) :  OK
+[check] style dim = 256 :  OK
+[check] voice storage is tiny (<1MB) :  OK  (55296 bytes)
+
+==========================================================================
+  SECTION G: WHY KOKORO IS ONLY 82M PARAMS (vs 300M+ for other TTS)
+==========================================================================
+| # | Trick                              | Effect                          |
+|---|------------------------------------|---------------------------------|
+| 1 | Shared encoder backbone            | Text/duration/decoder share ONE feature extractor, not 3 duplicates |
+| 2 | Non-autoregressive decoder         | All mel frames generated in parallel, no per-step recurrence stack |
+| 3 | Compact 256-dim style vectors      | 256-dim style per voice vs huge speaker-embedding tables |
+| 4 | Pre-computed phoneme embeddings    | Phoneme vocab is tiny (~100 IPA symbols), so the embedding table is tiny |
+| 5 | ISTFTNet vocoder                   | Inverse-STFT is cheaper than HiFi-GAN's multi-block upsampling stack |
+
+Result: 82M params total, runs in <2GB VRAM and on CPU at ~3x real-time.
+
+VRAM budget (weights dominate):
+  weights fp32 = 82000000 * 4 = 328 MB
+  weights fp16 = 82000000 * 2 = 164 MB
+  voices       = 54 * 256 * 4 = 54.0 KB
+  + activations + mel buffers       ~ a few tens of MB
+  => total well under 2 GB on any GPU, and runs on CPU.
+
+[check] 82M params fp16 weights < 2GB :  OK  (164 MB < 2048 MB)
+[check] 82M params fp32 weights < 2GB :  OK  (328 MB < 2048 MB)
+[check] params count is 82,000,000 :  OK
+
+Param-budget contrast (rough order of magnitude):
+| model family            | params    | why bigger                     |
+|-------------------------|-----------|--------------------------------|
+| Kokoro-82M (StyleTTS 2) | 82M       | shared backbone, NAR decoder   |
+| XTTS / Tortoise         | 300M+     | autoregressive decoder + flow  |
+| Bark                    | 1B+       | text + audio LLM stack         |
+| VALL-E style            | 1B+       | full autoregressive phoneme->ac|
+
+==========================================================================
+  SECTION H: SPECIFICATIONS SUMMARY
+==========================================================================
+| spec            | value                                          |
+|-----------------|------------------------------------------------|
+| parameters      | 82,000,000 (82M)                             |
+| architecture    | StyleTTS 2 (arxiv:2306.07691) + ISTFTNet (arxiv:2203.02395) |
+| voices          | 54 (v1.0)                                 |
+| languages       | 8 (en, zh, ja, ko, fr, it, pt, es)  |
+| style dim       | 256                                       |
+| sample rate     | 24000 Hz (24000 samples/sec)             |
+| mel bands       | 80                                         |
+| hop length      | 256 (-> 93.75 mel frames/sec ≈ 94)        |
+| FFT size        | 1024                                        |
+| VRAM            | < 2 GB (weights fp16 ~ 164 MB)             |
+| CPU inference   | ~3x real-time (3s audio per 1s compute)        |
+| license         | Apache-2.0 (open-weight)                      |
+| training        | ~1000 A100-80GB hours, ~$1000 total            |
+| G2P             | misaki (https://github.com/hexgrad/misaki)     |
+
+[check] 54 voices (v1.0) :  OK
+[check] 8 languages :  OK
+[check] Apache-2.0 license :  OK
+[check] mel frames/sec ~ 94 :  OK  (93.75)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

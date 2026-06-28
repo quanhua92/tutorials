@@ -1,0 +1,523 @@
+<!doctype html>
+<!--
+  spring_physics.html — Phase 5 animations bundle #1 (STYLE ANCHOR: use_reducer.html).
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving spring
+  physics end-to-end. Companion: SPRING_PHYSICS.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: a tween animates with a fixed duration + an easing curve. A spring
+  animates with PHYSICS — Hooke's law plus a damper. Every frame the solver reads
+  the current position/velocity, computes the spring force
+  F = -kx - cv  (k = stiffness, x = displacement, c = damping, v = velocity),
+  integrates acceleration/velocity/position, and writes the new position to the
+  DOM via a ref. The animation has no duration — it just runs until the spring
+  settles (|v| ≈ 0 AND |pos - target| ≈ 0). That is why spring motion feels
+  natural: it carries momentum, overshoots, and decays like a real object.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState/useRef/useEffect
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<SpringDemo/>), the gold-check
+  waits for the ball, asserts it sits at the initial position (~50%), clicks
+  "Set Target: 80%", polls the imperative style.left until the spring settles,
+  then asserts the ball landed within 0.5% of 80% AND moved > 20% from its start.
+  This proves the F = -kx - cv solver drives real DOM motion end-to-end.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spring Physics — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:320px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Spring Physics &mdash; F = -kx - cv</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/SPRING_PHYSICS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/SPRING_PHYSICS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <a href="./framer_motion_core.html">framer_motion_core</a> uses springs internally —
+    here's the physics underneath (<code>F = -kx - cv</code>).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">duration + easing → physics</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        A <b class="text-[#e6edf3]">tween</b> moves a value from A to B over a fixed duration along an easing curve.
+        A <b class="text-[#e6edf3]">spring</b> has no duration — it simulates a mass on a spring. Each frame the
+        solver computes the restoring force from Hooke's law plus a damper, integrates, and repeats until the
+        system settles. Because it carries <b class="text-[#e6edf3]">velocity</b>, a spring overshoots, settles
+        naturally, and survives interruptions (a new target just re-aims the same moving mass).
+      </p>
+      <pre class="src" style="margin-top:10px">F = -k·x - c·v        (Hooke's law + damping force)
+
+  k = stiffness   (spring strength — pull back toward target)
+  x = displacement (position - target)
+  c = damping     (friction — bleeds energy each frame)
+  v = velocity
+
+acceleration = F / mass
+velocity    += acceleration · dt     // semi-implicit Euler (stable)
+position    += velocity    · dt
+repeat until |v| ≈ 0 AND |position - target| ≈ 0</pre>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>parameter</th><th>unit</th><th>raise it →</th><th>effect</th></tr>
+        <tr>
+          <td><code>stiffness</code> (k)</td>
+          <td>N/m</td>
+          <td>stronger pull</td>
+          <td>faster, snappier, more oscillation</td>
+        </tr>
+        <tr>
+          <td><code>damping</code> (c)</td>
+          <td>N·s/m</td>
+          <td>more friction</td>
+          <td>less overshoot, settles sooner (c critical = no bounce)</td>
+        </tr>
+        <tr>
+          <td><code>mass</code> (m)</td>
+          <td>kg</td>
+          <td>heavier object</td>
+          <td>slower acceleration, sluggish feel</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the spring solver you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">function SpringDemo() {
+  var [target, setTarget] = React.useState(50);
+  var [stiffness, setStiffness] = React.useState(100);
+  var [damping, setDamping] = React.useState(12);
+  var posRef = React.useRef(50);   // animated position (NOT state — no re-render)
+  var velRef = React.useRef(0);    // animated velocity
+  var ballRef = React.useRef(null);
+  var rafRef = React.useRef(null);
+
+  // Spring simulation loop — re-runs whenever the target or tuning changes.
+  React.useEffect(function () {
+    var mass = 1;
+    var dt = 0.016; // ~60fps
+
+    function step() {
+      var pos = posRef.current;
+      var vel = velRef.current;
+      // F = -k*x - c*v  (Hooke's law + damping)
+      var force = -stiffness * (pos - target) - damping * vel;
+      var acc = force / mass;
+      vel += acc * dt;      // semi-implicit Euler = stable for springs
+      pos += vel * dt;
+      posRef.current = pos;
+      velRef.current = vel;
+      if (ballRef.current) ballRef.current.style.left = pos + '%';
+      // Continue only while the spring still has energy.
+      if (Math.abs(vel) &gt; 0.01 || Math.abs(pos - target) &gt; 0.01) {
+        rafRef.current = requestAnimationFrame(step);
+      }
+    }
+
+    if (ballRef.current) ballRef.current.style.left = posRef.current + '%';
+    rafRef.current = requestAnimationFrame(step);
+    return function () { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [target, stiffness, damping]);
+
+  function applyPreset(s, d) { setStiffness(s); setDamping(d); }
+
+  function onTrackClick(e) {
+    var rect = e.currentTarget.getBoundingClientRect();
+    var pct = ((e.clientX - rect.left) / rect.width) * 100;
+    setTarget(Math.max(0, Math.min(100, pct)));
+  }
+
+  var presets = [
+    { name: 'Gentle', s: 100, d: 12 },
+    { name: 'Wobbly', s: 180, d: 12 },
+    { name: 'Stiff',  s: 210, d: 20 },
+    { name: 'Slow',   s: 280, d: 60 }
+  ];
+
+  return (
+    &lt;div className="max-w-xl mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb] mb-1"&gt;Spring Playground&lt;/h2&gt;
+      &lt;p className="text-xs text-[#8b949e] mb-4"&gt;
+        F = -stiffness·(pos - target) - damping·vel · click the track or a preset
+      &lt;/p&gt;
+
+      &lt;div
+        data-testid="track"
+        onClick={onTrackClick}
+        className="relative h-16 bg-[#0d1117] border border-[#30363d] rounded-lg cursor-crosshair overflow-hidden"
+      &gt;
+        &lt;div
+          data-testid="target"
+          style={{ left: target + '%' }}
+          className="absolute top-0 bottom-0 w-0.5 bg-[#e74c3c] opacity-70"
+        /&gt;
+        &lt;div
+          data-testid="ball"
+          ref={ballRef}
+          className="absolute top-1/2 -translate-y-1/2 -ml-3 w-6 h-6 rounded-full bg-[#61dafb]"
+        /&gt;
+      &lt;/div&gt;
+
+      &lt;div className="flex justify-between text-xs text-[#8b949e] mt-1"&gt;
+        &lt;span&gt;0%&lt;/span&gt;
+        &lt;span&gt;target: &lt;span data-testid="target-read" className="text-[#e74c3c]"&gt;{Math.round(target)}%&lt;/span&gt;&lt;/span&gt;
+        &lt;span&gt;100%&lt;/span&gt;
+      &lt;/div&gt;
+
+      &lt;div className="mt-4 space-y-3"&gt;
+        &lt;label className="block"&gt;
+          &lt;div className="flex justify-between text-xs text-[#8b949e] mb-1"&gt;
+            &lt;span&gt;stiffness (k)&lt;/span&gt;
+            &lt;span className="text-[#61dafb]"&gt;{stiffness}&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;input
+            data-testid="stiffness"
+            type="range" min="10" max="500" value={stiffness}
+            onChange={function (e) { setStiffness(Number(e.target.value)); }}
+            className="w-full accent-[#61dafb]"
+          /&gt;
+        &lt;/label&gt;
+        &lt;label className="block"&gt;
+          &lt;div className="flex justify-between text-xs text-[#8b949e] mb-1"&gt;
+            &lt;span&gt;damping (c)&lt;/span&gt;
+            &lt;span className="text-[#61dafb]"&gt;{damping}&lt;/span&gt;
+          &lt;/div&gt;
+          &lt;input
+            data-testid="damping"
+            type="range" min="1" max="100" value={damping}
+            onChange={function (e) { setDamping(Number(e.target.value)); }}
+            className="w-full accent-[#61dafb]"
+          /&gt;
+        &lt;/label&gt;
+      &lt;/div&gt;
+
+      &lt;div className="mt-4 flex flex-wrap items-center gap-2"&gt;
+        {presets.map(function (p) {
+          return (
+            &lt;button
+              key={p.name}
+              data-testid="preset"
+              onClick={function () { applyPreset(p.s, p.d); }}
+              className="px-3 py-1.5 text-xs font-bold rounded border border-[#30363d] text-[#e6edf3] hover:border-[#61dafb] hover:text-[#61dafb]"
+            &gt;
+              {p.name}
+            &lt;/button&gt;
+          );
+        })}
+        &lt;button
+          data-testid="set80"
+          onClick={function () { setTarget(80); }}
+          className="px-3 py-1.5 text-xs font-bold rounded bg-[#61dafb] text-[#0d1117] ml-auto"
+        &gt;
+          Set Target: 80%
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;SpringDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;SpringDemo/&gt;</code> becomes <code>React.createElement(SpringDemo)</code>.
+        The effect's <code>step()</code> loop mutates the ball via <code>ballRef</code> — no
+        React re-render per frame, so 60fps stays cheap.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the solver, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Drag the sliders, click a preset, or click anywhere on the track to re-aim the target.
+        The <b class="text-[#e6edf3]">gold-check</b> does this automatically: it asserts the ball
+        starts at ~50%, clicks <code>Set Target: 80%</code>, waits for the spring to settle, then
+        asserts the ball landed near 80% — proving <code>F = -kx - cv</code> drives real motion.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        ball pos: <span id="pos-read" class="text-[#61dafb]">—</span>
+        · gold: start ~50% → click 80% → settle near 80% (moved &gt; 20%)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">spring vs tween · presets</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>spring</th><th>tween (duration + easing)</th></tr>
+        <tr>
+          <td>model</td>
+          <td>physics: <code>F = -kx - cv</code></td>
+          <td>time-mapped curve (linear/ease-out/cubic-bezier)</td>
+        </tr>
+        <tr>
+          <td>duration</td>
+          <td>emergent — settles when <code>|v| ≈ 0</code></td>
+          <td>fixed (<code>300ms</code>)</td>
+        </tr>
+        <tr>
+          <td>interruption</td>
+          <td>keeps velocity → smooth re-aim</td>
+          <td>restarts from a new curve (can jump)</td>
+        </tr>
+        <tr>
+          <td>overshoot</td>
+          <td>physical (underdamped only)</td>
+          <td>only if easing allows</td>
+        </tr>
+        <tr>
+          <td>best for</td>
+          <td>gestures, drag, swipe, UI</td>
+          <td>choreographed sequences, loops</td>
+        </tr>
+      </table></div>
+      <div style="overflow-x:auto;min-width:0;margin-top:14px"><table>
+        <tr><th>preset</th><th>stiffness</th><th>damping</th><th>feel</th></tr>
+        <tr><td><code>Gentle</code></td><td>100</td><td>12</td><td>soft, natural (≈ Framer default)</td></tr>
+        <tr><td><code>Wobbly</code></td><td>180</td><td>12</td><td>playful bounce</td></tr>
+        <tr><td><code>Stiff</code></td><td>210</td><td>20</td><td>snappy</td></tr>
+        <tr><td><code>Slow</code></td><td>280</td><td>60</td><td>heavy, slow</td></tr>
+        <tr><td><code>Molasses</code></td><td>280</td><td>120</td><td>very slow, no overshoot</td></tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var posRead     = document.getElementById("pos-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      //  Step 1: wait for ball, assert it sits at initial position (~50%).
+      //  Step 2: click "Set Target: 80%" → spring re-aims.
+      //  Step 3: poll the imperative style.left until the spring settles.
+      //  Step 4: assert ball landed within 0.5% of 80% AND moved > 20% from start.
+      var MAX_FRAMES = 300;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for SpringDemo to render…");
+        waitForBall(0);
+      }
+
+      function waitForBall(frame) {
+        var ball = root.querySelector('[data-testid="ball"]');
+        if (ball && ball.style.left !== "") {
+          var initLeft = parseFloat(ball.style.left);
+          if (!isNaN(initLeft) && Math.abs(initLeft - 50) < 5) {
+            clickTarget80();
+            return;
+          }
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForBall(frame + 1); });
+          return;
+        }
+        failGoldCheck("SpringDemo did not render the ball at its initial position");
+      }
+
+      function clickTarget80() {
+        var btn = root.querySelector('[data-testid="set80"]');
+        if (!btn) { failGoldCheck("Set Target 80% button not found"); return; }
+        btn.click();
+        pollSettled(80, 0);
+      }
+
+      function pollSettled(targetPct, frame) {
+        readLive();
+        var ball = root.querySelector('[data-testid="ball"]');
+        var left = ball ? parseFloat(ball.style.left) : NaN;
+        if (!isNaN(left) && Math.abs(left - targetPct) < 0.5) {
+          if (Math.abs(left - 50) > 20) {
+            passGoldCheck(left);
+          } else {
+            failGoldCheck("ball settled but did not move far enough from initial (50%)");
+          }
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          setTimeout(function () { pollSettled(targetPct, frame + 1); }, 40);
+          return;
+        }
+        failGoldCheck("spring did not settle near " + targetPct + "% (last=" + (isNaN(left) ? "NaN" : left.toFixed(3)) + ")");
+      }
+
+      function readLive() {
+        var ball = root.querySelector('[data-testid="ball"]');
+        var left = ball ? parseFloat(ball.style.left) : NaN;
+        posRead.textContent = isNaN(left) ? "—" : left.toFixed(2) + "%";
+      }
+
+      function passGoldCheck(left) {
+        readLive();
+        badge.textContent = "[check] ball sprang 50→80%, settled at " + left.toFixed(2) + "%. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 100);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

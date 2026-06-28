@@ -1,0 +1,557 @@
+<!doctype html>
+<!--
+  framer_motion_core.html — Phase 5 animations bundle #1.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground that
+  re-implements the CORE of Framer Motion (now "Motion") from scratch with
+  requestAnimationFrame, proving the declarative API is a wrapper around an
+  imperative rAF tween loop. Companion: FRAMER_MOTION_CORE.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: Framer Motion's <motion.div animate={{x:80}} /> looks like magic,
+  but it is a thin declarative skin over a single imperative mechanism:
+    1. read the current animated value from the DOM,
+    2. start a requestAnimationFrame loop,
+    3. each frame, compute eased = easeOut(t) * (to-from) + from,
+    4. write it back to el.style.
+  React only re-renders when the animate TARGET changes — the per-frame writes
+  bypass React entirely. This page rebuilds that loop by hand so the mechanism
+  is visible, then shows the same three demos (motion.div animate, variants,
+  whileHover) the real library ships.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, useEffect, useRef
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<MotionDemo/>), the gold-check
+  waits for the box to render at translateX(0px), clicks "Move Right" (one real
+  click), waits for the rAF tween to settle at translateX(80px), clicks
+  "Toggle Panel", waits for the panel height to grow past 30px. This proves the
+  hand-rolled rAF animator behaves exactly like motion's animate prop.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Framer Motion Core — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:260px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">Framer Motion Core &mdash; declarative animate, imperative rAF</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/FRAMER_MOTION_CORE.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/FRAMER_MOTION_CORE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Compare with <a href="./css_animations.html">css_animations</a>:
+    CSS transitions animate CSS properties — Framer Motion orchestrates them with React state.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">motion.div under the hood: the rAF tween loop</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        <code>&lt;motion.div animate=&#123;&#123; x: 80 &#125;&#125; /&gt;</code> looks like magic. It isn't.
+        Motion stores the animate target, watches for changes, and on each change kicks off a
+        <b class="text-[#e6edf3]">requestAnimationFrame</b> loop that writes
+        <code>el.style.transform</code> every frame — <b class="text-[#e6edf3]">bypassing React's render cycle entirely</b>.
+        React only re-renders when the <i>target</i> changes; the per-frame writes go straight to the DOM.
+        Below we rebuild that loop by hand: read current value → tween with <code>easeOut</code> → write to style.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>Framer Motion API</th><th>what it does</th><th>what we re-implement here</th></tr>
+        <tr>
+          <td><code>&lt;motion.div animate&gt;</code></td>
+          <td>declarative target; library diff-and-tween on prop change</td>
+          <td><code>useEffect([pos])</code> reads DOM, starts rAF loop</td>
+        </tr>
+        <tr>
+          <td><code>variants</code></td>
+          <td>named animation states (hidden / visible) switchable by label</td>
+          <td>a state value (<code>open</code>) selects the numeric target</td>
+        </tr>
+        <tr>
+          <td><code>whileHover</code> / <code>whileTap</code></td>
+          <td>gesture targets applied on enter, reverted on leave</td>
+          <td><code>onMouseEnter</code> / <code>onMouseLeave</code> set <code>style.transform</code></td>
+        </tr>
+        <tr>
+          <td><code>transition: &#123;duration, ease&#125;</code></td>
+          <td>timing of the tween between values</td>
+          <td><code>rafAnimate(from, to, 400, ...)</code> + <code>easeOutCubic</code></td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the motion core you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// easeOutCubic — Motion's default "easeOut" is a similar cubic curve.
+function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+// rafAnimate: the imperative core that Framer Motion wraps declaratively.
+// Reads `from` (current DOM value), tweens to `to` over `duration` ms, calls
+// `set(v)` every frame. This is exactly what a motion.div animate prop does internally.
+function rafAnimate(from, to, duration, set) {
+  var startTime = performance.now();
+  function frame(now) {
+    var t = Math.min((now - startTime) / duration, 1);
+    set(from + (to - from) * easeOut(t));
+    if (t &lt; 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+// === motion.div animate={{ x: pos }} — tween on state change ============
+function MotionBox() {
+  var posState = React.useState(0);
+  var pos = posState[0];
+  var setPos = posState[1];
+  var boxRef = React.useRef(null);
+
+  // This effect mirrors what motion does when the animate target changes:
+  // read current value from DOM, start a rAF tween to the new target.
+  React.useEffect(function () {
+    var el = boxRef.current;
+    if (!el) return;
+    var m = (el.style.transform || '').match(/-?\d+\.?\d*/);
+    var from = m ? parseFloat(m[0]) : 0;
+    rafAnimate(from, pos, 400, function (v) {
+      el.style.transform = 'translateX(' + v + 'px)';
+    });
+  }, [pos]);
+
+  return (
+    &lt;div className="p-4 mb-4 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] mb-2"&gt;
+        animate x — tween, 400ms easeOut (state-driven)
+      &lt;/div&gt;
+      &lt;div
+        data-testid="motionbox"
+        ref={boxRef}
+        style={{ transform: 'translateX(0px)', width: 64, height: 64 }}
+        className="bg-[#61dafb] rounded-lg"
+      /&gt;
+      &lt;div className="mt-3 flex gap-2"&gt;
+        &lt;button
+          data-testid="left"
+          className="px-3 py-1 bg-[#30363d] text-[#e6edf3] rounded text-xs"
+          onClick={function () { setPos(pos - 80); }}
+        &gt;
+          ◀ Move Left
+        &lt;/button&gt;
+        &lt;button
+          data-testid="right"
+          className="px-3 py-1 bg-[#61dafb] text-[#0d1117] rounded text-xs font-bold"
+          onClick={function () { setPos(pos + 80); }}
+        &gt;
+          Move Right ▶
+        &lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// === variants pattern: named states (closed ↔ open) select the target =====
+function CollapsePanel() {
+  var openState = React.useState(false);
+  var open = openState[0];
+  var setOpen = openState[1];
+  var panelRef = React.useRef(null);
+
+  React.useEffect(function () {
+    var el = panelRef.current;
+    if (!el) return;
+    var currentH = parseFloat(el.style.height || '0') || 0;
+    var targetH = open ? el.scrollHeight : 0;
+    if (currentH === targetH) return;
+    rafAnimate(currentH, targetH, 300, function (v) {
+      el.style.height = v + 'px';
+    });
+  }, [open]);
+
+  return (
+    &lt;div className="p-4 mb-4 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] mb-2"&gt;
+        variants-inspired: animate height between closed (0) and open (auto)
+      &lt;/div&gt;
+      &lt;button
+        data-testid="toggle"
+        className="px-3 py-1 bg-[#30363d] text-[#e6edf3] rounded text-xs"
+        onClick={function () { setOpen(!open); }}
+      &gt;
+        {open ? '▲ Close Panel' : '▼ Open Panel'}
+      &lt;/button&gt;
+      &lt;div
+        data-testid="panel"
+        ref={panelRef}
+        style={{ height: 0, overflow: 'hidden' }}
+        className="mt-2 bg-[#161b22] rounded border border-[#30363d]"
+      &gt;
+        &lt;div className="p-3 text-xs text-[#8b949e] leading-relaxed"&gt;
+          The same rAF loop now drives height. The open / closed labels are
+          the variants; the numeric target (0 or scrollHeight) is what gets tweened.
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  );
+}
+
+// === whileHover / whileTap — gesture-driven targets ======================
+function HoverButton() {
+  var btnRef = React.useRef(null);
+  return (
+    &lt;div className="p-4 bg-[#0d1117] rounded border border-[#30363d]"&gt;
+      &lt;div className="text-xs text-[#8b949e] mb-2"&gt;
+        whileHover — gesture target applied on enter, reverted on leave
+      &lt;/div&gt;
+      &lt;button
+        data-testid="hoverbtn"
+        ref={btnRef}
+        style={{ transform: 'scale(1)', transition: 'transform 0.15s ease-out' }}
+        className="px-4 py-2 bg-[#61dafb] text-[#0d1117] rounded font-bold text-sm"
+        onMouseEnter={function () { btnRef.current.style.transform = 'scale(1.15)'; }}
+        onMouseLeave={function () { btnRef.current.style.transform = 'scale(1)'; }}
+      &gt;
+        Hover me
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+function MotionDemo() {
+  return (
+    &lt;div className="max-w-xl mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-base font-bold text-[#61dafb] mb-3"&gt;Mini Motion — rAF from scratch&lt;/h2&gt;
+      &lt;MotionBox /&gt;
+      &lt;CollapsePanel /&gt;
+      &lt;HoverButton /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;MotionDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;MotionDemo/&gt;</code> becomes <code>React.createElement(MotionDemo)</code>.
+        Clicking a button bumps state → effect runs → <code>rafAnimate</code> starts the
+        rAF loop → <code>el.style</code> is mutated every frame, <b class="text-[#e6edf3]">never</b>
+        triggering a React re-render mid-animation.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the motion core, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click "Move Right" — the box tweens to <code>translateX(80px)</code> over 400ms via rAF.
+        Click "Open Panel" — height tweens from 0 to its content size. Hover the button — it
+        scales up. The <b class="text-[#e6edf3]">gold-check</b> runs this automatically: assert
+        box at 0 → click Move Right → wait for <code>translateX(80px)</code> → click Toggle →
+        wait for panel height to grow.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        box transform: <span id="pos-read" class="text-[#61dafb]">—</span>
+        · panel height: <span id="h-read" class="text-[#61dafb]">—</span>px
+        · gold: moveRight(0→80px) → toggle(open) → assert height grew
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">Motion API → our re-implementation</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>motion prop</th><th>library behaviour</th><th>by-hand equivalent</th></tr>
+        <tr>
+          <td><code>initial</code></td>
+          <td>first-frame values before enter animation</td>
+          <td>initial <code>style</code> on the element</td>
+        </tr>
+        <tr>
+          <td><code>animate</code></td>
+          <td>target to tween to; re-tweens on every change</td>
+          <td><code>useEffect([deps])</code> → <code>rafAnimate</code></td>
+        </tr>
+        <tr>
+          <td><code>exit</code></td>
+          <td>tween before unmount (needs <code>AnimatePresence</code>)</td>
+          <td>defer unmount: tween then call remove in <code>onComplete</code></td>
+        </tr>
+        <tr>
+          <td><code>transition &#123;type:'tween'&#125;</code></td>
+          <td>duration-based easing (the default)</td>
+          <td><code>rafAnimate(from, to, ms, set)</code> + easing fn</td>
+        </tr>
+        <tr>
+          <td><code>transition &#123;type:'spring'&#125;</code></td>
+          <td>physics-based (stiffness / damping), no fixed duration</td>
+          <td>rAF loop with velocity + spring force integration</td>
+        </tr>
+        <tr>
+          <td><code>variants</code></td>
+          <td>named states; children inherit the active label</td>
+          <td>state var picks the target object; pass label down as prop</td>
+        </tr>
+        <tr>
+          <td><code>whileHover / whileTap</code></td>
+          <td>gesture target stacked on top of <code>animate</code></td>
+          <td><code>onMouseEnter / Leave</code> set <code>style</code></td>
+        </tr>
+        <tr>
+          <td><code>layout</code> / <code>layoutId</code></td>
+          <td>FLIP: measure before/after, invert, play</td>
+          <td>measure bbox, set transform, rAF to identity</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var posRead     = document.getElementById("pos-read");
+      var hRead       = document.getElementById("h-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      // Proves the rAF animator works end-to-end:
+      //   1. box renders at translateX(0px)
+      //   2. click "Move Right" → wait for tween to settle at translateX(80px)
+      //   3. click "Toggle Panel" → wait for panel height to grow past 30px
+      var MAX_FRAMES = 120; // ~2s at 60fps — covers 400ms tween + slack
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for MotionDemo to render…");
+        waitForBox(0);
+      }
+
+      function waitForBox(frame) {
+        var box = root.querySelector('[data-testid="motionbox"]');
+        if (box) { assertInitial(box); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForBox(frame + 1); });
+          return;
+        }
+        failGoldCheck("MotionDemo did not render the box in time");
+      }
+
+      function assertInitial(box) {
+        readLive();
+        var t = box.style.transform || "";
+        if (t !== "translateX(0px)") {
+          failGoldCheck("box not at translateX(0px) initially, got: " + t);
+          return;
+        }
+        var right = root.querySelector('[data-testid="right"]');
+        if (!right) { failGoldCheck("Move Right button missing"); return; }
+        right.click();
+        waitForBoxMoved(0);
+      }
+
+      function waitForBoxMoved(frame) {
+        readLive();
+        var box = root.querySelector('[data-testid="motionbox"]');
+        if (!box) { failGoldCheck("box disappeared after click"); return; }
+        var t = box.style.transform || "";
+        if (t === "translateX(80px)") { togglePanel(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForBoxMoved(frame + 1); });
+          return;
+        }
+        failGoldCheck("box never reached translateX(80px), last: " + t);
+      }
+
+      function togglePanel() {
+        var toggle = root.querySelector('[data-testid="toggle"]');
+        if (!toggle) { failGoldCheck("Toggle button missing"); return; }
+        toggle.click();
+        waitForPanelOpen(0);
+      }
+
+      function waitForPanelOpen(frame) {
+        readLive();
+        var panel = root.querySelector('[data-testid="panel"]');
+        if (!panel) { failGoldCheck("panel disappeared after toggle"); return; }
+        var h = parseFloat(panel.style.height || "0") || 0;
+        if (h > 30) { passGoldCheck(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForPanelOpen(frame + 1); });
+          return;
+        }
+        failGoldCheck("panel never grew, last height: " + h + "px");
+      }
+
+      function readLive() {
+        var box = root.querySelector('[data-testid="motionbox"]');
+        var panel = root.querySelector('[data-testid="panel"]');
+        posRead.textContent = box ? (box.style.transform || "(none)") : "—";
+        hRead.textContent = panel ? (parseFloat(panel.style.height || "0") || 0) : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] moveRight(0→80px) → toggle(open): rAF animator OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

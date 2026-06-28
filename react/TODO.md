@@ -39,10 +39,10 @@
 
 ## Phase 5 — Animations (5)
 
-- [ ] 22 `css_animations` — CSS transitions in React: FLIP technique
-- [ ] 23 `view_transitions` — View Transitions API: crossfade, shared elements
-- [ ] 24 `framer_motion_core` — Framer Motion: motion components, gestures
-- [ ] 25 `spring_physics` — Spring physics: damping, stiffness, natural motion
+- [x] 22 `css_animations` — CSS transitions in React: FLIP technique
+- [x] 23 `view_transitions` — View Transitions API: crossfade, shared elements
+- [x] 24 `framer_motion_core` — Framer Motion: motion components, gestures
+- [x] 25 `spring_physics` — Spring physics: damping, stiffness, natural motion
 - [ ] 26 `animation_orchestration` — Variants, stagger, AnimatePresence exits
 
 ## Phase 6 — TanStack Router Deep Dive (10)

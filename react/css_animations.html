@@ -1,0 +1,538 @@
+<!doctype html>
+<!--
+  css_animations.html — Phase 5 animations bundle #1.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving CSS
+  animations in React end-to-end, built around the FLIP technique. Companion:
+  CSS_ANIMATIONS.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: React never animates anything itself — it mutates the DOM, and the
+  browser paints. CSS transitions handle the 90% case: toggle a class/style on a
+  state change and `transition: background .3s` smooths it. But when an element
+  CHANGES POSITION (a list reorders, a card expands), CSS transitions can't help
+  — `top`/`left` aren't transitioned by React's re-render, and the element just
+  snaps. FLIP (First-Last-Invert-Play) fixes this: measure the old position,
+  let React move the DOM, invert the move with a transform so it looks still,
+  then remove the transform with a transition. The browser animates a transform
+  (GPU-cheap) instead of layout (expensive). This is exactly what Framer Motion's
+  `layout` prop, react-flip-toolkit, and the View Transitions API do internally.
+
+  CDN setup (same React 19 ESM + Babel pattern as use_reducer.html):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, useLayoutEffect, useRef
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<App/>), the gold-check waits for
+  3 list items, asserts the first label is "Alpha", clicks the "move up" button on
+  item 2 (Beta), then asserts the new DOM order is [Beta, Alpha, Gamma] — proving
+  React reordered the keyed nodes and FLIP measured + inverted + played the move.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CSS Animations in React — FLIP Technique</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:320px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">CSS Animations in React &mdash; the FLIP technique</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/CSS_ANIMATIONS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/CSS_ANIMATIONS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="../frontend/foundations/box_model.html">frontend/foundations: box model</a>
+    — FLIP measures box positions; the box model is the foundation.
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">state-driven transitions → FLIP: animating position changes</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        React mutates the DOM; the browser paints. There is no animation layer in React
+        itself — you opt into smoothness with CSS. The simple case: toggle a class/style on
+        a state change and <code>transition: background .3s</code> fills the in-between
+        frames. But when an element <b class="text-[#e6edf3]">changes position</b> (a list
+        reorders, a card grows), CSS transitions are blind to it — React re-renders and the
+        box just snaps to its new slot. <b class="text-[#e6edf3]">FLIP</b> fixes that by
+        turning a position change into a <code>transform</code>, which the GPU animates cheaply.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>FLIP step</th><th>what you do</th><th>code</th></tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">F</b>irst</td>
+          <td>record the element's old box <i>before</i> the change</td>
+          <td><code>old = el.getBoundingClientRect()</code></td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">L</b>ast</td>
+          <td>let React move the DOM to its new position (state update + re-render)</td>
+          <td><code>setItems(reordered)</code></td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">I</b>nvert</td>
+          <td>compute <code>dy = old.top − new.top</code>; apply a transform so it <i>looks</i> unmoved</td>
+          <td><code>el.style.transform = 'translateY(' + dy + 'px)'</code></td>
+        </tr>
+        <tr>
+          <td><b class="text-[#e6edf3]">P</b>lay</td>
+          <td>drop the transform with a <code>transition</code> — the box glides to its real spot</td>
+          <td><code>transition: transform .3s; transform = ''</code></td>
+        </tr>
+      </table></div>
+      <p class="text-[#8b949e] text-[13px] mt-3 mb-0">
+        The measuring happens in <code>useLayoutEffect</code> (runs after DOM mutation,
+        <i>before paint</i>) so the user never sees the snap — only the smooth glide. This is
+        the engine inside Framer Motion's <code>layout</code> prop and the View Transitions API.
+      </p>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the animations you write (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">// ── Demo 1: simple STATE-DRIVEN CSS transition ───────────────────────
+// Toggle a style on state change; the CSS `transition` property fills the
+// in-between frames. This is the 90% case — no measuring, no transforms.
+function ThemeCard() {
+  var themeState = React.useState(true);
+  var dark = themeState[0];
+  var setDark = themeState[1];
+
+  return (
+    &lt;div
+      data-testid="theme-card"
+      onClick={function () { setDark(!dark); }}
+      style={{
+        background: dark ? '#0d1117' : '#f6f8fa',
+        color: dark ? '#e6edf3' : '#24292f',
+        border: '1px solid ' + (dark ? '#30363d' : '#d0d7de'),
+        transition: 'background 0.3s ease, color 0.3s ease, border-color 0.3s ease',
+        padding: '14px 16px',
+        borderRadius: '8px',
+        cursor: 'pointer',
+        textAlign: 'center',
+        fontWeight: '700',
+        margin: '0 auto 20px',
+        maxWidth: '320px'
+      }}
+    &gt;
+      {dark ? '🌙 Dark — click for light' : '☀️ Light — click for dark'}
+    &lt;/div&gt;
+  );
+}
+
+// ── Demo 2: FLIP — animate a POSITION change (reorder) ───────────────
+function FlipList() {
+  var state = React.useState([
+    { id: 1, text: 'Alpha' },
+    { id: 2, text: 'Beta' },
+    { id: 3, text: 'Gamma' }
+  ]);
+  var items = state[0];
+  var setItems = state[1];
+
+  // holds the last-known position (getBoundingClientRect) of each item, by id
+  var positionsRef = React.useRef({});
+
+  // FLIP engine — runs after EVERY render, BEFORE the browser paints.
+  React.useLayoutEffect(function () {
+    items.forEach(function (item) {
+      var el = document.querySelector('[data-item-id="' + item.id + '"]');
+      if (!el) return;
+
+      var oldRect = positionsRef.current[item.id];   // FIRST  (previous position)
+      var newRect = el.getBoundingClientRect();       // LAST   (position after re-render)
+
+      if (oldRect) {
+        var dy = oldRect.top - newRect.top;
+        if (dy !== 0) {
+          // INVERT: teleport the element back to where it used to be visually
+          el.style.transition = 'none';
+          el.style.transform = 'translateY(' + dy + 'px)';
+          el.offsetHeight; // force reflow — commit the inverted starting state
+          // PLAY: animate the transform away — the box glides to its new slot
+          requestAnimationFrame(function () {
+            el.style.transition = 'transform 0.3s ease';
+            el.style.transform = '';
+          });
+        }
+      }
+      // remember this position — it becomes FIRST for the next change
+      positionsRef.current[item.id] = newRect;
+    });
+  });
+
+  function moveUp(index) {
+    if (index === 0) return;
+    var next = items.slice();
+    var tmp = next[index - 1];
+    next[index - 1] = next[index];
+    next[index] = tmp;
+    setItems(next);
+  }
+
+  function moveDown(index) {
+    if (index === items.length - 1) return;
+    var next = items.slice();
+    var tmp = next[index + 1];
+    next[index + 1] = next[index];
+    next[index] = tmp;
+    setItems(next);
+  }
+
+  return (
+    &lt;ul
+      data-testid="list"
+      style={{ listStyle: 'none', padding: 0, margin: '0 auto', maxWidth: '320px' }}
+    &gt;
+      {items.map(function (item, index) {
+        return (
+          &lt;li
+            key={item.id}
+            data-testid="item"
+            data-item-id={item.id}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              padding: '12px 14px', marginBottom: '8px',
+              background: '#0d1117', border: '1px solid #30363d',
+              borderRadius: '8px', color: '#e6edf3'
+            }}
+          &gt;
+            &lt;span data-testid="item-label" style={{ flex: 1, fontWeight: 600 }}&gt;
+              {item.text}
+            &lt;/span&gt;
+            &lt;button
+              data-testid="move-up"
+              data-index={index}
+              disabled={index === 0}
+              onClick={function () { moveUp(index); }}
+              style={{
+                background: 'transparent', border: '1px solid #30363d', color: '#61dafb',
+                borderRadius: '5px', padding: '2px 8px', cursor: 'pointer', fontSize: '14px'
+              }}
+            &gt;↑&lt;/button&gt;
+            &lt;button
+              data-testid="move-down"
+              data-index={index}
+              disabled={index === items.length - 1}
+              onClick={function () { moveDown(index); }}
+              style={{
+                background: 'transparent', border: '1px solid #30363d', color: '#61dafb',
+                borderRadius: '5px', padding: '2px 8px', cursor: 'pointer', fontSize: '14px'
+              }}
+            &gt;↓&lt;/button&gt;
+          &lt;/li&gt;
+        );
+      })}
+    &lt;/ul&gt;
+  );
+}
+
+function App() {
+  return (
+    &lt;div style={{ maxWidth: '360px', margin: '0 auto' }}&gt;
+      &lt;ThemeCard /&gt;
+      &lt;FlipList /&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;App /&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;App/&gt;</code> becomes <code>React.createElement(App)</code>. Each
+        <code>setItems()</code> re-renders; <code>useLayoutEffect</code> then measures every
+        keyed <code>&lt;li&gt;</code> and runs First → Last → Invert → Play before paint.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (FLIP, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click the card to toggle a smooth color transition. Click ↑/↓ to reorder the list —
+        each item glides to its new slot instead of snapping. The <b class="text-[#e6edf3]">gold-check</b>
+        clicks ↑ on Beta automatically and asserts the DOM order becomes [Beta, Alpha, Gamma].
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        order: <span id="order-read" class="text-[#61dafb]">—</span>
+        · gold: 3 items, Alpha first → move-up Beta → [Beta, Alpha, Gamma]
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → animation pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>color / size / opacity change</td>
+          <td><code>style={{transition:'.3s'}} + toggle className on state</code></td>
+          <td>state-driven — no measuring needed; browser fills frames</td>
+        </tr>
+        <tr>
+          <td>element moves / reorders</td>
+          <td><b>FLIP</b> in <code>useLayoutEffect</code> (measure → invert → play)</td>
+          <td>React re-render snaps; FLIP turns the move into an animated transform</td>
+        </tr>
+        <tr>
+          <td>mount / unmount animation</td>
+          <td>defer removal: keep node, add exit class, remove on <code>transitionend</code></td>
+          <td>React unmounts instantly — you must delay it to animate out</td>
+        </tr>
+        <tr>
+          <td>shared-element / crossfade</td>
+          <td>native <code>document.startViewTransition()</code> (see view_transitions)</td>
+          <td>browser does FLIP for you across the whole page</td>
+        </tr>
+        <tr>
+          <td>physics / gestures / drag</td>
+          <td>Framer Motion <code>motion</code> + <code>layout</code> prop</td>
+          <td>library wraps FLIP + spring physics + AnimatePresence exits</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var orderRead   = document.getElementById("order-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for FlipList to render…");
+        waitForItems(0);
+      }
+
+      // read the ordered list of item labels from the rendered DOM
+      function getLabels() {
+        var nodes = root.querySelectorAll('[data-testid="item"]');
+        var labels = [];
+        for (var i = 0; i < nodes.length; i++) {
+          var label = nodes[i].querySelector('[data-testid="item-label"]');
+          labels.push(label ? (label.textContent || "").trim() : "");
+        }
+        return labels;
+      }
+
+      function waitForItems(frame) {
+        var items = root.querySelectorAll('[data-testid="item"]');
+        if (items.length === 3) { assertInitial(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForItems(frame + 1); });
+          return;
+        }
+        failGoldCheck("FlipList did not render 3 items in time");
+      }
+
+      // Step 1: assert 3 items rendered and Alpha is first
+      function assertInitial() {
+        readLive();
+        var labels = getLabels();
+        if (labels.length === 3 && labels[0] === "Alpha") {
+          clickMoveUpBeta();
+        } else {
+          failGoldCheck("expected 3 items with Alpha first, got [" + labels.join(", ") + "]");
+        }
+      }
+
+      // Step 2: click "move up" on Beta (initial index 1) → should become first
+      function clickMoveUpBeta() {
+        var btn = root.querySelector('[data-testid="move-up"][data-index="1"]');
+        if (!btn) { failGoldCheck("move-up button for index 1 not found"); return; }
+        btn.click();
+        pollReordered(0);
+      }
+
+      // Step 3: assert new order is [Beta, Alpha, Gamma]
+      function pollReordered(frame) {
+        readLive();
+        var labels = getLabels();
+        if (labels.length === 3 && labels[0] === "Beta" && labels[1] === "Alpha" && labels[2] === "Gamma") {
+          readLive();
+          passGoldCheck();
+          return;
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { pollReordered(frame + 1); });
+          return;
+        }
+        failGoldCheck("after move-up: expected [Beta, Alpha, Gamma], got [" + labels.join(", ") + "]");
+      }
+
+      function readLive() {
+        var labels = getLabels();
+        orderRead.textContent = labels.length ? labels.join(" → ") : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] 3 items, Alpha first → move-up Beta → [Beta, Alpha, Gamma]. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,445 @@
+<!doctype html>
+<!--
+  view_transitions.html — Phase 5 animations bundle #2.
+  GROUND TRUTH: a single-file React 19 + Tailwind v4 playground proving the
+  View Transitions API end-to-end inside a React render. Companion: VIEW_TRANSITIONS.md.
+
+  The lesson: document.startViewTransition(cb) is a browser API that snapshots
+  the current DOM, runs your callback (where React's setState re-renders), then
+  crossfades the old screenshot into the new live DOM. You get a smooth visual
+  transition for free — no JS animation library, no manual FLIP math. Wrap a
+  state update, get a crossfade. Tag an element with view-transition-name and
+  the browser morphs it between the old and new positions (a hero animation).
+
+  CDN setup (same React 19 ESM + Babel pattern as react/use_reducer):
+    1. @tailwindcss/browser@4 (jsDelivr)         — Tailwind v4 Play CDN
+    2. React 19.2.7 (esm.sh, ?dev)                — runtime: useState, createElement
+    3. react-dom@19.2.7/client (esm.sh)           — createRoot
+    4. Babel Standalone 8.0.3 (jsDelivr)           — compiles JSX → React.createElement
+
+  JSX lives in a <textarea>, NOT a script element. This keeps `node --check` green.
+  Babel.transform(code, {presets:[["react",{runtime:'classic'}]]}) compiles at runtime.
+
+  GOLD VALUE: after compile + createRoot().render(<ViewTransitionDemo/>), the
+  gold-check waits for the list view (3 items), clicks "item-2", asserts the
+  detail view shows "Item 2", clicks "Back", and asserts the list view returns.
+  This proves the state update wrapped in startViewTransition commits to the DOM
+  on every navigation — i.e. the View Transition callback drives React correctly.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>View Transitions API — React Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <!-- Babel Standalone — compiles JSX → React.createElement -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@8.0.3/babel.min.js"></script>
+
+  <!-- Minimal chrome styles that Tailwind utilities can't express -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#61dafb; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; max-width:760px;
+      font-size:13px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s,color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(97,218,251,.5);
+      background:rgba(97,218,251,.10); }
+    .badge.md:hover { color:#0d1117; border-color:var(--accent);
+      background:rgba(97,218,251,.22); }
+    .guide-callout { margin:0 26px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(97,218,251,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    .codearea { width:100%; min-height:280px; background:#010409; border:1px solid var(--line);
+      border-radius:6px; color:var(--ink);
+      font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      padding:12px; white-space:pre; overflow:auto; resize:vertical; tab-size:2; }
+    .codearea:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word;
+      margin-top:8px; overflow-x:auto; }
+    #root:empty::before { content:"(waiting for React to render…)"; color:var(--muted);
+      font-size:13px; }
+    .err { color:var(--bad); font-size:12.5px; white-space:pre-wrap; margin-top:8px; min-height:1em; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    code { background:rgba(97,218,251,.14); color:var(--accent); padding:1px 5px;
+      border-radius:4px; font-size:12.5px; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700;
+      margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+
+    /* ---- View Transition pseudo-elements (the whole point of this demo) ----
+       The browser creates ::view-transition-old(root) (snapshot of old DOM) and
+       ::view-transition-new(root) (live new DOM) and crossfades them by default.
+       Overriding the animation lets us customise the fade. The keyframes make the
+       crossfade explicit (0.25s) so the demo reads as a deliberate transition.
+       These only animate in browsers that ship document.startViewTransition
+       (Chrome 111+, Safari 18+, Firefox 144+). Elsewhere they are inert. */
+    @keyframes vt-fade-out { from { opacity: 1; } to { opacity: 0; } }
+    @keyframes vt-fade-in  { from { opacity: 0; } to { opacity: 1; } }
+    ::view-transition-old(root) { animation: vt-fade-out 0.25s ease forwards; }
+    ::view-transition-new(root) { animation: vt-fade-in  0.25s ease forwards; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-6 py-3 border-b border-[#30363d] flex-wrap">
+    <h1 class="text-base font-bold text-[#61dafb] m-0">View Transitions API &mdash; crossfade between DOM states</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="ml-auto text-sm flex items-center gap-4">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/react/VIEW_TRANSITIONS.md">📖 guide (.md)</a>
+      <a href="./index.html" class="text-[#8b949e] no-underline hover:text-[#e6edf3]">← react deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live React playground with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/react/VIEW_TRANSITIONS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ <a href="../frontend/astro/astro_view_transitions.html">Astro uses the same API for page transitions</a>
+    — here it is in pure React (same <code>document.startViewTransition</code>, one component instead of one route).
+  </div>
+
+  <main class="p-6 max-w-[1000px] mx-auto">
+
+    <!-- Panel 1: Concept -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">setState → startViewTransition(setState): the wrap</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0 leading-relaxed">
+        <code>document.startViewTransition(cb)</code> is a <b class="text-[#e6edf3]">browser</b> API, not a React one.
+        You hand it a callback that changes the DOM. In React that callback holds a <code>setState</code> —
+        React re-renders inside the transition. The browser then <b class="text-[#e6edf3]">screenshots the old DOM →
+        lets React paint the new DOM → crossfades old screenshot into new DOM</b>. One wrap, free animation.
+        Tag any element with <code>view-transition-name: hero</code> and the browser morphs that element between
+        its old and new position/size — a shared-element (hero) transition, no FLIP math.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>piece</th><th>role</th><th>analogy</th></tr>
+        <tr>
+          <td><code>startViewTransition(cb)</code></td>
+          <td>browser method: snapshot → run cb → crossfade</td>
+          <td>the film director — yells "freeze old frame", shoots the new scene, dissolves between them</td>
+        </tr>
+        <tr>
+          <td>the callback</td>
+          <td>sync function that updates the DOM (in React: holds your <code>setState</code>)</td>
+          <td>the scene change — what actually moves between the two frames</td>
+        </tr>
+        <tr>
+          <td><code>::view-transition-old/new</code></td>
+          <td>pseudo-elements the browser generates; you animate them in CSS</td>
+          <td>the two film frames being dissolved</td>
+        </tr>
+        <tr>
+          <td><code>view-transition-name</code></td>
+          <td>CSS prop that tags one element for a shared (hero) morph</td>
+          <td>the match-cut — one object tracked across the cut</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Editable JSX -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">1 · the transition you wrap (edit me)</h2>
+      <textarea id="jsx-source" class="codearea" spellcheck="false">function ViewTransitionDemo() {
+  var view = React.useState('list')[0];
+  var setView = React.useState('list')[1];
+  var selected = React.useState(null)[0];
+  var setSelected = React.useState(null)[1];
+
+  // Wrap a state update in startViewTransition. Feature-detect first:
+  // browsers without the API (or older Firefox) fall back to a plain setState.
+  function navigateTo(newView) {
+    if (document.startViewTransition) {
+      document.startViewTransition(function () {
+        setView(newView); // React re-renders INSIDE the transition callback
+      });
+    } else {
+      setView(newView);
+    }
+  }
+
+  if (view === 'list') {
+    return (
+      &lt;div data-testid="list-view" className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+        &lt;h2 className="text-lg font-bold text-[#61dafb] mb-3"&gt;Pick an item&lt;/h2&gt;
+        {[1, 2, 3].map(function (i) {
+          return (
+            &lt;button
+              key={i}
+              data-testid={"item-" + i}
+              onClick={function () { setSelected(i); navigateTo('detail'); }}
+              className="block w-full p-3 mb-2 bg-[#0d1117] rounded border border-[#30363d] text-left text-[#e6edf3] hover:border-[#61dafb]"
+            &gt;
+              Item {i}
+            &lt;/button&gt;
+          );
+        })}
+      &lt;/div&gt;
+    );
+  }
+
+  return (
+    &lt;div data-testid="detail-view" className="max-w-sm mx-auto p-5 bg-[#161b22] rounded-xl border border-[#30363d]"&gt;
+      &lt;h2 className="text-lg font-bold text-[#61dafb]"&gt;Detail: Item {selected}&lt;/h2&gt;
+      &lt;p className="text-[#8b949e] text-sm mt-1"&gt;You navigated here inside a startViewTransition callback.&lt;/p&gt;
+      &lt;button
+        data-testid="back"
+        onClick={function () { navigateTo('list'); }}
+        className="mt-3 px-3 py-1 bg-[#61dafb] text-[#0d1117] rounded font-bold text-xs hover:opacity-80"
+      &gt;
+        ← Back to list
+      &lt;/button&gt;
+    &lt;/div&gt;
+  );
+}
+
+createRoot(document.getElementById('root')).render(&lt;ViewTransitionDemo/&gt;);</textarea>
+      <div>
+        <button class="pillbtn" id="run">compile &amp; render</button>
+        <button class="pillbtn alt" id="reset">reset JSX</button>
+      </div>
+      <div id="err" class="err"></div>
+    </section>
+
+    <!-- Panel 3: Compiled output -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">2 · Babel compiles JSX → element tree</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        <code>&lt;ViewTransitionDemo/&gt;</code> becomes <code>React.createElement(ViewTransitionDemo)</code>.
+        Clicking an item runs <code>navigateTo</code>, which calls <code>document.startViewTransition</code> with
+        <code>setView</code> inside. React commits the new view; the browser crossfades.
+      </p>
+      <pre class="src" id="compiled-out"><span style="color:#8b949e">// (hit "compile &amp; render" to see Babel's output)</span></pre>
+    </section>
+
+    <!-- Panel 4: Live demo -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">3 · live React (the transition, proven)</h2>
+      <p class="text-[#8b949e] text-[13px] mt-0">
+        Click an item — the list <b class="text-[#e6edf3]">crossfades</b> into the detail view (in Chrome/Safari/Firefox 144+),
+        then click <b class="text-[#e6edf3]">Back</b> to crossfade back. The <b class="text-[#e6edf3]">gold-check</b>
+        drives this automatically: wait for 3 items → click item-2 → assert detail shows "Item 2" → click back → assert list returns.
+      </p>
+      <div class="border border-dashed border-[#61dafb] p-5 rounded-lg bg-[#0b0f14]">
+        <div id="root"></div>
+      </div>
+      <p class="text-[#8b949e] text-xs mt-2">
+        current view: <span id="count-read" class="text-[#61dafb]">—</span>
+        · gold: list(3) → item-2 → detail("Item 2") → back → list(3)
+      </p>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="bg-[#161b22] border border-[#30363d] rounded-lg p-5 mb-4">
+      <h2 class="text-sm text-[#61dafb] m-0 mb-2 uppercase tracking-wide">intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>crossfade a state change</td>
+          <td><code>document.startViewTransition(() =&gt; setX(v))</code></td>
+          <td>one wrap = free default crossfade, no animation lib</td>
+        </tr>
+        <tr>
+          <td>feature-detect</td>
+          <td><code>if (document.startViewTransition) {…} else setX(v)</code></td>
+          <td>Firefox &lt;144 / old browsers: fall back to plain setState</td>
+        </tr>
+        <tr>
+          <td>hero / shared element</td>
+          <td><code>style={{viewTransitionName:'hero'}}</code> on both views</td>
+          <td>browser morphs the named element old → new position/size</td>
+        </tr>
+        <tr>
+          <td>customise the fade</td>
+          <td><code>::view-transition-old(root){…}</code> + <code>::view-transition-new(root){…}</code></td>
+          <td>override the default crossfade with your own keyframes</td>
+        </tr>
+        <tr>
+          <td>SPA route change</td>
+          <td>wrap the router's <code>navigate()</code> in <code>startViewTransition</code></td>
+          <td>page-to-page crossfade without a full reload</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  LOADER + RUNNER + GOLD-CHECK  (valid classic JS — passes node --check)
+    //  JSX is never in a script element; it is read from #jsx-source textarea.
+    // ======================================================================
+    (function () {
+      var jsxBox      = document.getElementById("jsx-source");
+      var compiledOut = document.getElementById("compiled-out");
+      var root        = document.getElementById("root");
+      var errBox      = document.getElementById("err");
+      var runBtn      = document.getElementById("run");
+      var resetBtn    = document.getElementById("reset");
+      var badge       = document.getElementById("goldcheck");
+      var countRead   = document.getElementById("count-read");
+      var INITIAL_JSX = jsxBox.value;
+
+      // ---- 1. load React 19 ESM (no UMD in React 19) ----
+      badge.textContent = "[check] loading React 19 from esm.sh…";
+      badge.style.color = "var(--muted)";
+      badge.style.background = "rgba(139,148,158,.08)";
+
+      var ready = Promise.all([
+        import("https://esm.sh/react@19.2.7?dev"),
+        import("https://esm.sh/react-dom@19.2.7/client?dev")
+      ]).then(function (mods) {
+        window.React = mods[0].default;
+        window.createRoot = mods[1].createRoot;
+        return true;
+      });
+
+      function waitForBabel() {
+        return new Promise(function (resolve) {
+          (function poll() {
+            if (window.Babel && typeof window.Babel.transform === "function") resolve();
+            else setTimeout(poll, 30);
+          })();
+        });
+      }
+
+      // ---- 2. compile JSX from textarea and run ----
+      function compileAndRender() {
+        errBox.textContent = "";
+        var src = jsxBox.value;
+        try {
+          root.replaceChildren();
+          var out = window.Babel.transform(src, {
+            presets: [["react", { runtime: "classic" }]]
+          });
+          compiledOut.textContent = out.code;
+          (0, eval)(out.code);
+          runGoldCheck();
+        } catch (e) {
+          compiledOut.textContent = "";
+          errBox.textContent = String(e && e.message ? e.message : e);
+          failGoldCheck("JSX compile/render error");
+        }
+      }
+
+      // ---- 3. GOLD-CHECK ----
+      var MAX_FRAMES = 200;
+
+      function runGoldCheck() {
+        waitingGoldCheck("[check] waiting for React to render the list view…");
+        waitForListView(0);
+      }
+
+      // Step 1: list view visible with 3 items
+      function waitForListView(frame) {
+        readLive();
+        var list = root.querySelector('[data-testid="list-view"]');
+        var items = root.querySelectorAll('[data-testid^="item-"]');
+        if (list && items.length === 3) { clickItem2(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForListView(frame + 1); });
+          return;
+        }
+        failGoldCheck("list view with 3 items never appeared");
+      }
+
+      // Step 2: click "item-2" → assert detail view shows "Item 2"
+      function clickItem2() {
+        waitingGoldCheck("[check] clicked item-2, waiting for detail view…");
+        var btn = root.querySelector('[data-testid="item-2"]');
+        if (!btn) { failGoldCheck("item-2 button not found"); return; }
+        btn.click();
+        waitForDetailView(0);
+      }
+
+      function waitForDetailView(frame) {
+        readLive();
+        var detail = root.querySelector('[data-testid="detail-view"]');
+        if (detail && /Item 2/.test(detail.textContent)) { clickBack(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForDetailView(frame + 1); });
+          return;
+        }
+        failGoldCheck("detail view did not show 'Item 2' after click");
+      }
+
+      // Step 3: click "Back" → assert list view returns
+      function clickBack() {
+        waitingGoldCheck("[check] clicked back, waiting for list view to return…");
+        var back = root.querySelector('[data-testid="back"]');
+        if (!back) { failGoldCheck("back button not found"); return; }
+        back.click();
+        waitForListReturn(0);
+      }
+
+      function waitForListReturn(frame) {
+        readLive();
+        var list = root.querySelector('[data-testid="list-view"]');
+        var items = root.querySelectorAll('[data-testid^="item-"]');
+        if (list && items.length === 3) { passGoldCheck(); return; }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { waitForListReturn(frame + 1); });
+          return;
+        }
+        failGoldCheck("list view did not return after back");
+      }
+
+      function readLive() {
+        var list = root.querySelector('[data-testid="list-view"]');
+        var detail = root.querySelector('[data-testid="detail-view"]');
+        countRead.textContent = list ? ("list (" + root.querySelectorAll('[data-testid^="item-"]').length + " items)")
+                            : detail ? "detail" : "—";
+      }
+
+      function passGoldCheck() {
+        readLive();
+        badge.textContent = "[check] list→item-2→detail→back→list: navigation works. OK";
+        badge.style.color = "var(--ok)";
+        badge.style.background = "rgba(46,204,113,.08)";
+      }
+      function waitingGoldCheck(msg) {
+        badge.textContent = msg;
+        badge.style.color = "var(--muted)";
+        badge.style.background = "rgba(139,148,158,.08)";
+      }
+      function failGoldCheck(reason) {
+        readLive();
+        badge.textContent = "[check] " + reason + ": FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+      }
+
+      // ---- wire up ----
+      runBtn.addEventListener("click", compileAndRender);
+      resetBtn.addEventListener("click", function () {
+        jsxBox.value = INITIAL_JSX;
+        compileAndRender();
+      });
+
+      setInterval(readLive, 250);
+
+      // ---- boot ----
+      Promise.all([ready, waitForBabel()])
+        .then(compileAndRender)
+        .catch(function (e) {
+          errBox.textContent = "CDN load failed: " + String(e && e.message ? e.message : e);
+          failGoldCheck("React/Babel CDN did not load");
+        });
+    })();
+  </script>
+</body>
+</html>

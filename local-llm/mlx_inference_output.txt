@@ -1,0 +1,205 @@
+mlx_inference.py -- every value below is computed by this file.
+
+======================================================================
+SECTION A: unified memory -- CPU and GPU share ONE physical RAM pool
+======================================================================
+On Apple Silicon the CPU and GPU address the SAME physical RAM. An MLX
+array lives in that shared pool; you do NOT move it to a device. Instead
+you pick the device at OP time via `stream=`. So a GPU matmul and a CPU
+byte-read of element 0 hit the SAME bytes -- zero copy, either direction.
+
+  a = mx.array([1.0, 2.0, 3.0, 4.0])  -> lives in shared pool at offset 0
+  GPU op: mx.matmul(a, W, stream=mx.gpu)   reads shared pool -> 16 B, copied = 0
+  CPU op: print(a[0])                      reads shared pool -> 4 B, copied = 0
+[check] MLX unified memory: GPU then CPU read cost ZERO copy bytes: OK
+
+  PyTorch MPS contrast (same 16 B array, on the SAME hardware):
+    .to('mps') copies CPU -> GPU : 16 B
+    .to('cpu') copies GPU -> CPU : 16 B
+    total explicit copies        : 32 B   (vs MLX 0 B)
+
+  project: 2.0 GB activation, CPU<->GPU round-trip, 32 layers
+    MLX   copies = 0.0 GB   (unified memory, arrays stay put)
+    Torch copies = 128 GB (2 x 2.0 x 32 layers)
+    saved        = 128 GB
+[check] MLX avoids 100% of the CPU<->GPU activation copies: OK
+[check] PyTorch MPS copies 2 * act * layers: OK
+
+  --> Unified memory is the foundation. The GPU never waits on a DMA
+      transfer, and the CPU never waits on a readback. Every other MLX
+      advantage (lazy eval, fusion) rides on top of this.
+
+======================================================================
+SECTION B: lazy evaluation -- ops build a graph; nothing runs until eval()
+======================================================================
+MLX ops are LAZY. `a = mx.array([1,2,3,4])`, `b = a * 2`, `c = b + 5`
+constructs a graph of three nodes. Until you call mx.eval(c) (or print
+it), NOTHING is computed: b and c hold no value. This is what lets the
+compiler see the whole chain and fuse it (Section C).
+
+  a = mx.array([1,2,3,4])               -> MXArray#1(const,materialised=[1.0, 2.0, 3.0, 4.0])
+  b = a * 2                             -> MXArray#2(mul(*2),LAZY)   (NOT computed yet)
+  c = b + 5                             -> MXArray#3(add(+5),LAZY)   (NOT computed yet)
+[check] b is lazy (no value) before eval: OK
+[check] c is lazy (no value) before eval: OK
+
+  mx.eval(c)  ->  graph executes, 2 node(s) computed
+  c materialised = [7.0, 9.0, 11.0, 13.0]
+[check] after eval, c == [7.0, 9.0, 11.0, 13.0]: OK
+[check] eval computed the 2 non-leaf nodes (b, c): OK
+
+  graph topology before eval (rebuild):
+    id  op          state
+    1   const       leaf/const
+    2   mul(*2)     lazy
+    3   add(+5)     lazy
+
+  --> The graph is a recipe. eval() bakes it (and, with fusion, folds
+      the recipe into the fewest possible kernels first).
+
+======================================================================
+SECTION C: op fusion -- K elementwise ops -> 1 Metal kernel, K-fold less I/O
+======================================================================
+This is the payoff. A chain of K consecutive elementwise ops (mul, add,
+norm, activation...) run EAGERLY = K separate Metal kernel dispatches,
+each reading its input array from main memory and writing its output
+array back. MLX's compiler FUSES the chain into ONE kernel that reads
+the input once and writes the output once; every intermediate stays in
+GPU registers and never touches main memory.
+
+  array size N = 4 elements x 4 B = 16 B/transfer
+  chain c = (a * 2 + 5) * 3   ->   K = 3 elementwise ops (mul, add, mul)
+
+  mode              kernels   reads   writes  transfers  bytes
+  WITHOUT fusion    3         3       3       6          96
+  WITH fusion       1         1       1       2          32
+
+  bandwidth reduction = 6 transfers / 2 transfers = 3.0x less
+[check] K=3 eager = 3 reads + 3 writes = 6 transfers: OK
+[check] K=3 fused = 1 read + 1 write = 2 transfers: OK
+[check] K=3 fusion = 3x less bandwidth (6 -> 2): OK
+
+  fusion ratio across chain length K (ratio == K):
+    K   eager transfers   fused transfers   ratio
+    1   2                 2                 1.0x
+    2   4                 2                 2.0x
+    3   6                 2                 3.0x
+    4   8                 2                 4.0x
+    5   10                2                 5.0x
+    8   16                2                 8.0x
+[check] fusion ratio always equals K (2K -> 2): OK
+
+  the 2-op sub-case  c = (a*2)+5  (the chain the HTML builds):
+    eager = 4 transfers, fused = 2 transfers -> 2.0x
+[check] K=2 (a*2)+5 = 4 -> 2 = 2x: OK
+
+  project: per-token elementwise bookkeeping for a transformer block
+           (RMSnorm x2 + residual adds + SiLU activation ~ 8 fused-able ops)
+    weights read/token           = 2.00 GB (unavoidable)
+    elementwise eager (8 ops)    = 0.40 GB  (8 reads + 8 writes of 0.05 GB)
+    elementwise fused (1 kernel) = 0.05 GB   (1 read + 1 write)
+    total bytes/token  eager     = 2.40 GB
+    total bytes/token  fused     = 2.05 GB
+    bandwidth saved/token        = 0.35 GB (15%)
+[check] fusion cuts elementwise traffic from 8x to 1x: OK
+
+  --> Decode is bandwidth-bound, so every byte of intermediate traffic
+      you delete is bandwidth freed for reading weights. Fusion is not a
+      micro-optimisation -- it is why MLX decodes fast.
+
+======================================================================
+SECTION D: functional transforms -- value_and_grad, vmap, compile (stackable)
+======================================================================
+MLX borrows JAX's functional-transforms model. Transformations are
+HIGHER-ORDER FUNCTIONS: they take a function and return a function.
+Because they are pure and composable, you can stack grad(vmap(compile(fn))).
+
+  mx.value_and_grad(square)(x=3.0)  ->  value = 9.0, grad = 6.0
+[check] value_and_grad(x=3) for x^2 -> (9.0, 6.0): OK
+
+  vmap(square)([1,2,3,4])      ->  values  = [1.0, 4.0, 9.0, 16.0]
+  vmap(grad)([1,2,3,4])        ->  grads   = [2.0, 4.0, 6.0, 8.0]
+[check] vmap(square) over [1,2,3,4] -> [1,4,9,16]: OK
+
+  mx.compile(square)(3.0)             ->  9.0   (graph traced, fused, cached)
+  cache keys after first call          ->  ['square']
+[check] compile caches the traced+fused graph: OK
+
+  composed = vmap(grad(compile(square)))  ->  [2.0, 4.0, 6.0, 8.0]
+  (PyTorch can't do this: backward is a separate imperative pass,
+   not a transform you can stack with vmap/compile.)
+[check] composed grad over [1,2,3,4] -> [2,4,6,8]: OK
+
+  --> grad + vmap + compile are Lego bricks. Stack them in any order;
+      MLX traces the composed graph once and fuses the whole thing.
+
+======================================================================
+SECTION E: performance model -- decode is bandwidth-bound; MLX spends less
+======================================================================
+Generating one token (decode) is BANDWIDTH-BOUND: the engine must read
+essentially the whole model's weights once per token. The faster you
+saturate the unified-memory bandwidth with WEIGHT reads (not intermediate
+traffic / not CPU<->GPU copies), the more tokens/sec you get. MLX's three
+edges -- zero-copy, fusion, compiled Metal kernels -- all push toward the
+bandwidth roofline. Reported: MLX is ~2-3x faster than llama.cpp for decode
+on Apple Silicon (Ollama 0.19+ defaulted to MLX for this reason).
+
+  model: 4B params @ 4-bit   ->  ~2.0 GB weights read per token
+  M2 Max unified-memory BW   = 400 GB/s
+  roofline tokens/sec        = 400 / 2.0 = 200 tok/s
+
+  engine        eff vs roof   tok/s     reason it loses efficiency
+  MLX           65            130       no copy + fusion + compiled kernels
+  llama.cpp     45            90        Metal backend bolted onto a CPU-RAM design
+
+  modelled decode speedup (MLX / llama.cpp) = 1.4x  (order-of-magnitude; reported 2-3x)
+[check] MLX modelled faster than llama.cpp: OK
+[check] roofline = 400 / 2 = 200 tok/s: OK
+
+  where MLX's bandwidth advantage comes from:
+    1. zero CPU<->GPU copy    -> 0 B transferred per layer (unified memory)
+    2. op fusion              -> elementwise traffic cut K-fold (Section C)
+    3. compiled Metal kernels -> one dispatch per fused subgraph
+    (llama.cpp's Metal backend works well but inherits a design from a
+     split CPU-RAM/GPU-VRAM world; it copies more, fuses less.)
+
+  --> The 2-3x is not a single trick. It is the compound effect of three
+      architectural choices that all happen to help a bandwidth-bound workload.
+
+======================================================================
+SECTION F: mlx-lm + QuantizedLinear -- run a model in two commands
+======================================================================
+mlx-lm is the high-level CLI / library for LLMs on top of MLX. It loads
+models from HuggingFace (mlx-community/Llama-3.2-3B-Instruct-4bit), runs
+them with the fused/compiled path above, and ships QuantizedLinear for
+2/4/8-bit group quantization (conceptually the same as GGUF's block quants,
+but stored in MLX's native format and run by MLX's own Metal kernels).
+
+  install + generate:
+    pip install mlx-lm
+    mlx_lm.generate --model mlx-community/Llama-3.2-3B-Instruct-4bit \
+                      --prompt 'Hello' --max-tokens 32
+
+  quantize a model to 4-bit group quant (mlx_lm.convert):
+    mlx_lm.convert --hf-path meta-llama/Llama-3.2-3B-Instruct -q --q-bits 4
+
+  group quantization model (group = 32 weights):
+    fp32 block        = 32 x 4 B         = 128 B
+    4-bit block       = 2 B scale + 16 B packed = 18 B
+    compression ratio = 128 / 18 = 7.1x  (~8x counting only weights)
+[check] 4-bit group quant block = 2 + 16 = 18 B: OK
+[check] 4-bit block ~7.1x smaller than fp32 block: OK
+
+  bit-width options (mlx.nn.QuantizedLinear):
+    bits  scale B   packed B  ratio vs fp32
+    2     2         10        12.8x
+    4     2         18        7.1x
+    8     2         34        3.8x
+
+  --> mlx-lm makes MLX usable from the command line. The quantized weights
+      are dequantized on the fly inside the FUSED Metal kernel -- there is no
+      separate dequant pass, so quantization costs almost no extra bandwidth.
+
+======================================================================
+SECTION DONE -- all sections printed
+======================================================================

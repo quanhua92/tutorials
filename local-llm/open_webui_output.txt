@@ -1,0 +1,212 @@
+open_webui.py - reference impl. All numbers below feed OPEN_WEBUI.md.
+pure Python stdlib (no torch, no numpy, no sentence-transformers).
+Simulates the Open WebUI RAG pipeline: chunk -> embed -> search -> rerank -> inject.
+
+========================================================================
+  SECTION A: what Open WebUI is (frontend, not a model runner)
+========================================================================
+Open WebUI is a SELF-HOSTED WEB FRONTEND. It does not run models; it
+connects to backends and adds RAG, tools, multi-user RBAC on top.
+
+Backends it connects to (docs.openwebui.com/features):
+| backend         | local/remote | endpoint                       | serves                  |
+|-----------------|--------------|--------------------------------|-------------------------|
+| Ollama          | local        | http://localhost:11434         | any GGUF model via /api/chat |
+| OpenAI API      | remote       | https://api.openai.com         | GPT-4o, o-series        |
+| Anthropic       | remote       | https://api.anthropic.com      | Claude (via OpenAI-compat endpoint) |
+| OpenAI-compat   | either       | <any base_url>                 | vLLM, LM Studio, llama.cpp server, Together, Groq, ... |
+
+The flagship feature set:
+  * Multi-model chat   - talk to any model, switch mid-chat, run two side-by-side
+  * RAG / Knowledge    - upload docs -> chunk -> embed -> vector search -> inject
+  * Hybrid search      - BM25 (keyword) + vector (semantic) + cross-encoder rerank
+  * 9 vector DBs       - ChromaDB, PGVector, Qdrant, Milvus, Elasticsearch, ...
+  * MCP                - Model Context Protocol: external tools the model can call
+  * Pipelines          - modular plugins that filter / transform / route messages
+  * Multi-user RBAC    - roles, groups, per-model access, SSO/OIDC/LDAP, SCIM
+  * Open Terminal      - AI writes + executes Python in a real environment
+
+Deploy:
+  pip install open-webui && open-webui serve   # one command
+  docker run -d -p 3000:8080 ... ghcr.io/open-webui/open-webui:main
+[check] Open WebUI is a FRONTEND (does not run models itself): True -> OK
+[check] connects to Ollama + any OpenAI-compatible backend: True -> OK
+
+========================================================================
+  SECTION B: the RAG pipeline + chunking strategies
+========================================================================
+RAG = give the model YOUR documents without stuffing them all in context.
+The pipeline (Open WebUI's Knowledge feature):
+
+  Document -> [CHUNK] -> [EMBED] -> [VECTOR DB]
+  Query    -> [EMBED] -> [cosine top-k] -> [RERANK] -> [INJECT] -> [LLM]
+
+CHUNKING is where retrieval quality is won or lost:
+  * TOKEN-based  (e.g. 512 tokens): production default, good throughput.
+  * SENTENCE-based: preserves meaning boundaries (no mid-sentence cuts).
+  * OVERLAP (e.g. 50 tokens): repeats context at the seam so a fact split
+    across two chunks is not lost. step = size - overlap.
+  * too small -> lose context; too large -> dilute relevance + cost.
+
+Demo document (15 words):
+  'The cat sat on the mat. The dog ran in the park. Cats love fish.'
+
+Chunk it at size=5, overlap=2 (step=3):
+| # | chunk                          | words |
+|---|--------------------------------|-------|
+| 0 | The cat sat on the             | 5     |
+| 1 | on the mat. The dog            | 5     |
+| 2 | The dog ran in the             | 5     |
+| 3 | in the park. Cats love         | 5     |
+| 4 | Cats love fish.                | 3     |
+[check] chunks == gold (5 overlapping windows, step 3): True -> OK
+
+Effect of chunk size on chunk count (overlap=2 fixed):
+| size | overlap | step | #chunks |
+|------|---------|------|---------|
+| 3    | 2       | 1    | 13      |
+| 5    | 2       | 3    | 5       |
+| 7    | 2       | 5    | 3       |
+| 10   | 2       | 8    | 2       |
+Smaller chunks => more windows => finer recall but more embeddings to store.
+
+========================================================================
+  SECTION C: fake embeddings + cosine vector search
+========================================================================
+We cannot ship a real embedding model (nomic-embed-text, 768 dims) in pure
+stdlib. Instead: the FEATURE-HASHING TRICK. Each word -> FNV-1a hash -> one
+of 256 dims -> count -> L2-normalize. Two texts sharing words land in
+the same buckets, so cosine tracks lexical overlap. Deterministic (FNV-1a is
+NOT Python's randomized hash()).
+
+Corpus vocabulary (15 words) -> hash bucket (mod 256):
+| word  | bucket |
+|-------|--------|
+| cat   | 7      |
+| cats  | 156    |
+| do    | 20     |
+| dog   | 9      |
+| eat   | 37     |
+| fish  | 99     |
+| in    | 158    |
+| love  | 209    |
+| mat   | 253    |
+| on    | 208    |
+| park  | 185    |
+| ran   | 246    |
+| sat   | 215    |
+| the   | 28     |
+| what  | 47     |
+[check] zero hash collisions at DIM=256 (exact bag-of-words): True -> OK
+
+Query: 'What do cats eat?'  tokens=['what', 'do', 'cats', 'eat']
+  non-zero dims of the query embedding: [47, 20, 156, 37]
+
+Cosine similarity of each chunk to the query (sorted desc):
+| rank | cosine  | chunk                          |
+|------|---------|--------------------------------|
+| 1    | 0.2887  | Cats love fish.                |
+| 2    | 0.2236  | in the park. Cats love         |
+| 3    | 0.0000  | The cat sat on the             |
+| 4    | 0.0000  | The dog ran in the             |
+| 5    | 0.0000  | on the mat. The dog            |
+
+Top chunk: 'Cats love fish.'  (cosine = 0.2887)
+[check] top chunk == 'Cats love fish.': True -> OK
+[check] top cosine == 0.2887 (1/(2*sqrt3)): True -> OK
+[check] recomputed exact cos == 0.288675: True -> OK
+
+========================================================================
+  SECTION D: hybrid search (BM25 + vector) + cross-encoder rerank
+========================================================================
+Pure vector search misses exact keyword matches (a product code, a name).
+BM25 is the classic keyword ranker; it rewards rare terms and short docs.
+HYBRID = alpha*vector + (1-alpha)*BM25. Then a CROSS-ENCODER reranks the
+top-k for precision. Open WebUI ships both.
+
+BM25 index stats (k1=1.5, b=0.75):
+  N (chunks) = 5,  avgdl = 4.60 tokens
+  query content terms: ['cats', 'eat']
+
+| chunk                          | bm25  | vector  | rerank |
+|--------------------------------|-------|---------|--------|
+| The cat sat on the             | 0.000 | 0.0000  | 0.0000 |
+| on the mat. The dog            | 0.000 | 0.0000  | 0.0000 |
+| The dog ran in the             | 0.000 | 0.0000  | 0.0000 |
+| in the park. Cats love         | 0.843 | 0.2236  | 0.2000 |
+| Cats love fish.                | 1.038 | 0.2887  | 0.3333 |
+
+Hybrid blend (alpha=0.5, scores min-max normalized first):
+| rank | hybrid | chunk                          |
+|------|--------|--------------------------------|
+| 1    | 1.0000 | Cats love fish.                |
+| 2    | 0.7932 | in the park. Cats love         |
+| 3    | 0.0000 | The cat sat on the             |
+| 4    | 0.0000 | The dog ran in the             |
+| 5    | 0.0000 | on the mat. The dog            |
+
+Rerank confirmation (top-3 candidates, cross-encoder proxy):
+  rerank=0.3333  (was cosine=0.2887)  'Cats love fish.'
+  rerank=0.2000  (was cosine=0.2236)  'in the park. Cats love'
+  rerank=0.0000  (was cosine=0.0000)  'The cat sat on the'
+[check] BM25 top chunk == 'Cats love fish.': True -> OK
+[check] hybrid top chunk == 'Cats love fish.': True -> OK
+[check] rerank top chunk == 'Cats love fish.': True -> OK
+
+========================================================================
+  SECTION G: GOLD RAG pipeline trace (the centerpiece)
+========================================================================
+Full end-to-end pipeline on the canonical example:
+
+  Document : 'The cat sat on the mat. The dog ran in the park. Cats love fish.'
+  Query    : 'What do cats eat?'
+  Chunk    : size=5 words, overlap=2, step=3
+
+STEP 1  CHUNK
+        [0] 'The cat sat on the'
+        [1] 'on the mat. The dog'
+        [2] 'The dog ran in the'
+        [3] 'in the park. Cats love'
+        [4] 'Cats love fish.'
+
+STEP 2  EMBED  (256-dim hashing vectors, L2-normalized)
+        query tokens   = ['what', 'do', 'cats', 'eat']
+        query non-zero = [47, 20, 156, 37]
+        vector DB now holds 5 chunk vectors
+
+STEP 3  VECTOR SEARCH (cosine, top-5)
+        1. cos=0.2887  'Cats love fish.'
+        2. cos=0.2236  'in the park. Cats love'
+        3. cos=0.0000  'The cat sat on the'
+        4. cos=0.0000  'The dog ran in the'
+        5. cos=0.0000  'on the mat. The dog'
+
+STEP 4  RERANK (cross-encoder proxy: match density)
+        rerank=0.3333 (cos=0.2887)  'Cats love fish.'
+        rerank=0.2000 (cos=0.2236)  'in the park. Cats love'
+        rerank=0.0000 (cos=0.0000)  'The cat sat on the'
+        rerank=0.0000 (cos=0.0000)  'The dog ran in the'
+        rerank=0.0000 (cos=0.0000)  'on the mat. The dog'
+
+STEP 5  INJECT into prompt template
+        Context: - Cats love fish.
+        
+        Question: What do cats eat?
+
+STEP 6  LLM generates (grounded in injected context):
+        -> 'Cats eat fish.'
+
+[check] chunks == gold (5 overlapping windows): True -> OK
+[check] top chunk == 'Cats love fish.': True -> OK
+[check] top cosine == 0.288675: True -> OK
+[check] prompt contains the retrieved context: True -> OK
+
+GOLD (recomputed & badge-checked in open_webui.html):
+  #chunks        = 5
+  top chunk      = 'Cats love fish.'
+  top cosine     = 0.288675
+  simulated ans  = 'Cats eat fish.'
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

@@ -1,0 +1,240 @@
+ollama_lmstudio.py - Ollama & LM Studio: the user-friendly layers on
+llama.cpp. Pure Python stdlib (json only). Numbers/parse results below
+feed OLLAMA_LMSTUDIO.md.
+Sources: ollama/ollama (docs/modelfile.md), lmstudio.ai, web-verified.
+
+Two tools, one engine: Ollama = CLI-first dev tool,
+LM Studio = GUI-first discovery tool. Both wrap llama.cpp (GGML compute graph).
+
+==========================================================================
+  SECTION A: THE MODELFILE PARSER (Ollama's Dockerfile for models)
+==========================================================================
+A Modelfile pins a base model + overrides. Parsed with pure Python.
+Verified against: github.com/ollama/ollama/blob/main/docs/modelfile.md
+
+INPUT (the gold Modelfile):
+  | FROM llama3.2
+  | PARAMETER temperature 0.7
+  | SYSTEM "You are helpful"
+
+PARSED:
+  from    = 'llama3.2'
+  params  = {'temperature': 0.7}
+  system  = 'You are helpful'
+
+[check] from == 'llama3.2' :  OK  ('llama3.2')
+[check] params has temperature :  OK
+[check] temperature == 0.7 (float) :  OK  (0.7)
+[check] system == 'You are helpful' :  OK  ('You are helpful')
+
+INPUT (richer Modelfile, every directive):
+  | # A richer Modelfile
+  | FROM llama3.2:3b
+  | 
+  | # inference parameters (typed: float / int / bool / string)
+  | PARAMETER temperature 0.8
+  | PARAMETER num_ctx 8192
+  | PARAMETER top_p 0.9
+  | PARAMETER stream true
+  | PARAMETER stop "User:"
+  | 
+  | TEMPLATE """{{ .System }}
+  | {{ .Prompt }}"""
+  | 
+  | SYSTEM "You are a concise coding assistant."
+  | 
+  | MESSAGE user "What is mmap?"
+  | MESSAGE assistant "Memory-mapped file I/O."
+  | 
+  | ADAPTER ./my-lora.gguf
+  | LICENSE "MIT"
+
+PARSED:
+  from     = 'llama3.2:3b'
+  params   = {
+    num_ctx        = 8192            (int)
+    stop           = 'User:'         (str)
+    stream         = True            (bool)
+    temperature    = 0.8             (float)
+    top_p          = 0.9             (float)
+  }
+  template = '{{ .System }}\n{{ .Prompt }}'
+  system   = 'You are a concise coding assistant.'
+  adapter  = './my-lora.gguf'
+  license  = 'MIT'
+  messages = [{'role': 'user', 'content': 'What is mmap?'}, {'role': 'assistant', 'content': 'Memory-mapped file I/O.'}]
+
+[check] rich from == 'llama3.2:3b' :  OK
+[check] temperature coerced to float 0.8 :  OK
+[check] num_ctx coerced to int 8192 :  OK
+[check] stream coerced to bool True :  OK
+[check] stop string quotes stripped :  OK
+[check] multi-line template parsed (3 lines) :  OK
+[check] 2 messages parsed :  OK
+[check] message roles correct :  OK
+[check] adapter path parsed :  OK
+[check] comment lines ignored :  OK
+
+GOLD (for ollama_lmstudio.html):
+  from    = 'llama3.2'
+  params  = {'temperature': 0.7}
+  system  = 'You are helpful'
+
+==========================================================================
+  SECTION B: OLLAMA CALL STACK - Go server -> llama.cpp -> Metal/CUDA
+==========================================================================
+Ollama: MIT (open source), written in Go.
+CLI-first. No built-in GUI (pairs with Open WebUI for a web UI).
+OpenAI-compatible API at localhost:11434/v1/chat/completions.
+
+What `ollama run llama3.2 "Hello"` actually does, layer by layer:
+
+  ollama run llama3.2 "Hello"
+      [CLI client (Go)]
+    |-resolve model -> registry tag -> local blob path
+        [Ollama server (Go)]
+    |-if missing: ollama pull -> download GGUF from registry
+        [Ollama server (Go)]
+    |-spawn llama.cpp runner subprocess (cgo / shared C lib)
+        [Ollama server (Go)]
+      |-load GGUF: header + KV + tensor info + mmap tensor_data
+          [llama.cpp (C)]
+      |-detect GPU backend: Metal | CUDA | ROCm (auto-offload)
+          [llama.cpp (C)]
+      |-build GGML compute graph for this architecture
+          [llama.cpp (C)]
+        |-tokenize prompt  ->  token ids
+            [llama.cpp (C)]
+        |-forward pass: matmul + RoPE + attention + sampling
+            [llama.cpp (C)]
+        |-detokenize -> text, stream tokens back over stdout
+            [llama.cpp (C)]
+    |-relay token stream to the terminal
+        [Ollama server (Go)]
+
+Key insight: the Go layer is a *thin orchestrator*. All math runs in
+the llama.cpp subprocess. Ollama adds: model registry, the Modelfile,
+the OpenAI-compatible HTTP API, and auto GPU detection -- nothing more.
+
+Ollama 0.19+ adds an MLX backend on Apple Silicon (up to 93% faster
+decode for supported models) -- but the orchestration shape is unchanged.
+[check] Ollama port is 11434 :  OK
+[check] Ollama API path is OpenAI-compatible :  OK
+
+==========================================================================
+  SECTION C: LM STUDIO CALL STACK - Electron -> llama.cpp/MLX -> GUI
+==========================================================================
+LM Studio: Proprietary (free), written in TypeScript / Electron.
+GUI-first. Built-in HuggingFace model browser + side-by-side compare.
+Local OpenAI-compatible API server at localhost:1234/v1/chat/completions.
+
+What clicking 'Load model' then 'Send' actually does:
+
+  LM Studio app window (chat panel)
+      [Electron renderer (React UI)]
+    |-Model browser tab -> HuggingFace API (search/filter/download)
+        [Electron renderer]
+    |-user picks model -> one-click GGUF/MLX download to ~/.cache
+        [Electron renderer]
+    |-click 'Start Server' -> local API on port 1234
+        [Electron main (Node.js)]
+    |-click 'Send' in chat -> request to in-process llama.cpp
+        [Electron main (Node.js)]
+      |-load GGUF or MLX weights (mmap)
+          [llama.cpp / MLX (native binding)]
+      |-detect GPU (Metal/CUDA) or MLX backend; multi-GPU supported
+          [llama.cpp / MLX]
+      |-build compute graph
+          [llama.cpp / MLX]
+        |-forward pass -> tokens
+            [llama.cpp / MLX]
+    |-stream tokens back to renderer, render in chat bubble
+        [Electron renderer]
+    |-OPTIONAL: 2nd model column -> same prompt, both responses shown
+        [Electron renderer]
+
+Key insight: the Electron layer adds *discovery + UX*. Same engine
+underneath, but the value is the in-app HuggingFace browser, the chat
+GUI, and side-by-side model comparison -- none of which Ollama has.
+
+Trade-off: no CLI, no headless mode. You cannot script it in CI.
+[check] LM Studio port is 1234 :  OK
+[check] LM Studio API path is OpenAI-compatible :  OK
+
+==========================================================================
+  SECTION D: THE SHARED OPENAI-COMPATIBLE API
+==========================================================================
+Both expose /v1/chat/completions with the SAME request body shape.
+Client code is portable: change the host:port, nothing else.
+
+Request body (identical for both):
+  POST /v1/chat/completions
+  Content-Type: application/json
+  {"messages": [{"content": "Hello", "role": "user"}], "model": "llama3.2", "stream": false, "temperature": 0.7}
+
+  -> Ollama:    POST http://localhost:11434/v1/chat/completions
+  -> LM Studio: POST http://localhost:1234/v1/chat/completions
+
+Only the HOST:PORT differs. The path, the JSON schema, and the
+streaming SSE response format are the same (OpenAI-compatible).
+
+Example: swap a curl call between the two by changing one number:
+  curl http://localhost:11434/v1/chat/completions -d '{"messages": [{"content": "Hello", "role": "user"}], "model": "llama3.2", "stream": false, "temperature": 0.7}'
+  curl http://localhost:1234/v1/chat/completions -d '{"messages": [{"content": "Hello", "role": "user"}], "model": "llama3.2", "stream": false, "temperature": 0.7}'
+
+[check] both share the same API path :  OK
+[check] both are OpenAI-compatible (/v1/chat/completions) :  OK
+[check] ports differ (11434 vs 1234) :  OK
+[check] request body is valid JSON :  OK
+
+==========================================================================
+  SECTION E: FEATURE COMPARISON MATRIX
+==========================================================================
+Feature                Ollama                     LM Studio                 
+--------------------------------------------------------------------------
+Interface              CLI + REST API             GUI (Electron desktop app)
+Language               Go                         TypeScript / Electron     
+Model discovery        Registry (ollama pull <model>) HuggingFace browser (in-app)
+OpenAI API             localhost:11434            localhost:1234            
+GPU auto-offload       Yes                        Yes                       
+MLX backend            Yes (0.19+)                Yes                       
+Multi-GPU              Limited                    Yes                       
+Headless / CI          Yes                        No                        
+CLI automation         Yes (pull/run/create)      No                        
+Side-by-side cmp       No                         Yes                       
+Built-in GUI           No (use Open WebUI)        Yes                       
+License                MIT (open source)          Proprietary (free)        
+Underlying engine      llama.cpp (GGML compute graph) llama.cpp (GGML compute graph)
+
+Bottom line: SAME engine (llama.cpp) underneath both. The choice is
+CLI-first dev tool (Ollama) vs GUI-first discovery tool (LM Studio).
+
+[check] both share the same engine :  OK
+[check] only Ollama is headless-capable :  OK
+[check] only LM Studio has side-by-side compare :  OK
+
+==========================================================================
+  SECTION F: LINEAGE - raw llama.cpp -> Ollama + LM Studio
+==========================================================================
+WHY these exist: raw llama.cpp requires manual compile + manual GGUF
+download + manual flag tuning. The UX gap kept local LLMs out of reach
+for most users. Two different philosophies filled it:
+
+stage              what changed                                             why
+------------------------------------------------------------------------------
+raw llama.cpp      compile C++ yourself, hunt for GGUFs, memorize -ngl/-c/-t flags powerful but hostile UX; no model discovery; no API
+Ollama (2023)      Go server + CLI + Modelfile + registry + OpenAI API, all CLI-driven developer-friendly: `ollama run` just works; scriptable; CI-ready
+LM Studio (2023)   Electron GUI + HuggingFace browser + chat + side-by-side compare non-developer-friendly: point-and-click discovery; no terminal
+
+Both converge on the SAME outcome: hide llama.cpp's rough edges. The
+divergence is WHO they hide them from -- devs (Ollama) vs everyone else
+(LM Studio). When you outgrow single-user local serving, the next step
+is vLLM (production multi-user throughput). See VLLM_SERVING.md.
+
+[check] raw llama.cpp had no model discovery :  OK
+[check] Ollama is the CLI-first branch :  OK
+[check] LM Studio is the GUI-first branch :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

@@ -1,0 +1,201 @@
+vllm_serving.py - vLLM vs llama.cpp for local LLM serving, by the numbers.
+Pure Python stdlib. Numbers below feed VLLM_SERVING.md.
+Model: Llama-3-8B on a single RTX 4090 (the simulated reference setup).
+
+Lineage: single-user llama.cpp -> PagedAttention -> continuous batching
+       -> vLLM high-throughput server.
+
+==========================================================================
+  SECTION A: the two engines - design points at a glance
+==========================================================================
+Two local serving engines, two opposite design points. Pick by how
+many CONCURRENT users you serve - that single question decides it.
+
+| property     | llama.cpp / Ollama                  | vLLM                                |
+|--------------|-------------------------------------|-------------------------------------|
+| target       | single user, interactive            | multiple concurrent users, API serving |
+| batching     | sequential / static (request-level) | continuous (iteration-level scheduling) |
+| kv_cache     | contiguous buffer per request       | PagedAttention (non-contiguous blocks) |
+| gpu          | GPU optional (runs on CPU, Apple Metal) | NVIDIA GPU required (CUDA)          |
+| throughput   | flat (does not scale with users)    | grows with concurrency, saturates at bw ceiling |
+
+The rest of this file quantifies the last two rows: PagedAttention
+(KV cache - Section B), continuous batching (scheduling - Section C),
+and the throughput curves those two enable (Section D).
+
+[check] engines target opposite workloads :  OK
+[check] vLLM requires a GPU, llama.cpp does not :  OK
+
+==========================================================================
+  SECTION B: PagedAttention - kill the 60-80% KV-cache waste
+==========================================================================
+A request's KV cache grows as it generates. The naive scheme reserves
+a CONTIGUOUS worst-case buffer (max_len = 2048 tokens) for
+EVERY request - so a 200-token chat holds a 2048-token slot. PagedAttention
+instead stores KV in fixed 16-token BLOCKS grabbed on demand,
+like OS virtual-memory pages. Waste collapses from the bulk of memory to a
+few tokens per request.
+
+Workload: 16 concurrent requests, heavy-tailed lengths (seed=42):
+  actual lengths: [67, 111, 116, 174, 258, 280, 293, 322, 343, 409, 547, 634, 732, 942, 958, 1713]
+  total KV actually used  = 7899 tokens
+  naive reserved (worst-case x 16) = 32768 tokens
+  paged reserved (blocks of 16)     = 8032 tokens
+
+| scheme          | reserved | used  | waste   | waste % |
+|-----------------|----------|-------|---------|---------|
+| naive contiguous|    32768 |  7899 |   24869 |   75.9%  |
+| PagedAttention  |     8032 |  7899 |     133 |    1.7%  |
+
+Same 2048-token budget, paging uses 8032/32768 = 24.5% of the naive footprint.
+-> on the SAME GPU you can hold ~4.1x as many concurrent
+   requests. More concurrent requests in KV room = higher batch sizes =
+   the throughput gains in Section D.
+
+[check] naive KV waste is in the 60-80% band reported by the paper :  OK  (got 75.9%)
+[check] paged waste is tiny (<5%) :  OK  (got 1.7%)
+[check] paging fits more requests in the same memory :  OK
+
+==========================================================================
+  SECTION C: continuous batching - no head-of-line blocking
+==========================================================================
+Discrete iteration-level simulator (1 iteration = 1 decode step). A
+request advances one token per iteration in the running set. MAX_BATCH
+is the concurrency cap.
+
+Workload: arrivals {'R0': 0, 'R1': 1, 'R2': 2, 'R3': 3}, lengths {'R0': 20, 'R1': 8, 'R2': 20, 'R3': 8}, MAX_BATCH=2
+R0/R2 are long (20 tok); R1/R3 are short (8 tok). They interleave.
+
+STATIC (request-level) batching - a batch runs until ALL finish, then
+the next batch is admitted. Finished-early slots sit EMPTY:
+
+    |0....5....0....5....0....5....0....5....0....5..
+R0 |####################----------------------------
+R1 | ...................########--------------------
+R2 |  ..................####################--------
+R3 |   .....................................########
+
+CONTINUOUS (iteration-level) batching - a freed slot is refilled at the
+VERY NEXT iteration. Short requests don't wait behind a long batch:
+
+    |0....5....0....5....0....5....0....5....0....5..
+R0 |####################----------------------------
+R1 | ########---------------------------------------
+R2 |  .......####################-------------------
+R3 |   .................########--------------------
+
+('#' = running, '.' = waiting/queued, ' ' = not yet arrived, '-' = done)
+
+| request | arrival | length | static finish | continuous finish |
+|---------|---------|--------|---------------|-------------------|
+| R0       |       0 |     20 |            19 |                19 |
+| R1       |       1 |      8 |            27 |                 8 |
+| R2       |       2 |     20 |            39 |                28 |
+| R3       |       3 |      8 |            47 |                27 |
+
+  wall-clock (last finish): static=47 iters,  continuous=28 iters  -> 1.68x faster
+  mean latency (finish-arrival): static=31.5 iters,  continuous=19.0 iters  -> 1.66x better
+  R1 (short req): finishes @ 8 (continuous) vs @ 27 (static) -> 3.4x less waiting
+
+[check] continuous finishes the whole workload sooner :  OK  (28 vs 47)
+[check] short request R1 finishes far earlier under continuous batching :  OK  (8 vs 27)
+[check] every request finishes no later under continuous than static :  OK
+
+==========================================================================
+  SECTION D: the throughput curves - sequential vs continuous batching
+==========================================================================
+Llama-3-8B on a single RTX 4090. llama.cpp is FLAT (serves one request
+at a time, so adding users just slices the same pie). vLLM GROWS then
+saturates: continuous batching packs sequences into each memory-bound
+forward pass, so aggregate tok/s rises toward the bandwidth ceiling.
+
+    llama.cpp total(N) = 60                       [flat]
+    vLLM    total(N) = 900 * N / (N + 10)   [saturating, half-sat @ N=10]
+
+| users | llama total | llama /user | vLLM total | vLLM /user | vLLM speedup |
+|-------|-------------|-------------|------------|------------|--------------|
+|     1 |        60   |      60.0   |       82   |     81.8   |       1.36x |
+|     2 |        60   |      30.0   |      150   |     75.0   |       2.50x |
+|     5 |        60   |      12.0   |      300   |     60.0   |       5.00x |
+|    10 |        60   |       6.0   |      450   |     45.0   |       7.50x |
+|    20 |        60   |       3.0   |      600   |     30.0   |      10.00x |
+|    30 |        60   |       2.0   |      675   |     22.5   |      11.25x |
+|    50 |        60   |       1.2   |      750   |     15.0   |      12.50x |
+
+Read the table two ways:
+  - PER-USER (latency): both engines degrade as N grows, but llama.cpp
+    collapses as 1/N (10 users -> 6 tok/s each)
+    while vLLM degrades gently (15 tok/s even at 50 users).
+  - TOTAL (throughput): llama.cpp is pinned at 60; vLLM climbs from
+    82 toward 900 (at N=50 it is 750/req).
+
+Why vLLM does NOT just equal N x 60: the memory bus saturates. Each
+added sequence shares the SAME weight read, so total rises, but the bus
+caps it at ~900 tok/s aggregate. That cap is the curve's flat top.
+
+[check] llama.cpp total is flat at 60 regardless of users :  OK
+[check] vLLM total grows with users (10 -> 50 rises) :  OK
+[check] both engines degrade in per-user tok/s as users grow :  OK
+[check] vLLM per-user > llama.cpp per-user for all N>=2 :  OK
+
+==========================================================================
+  SECTION E: when to use which - the decision rules + setup
+==========================================================================
+The choice is dominated by ONE variable: how many concurrent users?
+
+| workload                         | pick             | why                            |
+|----------------------------------|------------------|--------------------------------|
+| single user, interactive (chat)  | llama.cpp/Ollama | lower overhead, fast cold-start|
+| multiple concurrent users / API  | vLLM             | 7.5-15x throughput (Section D) |
+| CPU-only / edge device           | llama.cpp only   | vLLM requires an NVIDIA GPU    |
+| Apple Silicon (M-series)         | MLX / Ollama     | neither vLLM (no CUDA) nor     |
+|                                  |                  | llama.cpp's sweet spot         |
+
+Practical vLLM setup (OpenAI-compatible API server):
+
+  vllm serve meta-llama/Llama-3.1-8B-Instruct \
+      --tensor-parallel-size 1 \       # number of GPUs (TP degree)
+      --max-model-len 8192 \           # max context -> sets KV room
+      --gpu-memory-utilization 0.9      # fraction of VRAM vLLM may use
+
+  # the three flags that decide capacity & throughput:
+  #   --max-model-len      : caps each request's KV (bigger = more VRAM)
+  #   --gpu-memory-util    : how much VRAM -> how big the block pool is
+  #   --tensor-parallel-size: spread one model across N GPUs (shard layers)
+
+Equivalent llama.cpp single-user server (no GPU required):
+
+  llama-server -m Llama-3.1-8B-Instruct.Q4_K_M.gguf \
+      -ngl 99 -c 8192 --port 8080
+
+Crossover rule of thumb (community + Red Hat benchmark): below ~4-5
+concurrent users, llama.cpp is simpler and fast enough; above that, vLLM's
+continuous batching pulls away hard. At 10+ users there is no contest.
+
+[check] vLLM setup exposes the 3 capacity/throughput flags :  OK
+[check] llama.cpp runs without a GPU; vLLM does not :  OK
+
+==========================================================================
+  GOLD - the canonical numbers the HTML must reproduce
+==========================================================================
+10 concurrent users, Llama-3-8B on RTX 4090:
+  llama.cpp sequential    = 6.0 tok/s/user   (total 60 / 10)
+  vLLM continuous batching= 45.0 tok/s/user   (total 450)   -> 7.5x
+
+50 concurrent users:
+  vLLM = 15.0 tok/s/user, total = 750 tok/s   (per-user = 900/60)
+
+Recompute recipe (identical in VLLM_SERVING.html):
+  vllm_per_user(10) = 900 / (10 + 10) = 45.0
+  vllm_per_user(50) = 900 / (50 + 10) = 15.0
+  vllm_total(50)    = 900 * 50 / (50 + 10) = 750
+
+[check] gold: llama.cpp @10 = 6.0 tok/s/user :  OK  (got 6.0)
+[check] gold: vLLM @10 = 45.0 tok/s/user :  OK  (got 45.0)
+[check] gold: speedup @10 = 7.5x :  OK  (got 7.5)
+[check] gold: vLLM @50 = 15.0 tok/s/user :  OK  (got 15.0)
+[check] gold: vLLM total @50 = 750 tok/s :  OK  (got 750.0)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

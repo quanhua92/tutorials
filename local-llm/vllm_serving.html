@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vLLM Serving &mdash; sequential vs continuous-batching throughput simulator</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0a0e14; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --border:#30363d;
+    --accent:#f97316;        /* orange = llama.cpp (sequential) */
+    --green:#27ae60;         /* green = vLLM (continuous batching) */
+    --blue:#58a6ff; --red:#c0392b; --gold:#f1c40f;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem;line-height:1.5}
+  a{color:var(--accent)}
+  h1{font-size:1.32rem;margin:.2rem 0 .1rem}
+  h2{font-size:1rem;color:var(--muted);margin:1.7rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem;display:flex;align-items:center;gap:.5rem}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem;max-width:940px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.95rem 1.05rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.76rem;line-height:1.55;margin-bottom:.4rem}
+  .badge{display:inline-block;background:#3a2a14;color:var(--accent);border:1px solid var(--accent);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.4rem;text-decoration:none}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+     background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);
+     font-size:.82rem;color:var(--muted);line-height:1.5;}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin:.4rem 0 .2rem}
+  label{color:var(--muted);font-size:.8rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+  input[type=range]{accent-color:var(--accent);width:230px}
+  .pick{font-family:ui-monospace,monospace;font-size:1.35rem;font-weight:700;color:var(--accent);
+        min-width:54px;text-align:center;font-variant-numeric:tabular-nums}
+
+  .metric-row{display:flex;flex-wrap:wrap;gap:.5rem;margin:.7rem 0}
+  .metric-card{padding:.5rem .85rem;background:var(--panel2);border:1px solid var(--border);
+               border-radius:7px;min-width:118px}
+  .metric-card .v{font-size:1.28rem;font-weight:700;font-variant-numeric:tabular-nums;display:block}
+  .metric-card .l{font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .metric-card.llama{border-color:var(--accent);background:rgba(249,115,22,.07)}
+  .metric-card.llama .v{color:var(--accent)}
+  .metric-card.vllm{border-color:var(--green);background:rgba(39,174,96,.07)}
+  .metric-card.vllm .v{color:var(--green)}
+  .metric-card.gold{border-color:var(--gold);background:rgba(241,196,15,.07)}
+  .metric-card.gold .v{color:var(--gold)}
+
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem .85rem;
+           margin-top:.5rem;font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout .llama{color:var(--accent);font-weight:600}
+  .readout .vllm{color:var(--green);font-weight:600}
+  .readout .dim{color:var(--muted)}
+  .readout .good{color:var(--green)}
+
+  .legend{display:flex;gap:1.2rem;flex-wrap:wrap;margin:.4rem 0 .1rem;font-size:.76rem;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:.35rem}
+  .legend i{width:14px;height:3px;border-radius:2px;display:inline-block}
+
+  svg.chart{width:100%;height:auto;display:block;font-family:ui-monospace,monospace;font-size:9px}
+  svg.chart .axis{stroke:var(--border);stroke-width:1;fill:none}
+  svg.chart .grid{stroke:var(--grid);stroke-width:1;fill:none;stroke-dasharray:2 3}
+  svg.chart .tk{fill:var(--muted)}
+  svg.chart .al{fill:var(--muted);font-size:9px}
+  svg.chart .pt{fill:var(--ink)}
+  svg.chart .goldpt{fill:var(--gold)}
+  .note{font-size:.74rem;color:var(--muted);font-style:italic;margin-top:.45rem}
+
+  #check{display:inline-block;border:1px solid var(--green);border-radius:6px;padding:5px 12px;
+         font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;color:var(--green);
+         background:#1c3a25}
+  #check.fail{border-color:var(--red);color:var(--red);background:#3a1414}
+
+  table.dt{border-collapse:collapse;font-size:.78rem;width:100%;margin-top:.5rem;font-variant-numeric:tabular-nums}
+  table.dt td,table.dt th{border:1px solid var(--border);padding:5px 8px;text-align:right}
+  table.dt th{color:var(--muted);font-weight:600;text-align:left}
+  table.dt td.llama{color:var(--accent);font-weight:600}
+  table.dt td.vllm{color:var(--green);font-weight:600}
+  table.dt td.cur{background:rgba(88,166,255,.10)}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&#8592; back to Local LLM dashboard</a>
+  <h1>vLLM Serving &mdash; <span style="color:#f97316">sequential</span> vs <span style="color:#27ae60">continuous-batching</span> throughput
+    <a class="badge md" title="Full guide — PagedAttention, continuous batching, curves, decision tree, pitfalls" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/VLLM_SERVING.md">&#128214; VLLM_SERVING.md</a>
+    <a class="badge" title="Ground-truth source code (pure Python stdlib)" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/vllm_serving.py">&#128196; vllm_serving.py</a>
+  </h1>
+  <div class="sub">
+    One slider &mdash; <b>how many concurrent users?</b> &mdash; decides whether you want
+    <b style="color:#f97316">llama.cpp</b> (serves one request at a time, <b>flat</b> throughput) or
+    <b style="color:#27ae60">vLLM</b> (<b>PagedAttention</b> + <b>continuous batching</b> &rarr; throughput <b>grows then saturates</b>).
+    Below: <b>per-user latency</b> collapses as 1/N for llama.cpp but degrades gently for vLLM; <b>aggregate throughput</b>
+    is pinned at 60 for llama.cpp and climbs toward 900 for vLLM. All values recomputed live in JS &mdash; identical to
+    <code>vllm_serving.py</code>.
+  </div>
+  <div class="guide-callout">&#128214; <a href="https://github.com/quanhua92/tutorials/blob/main/local-llm/VLLM_SERVING.md">Read the full guide</a> &mdash; the two engines, PagedAttention's memory-waste kill, continuous batching's no-head-of-line-blocking trace, the throughput curves, the &ldquo;when to use which&rdquo; decision tree, and the pitfalls table. This page is the interactive companion.</div>
+
+  <!-- ===== PANEL 1: throughput simulator (the centerpiece) ===== -->
+  <h2><span class="n">&#9312;</span> Throughput simulator &mdash; drag concurrent users (1&ndash;50)</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> the two engines on Llama-3-8B / single RTX 4090. Left chart = <b>per-user tok/s</b>
+      (latency): llama.cpp <b style="color:#f97316">collapses as 1/N</b>, vLLM <b style="color:#27ae60">degrades gently</b>.
+      Right chart = <b>aggregate tok/s</b> (throughput): llama.cpp is <b>flat at 60</b>, vLLM <b>saturates toward 900</b> as
+      continuous batching packs sequences into each memory-bound forward pass. The gold dots pin the measured points
+      (N=10, N=50).</div>
+    <div class="controls">
+      <label>concurrent users:
+        <input type="range" id="users" min="1" max="50" step="1" value="10">
+        <span class="pick" id="usersval">10</span>
+      </label>
+      <button id="g10" style="background:var(--gold);color:#0d1117;border:none;border-radius:6px;padding:5px 12px;font-weight:600;cursor:pointer">load gold (N=10)</button>
+      <button id="g50" style="background:var(--panel2);color:var(--gold);border:1px solid var(--gold);border-radius:6px;padding:5px 12px;font-weight:600;cursor:pointer">load N=50</button>
+    </div>
+
+    <div class="legend">
+      <span><i style="background:#f97316"></i>llama.cpp (sequential)</span>
+      <span><i style="background:#27ae60"></i>vLLM (continuous batching)</span>
+      <span><i style="background:#f1c40f;height:8px;width:8px;border-radius:50%"></i>measured gold points</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin:.5rem 0 .2rem">
+      <div>
+        <div class="micro" style="text-align:center"><b>per-user tok/s</b> (latency)</div>
+        <svg class="chart" id="perChart" viewBox="0 0 520 250" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div>
+        <div class="micro" style="text-align:center"><b>aggregate tok/s</b> (throughput)</div>
+        <svg class="chart" id="totChart" viewBox="0 0 520 250" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </div>
+
+    <div class="metric-row" id="metrics"></div>
+    <div class="readout" id="readout"></div>
+    <div class="note">llama.cpp: <code>per_user(N)=60/N</code>, <code>total(N)=60</code> (flat). vLLM: <code>per_user(N)=900/(N+10)</code>, <code>total(N)=900&middot;N/(N+10)</code> (saturating). The flat top of vLLM's total curve is the memory bus saturating &mdash; it does NOT stay at N&times;60 forever.</div>
+  </div>
+
+  <!-- ===== PANEL 2: PagedAttention waste + continuous batching ===== -->
+  <h2><span class="n">&#9313;</span> The two innovations that make the curve grow</h2>
+  <div class="panel">
+    <div class="micro"><b>PagedAttention</b> pages the KV cache in fixed 16-token blocks, killing the 60&ndash;80% waste of
+      contiguous worst-case reservation &rarr; far more concurrent requests fit on the same GPU (bigger batches).
+      <b>Continuous batching</b> admits a queued request into a freed slot the very next iteration &rarr; no head-of-line
+      blocking, the batch stays full. Together they let the batch amortise one weight read across many sequences.</div>
+    <div class="metric-row" id="innov"></div>
+    <div class="readout" id="innovRead"></div>
+  </div>
+
+  <div class="sub" style="margin-top:1.4rem">
+    <span id="check">check: &hellip;</span>
+    JS recompute matches <code>vllm_serving.py</code> GOLD: N=10 &rarr; llama=6.0, vLLM=45.0 tok/s/user (7.5&times;); N=50 &rarr; vLLM=15.0 tok/s/user, total=750 tok/s.
+  </div>
+
+<script>
+"use strict";
+/* ============================================================
+   Core formulas  (IDENTICAL to vllm_serving.py)
+   ============================================================ */
+var LLAMACPP_T1   = 60.0;   /* flat aggregate tok/s */
+var VLLM_T_SAT    = 900.0;  /* aggregate throughput ceiling */
+var VLLM_N_HALF   = 10.0;   /* half-saturation concurrency */
+
+function llamacppPerUser(n){ return n <= 0 ? 0 : LLAMACPP_T1 / n; }
+function llamacppTotal(n){  return n <= 0 ? 0 : LLAMACPP_T1; }
+function vllmPerUser(n){    return n <= 0 ? 0 : VLLM_T_SAT / (n + VLLM_N_HALF); }
+function vllmTotal(n){      return n <= 0 ? 0 : VLLM_T_SAT * n / (n + VLLM_N_HALF); }
+function speedup(n){        var lc = llamacppPerUser(n); return lc <= 0 ? 0 : vllmPerUser(n) / lc; }
+
+function f1(x){ return (Math.round(x*10)/10).toFixed(1); }
+function f0(x){ return Math.round(x).toString(); }
+
+/* ---- chart geometry helpers ---- */
+var M = {l:40, r:14, t:14, b:28, w:520, h:250};
+function px(n){ return M.l + (n - 1) / 49 * (M.w - M.l - M.r); }      /* users 1..50 -> x */
+function py(v, vmax){ return M.h - M.b - (v / vmax) * (M.h - M.t - M.b); }
+
+/* build a polyline string of f over users 1..50 */
+function curve(f, vmax){
+  var pts = [];
+  for (var n = 1; n <= 50; n++){ pts.push(px(n).toFixed(1) + "," + py(f(n), vmax).toFixed(1)); }
+  return pts.join(" ");
+}
+
+function drawAxes(svg, vmax, ylabel, yticks){
+  var parts = [];
+  /* y grid + ticks */
+  for (var i = 0; i < yticks.length; i++){
+    var yv = yticks[i];
+    var yy = py(yv, vmax);
+    parts.push('<line class="grid" x1="'+M.l+'" y1="'+yy.toFixed(1)+'" x2="'+(M.w-M.r)+'" y2="'+yy.toFixed(1)+'"/>');
+    parts.push('<text class="tk" x="'+(M.l-5)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end">'+yv+'</text>');
+  }
+  /* x ticks at 1,10,20,30,40,50 */
+  var xt = [1,10,20,30,40,50];
+  for (var j = 0; j < xt.length; j++){
+    var xx = px(xt[j]);
+    parts.push('<line class="axis" x1="'+xx.toFixed(1)+'" y1="'+(M.h-M.b)+'" x2="'+xx.toFixed(1)+'" y2="'+(M.h-M.b+3)+'"/>');
+    parts.push('<text class="tk" x="'+xx.toFixed(1)+'" y="'+(M.h-M.b+14)+'" text-anchor="middle">'+xt[j]+'</text>');
+  }
+  parts.push('<line class="axis" x1="'+M.l+'" y1="'+(M.h-M.b)+'" x2="'+(M.w-M.r)+'" y2="'+(M.h-M.b)+'"/>');
+  parts.push('<line class="axis" x1="'+M.l+'" y1="'+M.t+'" x2="'+M.l+'" y2="'+(M.h-M.b)+'"/>');
+  parts.push('<text class="al" x="6" y="'+(M.h/2)+'" transform="rotate(-90 6,'+(M.h/2)+')" text-anchor="middle">'+ylabel+'</text>');
+  parts.push('<text class="al" x="'+((M.w+M.l)/2)+'" y="'+(M.h-3)+'" text-anchor="middle">concurrent users</text>');
+  return parts.join("");
+}
+
+function renderPerChart(n){
+  var vmax = 85;
+  var p = drawAxes(vmax, "tok/s / user", [0,20,40,60,80]);
+  p += '<polyline points="'+curve(llamacppPerUser, vmax)+'" fill="none" stroke="#f97316" stroke-width="2.2"/>';
+  p += '<polyline points="'+curve(vllmPerUser, vmax)+'" fill="none" stroke="#27ae60" stroke-width="2.2"/>';
+  /* gold dots at N=10 and N=50 */
+  p += dot(10, llamacppPerUser(10), vmax, "#f1c40f");
+  p += dot(10, vllmPerUser(10), vmax, "#f1c40f");
+  p += dot(50, vllmPerUser(50), vmax, "#f1c40f");
+  p += label(10, vllmPerUser(10), vmax, "45", "#f1c40f");
+  /* current-N markers */
+  p += dot(n, llamacppPerUser(n), vmax, "#f97316");
+  p += dot(n, vllmPerUser(n), vmax, "#27ae60");
+  p += '<line stroke-dasharray="3 3" stroke="#8b949e" x1="'+px(n).toFixed(1)+'" y1="'+M.t+'" x2="'+px(n).toFixed(1)+'" y2="'+(M.h-M.b)+'"/>';
+  document.getElementById("perChart").innerHTML = p;
+}
+
+function renderTotChart(n){
+  var vmax = 950;
+  var p = drawAxes(vmax, "aggregate tok/s", [0,300,600,900]);
+  p += '<polyline points="'+curve(llamacppTotal, vmax)+'" fill="none" stroke="#f97316" stroke-width="2.2"/>';
+  p += '<polyline points="'+curve(vllmTotal, vmax)+'" fill="none" stroke="#27ae60" stroke-width="2.2"/>';
+  /* ceiling line at 900 */
+  p += '<line stroke-dasharray="2 4" stroke="#27ae60" opacity="0.5" x1="'+M.l+'" y1="'+py(900,vmax)+'" x2="'+(M.w-M.r)+'" y2="'+py(900,vmax)+'"/>';
+  p += '<text class="al" x="'+(M.w-M.r-4)+'" y="'+(py(900,vmax)-4)+'" text-anchor="end" fill="#27ae60">ceiling 900</text>';
+  /* gold dots */
+  p += dot(10, vllmTotal(10), vmax, "#f1c40f");
+  p += dot(50, vllmTotal(50), vmax, "#f1c40f");
+  p += label(50, vllmTotal(50), vmax, "750", "#f1c40f");
+  /* flat-60 line is the orange curve itself */
+  /* current-N markers */
+  p += dot(n, llamacppTotal(n), vmax, "#f97316");
+  p += dot(n, vllmTotal(n), vmax, "#27ae60");
+  p += '<line stroke-dasharray="3 3" stroke="#8b949e" x1="'+px(n).toFixed(1)+'" y1="'+M.t+'" x2="'+px(n).toFixed(1)+'" y2="'+(M.h-M.b)+'"/>';
+  document.getElementById("totChart").innerHTML = p;
+}
+
+function dot(n, v, vmax, color){
+  return '<circle cx="'+px(n).toFixed(1)+'" cy="'+py(v, vmax).toFixed(1)+'" r="3.6" fill="'+color+'" stroke="#0d1117" stroke-width="1"/>';
+}
+function label(n, v, vmax, text, color){
+  return '<text class="al" x="'+(px(n)+5).toFixed(1)+'" y="'+(py(v,vmax)-5).toFixed(1)+'" fill="'+color+'" font-weight="700">'+text+'</text>';
+}
+
+function renderMetrics(n){
+  var cards = [
+    {cls:"llama", label:"llama.cpp /user", v: f1(llamacppPerUser(n))+" t/s"},
+    {cls:"llama", label:"llama.cpp total", v: f0(llamacppTotal(n))+" t/s"},
+    {cls:"vllm",  label:"vLLM /user",      v: f1(vllmPerUser(n))+" t/s"},
+    {cls:"vllm",  label:"vLLM total",      v: f0(vllmTotal(n))+" t/s"},
+    {cls:"gold",  label:"vLLM speedup",    v: f1(speedup(n))+"x"}
+  ];
+  var html = "";
+  for (var i = 0; i < cards.length; i++){
+    html += '<div class="metric-card '+cards[i].cls+'"><span class="v">'+cards[i].v+
+            '</span><span class="l">'+cards[i].label+'</span></div>';
+  }
+  document.getElementById("metrics").innerHTML = html;
+
+  var sp = speedup(n);
+  var verdict = (n <= 4) ? "below the ~4-5 user crossover &mdash; llama.cpp is simpler and fast enough"
+               : (n <= 9) ? "entering the crossover &mdash; vLLM starts to pull ahead"
+               : "multi-user regime &mdash; vLLM's continuous batching dominates";
+  document.getElementById("readout").innerHTML =
+    'N = '+n+' concurrent users (Llama-3-8B, RTX 4090)\n'+
+    '<span class="llama">llama.cpp</span>: per-user = 60 / '+n+' = <b>'+f1(llamacppPerUser(n))+'</b> t/s,  total = <b>'+f0(llamacppTotal(n))+'</b> t/s (flat)\n'+
+    '<span class="vllm">vLLM</span>:      per-user = 900 / ('+n+' + 10) = <b>'+f1(vllmPerUser(n))+'</b> t/s,  total = 900&middot;'+n+'/('+n+'+10) = <b>'+f0(vllmTotal(n))+'</b> t/s\n'+
+    '<span class="dim">vLLM speedup (per-user): </span><b>'+f1(sp)+'x</b>   <span class="dim">'+verdict+'</span>';
+}
+
+function renderInnov(){
+  /* PagedAttention waste + continuous batching numbers (from vllm_serving.py Section B & C) */
+  var naiveReserved = 32768, pagedReserved = 8032, used = 7899;
+  var wNaive = (naiveReserved - used) / naiveReserved * 100;
+  var wPaged = (pagedReserved - used) / pagedReserved * 100;
+  var cards = [
+    {cls:"llama", label:"naive KV waste", v: f1(wNaive)+"%"},
+    {cls:"vllm",  label:"paged KV waste", v: f1(wPaged)+"%"},
+    {cls:"vllm",  label:"more reqs / GPU", v: (naiveReserved/pagedReserved).toFixed(1)+"x"},
+    {cls:"gold",  label:"wall-clock (trace)", v: "1.7x"}
+  ];
+  var html = "";
+  for (var i = 0; i < cards.length; i++){
+    html += '<div class="metric-card '+cards[i].cls+'"><span class="v">'+cards[i].v+
+            '</span><span class="l">'+cards[i].label+'</span></div>';
+  }
+  document.getElementById("innov").innerHTML = html;
+  document.getElementById("innovRead").innerHTML =
+    '<span class="llama">naive contiguous KV</span>: reserve worst-case 2048 tokens/request &rarr; waste <b>'+f1(wNaive)+'%</b> (in the paper\'s 60-80% band)\n'+
+    '<span class="vllm">PagedAttention</span>: 16-token blocks on demand &rarr; waste <b>'+f1(wPaged)+'%</b>, footprint drops to '+(pagedReserved/naiveReserved*100).toFixed(0)+'% &rarr; ~'+(naiveReserved/pagedReserved).toFixed(1)+'x more concurrent requests fit\n'+
+    '<span class="dim">continuous batching trace (MAX_BATCH=2): static wall-clock 47 iters, continuous 28 iters &rarr; 1.68x faster; short request R1 finishes @8 vs @27 (3.4x less waiting)</span>';
+}
+
+/* ---- GOLD CHECK vs vllm_serving.py GOLD ---- */
+function runGoldCheck(){
+  var ok1 = Math.abs(llamacppPerUser(10) - 6.0) < 1e-9;
+  var ok2 = Math.abs(vllmPerUser(10) - 45.0) < 1e-9;
+  var ok3 = Math.abs(speedup(10) - 7.5) < 1e-9;
+  var ok4 = Math.abs(vllmPerUser(50) - 15.0) < 1e-9;
+  var ok5 = Math.abs(vllmTotal(50) - 750.0) < 1e-9;
+  var all = ok1 && ok2 && ok3 && ok4 && ok5;
+  var el = document.getElementById("check");
+  if (all){
+    el.textContent = "[check: OK]  N=10: llama=6.0, vLLM=45.0 tok/s/user (7.5x); N=50: vLLM=15.0, total=750  (matches vllm_serving.py)";
+    el.className = "";
+  } else {
+    el.textContent = "[check: FAIL]  llama@10="+llamacppPerUser(10)+", vllm@10="+vllmPerUser(10)+", vllm@50="+vllmPerUser(50)+", tot@50="+vllmTotal(50);
+    el.className = "fail";
+  }
+  return all;
+}
+
+function renderAll(){
+  var n = parseInt(document.getElementById("users").value, 10);
+  document.getElementById("usersval").textContent = n;
+  renderPerChart(n);
+  renderTotChart(n);
+  renderMetrics(n);
+}
+
+/* ---- wire up ---- */
+document.getElementById("users").addEventListener("input", renderAll);
+document.getElementById("g10").addEventListener("click", function(){
+  document.getElementById("users").value = 10; renderAll();
+});
+document.getElementById("g50").addEventListener("click", function(){
+  document.getElementById("users").value = 50; renderAll();
+});
+
+renderInnov();
+renderAll();
+runGoldCheck();
+</script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+ltx_video.py - LTX-Video speed architecture (VAE compression + DiT budget).
+Pure Python stdlib. Numbers below feed LTX_VIDEO.md.
+Sources: Lightricks/LTX-Video README + paper arXiv:2501.00103 + LTX-VideoQ8.
+
+Lineage: U-Net video models (heavy) -> LTX DiT + aggressive Video VAE (fast).
+
+==========================================================================
+  SECTION A: THE 1500x - pixel space vs VAE latent space
+==========================================================================
+The single idea behind LTX-Video's speed: the Video VAE compresses the
+pixel buffer 8x on EACH spatial axis and 8x along time, BEFORE the DiT
+runs. The denoiser then works on a tiny latent grid - so each step is
+~1500x cheaper in 'positions to process'.
+
+Reference clip: 720 x 480 x 121 frames x 3 RGB channels
+
+PIXEL SPACE (what a U-Net would denoise directly):
+  grid    = 720 x 480 x 121            =   41,817,600 positions
+  values  = grid x 3 (RGB)          =  125,452,800 values
+  fp16    =       250.91 MB   (501.81 MB in fp32)
+
+LATENT SPACE (what the LTX DiT actually denoises):
+  spatial  : 720/8=90 , 480/8=60   (8x on each axis)
+  temporal : (121-1)/8=15                   (8x along time; T must be 8k+1)
+  grid     = 90 x 60 x 15              =       81,000 positions
+  fp16 (C=128) =      20.74 MB
+
+COMPRESSION (pixel values -> latent positions):
+   125,452,800 / 81,000  =  1548.8x   (~1500x)
+
+Why the channel dimension does not break the headline:
+  Each latent position carries C=128 hidden channels, so the latent
+  TENSOR is 10,368,000 values = 20.7 MB fp16 - NOT 81K scalars.
+  True byte compression (pixel fp16 / latent fp16, C=128) = 12.1x.
+  The ~1500x is about how many SPATIAL-TEMPORAL positions the DiT attends
+  over (81K vs 41.8M) - that is what makes each diffusion step cheap.
+  Pure grid reduction (no channels) = 41,817,600 / 81,000 = 516.3x (~512x = 8^3).
+
+[check] headline compression ~= 1500x :  OK  (got 1548.8x)
+[check] pure grid reduction ~= 512x (8^3) :  OK  (got 516.3x)
+[check] latent grid is the documented 90x60x15 :  OK  (got (90, 60, 15))
+
+==========================================================================
+  SECTION B: TEXT-TO-VIDEO vs IMAGE-TO-VIDEO (what the denoiser starts from)
+==========================================================================
+The DiT always denoises a latent from t=T_max down to t=0. The ONLY
+difference between T2V and I2V is the INITIAL latent:
+
+  T2V : start from PURE NOISE. The text prompt alone guides every frame.
+  I2V : encode the first frame to a latent, LOCK frame 0, fill the rest
+        with noise. The model generates MOTION for frames 1..T-1 only.
+
+Tiny demo (seeded). Latent grid 4(frames) x 3(h) x 2(w), 1 channel for
+readability. Noise ~ N(0,1) rounded to 2dp; image latent = fixed pattern.
+
+  T2V initial latent:
+    frame 0: [[-0.14, -0.17], [-0.11, 0.7], [-0.13, -1.5]]
+    frame 1: [[0.33, -0.27], [-0.22, 0.12], [0.23, 1.16]]
+    frame 2: [[0.66, 0.11], [-0.74, -1.01], [0.25, 1.31]]
+    frame 3: [[0.04, -0.11], [0.53, -1.45], [-0.31, 0.49]]
+  I2V initial latent:
+    frame 0: [[0.3, 0.5], [0.4, 0.6], [0.5, 0.7]]  [LOCKED image]
+    frame 1: [[0.33, -0.27], [-0.22, 0.12], [0.23, 1.16]]
+    frame 2: [[0.66, 0.11], [-0.74, -1.01], [0.25, 1.31]]
+    frame 3: [[0.04, -0.11], [0.53, -1.45], [-0.31, 0.49]]
+
+After denoising (same DiT, same steps), the difference:
+  T2V -> fully synthesized clip (no anchor; prompt decides frame 0 too).
+  I2V -> frame 0 stays the input image; frames 1..T-1 are generated motion.
+
+Practical consequence: I2V is what makes LTX useful for animation - feed a
+generated/real still image, get a coherent ~5s clip anchored on it. T2V is
+the from-scratch path. Both cost the same per step (same latent size).
+[check] I2V locks frame 0 to the image latent :  OK
+
+==========================================================================
+  SECTION C: VRAM BUDGET - why 8GB is enough
+==========================================================================
+LTX fits an 8GB card because the WEIGHTS are modest (2B DiT) AND the
+working set (latent + activations) is bounded by the tiny latent grid.
+
+Budget = DiT_weights + VAE_weights + latent_tensor + activations + overhead
+
+Reference: 720x480x121, DiT Q8 (the Ada-kernel path):
+  DiT weights   = 2.0B x 8.5 / 8        =  2.125 GB   (2B params, Q8)
+  VAE weights   = 0.15B x 16 / 8         =  0.300 GB   (~150M params, fp16)
+  latent tensor = 90*60*15*128*2 / 1e9 =  0.021 GB   (tiny)
+  activations   = 3.0 x 81000/81000     =  3.000 GB   (scales w/ latent positions)
+  overhead      = floor                 =  0.500 GB   (CUDA ctx + workspace)
+  TOTAL                                  =  5.946 GB
+
+Across DiT quants (the lever that decides if 8GB is comfortable):
+| DiT quant | bpw  | DiT GB | VAE  | latent | act   | oh   | TOTAL  | 8GB? |
+|-----------|------|--------|------|--------|-------|------|--------|------|
+| FP16      | 16.0 |  4.000 GB |  0.300 GB |  0.021 GB |  3.000 GB |  0.500 GB |   7.82 GB |  FIT  |
+| Q4_GGUF   |  4.5 |  1.125 GB |  0.300 GB |  0.021 GB |  3.000 GB |  0.500 GB |   4.95 GB |  FIT  |
+| Q8        |  8.5 |  2.125 GB |  0.300 GB |  0.021 GB |  3.000 GB |  0.500 GB |   5.95 GB |  FIT  |
+
+FP16 is borderline on 8GB (7.95 GB, no headroom). Q8 is the comfortable
+path (~6 GB, ~2 GB free) and is exactly what LTX-VideoQ8 targets on Ada.
+[check] Q8 total fits 8GB with headroom :  OK  (got 5.95)
+[check] FP16 total is under but tight on 8GB :  OK  (got 7.82)
+[check] latent tensor is < 0.05 GB (negligible) :  OK  (got 0.0207)
+
+==========================================================================
+  SECTION D: SPEED - the real-time factor (video duration / gen time)
+==========================================================================
+'Faster than real-time' means the clip GENERATES faster than it PLAYS:
+
+  video duration = 121 frames / 24 fps = 5.04 s
+  real-time factor (RTF) = duration / gen_time    (RTF >= 1 = faster than playback)
+
+Per-step cost scales with latent positions (the 81K grid). Calibrated to
+the documented '<60s for 720x480x121 on RTX 4060 8GB' (LTX-VideoQ8).
+
+  latent positions = 90*60*15 = 81,000   (scale vs 81K = 1.000)
+
+  8 diffusion steps (distilled model, no CFG/STG needed):
+| GPU                              | s/step | gen time | RTF   | faster than real-time? |
+|----------------------------------|--------|----------|-------|-------------------------|
+| H100 (paper 'real-time')         |   0.50 |    4.0 s |  1.26 | YES (RTF >= 1)          |
+| RTX 4090 24GB                    |   1.60 |   12.8 s |  0.39 | no (RTF 0.39)           |
+| RTX 4060 8GB (Q8 kernels)        |   5.50 |   44.0 s |  0.11 | no (RTF 0.11)           |
+
+Reading the table:
+  - RTX 4060 8GB (Q8): ~44 s for a 5 s clip. RTF ~0.11 - NOT literally
+    real-time, but ~7-50x faster than Wan 14B / HunyuanVideo, on an 8GB card.
+  - H100: the paper's 'real-time' claim (RTF >= 1, gen <= playback).
+  - The speed is NOT a smaller model: it is the 1500x smaller working set
+    (Section A) x a distilled 8-step schedule (no CFG/STG) x Q8 kernels.
+[check] RTX 4060 Q8 gen < 60s (documented) :  OK  (got 44.0s)
+[check] RTX 4060 Q8 is NOT faster than real-time (RTF < 1) :  OK  (RTF=0.11)
+[check] H100 IS faster than real-time (RTF >= 1) :  OK  (RTF=1.26)
+
+==========================================================================
+  SECTION E: LTX vs WAN vs HUNYUANVIDEO - the video-model landscape
+==========================================================================
+Same target clip (720x480x121 ~ a 5s video). The spread is ~2 orders of
+magnitude in VRAM and speed. LTX trades a little quality for a LOT of speed.
+
+| model                       | params | resolution   | VRAM    | gen      | RTF   |
+|-----------------------------|--------|--------------|---------|----------|-------|
+| LTX-Video 2B (Q8, distilled) |    2B  | 720x480x121  |     6 GB |     44 s | 0.115 |
+| LTX-Video 2B (H100)         |    2B  | 720x480x121  |     6 GB |      4 s | 1.260 |
+| Wan 2.2 14B                 |   14B  | 720x480x121  |    18 GB |    300 s | 0.017 |
+| HunyuanVideo 13B            |   13B  | 720p         |    60 GB |   1800 s | 0.003 |
+
+LTX is the only one that fits a consumer 8GB card AND finishes in under a
+minute. Wan 2.2 is the higher-quality but heavier alternative (see the
+wan_video bundle for its Lightning/TeaCache/GGUF optimizations that close
+the gap). HunyuanVideo is the datacenter-tier quality leader.
+[check] LTX uses the least VRAM of the three :  OK  (6.0/18.0/60.0)
+[check] LTX is the fastest of the three :  OK  (44.0/300.0/1800.0)
+
+  Wan 14B / LTX 2B speedup ~= 7x  (300s vs 44s)
+[check] LTX is roughly an order of magnitude faster than Wan 14B :  OK
+
+==========================================================================
+  GOLD VALUE - the canonical number the HTML must reproduce
+==========================================================================
+Reference clip 720x480x121x3:
+  pixel values      = 720*480*121*3        = 125,452,800
+  latent positions  = 90*60*15              = 81,000
+  COMPRESSION RATIO = 125,452,800 / 81,000 = 1548.8x  (~1500x)
+
+  GOLD (pinned in ltx_video.html):
+    compression(720x480x121) = 1548.8x   (to 1 dp)
+    pixel fp16 footprint      = 250.91 MB
+    latent fp16 (C=128)        = 20.74 MB
+[check] gold compression ~= 1548.8x :  OK  (got 1548.8)
+[check] gold pixel values == 125,452,800 :  OK  (got 125452800)
+[check] gold latent positions == 81,000 :  OK  (got 81000)
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

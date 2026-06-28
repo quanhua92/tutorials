@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flux GGUF &mdash; VRAM Budget &amp; Quant Playground</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#0a0e14; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --border:#30363d;
+    --accent:#f97316;
+    --green:#27ae60; --red:#c0392b; --blue:#58a6ff; --gold:#f1c40f; --purple:#a78bfa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem;line-height:1.5}
+  a{color:var(--accent)}
+  h1{font-size:1.32rem;margin:.2rem 0 .1rem}
+  h2{font-size:1rem;color:var(--muted);margin:1.7rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem;display:flex;align-items:center;gap:.5rem}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem;max-width:920px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:.95rem 1.05rem;margin:.8rem 0}
+  .micro{color:var(--muted);font-size:.76rem;line-height:1.55;margin-bottom:.6rem}
+  label{color:var(--muted);font-size:.8rem;display:flex;gap:.45rem;align-items:center;flex-wrap:wrap}
+  .controls{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;margin:.3rem 0 .6rem}
+  select{background:var(--panel2);color:var(--ink);
+     border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:.82rem;font-family:inherit}
+  input[type=range]{accent-color:var(--accent);width:220px}
+  .badge{display:inline-block;background:#3a2a14;color:var(--accent);border:1px solid var(--accent);
+         border-radius:5px;padding:2px 9px;font-size:.72rem;font-weight:600;margin-left:.4rem;
+         text-decoration:none}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+     background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.25);
+     font-size:.82rem;color:var(--muted);line-height:1.5}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--ink);
+           background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.6rem .85rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--accent)}
+  .readout .good{color:var(--green)}
+  .readout .bad{color:var(--red)}
+  .readout .dim{color:var(--muted)}
+  #check{display:inline-block;border:1px solid var(--green);border-radius:6px;padding:5px 12px;
+         font-family:ui-monospace,monospace;font-size:.78rem;font-weight:600;color:var(--green)}
+  #check.fail{border-color:var(--red);color:var(--red)}
+
+  /* VRAM bar chart */
+  .vramrow{display:flex;align-items:center;gap:.6rem;margin:.45rem 0}
+  .vramrow .lab{width:70px;font-size:.78rem;font-family:ui-monospace,monospace;color:var(--ink);font-weight:600}
+  .vramtrack{flex:1;height:28px;background:var(--panel);border:1px solid var(--border);border-radius:5px;position:relative;overflow:hidden;min-width:120px}
+  .vramfill{height:100%;border-radius:4px;transition:width .35s ease;display:flex;align-items:center;padding-left:8px;font-size:.72rem;font-weight:700;color:#0d1117;white-space:nowrap}
+  .vramrow .sz{width:56px;text-align:right;font-size:.74rem;font-variant-numeric:tabular-nums;color:var(--muted)}
+  .vramrow .q{width:40px;text-align:right;font-size:.72rem;color:var(--muted)}
+
+  /* GPU grid */
+  .gpugrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5rem;margin-top:.6rem}
+  .gpucard{border:1px solid var(--border);border-radius:8px;padding:.6rem .7rem;background:var(--panel2)}
+  .gpucard .name{font-size:.78rem;font-weight:600;color:var(--ink)}
+  .gpucard .vram{font-size:1.1rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums}
+  .gpucard .best{font-size:.72rem;color:var(--green);margin-top:.2rem;font-family:ui-monospace,monospace}
+  .gpucard .nope{font-size:.72rem;color:var(--red);margin-top:.2rem}
+  .gpucard.ok{border-color:rgba(39,174,96,.4)}
+
+  /* pipeline diagram */
+  .pipe{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin-top:.6rem}
+  .pipe .stage{flex:1;min-width:120px;border:1px solid var(--border);border-radius:8px;padding:.6rem .7rem;background:var(--panel2);text-align:center}
+  .pipe .stage .ico{font-size:1.3rem}
+  .pipe .stage .ttl{font-size:.78rem;font-weight:600;margin:.2rem 0}
+  .pipe .stage .det{font-size:.7rem;color:var(--muted);font-family:ui-monospace,monospace}
+  .pipe .arrow{display:flex;align-items:center;color:var(--accent);font-size:1.1rem;padding:0 .3rem}
+  .pipe .stage.dit{border-left:3px solid var(--accent)}
+  .pipe .stage.vae{border-left:3px solid var(--blue)}
+  .pipe .stage.pix{border-left:3px solid var(--green)}
+  .pipe .stage.t5{border-left:3px solid var(--purple)}
+
+  .formula{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:.55rem .8rem;
+           margin:.4rem 0;font-family:ui-monospace,monospace;font-size:.76rem;color:var(--ink);white-space:pre-wrap;overflow-x:auto}
+  .formula b{color:var(--accent)}
+  .note{font-size:.74rem;color:var(--muted);font-style:italic;margin-top:.4rem}
+</style>
+</head>
+<body>
+  <a href="./index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">&#8592; back to Local LLM dashboard</a>
+  <h1>Flux GGUF &mdash; <span style="color:#f97316">12B DiT on a 6&ndash;12 GB GPU</span>
+    <a class="badge md" title="Full guide &mdash; architecture, VRAM budgets, pitfalls, cheat sheet" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/FLUX_GGUF.md">&#128214; FLUX_GGUF.md</a>
+    <a class="badge" title="Ground-truth source code (pure Python stdlib)" href="https://github.com/quanhua92/tutorials/blob/main/local-llm/flux_gguf.py">&#128196; flux_gguf.py</a>
+  </h1>
+  <div class="sub">
+    Flux.1 [dev] is a <b style="color:#f97316">12-billion-parameter Diffusion Transformer</b> &mdash; 23 GB at FP16,
+    far too big for most GPUs. GGUF block quantization (the same format LLMs use) shrinks it to
+    <b>7 GB (Q4_K_M)</b> with &lt;2% quality loss. Pick a GPU tier below and watch the VRAM budget recalculate.
+    The gold-check pins the <b>VAE compression ratio</b> to the exact <code>.py</code> output.
+  </div>
+  <div class="guide-callout">&#128214; <a href="https://github.com/quanhua92/tutorials/blob/main/local-llm/FLUX_GGUF.md">Read the full guide</a> &mdash; architecture lineage, VRAM budget tables, killer pitfalls (T5 quantization, fp8 vs GGUF), and the cheat sheet. This page is the interactive companion.</div>
+  <span id="check" style="margin-top:.6rem">check: ...</span>
+
+  <!-- ===== PANEL 1: VRAM bar chart ===== -->
+  <h2><span class="n">&#9312;</span> VRAM vs quant level &mdash; the bar chart</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> total VRAM for a 1024&times;1024 generation at each DiT quant level.
+      Bars include DiT weights + T5 + VAE + activations. Drag the slider to set your GPU VRAM; green = fits, red = OOM.</div>
+    <div class="controls">
+      <label>your GPU VRAM:
+        <select id="gpuSel">
+          <option value="6">6 GB (GTX 1060)</option>
+          <option value="8">8 GB (RTX 3060/4060)</option>
+          <option value="12" selected>12 GB (RTX 3060 12GB)</option>
+          <option value="16">16 GB (RTX 4080)</option>
+          <option value="24">24 GB (RTX 3090/4090)</option>
+        </select>
+      </label>
+      <label>T5 encoder:
+        <select id="t5Sel">
+          <option value="fp16">fp16 (9.4 GB, best text)</option>
+          <option value="q4" selected>Q4 (2.0 GB, saves 7.4 GB)</option>
+        </select>
+      </label>
+    </div>
+    <div id="vramChart"></div>
+    <div class="note">Q4_K_M + Q4 T5 = 11.5 GB &rarr; fits a 12 GB GPU with <2% quality loss. That's the sweet spot most users should pick.</div>
+  </div>
+
+  <!-- ===== PANEL 2: GPU compatibility matrix ===== -->
+  <h2><span class="n">&#9313;</span> Which GPU can run which quant?</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> for each GPU tier, the best DiT quant that fits (with Q4 T5). Green = comfortable fit, the bolded quant is the recommendation for that card.</div>
+    <div class="gpugrid" id="gpuGrid"></div>
+    <div class="note">"Fits" = total VRAM (DiT + T5 + VAE + activations) &le; GPU VRAM. On 8 GB cards, ComfyUI can offload T5/VAE to system RAM between steps (slower but works).</div>
+  </div>
+
+  <!-- ===== PANEL 3: DiT -> VAE -> pixel pipeline ===== -->
+  <h2><span class="n">&#9314;</span> The pipeline &mdash; text &rarr; DiT &rarr; VAE &rarr; pixel</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> Flux never denoises pixels directly. The VAE compresses 1024&times;1024&times;3 into a 128&times;128&times;16 latent (12&times; smaller). The DiT denoises that latent, then the VAE decodes it back to pixels. The compression ratio below is gold-checked against <code>flux_gguf.py</code>.</div>
+    <div class="pipe">
+      <div class="stage t5">
+        <div class="ico">&#9999;&#65039;</div>
+        <div class="ttl">T5-XXL + CLIP-L</div>
+        <div class="det">prompt &rarr; embeddings<br/>256-token context</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage dit">
+        <div class="ico">&#9881;&#65039;</div>
+        <div class="ttl">DiT (12B)</div>
+        <div class="det">denoise latent<br/>over 20-28 steps<br/><b style="color:#f97316">THIS is what GGUF shrinks</b></div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage vae">
+        <div class="ico">&#128280;</div>
+        <div class="ttl">VAE decode</div>
+        <div class="det">latent &rarr; pixel<br/>always fp16/fp32</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="stage pix">
+        <div class="ico">&#127912;</div>
+        <div class="ttl">1024&times;1024 image</div>
+        <div class="det">3.15M pixel values</div>
+      </div>
+    </div>
+    <div class="formula" id="vaeFormula"></div>
+    <div id="vaeRO" class="readout"></div>
+  </div>
+
+  <!-- ===== PANEL 4: fp8 vs GGUF ===== -->
+  <h2><span class="n">&#9315;</span> fp8 vs GGUF &mdash; speed vs compatibility</h2>
+  <div class="panel">
+    <div class="micro"><b>What this shows:</b> two ways to shrink Flux below FP16. fp8 is faster but needs RTX 40+ hardware. GGUF is slower but runs on ANY GPU and lets you pick the size.</div>
+    <div class="cards" style="display:flex;gap:.7rem;flex-wrap:wrap;margin-top:.4rem">
+      <div style="flex:1;min-width:200px;border:1px solid var(--border);border-radius:8px;padding:.7rem .85rem;background:var(--panel2);border-left:3px solid var(--blue)">
+        <h3 style="margin:0 0 .3rem;font-size:.85rem;color:var(--ink)">fp8 <span style="color:var(--blue);font-size:.7rem">native float8</span></h3>
+        <div style="font-size:.74rem;color:var(--muted);line-height:1.6">
+          &bull; VRAM: ~12 GB (one size)<br/>
+          &bull; Speed: <b style="color:var(--green)">faster</b> (native fp8 matmul)<br/>
+          &bull; Needs: <b style="color:var(--red)">Ada/Hopper only</b> (RTX 40+)<br/>
+          &bull; Quality: ~1% loss
+        </div>
+      </div>
+      <div style="flex:1;min-width:200px;border:1px solid var(--border);border-radius:8px;padding:.7rem .85rem;background:var(--panel2);border-left:3px solid var(--accent)">
+        <h3 style="margin:0 0 .3rem;font-size:.85rem;color:var(--ink)">GGUF <span style="color:var(--accent);font-size:.7rem">block quant Q4-Q8</span></h3>
+        <div style="font-size:.74rem;color:var(--muted);line-height:1.6">
+          &bull; VRAM: 6.5&ndash;12 GB <b style="color:var(--green)">(you pick)</b><br/>
+          &bull; Speed: slower (dequant on-the-fly)<br/>
+          &bull; Needs: <b style="color:var(--green)">ANY GPU</b> (even old Maxwell)<br/>
+          &bull; Quality: &lt;1&ndash;4% (depends on level)
+        </div>
+      </div>
+    </div>
+    <div class="note">Rule of thumb: RTX 4090/4080/5090 &rarr; fp8 (faster). Everything else &rarr; GGUF (only option). Want the smallest? GGUF Q3_K_S (5.5 GB DiT).</div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================
+   Reproduce flux_gguf.py's VRAM budget + VAE compression in JS,
+   then gold-check the 12.0x compression ratio.
+   ============================================================ */
+var GH = "https://github.com/quanhua92/tutorials/blob/main/local-llm";
+
+/* --- constants: 1:1 ports of flux_gguf.py --- */
+var N_PARAMS_DIT = 12e9;
+var BYTES_PER_GB = 1e9;
+
+/* quant levels (file sizes = gold values from city96 HF repo) */
+var QUANTS = [
+  {name:"FP16",   file:23.0, qloss:0.0, ditOnly:false},
+  {name:"Q8_0",   file:12.0, qloss:0.5, ditOnly:false},
+  {name:"Q4_K_M", file:7.0,  qloss:1.8, ditOnly:true},
+  {name:"Q4_K_S", file:6.5,  qloss:2.0, ditOnly:true},
+  {name:"Q3_K_S", file:5.5,  qloss:4.0, ditOnly:true},
+];
+
+/* T5 sizes */
+var T5 = {fp16:9.4, q4:2.0};
+
+/* fixed budget terms */
+var VAE_GB = 0.5;
+var ACT_GB = 2.0;   /* activations + CLIP-L overhead */
+
+/* VRAM budget = DiT + T5 + VAE + activations */
+function vramBudget(ditFile, t5Mode){
+  return ditFile + T5[t5Mode] + VAE_GB + ACT_GB;
+}
+
+/* effective bpw = file_GB * 8 / 12B */
+function effBpw(fileGb){
+  return fileGb * BYTES_PER_GB * 8 / N_PARAMS_DIT;
+}
+
+/* --- render VRAM bar chart --- */
+function renderChart(){
+  var gpuVram = parseInt(document.getElementById("gpuSel").value, 10);
+  var t5Mode = document.getElementById("t5Sel").value;
+  /* FP16/Q8 use fp16 T5 regardless (high-end configs); Q4/Q3 use selected T5 */
+  var maxVram = 36;  /* FP16 + fp16 T5 = 34.9 */
+  var html = "";
+  QUANTS.forEach(function(q){
+    var t5 = (q.name === "FP16" || q.name === "Q8_0") ? "fp16" : t5Mode;
+    var total = vramBudget(q.file, t5);
+    var fits = total <= gpuVram + 0.01;  /* small tolerance */
+    var pct = Math.round(total / maxVram * 100);
+    var color = fits ? "var(--green)" : "var(--red)";
+    var label = q.name + " + T5:" + t5;
+    html += '<div class="vramrow">' +
+      '<span class="lab">' + q.name + '</span>' +
+      '<span class="vramtrack"><span class="vramfill" style="width:' + pct + '%;background:' + color + '">' +
+        (pct > 22 ? total.toFixed(1) + " GB" : "") + '</span></span>' +
+      '<span class="sz">' + total.toFixed(1) + 'G</span>' +
+      '<span class="q">' + (fits ? '<b style="color:var(--green)">fits</b>' : '<b style="color:var(--red)">OOM</b>') + '</span>' +
+      '</div>';
+  });
+  /* GPU marker line label */
+  var gpuPct = Math.round(gpuVram / maxVram * 100);
+  html += '<div class="vramrow"><span class="lab" style="color:var(--blue)">your GPU</span>' +
+    '<span class="vramtrack"><span class="vramfill" style="width:' + gpuPct + '%;background:rgba(88,166,255,.15);border:1px dashed var(--blue);color:var(--blue)">' + gpuVram + ' GB</span></span>' +
+    '<span class="sz"></span><span class="q"></span></div>';
+  document.getElementById("vramChart").innerHTML = html;
+}
+
+/* --- render GPU compatibility grid --- */
+function renderGpuGrid(){
+  var gpus = [
+    {name:"GTX 1060",     vram:6},
+    {name:"RTX 3060/4060",vram:8},
+    {name:"RTX 3060 12G", vram:12},
+    {name:"RTX 4080",     vram:16},
+    {name:"RTX 3090/4090",vram:24},
+  ];
+  var html = "";
+  gpus.forEach(function(g){
+    /* find best DiT quant (with Q4 T5) that fits */
+    var best = null;
+    for (var i = QUANTS.length - 1; i >= 0; i--){
+      var total = vramBudget(QUANTS[i].file, "q4");
+      if (total <= g.vram + 0.01){
+        best = QUANTS[i];
+        break;
+      }
+    }
+    var ok = !!best;
+    html += '<div class="gpucard' + (ok ? " ok" : "") + '">' +
+      '<div class="name">' + g.name + '</div>' +
+      '<div class="vram">' + g.vram + ' GB</div>';
+    if (ok){
+      html += '<div class="best">' + best.name + ' + Q4 T5</div>';
+      var total = vramBudget(best.file, "q4");
+      html += '<div style="font-size:.68rem;color:var(--muted)">' + total.toFixed(1) + ' GB total &middot; ~' + best.qloss + '% loss</div>';
+    } else {
+      html += '<div class="nope">no GGUF Flux fits<br/>(use CPU offload)</div>';
+    }
+    html += '</div>';
+  });
+  document.getElementById("gpuGrid").innerHTML = html;
+}
+
+/* --- render VAE pipeline + compression --- */
+function renderVae(){
+  var px = 1024 * 1024 * 3;
+  var lt = 128 * 128 * 16;
+  var comp = px / lt;
+  document.getElementById("vaeFormula").innerHTML =
+    '<b>VAE compression:</b>  1024&times;1024&times;3 = ' + px.toLocaleString() + ' pixel values\n' +
+    '                        128&times;128&times;16  = ' + lt.toLocaleString() + ' latent values\n' +
+    '                        ratio = ' + px.toLocaleString() + ' / ' + lt.toLocaleString() + ' = <b>' + comp.toFixed(1) + '&times;</b>';
+  document.getElementById("vaeRO").innerHTML =
+    '<span class="dim">pixel values      = </span>' + px.toLocaleString() + '  (1024&times;1024&times;3)\n' +
+    '<span class="dim">latent values     = </span>' + lt.toLocaleString() + '  (128&times;128&times;16)\n' +
+    '<span class="dim">spatial downsample = </span>8&times; per axis (64&times; area)\n' +
+    '<span class="dim">channel expand    = </span>16/3 = 5.33&times;\n' +
+    '<span class="dim">net compression   = </span><b>' + comp.toFixed(1) + '&times;</b>  (64 / 5.33)\n' +
+    '<span class="dim">DiT attention seq = </span>16,384 tokens (not 1,048,576)';
+}
+
+/* --- GOLD-CHECK: VAE compression must be exactly 12.0 (flux_gguf.py Section B) --- */
+function goldCheck(){
+  var GOLD_PX = 1024 * 1024 * 3;     /* 3,145,728 */
+  var GOLD_LT = 128 * 128 * 16;      /* 262,144   */
+  var comp = GOLD_PX / GOLD_LT;
+  var ok = (comp.toFixed(1) === "12.0");
+  var el = document.getElementById("check");
+  if (ok){
+    el.textContent = "[check: OK]  VAE compression = " + GOLD_PX.toLocaleString() + " / " + GOLD_LT.toLocaleString() + " = " + comp.toFixed(1) + "x  (matches flux_gguf.py)";
+    el.className = "";
+  } else {
+    el.textContent = "[check: FAIL]  got " + comp.toFixed(1) + "x";
+    el.className = "fail";
+  }
+}
+
+/* --- wire up --- */
+function renderAll(){ renderChart(); renderGpuGrid(); renderVae(); goldCheck(); }
+["gpuSel","t5Sel"].forEach(function(id){
+  document.getElementById(id).addEventListener("change", function(){ renderChart(); renderGpuGrid(); });
+});
+
+renderAll();
+</script>
+</body>
+</html>

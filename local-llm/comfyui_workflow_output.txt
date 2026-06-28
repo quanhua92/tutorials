@@ -1,0 +1,147 @@
+comfyui_workflow.py - reference impl. All numbers below feed COMFYUI_WORKFLOW.md.
+pure Python stdlib (json only). Models the ComfyUI prompt-format DAG.
+
+========================================================================
+  SECTION A: parse the prompt JSON -> nodes
+========================================================================
+ComfyUI prompt format: a dict keyed by node id (string). Each value has
+  class_type : the node's operation name (a registered Python class)
+  inputs     : dict of input_name -> value OR link [src_id, slot]
+A link [src_id, slot] means 'take output slot #slot of node src_id'.
+
+prompt JSON (first node):
+  {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"model.safetensors"}}
+  {"class_type":"CLIPTextEncode","inputs":{"text":"beautiful landscape","clip":["4",1]}}
+
+| node_id | class_type             | inputs (links marked *)              |
+|---------|------------------------|--------------------------------------|
+| 3       | KSampler               | cfg=8, latent_image*=[5,0], model*=[4,0], negative*=[7,0], positive*=[6,0], sampler='euler', scheduler='normal', seed=42, steps=20 |
+| 4       | CheckpointLoaderSimple | ckpt_name='model.safetensors'        |
+| 5       | EmptyLatentImage       | batch_size=1, height=512, width=512  |
+| 6       | CLIPTextEncode         | clip*=[4,1], text='beautiful landscape' |
+| 7       | CLIPTextEncode         | clip*=[4,1], text='blurry, bad'      |
+| 8       | VAEDecode              | samples*=[3,0], vae*=[4,2]           |
+| 9       | SaveImage              | images*=[8,0]                        |
+
+CheckpointLoaderSimple (node 4) has THREE output slots:
+  slot 0 = MODEL   slot 1 = CLIP   slot 2 = VAE
+[check] parsed 7 nodes: True -> OK
+
+========================================================================
+  SECTION B: build the DAG (every link is a directed edge)
+========================================================================
+Walk every input; if it is a [src, slot] link, record a directed edge
+src -> dst. The collection of edges IS the workflow's DAG.
+
+| # | src_id | slot | -> | dst_id | input_name | source type |
+|---|--------|------|----|--------|------------|-------------|
+| 1 | 4      | 0    | -> | 3      | model      | MODEL       |
+| 2 | 6      | 0    | -> | 3      | positive   | CONDITIONING |
+| 3 | 7      | 0    | -> | 3      | negative   | CONDITIONING |
+| 4 | 5      | 0    | -> | 3      | latent_image | LATENT      |
+| 5 | 4      | 1    | -> | 6      | clip       | CLIP        |
+| 6 | 4      | 1    | -> | 7      | clip       | CLIP        |
+| 7 | 3      | 0    | -> | 8      | samples    | LATENT      |
+| 8 | 4      | 2    | -> | 8      | vae        | VAE         |
+| 9 | 8      | 0    | -> | 9      | images     | IMAGE       |
+
+total dependency edges (wires):   9
+distinct source output ports:     8
+(CLIP slot 1 of node 4 fans out to nodes 6 AND 7 -> counted once as a
+ source port, but twice as a dependency wire.)
+[check] edge_count == 9 (one wire per link): True -> OK
+[check] distinct source ports == 8: True -> OK
+
+========================================================================
+  SECTION C: topological sort (Kahn's algorithm, numeric tie-break)
+========================================================================
+A node can only execute once ALL its input producers have executed.
+Kahn's algorithm: emit zero-in-degree nodes, decrement consumers, repeat.
+Tie-break by numeric node id so the order is deterministic.
+
+in-degree per node:
+  node 3  (KSampler              ) in-degree = 4
+  node 4  (CheckpointLoaderSimple) in-degree = 0
+  node 5  (EmptyLatentImage      ) in-degree = 0
+  node 6  (CLIPTextEncode        ) in-degree = 1
+  node 7  (CLIPTextEncode        ) in-degree = 1
+  node 8  (VAEDecode             ) in-degree = 2
+  node 9  (SaveImage             ) in-degree = 1
+
+topo-sorted execution order:
+  1. node 4 -> CheckpointLoaderSimple
+  2. node 5 -> EmptyLatentImage
+  3. node 6 -> CLIPTextEncode
+  4. node 7 -> CLIPTextEncode
+  5. node 3 -> KSampler
+  6. node 8 -> VAEDecode
+  7. node 9 -> SaveImage
+
+order = ['4', '5', '6', '7', '3', '8', '9']
+[check] topo order == ['4','5','6','7','3','8','9']: True -> OK
+[check] order is a legal topological sort: True -> OK
+
+========================================================================
+  SECTION D: execute in topo order (symbolic trace)
+========================================================================
+Run graph_compute: for each node in topo order, read resolved inputs and
+produce typed outputs. Real ComfyUI swaps each node for the actual model
+op (load weights, run CLIP, denoise 20 steps, VAE decode, write PNG).
+
+| step | node | class_type             | outputs                              |
+|------|------|------------------------|--------------------------------------|
+| 1    | 4    | CheckpointLoaderSimple | MODEL(model.safetensors)             |
+| 2    | 5    | EmptyLatentImage       | LATENT(512x512 noise)                |
+| 3    | 6    | CLIPTextEncode         | COND('beautiful landscape' via CLIP(model.safetensors)) |
+| 4    | 7    | CLIPTextEncode         | COND('blurry, bad' via CLIP(model.safetensors)) |
+| 5    | 3    | KSampler               | LATENT(denoised seed=42 steps=20)    |
+| 6    | 8    | VAEDecode              | IMAGE(512x512x3 pixels)              |
+| 7    | 9    | SaveImage              | SAVED(ComfyUI_00001_.png)            |
+
+Data flow summary (typed ports):
+  node 4 CheckpointLoaderSimple -> MODEL[0], CLIP[1], VAE[2]
+  node 5 EmptyLatentImage       -> LATENT[0]
+  node 6 CLIPTextEncode(+)      -> CONDITIONING[0]   (reads CLIP[1] of 4)
+  node 7 CLIPTextEncode(-)      -> CONDITIONING[0]   (reads CLIP[1] of 4)
+  node 3 KSampler               -> LATENT[0]         (MODEL+pos+neg+noise)
+  node 8 VAEDecode              -> IMAGE[0]          (LATENT+VAE)
+  node 9 SaveImage              -> writes PNG        (IMAGE)
+[check] final node (9) is SaveImage: True -> OK
+[check] KSampler (3) ran before VAEDecode (8): True -> OK
+
+========================================================================
+  SECTION G: GOLD trace (the centerpiece)
+========================================================================
+Full parse -> topo-sort -> execute on the canonical 7-node workflow.
+
+STEP 1  parse prompt JSON
+        node_count = 7
+        edge_count = 9  (distinct source ports = 8)
+STEP 2  topo_sort (Kahn, numeric tie-break)
+        order = ['4', '5', '6', '7', '3', '8', '9']
+STEP 3  execute (symbolic)
+| order | node | class_type             | output[0]                            |
+|-------|------|------------------------|--------------------------------------|
+| 1     | 4    | CheckpointLoaderSimple | MODEL(model.safetensors)             |
+| 2     | 5    | EmptyLatentImage       | LATENT(512x512 noise)                |
+| 3     | 6    | CLIPTextEncode         | COND('beautiful landscape' via CLIP(model.safetensors)) |
+| 4     | 7    | CLIPTextEncode         | COND('blurry, bad' via CLIP(model.safetensors)) |
+| 5     | 3    | KSampler               | LATENT(denoised seed=42 steps=20)    |
+| 6     | 8    | VAEDecode              | IMAGE(512x512x3 pixels)              |
+| 7     | 9    | SaveImage              | SAVED(ComfyUI_00001_.png)            |
+
+STEP 4  result: SAVED(ComfyUI_00001_.png)
+[check] node_count == 7: True -> OK
+[check] topo order == [4,5,6,7,3,8,9]: True -> OK
+[check] topo order is legal: True -> OK
+[check] edge_count == 9 (dependency wires): True -> OK
+
+GOLD (recomputed & badge-checked in comfyui_workflow.html):
+  node_count   = 7
+  edge_count   = 9
+  topo order   = ['4', '5', '6', '7', '3', '8', '9']
+  final output = SAVED(ComfyUI_00001_.png)
+
+========================================================================
+  DONE - all sections printed; gold = OK
+========================================================================

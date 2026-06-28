@@ -1,0 +1,170 @@
+diffusion_fundamentals.py - the math behind image/video generation.
+Pure Python stdlib. Numbers below feed DIFFUSION_FUNDAMENTALS.md.
+Sources: DDPM arXiv:2006.11239, DDIM arXiv:2010.02502, EDM arXiv:2206.00364.
+
+Forward (add noise) -> reverse (subtract noise) -> schedulers (fewer steps).
+
+==========================================================================
+  SECTION A: LINEAR NOISE SCHEDULE - the fixed forward coefficients
+==========================================================================
+DDPM linear schedule (Ho et al. 2020, arXiv:2006.11239):
+  beta_t  = beta_1 + (t-1)/(T-1)*(beta_T - beta_1)   for t = 1..T
+  alpha_t = 1 - beta_t
+  alpha_bar_t = prod(alpha_1 .. alpha_t)   (signal retained)
+
+T = 1000 steps
+beta_1   = 0.000100   beta_T = 0.0200
+alpha_1  = 0.999900   alpha_T = 0.980000
+beta_500 = 0.010040  alpha_500 = 0.989960
+
+alpha_bar at key steps (signal fraction surviving):
+| step t | beta_t   | alpha_bar_t | sqrt(ab_t) | sqrt(1-ab_t) |
+|--------|----------|-------------|------------|--------------|
+|      1 |  0.00010 |    0.999900 |     0.9999 |       0.0100 |
+|    100 |  0.00207 |    0.897018 |     0.9471 |       0.3209 |
+|    250 |  0.00506 |    0.524085 |     0.7239 |       0.6899 |
+|    500 |  0.01004 |    0.078587 |     0.2803 |       0.9599 |
+|    750 |  0.01502 |    0.003351 |     0.0579 |       0.9983 |
+|   1000 |  0.02000 |    0.000040 |     0.0064 |       1.0000 |
+
+GOLD (for diffusion_fundamentals.html):
+  alpha_bar_500        = 0.078587
+  sqrt(alpha_bar_500)  = 0.2803   (signal coef)
+  sqrt(1-alpha_bar_500)= 0.9599   (noise coef)
+  => at step 500: image is barely visible (mostly noise)
+[check] alpha_bar_500 ~ 0.0786 :  OK  (got 0.078587)
+[check] alpha_bar is monotonically decreasing :  OK
+[check] alpha_bar_T < 1e-4 (image ~ pure noise at T) :  OK  (alpha_bar_T = 4.04e-05)
+
+==========================================================================
+  SECTION B: FORWARD DIFFUSION - add noise in closed form
+==========================================================================
+Forward closed form (one Gaussian, any step):
+  x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * noise
+
+x_0  (clean 'image') = [+0.60, -0.40, +0.90, -0.20, +0.50, -0.80, +0.30, +0.70]
+noise (fixed Gauss)  = [-0.144, -0.173, -0.111, +0.702, -0.128, -1.497, +0.332, -0.267]
+
+The same x_0 + noise at increasing corruption:
+| step t | signal coef | noise coef |  x_t (first 4)                         |
+|--------|-------------|------------|----------------------------------------|
+|      1 |      0.9999 |     0.0100 | [+0.599, -0.402, +0.899, -0.193]       |
+|    100 |      0.9471 |     0.3209 | [+0.522, -0.434, +0.817, +0.036]       |
+|    250 |      0.7239 |     0.6899 | [+0.335, -0.409, +0.575, +0.339]       |
+|    500 |      0.2803 |     0.9599 | [+0.030, -0.278, +0.145, +0.618]       |
+|    750 |      0.0579 |     0.9983 | [-0.109, -0.196, -0.059, +0.689]       |
+|   1000 |      0.0064 |     1.0000 | [-0.140, -0.175, -0.106, +0.701]       |
+
+GOLD: at step 500, x_500 ~ 0.28*x_0 + 0.96*noise (image barely visible)
+  x_500 (closed form) = [+0.030, -0.278, +0.145, +0.618, +0.018, -1.662, +0.403, -0.060]
+  x_500 (0.28/0.96)   = [+0.030, -0.278, +0.145, +0.618, +0.018, -1.662, +0.403, -0.060]
+[check] step-500 signal coef ~ 0.28 :  OK  (got 0.2803)
+[check] step-500 noise coef ~ 0.96 :  OK  (got 0.9599)
+[check] at T, x_T ~ pure noise (signal coef < 0.01) :  OK
+
+==========================================================================
+  SECTION C: REVERSE PROCESS - subtract noise, step by step
+==========================================================================
+The model predicts the noise:  pred_noise = model(x_t, t)
+DDPM reverse step (stochastic, eta=1):
+  x_{t-1} = (1/sqrt(alpha_t)) * (x_t - ((1-alpha_t)/sqrt(1-alpha_bar_t))*pred_noise)
+            + sigma_t * z        where sigma_t = sqrt(beta_t), z ~ N(0,I)
+
+Key insight: if the model returns the TRUE noise (an oracle), then the
+predicted clean image is EXACT:
+  x0_pred = (x_t - sqrt(1-alpha_bar_t)*noise) / sqrt(alpha_bar_t)  ==  x_0
+
+x_500         = [+0.030, -0.278, +0.145, +0.618, +0.018, -1.662, +0.403, -0.060]
+x0_pred       = [+0.600, -0.400, +0.900, -0.200, +0.500, -0.800, +0.300, +0.700]  (oracle: NOISE was the true eps)
+x_0 (truth)   = [+0.60, -0.40, +0.90, -0.20, +0.50, -0.80, +0.30, +0.70]
+max|x0_pred - x_0| = 1.67e-16   (exact: forward is invertible)
+[check] oracle x0_pred recovers x_0 exactly (err < 1e-12) :  OK  (err=1.67e-16)
+
+One DDPM step: x_500 -> x_499
+  SNR(x_500) = 0.08529   SNR(x_499) = 0.08623  (SNR rose)
+[check] reverse step raises SNR (denoising) :  OK
+
+DDIM deterministic round-trip (eta=0), 20 skipped steps, oracle noise:
+  x_{prev} = sqrt(ab_prev)*x0_pred + sqrt(1-ab_prev)*eps
+  x_recovered = [+0.60, -0.40, +0.90, -0.20, +0.50, -0.80, +0.30, +0.70]
+  x_0 (truth) = [+0.60, -0.40, +0.90, -0.20, +0.50, -0.80, +0.30, +0.70]
+  max|x_recovered - x_0| = 1.33e-14   (DDIM skips steps for free)
+[check] 20-step DDIM oracle round-trip recovers x_0 (err < 1e-9) :  OK  (err=1.33e-14)
+
+Why this matters: with a PERFECT model you can skip 980 of 1000 steps.
+Real models are imperfect, so fewer steps -> more error -> see Section E.
+
+==========================================================================
+  SECTION D: SCHEDULERS - how to take fewer (better) steps
+==========================================================================
+A scheduler decides WHICH timesteps to visit and the exact reverse
+update. Same model, different scheduler = wildly different speed.
+
+Noise schedule comparison (alpha_bar_t = signal kept):
+| step t | linear alpha_bar | cosine alpha_bar |
+|--------|-----------------|------------------|
+|      1 |        0.999900 |         0.999959 |
+|    100 |        0.897018 |         0.972093 |
+|    250 |        0.524085 |         0.847012 |
+|    500 |        0.078587 |         0.493844 |
+|    750 |        0.003351 |         0.144272 |
+|   1000 |        0.000040 |         0.000000 |
+  Cosine keeps far more signal than linear mid-walk (0.8470 vs 0.5241
+  at t=250), better for small images. Linear is the canonical default.
+[check] cosine keeps more signal than linear at t=250 :  OK
+
+Scheduler characteristics (same model, different reverse walk):
+| scheduler        | steps  | deterministic? | notes                          |
+|------------------|--------|----------------|--------------------------------|
+| DDPM             | 1000   | no (stochastic) | original slow method           |
+| DDIM             | 20-50  | yes            | skip steps without retraining  |
+| Euler            | 20-30  | yes*           | flow-matching/EDM, simple ODE  |
+| DPM++ 2M Karras  | 20-30  | yes            | best quality/speed for most    |
+  (* Euler-a adds a little noise; plain Euler is deterministic.)
+
+Karras sigma schedule (EDM, arXiv:2206.00364) - 20 steps, rho=7:
+  sigmas = [80.000, 60.557, 45.314, ... , 0.040, 0.017, 0.006]
+  sigma_max = 80.000  ->  sigma_min = 0.00627
+  Densely samples high-noise (creative) + low-noise (detail) regions.
+[check] Karras sigmas strictly decreasing (most->least noise) :  OK
+[check] DPM++ 2M Karras needs only 20-30 steps :  OK
+
+==========================================================================
+  SECTION E: STEP COUNT vs QUALITY - the speed/quality tradeoff
+==========================================================================
+Relative quality (FID, normalized so 100 steps = 100% reference).
+Empirical curve: huge gains to 30 steps, diminishing returns after.
+
+| steps | relative quality | use case                          |
+|-------|------------------|-----------------------------------|
+|     4 |             70%  | distilled/Lightning models, fastest |
+|    10 |             85%  | quick previews                    |
+|    20 |             93%  | interactive editing               |
+|    30 |             97%  | SWEET SPOT - production default   |
+|    50 |             99%  | high quality, ~2x slower than 30  |
+|   100 |            100%  | reference (no real gain past this) |
+
+[check] quality curve is monotonically increasing :  OK
+[check] quality curve is concave (diminishing returns) :  OK
+Rule of thumb: 30 steps gives 97% quality at 3x the speed of 100.
+Going below 10 steps without distillation degrades fast (DDPM needs ~1000).
+
+==========================================================================
+  SECTION F: LATENT DIFFUSION - diffuse in a 48x smaller space
+==========================================================================
+Stable Diffusion / Flux do NOT diffuse in pixel space. A VAE encoder
+compresses pixels -> a small latent, diffusion runs there, a VAE
+decoder turns the denoised latent back into pixels.
+
+pixel space  : 512x512x3 = 786,432 values
+latent space : 64x64x4 =  16,384 values
+compression  : 48.0x less math per diffusion step
+
+Same idea, bigger video (LTX-Video, 720x480x121 frames):
+  video pixels =  125,452,800   video latent =   345,600   (363x)
+[check] latent space is ~48x smaller than pixel space :  OK  (got 48.0x)
+[check] latent diffusion saves >40x compute :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

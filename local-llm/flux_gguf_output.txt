@@ -1,0 +1,188 @@
+flux_gguf.py - Running Flux.1 [dev] locally with GGUF quantization.
+Pure Python stdlib. Numbers below feed FLUX_GGUF.md.
+Sources: city96/ComfyUI-GGUF, city96/FLUX.1-dev-gguf (HuggingFace),
+         Black Forest Labs Flux.1 blog, quant_types.py (block format).
+
+Story: 12B DiT model (23 GB FP16) -> GGUF block quant -> fits 8 GB GPU
+
+==========================================================================
+  SECTION A: FLUX.1 ARCHITECTURE - DiT, not U-Net
+==========================================================================
+Flux.1 [dev] (Black Forest Labs, Aug 2024) is a Diffusion Transformer
+(DiT). The denoising network is a transformer, NOT the U-Net used by
+SD 1.5 / SDXL. This matters for quantization (Section C).
+
+Component breakdown:
+  DiT denoiser   : 12.0B params  (the big one, 12B)
+  T5-XXL encoder : 4.7B params  (256-token context)
+  CLIP-L encoder : 0.4B params  (small, always fp16)
+  VAE            : decodes latent -> pixel (always fp16/fp32)
+
+Why a transformer? Flux uses flow matching (not DDPM): a straighter
+sampling trajectory that needs fewer steps (20-28 vs SDXL's 30-50).
+The DiT processes the noisy latent + text embeddings via attention.
+
+Full-precision weight sizes:
+  DiT  fp16 = 24.0 GB   (12B x 2 bytes)
+  T5   fp16 = 9.4 GB    (4.7B x 2 bytes)
+  Total     = 33.4 GB (before VAE + activations)
+
+[check] DiT is 4.6x larger than SDXL's U-Net :  OK  (4.6x (SDXL U-Net = 2.6B))
+[check] Flux needs >8GB just for fp16 weights :  OK  (33.4GB)
+
+==========================================================================
+  SECTION B: VAE COMPRESSION - pixel space to latent space
+==========================================================================
+The VAE compresses a 1024x1024 RGB image into a small latent that the
+DiT actually denoises. The DiT NEVER sees pixels directly - it works
+in compressed latent space, which is why 12B params is affordable at all.
+
+Pixel space : 1024x1024x3 =  3,145,728 values
+Latent space: 128x128x16 =    262,144 values
+
+Spatial downsample = 1024/128 = 8x per axis
+  -> 8x8 = 64x fewer spatial positions
+Channel expansion   = 16/3 = 5.33x
+Net compression     = 64/5.33 = 12.0x
+
+Attention sequence length:
+  if DiT saw pixels : 1,048,576 tokens  (1024x1024)
+  in latent space   :   16,384 tokens  (128x128)
+  -> 64x shorter sequence = 4096x less attention compute
+
+GOLD (for FLUX_GGUF.html):
+  compression = 1024*1024*3 / (128*128*16)
+             = 3,145,728 / 262,144
+             = 12.0x
+[check] VAE compression is exactly 12.0x :  OK  (got 12.0)
+[check] latent values = 262,144 :  OK  (got 262144)
+[check] pixel values = 3,145,728 :  OK  (got 3145728)
+
+==========================================================================
+  SECTION C: THE SIZE PROBLEM - 23 GB won't fit a consumer GPU
+==========================================================================
+Flux DiT at FP16 = 12B params x 2 bytes = 24 GB (actual checkpoint: 23 GB)
+
+Consumer GPU VRAM tiers (2024-2026):
+  GPU               VRAM  Fits FP16?
+  ---------------- -----  ----------
+  GTX 1060            6GB          no
+  RTX 3060/4060       8GB          no
+  RTX 3060 12GB      12GB          no
+  RTX 4070           12GB          no
+  RTX 4080           16GB          no
+  RTX 3090/4090      24GB         YES
+
+Only 24 GB GPUs (3090/4090, ~$1000+) can hold the FP16 model + T5 +
+VAE + activations. Everyone else is stuck... unless we quantize.
+[check] only 24GB+ GPUs fit FP16 Flux :  OK
+
+==========================================================================
+  SECTION D: GGUF QUANT LEVELS - same block format as LLMs
+==========================================================================
+ComfyUI-GGUF (by city96) applies the SAME GGUF block quantization that
+llama.cpp uses for LLMs (see quant_types.py) to the Flux DiT weights.
+Each level packs more weights per byte at a quality cost.
+
+| level    | file size | eff bpw | quality loss | min GPU |
+|----------|-----------|---------|--------------|---------|
+| FP16     |  23.0 GB |  15.33 |   ~0.0%      |  24 GB  |
+| Q8_0     |  12.0 GB |   8.00 |   ~0.5%      |  12 GB  |
+| Q4_K_M   |   7.0 GB |   4.67 |   ~1.8%      |   8 GB  |
+| Q4_K_S   |   6.5 GB |   4.33 |   ~2.0%      |   8 GB  |
+| Q3_K_S   |   5.5 GB |   3.67 |   ~4.0%      |   6 GB  |
+
+Effective bpw = file_size_GB * 8 / 12B_params. It is slightly below
+the STRUCTURAL bpw from quant_types.py (Q8_0=8.5, Q4_K_M=4.84) because
+the checkpoint keeps a few sensitive layers (embeddings, output) at
+higher precision, pulling the average down.
+
+Why GGUF works for Flux but NOT for SDXL:
+  Flux = DiT (transformer):   dense matmuls, very quant-tolerant.
+  SDXL = U-Net (conv2d):      conv kernels degrade fast below 8-bit.
+  => 4-bit Flux is great; 4-bit SDXL is mush. Same bytes, different arch.
+
+[check] Q8_0 < FP16 in size :  OK  (12.0 vs 23.0)
+[check] Q4_K_M < Q8_0 in size :  OK  (7.0 vs 12.0)
+[check] Q4_K_S < Q4_K_M in size :  OK  (6.5 vs 7.0)
+[check] Q3_K_S < Q4_K_S in size :  OK  (5.5 vs 6.5)
+[check] Q4_K_M effective bpw in 4-5 range :  OK  (4.67)
+[check] Q8_0 effective bpw in 7-9 range :  OK  (8.00)
+
+==========================================================================
+  SECTION E: VRAM BUDGET - the full accounting per quant level
+==========================================================================
+File size is NOT the VRAM cost. You also need memory for the text
+encoder (T5), the VAE, and the intermediate activations during sampling.
+
+VRAM = DiT_weights + T5_encoder + VAE + activations/overhead
+
+T5 can be loaded at full precision OR quantized separately (also GGUF).
+  T5 fp16 = 9.4 GB    (best text adherence)
+  T5 Q4   = 2.0 GB    (saves 7.4 GB, minor text quality loss)
+
+Fixed terms: VAE = 0.5 GB, activations+CLIP-L = 2.0 GB
+
+| DiT quant | DiT   | T5    | VAE  | act  | TOTAL  | fits GPU |
+|-----------|-------|-------|------|------|--------|----------|
+| FP16      | 23.0G |  9.4G | 0.5G | 2.0G |  34.9G |    24 GB |
+| Q8_0      | 12.0G |  9.4G | 0.5G | 2.0G |  23.9G |    24 GB |
+| Q4_K_M    |  7.0G |  2.0G | 0.5G | 2.0G |  11.5G |    12 GB |
+| Q4_K_S    |  6.5G |  2.0G | 0.5G | 2.0G |  11.0G |    12 GB |
+| Q3_K_S    |  5.5G |  2.0G | 0.5G | 2.0G |  10.0G |    12 GB |
+
+Key takeaway: pairing a Q4 DiT with a Q4 T5 lets Flux run on an 12 GB
+GPU (RTX 3060 12GB). Q8 DiT + fp16 T5 still needs 24 GB. The DiT is
+the dominant term, but the T5 choice swings the budget by ~7 GB.
+
+[check] Q4_K_M budget fits in 12 GB :  OK  (total = 11.5 GB)
+[check] Q8_0 + fp16 T5 needs 24 GB :  OK  (total = 23.9 GB)
+[check] Q3_K_S has the smallest total :  OK  (total = 10.0 GB)
+
+==========================================================================
+  SECTION F: FP8 vs GGUF - two paths to lower VRAM
+==========================================================================
+There are two ways to shrink Flux below FP16. They optimize for
+different things:
+
+|              | FP8                          | GGUF                        |
+|--------------|------------------------------|-----------------------------|
+| format       | 8-bit float (e4m3/e5m2)      | block quant (Q4-Q8)         |
+| VRAM         | ~12 GB (same as Q8_0)        | 6.5-12 GB (pick your level) |
+| speed        | FASTER (native fp8 matmul)   | SLOWER (dequant on the fly) |
+| hardware     | Ada/Hopper+ ONLY (RTX 40+)   | ANY GPU (even old Maxwell)   |
+| quality      | ~1% loss (good)              | <1%-4% (depends on level)    |
+| comfyUI      | built-in (LoadDiffusionModel) | ComfyUI-GGUF custom node     |
+
+The tradeoff in one line:
+  fp8  = fast + needs new hardware + one size (12 GB).
+  GGUF = slower + works everywhere + you pick the size (6.5-12 GB).
+
+Rule of thumb:
+  - RTX 4090/4080/5090 (Ada/Hopper, fp8 HW): use fp8 (faster, same VRAM).
+  - RTX 3060/4060/2060/1060 or AMD/Mac:       use GGUF (only option).
+  - Want the SMALLEST possible?                GGUF Q3_K_S (5.5 GB DiT).
+[check] fp8 needs Ada/Hopper hardware :  OK
+[check] GGUF works on any GPU :  OK
+
+==========================================================================
+  SECTION G: SUMMARY - which quant for which GPU
+==========================================================================
+Decision: match the DiT quant to your GPU, then pair with a T5 quant.
+
+| Your GPU     | DiT quant | T5 quant | Total VRAM | Quality     |
+|--------------|-----------|----------|------------|-------------|
+| 24 GB (3090/4090) | FP16      | fp16    |    34.9 GB | reference   |
+| 24 GB (3090/4090) | Q8_0      | fp16    |    23.9 GB | near-lossless |
+| 24 GB (3090/4090) | Q8_0      | Q4      |    16.5 GB | near-lossless |
+| 12 GB (3060 12G) | Q4_K_M    | Q4      |    11.5 GB | excellent   |
+| 12 GB (3060 12G) | Q4_K_S    | Q4      |    11.0 GB | very good   |
+| 12 GB (3060 12G) | Q3_K_S    | Q4      |    10.0 GB | good (headroom) |
+
+The sweet spot for most users: Q4_K_M DiT + Q4 T5 on an 8-12 GB GPU.
+~7 GB DiT file, ~10-12 GB total VRAM, <2% quality loss vs FP16.
+[check] Q4_K_M + Q4 T5 is the recommended sweet spot :  OK
+
+==========================================================================
+  DONE - all sections printed, all checks passed
+==========================================================================

@@ -437,8 +437,11 @@ for md in sorted(Path('SECTION').rglob('*.md')):
    browser per block — ~2s each, so batch in background):
 
 ```bash
-nohup bash scripts/mermaid_validate.sh > /tmp/mermaid_results.txt 2>&1 &
+nohup bash skills/concept-builder/mermaid_validate.sh > /tmp/mermaid_results.txt 2>&1 &
 ```
+
+The script is at `skills/concept-builder/mermaid_validate.sh` (bundled with
+this skill). Copy it into any project that uses the concept-builder workflow.
 
 3. **Fix ONLY the blocks that `mmdc` confirms as broken.** Do not touch working
    diagrams — patterns like `[("text")]` (DB/cylinder shape), `[text/with/slash]`

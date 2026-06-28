@@ -40,8 +40,8 @@ graph LR
     HR -->|MMR + rules, <10ms| RR["Re-Ranker<br/>diversity + policy"]
     RR -->|top-20 slate| C
     C -->|POST /events| EV[("Event Bus<br/>clicks, watches")]
-    EV -.daily retrain.-> TT
-    EV -.daily reindex.-> TT
+    EV -.->|daily retrain| TT
+    EV -.->|daily reindex| TT
     FS[("Feature Store<br/>online + offline")] --> TT
     FS --> HR
     style TT fill:#eafaf1,stroke:#27ae60,stroke-width:3px
@@ -115,8 +115,8 @@ graph TD
     HR -->|"MMR + freshness + policy, <10ms"| RR["Re-Ranker"]
     RR -->|top-20 slate| RD
     LOG -->|append| KF[("Kafka / Event Bus")]
-    KF -.daily retrain.-> TRN["Training Pipeline<br/>two-tower + rankers"]
-    TRN -.daily reindex.-> ANN
+    KF -.->|daily retrain| TRN["Training Pipeline<br/>two-tower + rankers"]
+    TRN -.->|daily reindex| ANN
     FS[("Feature Store<br/>online <100ms / offline daily")] --> RD
     FS --> HR
     style ANN fill:#eafaf1,stroke:#27ae60,stroke-width:3px

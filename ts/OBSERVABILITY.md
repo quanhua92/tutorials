@@ -53,10 +53,10 @@ graph TD
     H1 -->|"await db.query()"| H2["after await<br/>reqId STILL visible"]
     H2 -->|"fetch(svcB)"| NET["HTTP hop<br/>(traceparent header)"]
     NET --> SVC["service B<br/>same traceId"]
-    H1 -. emits .-> LOG["LOGS (pino JSON line)<br/>{level,time,msg,reqId,traceId}"]
-    H1 -. records .-> MET["METRICS<br/>counter++ / histogram.record()"]
-    H1 -. starts .-> TRC["TRACES (span tree)<br/>root -> db -> http"]
-    LOG -. traceId .->|JOIN| TRC
+    H1 -.->|emits| LOG["LOGS (pino JSON line)<br/>{level,time,msg,reqId,traceId}"]
+    H1 -.->|records| MET["METRICS<br/>counter++ / histogram.record()"]
+    H1 -.->|starts| TRC["TRACES (span tree)<br/>root -> db -> http"]
+    LOG -.->|"traceId = JOIN key"| TRC
     style ALS fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style LOG fill:#eafaf1,stroke:#27ae60
     style MET fill:#fef9e7,stroke:#f1c40f
@@ -90,7 +90,7 @@ graph LR
     OBS["OBSERVABILITY<br/>(you are here)"] --> LOG["LOGS<br/>events<br/>pino: one JSON object"]
     OBS --> MET["METRICS<br/>aggregates<br/>counter / histogram"]
     OBS --> TRC["TRACES<br/>span tree<br/>OpenTelemetry"]
-    LOG -. "traceId field" .->|"JOIN"| TRC
+    LOG -.->|"traceId = JOIN key"| TRC
     style OBS fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
     style LOG fill:#eafaf1,stroke:#27ae60
     style MET fill:#fef9e7,stroke:#f1c40f

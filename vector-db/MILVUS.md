@@ -54,9 +54,9 @@ graph TD
         IC --> IN["IndexNode<br/>build HNSW/DiskANN/IVF"]
     end
 
-    EE["Embedded etcd<br/>ETCD_USE_EMBED=true<br/>(in-process metadata)"] -.meta.-> STANDALONE
-    S3[("External S3 / MinIO / R2<br/>binlogs + index files")] -.data.-> DN
-    S3 -.data.-> QN
+    EE["Embedded etcd<br/>ETCD_USE_EMBED=true<br/>(in-process metadata)"] -.->|meta| STANDALONE
+    S3[("External S3 / MinIO / R2<br/>binlogs + index files")] -.->|data| DN
+    S3 -.->|data| QN
 
     style STANDALONE fill:#1a1430,stroke:#8b5cf6,stroke-width:2px,color:#e6edf3
     style EE fill:#0a0e14,stroke:#1abc9c

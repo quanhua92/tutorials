@@ -19,11 +19,11 @@
 graph LR
     subgraph STRAIGHT["Straight road → fast hits the end, slow is the middle"]
         S0["slow"] --> S1["slow"] --> S2["slow<br/>(MIDDLE)"]
-        F0["fast"] -.2x speed.-> F1["fast"] -.2x speed.-> F2["fast<br/>= None"]
+        F0["fast"] -.->|2x speed| F1["fast"] -.->|2x speed| F2["fast<br/>= None"]
     end
     subgraph CIRCULAR["Circular road → fast laps slow, they MEET"]
         C0(("slow")) --> C1(("slow"))
-        CF0(("fast")) -.2x speed.-> CF1(("fast")) -.2x speed.-> CF2(("fast<br/>= slow ✓"))
+        CF0(("fast")) -.->|2x speed| CF1(("fast")) -.->|2x speed| CF2(("fast<br/>= slow ✓"))
     end
     style S2 fill:#1abc9c,stroke:#16a085,color:#0d1117
     style CF2 fill:#e67e22,stroke:#d35400,color:#0d1117
@@ -127,7 +127,7 @@ graph LR
     n1["1"] --> n2["2"]
     n2 --> n3["3"]
     n3 --> n4["4"]
-    n4 -.cycle.-> n2
+    n4 -.->|cycle| n2
     style n2 fill:#e67e22,stroke:#d35400,color:#0d1117
     style n4 fill:#1abc9c,stroke:#16a085,color:#0d1117
 ```

@@ -43,8 +43,8 @@ graph TD
     Loop -- "pop next ready task" --> T2["task B"]
     T1 -- "await asyncio.sleep(x)" --> Y1["SUSPENDS → re-queue A"]
     T2 -- "await fetch()" --> Y2["SUSPENDS → re-queue B"]
-    Y1 -. "back of the queue" .-> Loop
-    Y2 -. "back of the queue" .-> Loop
+    Y1 -.->|back of the queue| Loop
+    Y2 -.->|back of the queue| Loop
     Yield["await is the ONLY switch point<br/>(cooperative, not preemptive)"] --> Loop
     style Loop fill:#1c2f47,stroke:#3776ab,stroke-width:3px
     style Yield fill:#fef9e7,stroke:#f1c40f

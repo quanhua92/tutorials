@@ -73,7 +73,7 @@ graph LR
     APIS -->|watch| KL["kubelet on Node A"]
     KL -->|CRI| CR["container runtime<br/>(containerd / CRI-O)"]
     CR --> PID["PID 1 in a namespace+cgroup"]
-    KL -.reports status.-> APIS
+    KL -.->|reports status| APIS
     style APIS fill:#1c2a3a,stroke:#2e6da4
     style ETCD fill:#3a2f12,stroke:#b7950b
     style KL fill:#1c3a25,stroke:#27ae60,stroke-width:3px

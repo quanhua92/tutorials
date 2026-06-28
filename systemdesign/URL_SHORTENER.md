@@ -18,16 +18,16 @@ analytics, 301 vs 302) is a tradeoff hanging off those two ops.
 ```mermaid
 graph LR
     C(["client"]) -->|POST /shorten| GW["API Gateway<br/>(rate limit, auth)"]
-    C -->|GET /{key}| GW
+    C -->|"GET /{key}"| GW
     GW -->|write| SS["Shortening Service"]
     GW -->|read| RS["Redirect Service"]
     SS --> ID["ID Generator<br/>(Snowflake / counter)"]
     SS -->|write-through| DB[("Key→URL DB<br/>sharded MySQL / Cassandra")]
     SS -->|populate| RC[("Redis Cache<br/>short_key → long_url")]
     RS -->|1. lookup| RC
-    RC -.miss.-> DB
+    RC -.->|miss| DB
     RS -->|2. 302 + long_url| C
-    RS -.3. async click event.-> KF["Kafka"]
+    RS -.->|3. async click event| KF["Kafka"]
     KF --> SP["Stream Processor"]
     SP --> AN[("Analytics DB<br/>time-series")]
     style GW fill:#eaf2f8,stroke:#2980b9
@@ -96,15 +96,15 @@ graph LR
 graph TD
     LB["Load Balancer / CDN"] --> AGW["API Gateway<br/>rate-limit + auth"]
     AGW -->|POST /shorten| SH["Shortening Service"]
-    AGW -->|GET /{key}| RD["Redirect Service"]
+    AGW -->|"GET /{key}"| RD["Redirect Service"]
     SH --> IG["ID Generator<br/>Snowflake 64-bit"]
     SH --> WDB[("Key→URL DB<br/>sharded by short_key")]
     SH -->|write-through| CA[("Redis cluster")]
     RD -->|1 read| CA
-    CA -.cache miss.-> RDB[("DB read replica")]
+    CA -.->|cache miss| RDB[("DB read replica")]
     RD -->|2 emit click| KP["Kafka queue"]
     KP --> ST["Stream processor<br/>(aggregate + dedup)"]
-    ST --> TS[("Analytics DB<br/>time-series, sharded by day)"]
+    ST --> TS[("Analytics DB<br/>time-series, sharded by day")]
     RD -->|3 302 + Location| LB
     style CA fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style RD fill:#eafaf1,stroke:#27ae60,stroke-width:2px

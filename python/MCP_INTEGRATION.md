@@ -40,7 +40,7 @@ graph TD
     T2 --> Mnt["mount behind FastAPI<br/>(🔗 P7)"]
     Mnt --> Net["remote, multi-client"]
     T1 --> Loc["local CLI / Claude Desktop"]
-    Sub -.host consumes.-> LC["LangChain agent<br/>Client -> list_tools<br/>-> StructuredTool<br/>(🔗 P6)"]
+    Sub -.->|host consumes| LC["LangChain agent<br/>Client -> list_tools<br/>-> StructuredTool<br/>(🔗 P6)"]
     style Sub fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style T2 fill:#eafaf1,stroke:#27ae60
     style LC fill:#eaf2f8,stroke:#2980b9

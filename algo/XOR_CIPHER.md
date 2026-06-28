@@ -304,8 +304,8 @@ gold malleability: delta('1'->'9') = 0x08 = 8
 ```mermaid
 graph LR
     MSG["message"] --> KS["keystream"]
-    OTP["one-time pad<br/>(truly random)"] -.perfect secrecy.-> KS
-    CSPRNG["ChaCha20 / AES-CTR<br/>(CSPRNG keystream)"] -.confidential.-> KS
+    OTP["one-time pad<br/>(truly random)"] -.->|perfect secrecy| KS
+    CSPRNG["ChaCha20 / AES-CTR<br/>(CSPRNG keystream)"] -.->|confidential| KS
     KS --> XOR["XOR"]
     XOR --> CT["ciphertext"]
     style XOR fill:#fef9e7,stroke:#f1c40f,stroke-width:3px

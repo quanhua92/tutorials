@@ -48,7 +48,7 @@ graph TD
   I1 --> L1 & L2 & L3 & L4
   I2 --> L5 & L6
   I3 --> L7 & L8 & L9
-  L1 -. "next" .-> L2 -.-> L3 -.-> L4 -.-> L5 -.-> L6 -.-> L7 -.-> L8 -.-> L9
+  L1 -.->|next| L2 -.->|-> L3 -| L4 -.->|-> L5 -| L6 -.->|-> L7 -| L8 -.-> L9
   style R fill:#f4ecf7,stroke:#8e44ad,stroke-width:3px
   style I1 fill:#eaf2f8,stroke:#2980b9
   style I2 fill:#eaf2f8,stroke:#2980b9

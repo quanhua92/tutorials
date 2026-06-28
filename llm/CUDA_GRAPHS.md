@@ -108,7 +108,7 @@ graph TD
     subgraph lineage["Lineage: how decode got fast"]
         direction LR
         O["OLD: eager per-step<br/>(nanoGPT / Week 2)"] -->|"launch tax dominates<br/>at small batch"| N["NEW: captured + replayed<br/>(vLLM / nano-vllm)"]
-        O2["model(input_ids, pos)<br/>re-issues ~N kernels<br/>through Python each step"] -.same math.-> N2["graph.replay()<br/>re-issues ~N kernels<br/>in ONE call"]
+        O2["model(input_ids, pos)<br/>re-issues ~N kernels<br/>through Python each step"] -.->|same math| N2["graph.replay()<br/>re-issues ~N kernels<br/>in ONE call"]
     end
     style O fill:#fdecea,stroke:#c0392b
     style N fill:#eafaf1,stroke:#27ae60,stroke-width:2px

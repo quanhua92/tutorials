@@ -21,8 +21,8 @@ graph TD
     SF["Server Functions<br/>createServerFn — typed RPC"]
     R["TanStack Router<br/>type-safe file-based routing<br/>(the foundation)"]
     R --> SF --> N --> V
-    C["client calls<br/>await getUser({data:42})"] -.typed call.-> SF
-    SF -.typed result.-> C
+    C["client calls<br/>await getUser({data:42})"] -.->|typed call| SF
+    SF -.->|typed result| C
     style R fill:#eaf2f8,stroke:#6366f1,stroke-width:3px
     style SF fill:#eafaf1,stroke:#2ecc71
     style N fill:#fef9e7,stroke:#f1c40f

@@ -45,8 +45,8 @@ graph LR
     BASE --> QUANT
     QUANT --> CACHE[("Redis<br/>5-min TTL")]
     CACHE -->|GET /forecasts| DOWN["surge pricing<br/>driver repositioning<br/>staffing"]
-    DOWN -.feedback.-> SRC
-    DRIFT["drift monitor<br/>rolling WMAPE"] -.warm-start.-> GNN
+    DOWN -.->|feedback| SRC
+    DRIFT["drift monitor<br/>rolling WMAPE"] -.->|warm-start| GNN
     CACHE -.-> DRIFT
     style DECMP fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style GNN fill:#eafaf1,stroke:#27ae60,stroke-width:2px
@@ -113,10 +113,10 @@ graph LR
 graph TD
     LB["Load Balancer"] --> AGW["API Gateway<br/>auth + rate-limit"]
     AGW -->|POST /features/ingest| FLK[("Flink<br/>streaming aggregator")]
-    FLK -.writes 5/15/30-min windows.-> REDIS[("Redis<br/>online features")]
-    FLK -.writes.-> TS[("ClickHouse / TimescaleDB<br/>demand_events")]
+    FLK -.->|writes 5/15/30-min windows| REDIS[("Redis<br/>online features")]
+    FLK -.->|writes| TS[("ClickHouse / TimescaleDB<br/>demand_events")]
     AGW -->|GET /forecasts| CACHE[("Redis<br/>forecast cache, 5-min TTL")]
-    CACHE -.miss.-> ORC["Forecast Orchestrator"]
+    CACHE -.->|miss| ORC["Forecast Orchestrator"]
     ORC --> FS[("Feature Store<br/>Feast")]
     FS --> GNN["Temporal GNN<br/>SAGEConv + GRU<br/>~3s batched"]
     FS --> CLS["Classical ensemble<br/>Prophet / SARIMA / Holt-Winters"]
@@ -124,10 +124,10 @@ graph TD
     CLS --> ENS
     ENS --> QUANT["Quantile heads<br/>P10 / P50 / P90"]
     QUANT --> CACHE
-    DRIFT["Drift monitor<br/>rolling WMAPE per cluster"] -.warm-start fine-tune.-> GNN
+    DRIFT["Drift monitor<br/>rolling WMAPE per cluster"] -.->|warm-start fine-tune| GNN
     CACHE -.-> DRIFT
-    BUS[("Kafka<br/>request events")] -.daily retrain.-> GNN
-    BUS -.daily retrain.-> CLS
+    BUS[("Kafka<br/>request events")] -.->|daily retrain| GNN
+    BUS -.->|daily retrain| CLS
     style GNN fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CLS fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style REDIS fill:#eaf2f8,stroke:#2980b9

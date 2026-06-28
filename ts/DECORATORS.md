@@ -88,7 +88,7 @@ graph TD
     DEC --> FC["FUNCTIONS_CLOSURES<br/>@bound vs the this-loss bug"]
     DEC --> PR["PROXY_REFLECT<br/>class decorator = Proxy construct trap"]
     DEC --> MD["ctx.metadata + Symbol.metadata<br/>modern reflection (TS 5.2+)"]
-    MD -.replaces.-> RM["legacy reflect-metadata<br/>(experimentalDecorators)"]
+    MD -.->|replaces| RM["legacy reflect-metadata<br/>(experimentalDecorators)"]
     style DEC fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style RM fill:#fadbd8,stroke:#e74c3c
 ```

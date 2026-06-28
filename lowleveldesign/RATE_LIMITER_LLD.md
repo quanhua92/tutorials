@@ -27,7 +27,7 @@ flowchart LR
   RL --> S1["TokenBucket"]
   RL --> S2["SlidingWindow"]
   RL --> S3["FixedWindow"]
-  RL -. wraps .-> TS["ThreadSafeRateLimiter<br/>(per-key lock)"]
+  RL -.->|wraps| TS["ThreadSafeRateLimiter<br/>(per-key lock)"]
   TS --> Clock["Clock<br/>SystemClock / FakeClock"]
   style RL fill:#f39c12,color:#0d1117
   style TS fill:#27ae60,color:#0d1117

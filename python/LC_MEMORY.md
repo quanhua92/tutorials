@@ -77,7 +77,7 @@ dict** keyed by a `session_id`, holding a list of `HumanMessage` / `AIMessage`
 graph TD
     Dict["sessions: dict[str, list]"] --> A["sessions['alice'] -> [H, AI, H, AI]"]
     Dict --> B["sessions['bob']   -> [H, AI]"]
-    A -.isolated.-> B
+    A -.->|isolated| B
     style Dict fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```
 

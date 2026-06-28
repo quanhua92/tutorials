@@ -28,7 +28,7 @@ graph LR
     USR -->|POST /confirm + idem key| PAY["Payment Service<br/>(authorize -> capture)"]
     PAY -->|on AUTHORIZED| INV
     INV -->|HELD -> SOLD| SDB
-    PAY -.on hold expiry.-> VOID["VOID auth"]
+    PAY -.->|on hold expiry| VOID["VOID auth"]
     SWP["Hold Sweeper<br/>(every 30s)"] -->|release expired HELD| RDS
     RDS -->|batched < 1s push| WSG["WebSocket Gateway<br/>(seat-map fan-out)"]
     WSG -->|live availability| USR
@@ -109,7 +109,7 @@ graph TD
     PAY -->|client idempotency key| IDEM[("idempotency store<br/>(user,key) -> response, 24h TTL")]
     PAY -->|on AUTHORIZED| INV2["Inventory: HELD -> SOLD"]
     INV2 -->|versioned write| SDB
-    PAY -.on hold expiry.-> VOID["VOID authorization"]
+    PAY -.->|on hold expiry| VOID["VOID authorization"]
     SWP["Hold Sweeper<br/>(every 30s)"] -->|SCAN expired HELD| RDS
     RDS -->|batched delta < 1s| EV["Kafka seat-events"]
     EV --> WSG["WebSocket Gateway cluster<br/>(20 nodes, per-event conn map)"]

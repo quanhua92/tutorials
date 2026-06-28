@@ -31,12 +31,12 @@ graph LR
     HK["HEAP FILE<br/>unordered rows<br/>(the table)"]
     HI["INDEXES (separate)<br/>leaf = key -> TID<br/>(physical pointer)"]
     HK
-    HI -. "after index:<br/>+1 heap read" .-> HK
+    HI -.->|after index:<br/>+1 heap read| HK
   end
   subgraph clus["CLUSTERED / IOT  (InnoDB)"]
     CK["PK B-TREE LEAF<br/>= the table<br/>rows IN PK order"]
     CI["SECONDARY INDEX<br/>leaf = key -> PK VALUE<br/>(logical handle)"]
-    CI -. "after secondary:<br/>+1 full PK-tree walk" .-> CK
+    CI -.->|after secondary:<br/>+1 full PK-tree walk| CK
   end
   style heap fill:#eaf2f8,stroke:#2980b9
   style clus fill:#eafaf1,stroke:#27ae60,stroke-width:3px

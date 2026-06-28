@@ -28,8 +28,8 @@ graph LR
     CAL -->|calibrated pCTR| AUC["Auction<br/>GSP: bid x pCTR x quality"]
     AUC -->|winners + prices| U
     U -->|POST /events| LOG[("Event Log<br/>impressions, clicks")]
-    LOG -.1-6h batch retrain.-> RK
-    LOG -.streaming SGD.-> RK
+    LOG -.->|1-6h batch retrain| RK
+    LOG -.->|streaming SGD| RK
     style RK fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CAL fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style LOG fill:#fef9e7,stroke:#f1c40f
@@ -105,9 +105,9 @@ graph TD
     CAL --> AUC["Auction Engine<br/>GSP: bid x pCTR x quality"]
     AUC -->|"winners + prices"| SRV
     ING -->|append| KF[("Kafka<br/>impressions, clicks")]
-    KF -.1-6h batch retrain.-> TRN["Training Pipeline"]
-    KF -.streaming SGD.-> RK
-    TRN -.daily recalibrate.-> CAL
+    KF -.->|1-6h batch retrain| TRN["Training Pipeline"]
+    KF -.->|streaming SGD| RK
+    TRN -.->|daily recalibrate| CAL
     style RK fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CAL fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style KF fill:#fef9e7,stroke:#f1c40f

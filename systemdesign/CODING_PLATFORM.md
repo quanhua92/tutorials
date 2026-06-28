@@ -32,7 +32,7 @@ graph LR
     W -->|publish| RS[("Redis pub/sub")]
     RS -->|push| SSE["SSE Server<br/>real-time verdict"]
     SSE -->|stream| U
-    W -.on ACCEPTED.-> LB[("Redis ZSET<br/>contest leaderboard")]
+    W -.->|on ACCEPTED| LB[("Redis ZSET<br/>contest leaderboard")]
     style Q fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style SB fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style W fill:#eafaf1,stroke:#27ae60,stroke-width:2px
@@ -111,7 +111,7 @@ graph TD
     WC -->|publish| RP[("Redis pub/sub<br/>submission:{id}")]
     RP -->|push| SSE["SSE Server<br/>~10K conn/pod"]
     SSE -->|verdict stream| CLI(["client"])
-    WC -.on ACCEPTED.-> ZS[("Redis ZSET<br/>contest:{id}")]
+    WC -.->|on ACCEPTED| ZS[("Redis ZSET<br/>contest:{id}")]
     ZS --> LBR
     style KF fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style SBX fill:#eafaf1,stroke:#27ae60,stroke-width:3px

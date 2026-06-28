@@ -88,9 +88,9 @@ graph TD
     RENDER --> LOOP["step 4: repeat from step 1"]
     LOOP --> EMPTY
 
-    TQ["MACROTASK / TASK queue<br/>(FIFO):<br/>setTimeout / setInterval (timers)<br/>I/O callbacks (poll)<br/>setImmediate (check, Node)<br/>UI events / rendering (browser)"] -.feeds.-> PICK
-    MQ["MICROTASK queue (FIFO):<br/>Promise.then / catch / finally<br/>queueMicrotask<br/>MutationObserver (browser)"] -.feeds.-> MT
-    NQ["nextTick queue (Node only):<br/>process.nextTick<br/>drained BEFORE microtasks"] -.feeds.-> NT
+    TQ["MACROTASK / TASK queue<br/>(FIFO):<br/>setTimeout / setInterval (timers)<br/>I/O callbacks (poll)<br/>setImmediate (check, Node)<br/>UI events / rendering (browser)"] -.->|feeds| PICK
+    MQ["MICROTASK queue (FIFO):<br/>Promise.then / catch / finally<br/>queueMicrotask<br/>MutationObserver (browser)"] -.->|feeds| MT
+    NQ["nextTick queue (Node only):<br/>process.nextTick<br/>drained BEFORE microtasks"] -.->|feeds| NT
 
     style PICK fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style MT fill:#eafaf1,stroke:#27ae60,stroke-width:3px

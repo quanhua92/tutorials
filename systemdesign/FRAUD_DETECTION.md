@@ -38,10 +38,10 @@ graph LR
     DEEP --> DEC
     RUL -->|BLOCK| DEC
     DEC -->|ALLOW/BLOCK/REVIEW| PG
-    DEC -.SHAP explain.-> PG
+    DEC -.->|SHAP explain| PG
     PG -->|async| BUS[("Event Bus + Labels<br/>chargebacks 14-30d")]
-    BUS -.daily retrain + recalibrate.-> ML
-    BUS -.hourly re-embed.-> GNN
+    BUS -.->|daily retrain + recalibrate| ML
+    BUS -.->|hourly re-embed| GNN
     style RUL fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style ML fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style BUS fill:#fef9e7,stroke:#f1c40f
@@ -114,11 +114,11 @@ graph TD
     ML --> DEC
     RUL -->|BLOCK| DEC
     DEC -->|ALLOW/BLOCK/REVIEW + SHAP| ORC
-    FLK[("Flink<br/>streaming velocity")] -.writes.-> REDIS[("Redis<br/>online features")]
-    FET -.reads.-> REDIS
-    GNNSVC[("GNN Embedding Service<br/>GraphSAGE, hourly")] -.5ms lookup.-> DEEP
-    BUS[("Kafka + Labels<br/>chargebacks 14-30d")] -.daily retrain.-> ML
-    BUS -.hourly re-embed.-> GNNSVC
+    FLK[("Flink<br/>streaming velocity")] -.->|writes| REDIS[("Redis<br/>online features")]
+    FET -.->|reads| REDIS
+    GNNSVC[("GNN Embedding Service<br/>GraphSAGE, hourly")] -.->|5ms lookup| DEEP
+    BUS[("Kafka + Labels<br/>chargebacks 14-30d")] -.->|daily retrain| ML
+    BUS -.->|hourly re-embed| GNNSVC
     style RUL fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style ML fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style REDIS fill:#eaf2f8,stroke:#2980b9

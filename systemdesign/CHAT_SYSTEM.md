@@ -26,8 +26,8 @@ graph LR
     CHAT -->|4. fan-out| KF["Kafka / pub-sub"]
     KF -->|recipient online| WSG2["recipient WS Gateway"]
     WSG2 -->|WS push + ACK| C2(["recipient"])
-    KF -.recipient offline.-> NS["Notification Service"]
-    NS -.APNs / FCM.-> C2
+    KF -.->|recipient offline| NS["Notification Service"]
+    NS -.->|APNs / FCM| C2
     style WSG fill:#eaf2f8,stroke:#2980b9
     style CHAT fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style MSG fill:#eafaf1,stroke:#27ae60,stroke-width:2px
@@ -99,7 +99,7 @@ graph TD
     API -->|publish fan-out| KF["Kafka<br/>per-conversation topic"]
     KF --> WS2["recipient WS Gateway<br/>(looked up via presence)"]
     WS2 -->|WS push + client ACK| RC(["recipient client"])
-    KF -.offline.-> NS["Notification Service"]
+    KF -.->|offline| NS["Notification Service"]
     NS --> PUSH["APNs / FCM / SMS"]
     PUSH -.-> RC
     RC -->|GET /messages?cursor=| API

@@ -33,15 +33,15 @@ The central tension is **lexical vs semantic**:
 graph LR
     U(["user query"]) --> QU["Query Understanding<br/>spell + intent + expand"]
     QU -->|"literal + expanded terms"| BM["BM25 Retriever<br/>inverted index, <25ms"]
-    QU -.parallel.-> ANN["Dense ANN<br/>FAISS/HNSW, <30ms"]
+    QU -.->|parallel| ANN["Dense ANN<br/>FAISS/HNSW, <30ms"]
     BM --> MERGE["candidate merge<br/>~1000 dedup"]
     ANN --> MERGE
     MERGE -->|"GBDT, <15ms"| LR["Light Ranker<br/>1000 -> 100"]
     LR -->|"cross-encoder GPU, <50ms"| XE["Re-Ranker<br/>100 -> 50"]
     XE -->|"MMR + freshness + rules, <5ms"| BIZ["Business Re-Rank<br/>final top-10"]
     BIZ -->|ranked SERP| U
-    EV[("Event Bus<br/>clicks, dwell")] -.weekly retrain.-> LR
-    EV -.weekly retrain.-> XE
+    EV[("Event Bus<br/>clicks, dwell")] -.->|weekly retrain| LR
+    EV -.->|weekly retrain| XE
     FS[("Feature Store<br/>clicks, CTR, freshness")] --> LR
     FS --> XE
     style BM fill:#eafaf1,stroke:#27ae60,stroke-width:3px
@@ -121,10 +121,10 @@ graph TD
     XE -->|"MMR + freshness + rules, <5ms"| BIZ["Business Re-Rank<br/>final top-10"]
     BIZ -->|ranked SERP| RD
     IDX -->|append| KF[("Kafka / Event Bus")]
-    KF -.near-real-time.-> BM
+    KF -.->|near-real-time| BM
     LOG["Click / dwell log"] --> KF
-    KF -.weekly retrain.-> TRN["Training Pipeline<br/>rankers + towers"]
-    TRN -.weekly reindex.-> ANN
+    KF -.->|weekly retrain| TRN["Training Pipeline<br/>rankers + towers"]
+    TRN -.->|weekly reindex| ANN
     FS[("Feature Store<br/>clicks, CTR, freshness")] --> LR
     FS --> XE
     style BM fill:#eafaf1,stroke:#27ae60,stroke-width:3px

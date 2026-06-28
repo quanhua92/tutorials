@@ -450,7 +450,7 @@ implements `AllReduce` as an explicit element-wise sum (`t0 + t1`).
 
 ```mermaid
 graph LR
-    REAL["Real multi-process TP<br/>(NCCL, dist.all_reduce)"] -.math identical to.-> SIM["This simulation<br/>(t0 + t1, single process)"]
+    REAL["Real multi-process TP<br/>(NCCL, dist.all_reduce)"] -.->|math identical to| SIM["This simulation<br/>(t0 + t1, single process)"]
     style SIM fill:#eafaf1,stroke:#27ae60,stroke-width:3px
 ```
 

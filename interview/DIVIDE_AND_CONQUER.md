@@ -155,20 +155,20 @@ flowchart TD
     AL --> ALR["[2, 3]"]
     ALR --> ALRL["[2]"]
     ALR --> ALRR["[3]"]
-    ALRL -.merge.-> M1["[2, 3]"]
-    ALRR -.merge.-> M1
-    ALL -.merge.-> M2["[2, 3, 5]"]
-    M1 -.merge.-> M2
+    ALRL -.->|merge| M1["[2, 3]"]
+    ALRR -.->|merge| M1
+    ALL -.->|merge| M2["[2, 3, 5]"]
+    M1 -.->|merge| M2
     AR --> ARL["[1]"]
     AR --> ARR["[6, 4]"]
     ARR --> ARRL["[6]"]
     ARR --> ARRR["[4]"]
-    ARRL -.merge.-> M3["[4, 6]"]
-    ARRR -.merge.-> M3
-    ARL -.merge.-> M4["[1, 4, 6]"]
-    M3 -.merge.-> M4
-    M2 -.final merge.-> OUT["[1, 2, 3, 4, 5, 6]"]
-    M4 -.final merge.-> OUT
+    ARRL -.->|merge| M3["[4, 6]"]
+    ARRR -.->|merge| M3
+    ARL -.->|merge| M4["[1, 4, 6]"]
+    M3 -.->|merge| M4
+    M2 -.->|final merge| OUT["[1, 2, 3, 4, 5, 6]"]
+    M4 -.->|final merge| OUT
     style OUT fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style A fill:#fef9e7,stroke:#f1c40f
 ```
@@ -272,10 +272,10 @@ flowchart TD
     SP --> R1["right: k=2"]
     R1 --> R1L["single [1,3,4] -> [1,3,4]"]
     R1 --> R1R["single [2,6] -> [2,6]"]
-    R1L -.merge.-> RM["[1,2,3,4,6]"]
-    R1R -.merge.-> RM
-    L1 -.final merge.-> OUT["[1,1,2,3,4,4,5,6]"]
-    RM -.final merge.-> OUT
+    R1L -.->|merge| RM["[1,2,3,4,6]"]
+    R1R -.->|merge| RM
+    L1 -.->|final merge| OUT["[1,1,2,3,4,4,5,6]"]
+    RM -.->|final merge| OUT
     style OUT fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style K fill:#fef9e7,stroke:#f1c40f
 ```

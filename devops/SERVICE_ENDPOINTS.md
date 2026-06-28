@@ -86,7 +86,7 @@ points at pods *only* via the selector; the Endpoints object is the materialized
 
 ```mermaid
 graph LR
-    S["Service: web<br/>ClusterIP 10.96.0.10<br/>selector app=web"] -.selector.-> E["Endpoints controller<br/>(watches pods)"]
+    S["Service: web<br/>ClusterIP 10.96.0.10<br/>selector app=web"] -.->|selector| E["Endpoints controller<br/>(watches pods)"]
     E --> O["Endpoints object<br/>[web-a, web-b, web-c]"]
     O --> KP["kube-proxy (every node)"]
     style S fill:#fef9e7,stroke:#f1c40f,stroke-width:3px

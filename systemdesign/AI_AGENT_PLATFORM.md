@@ -30,7 +30,7 @@ graph LR
     ORC -->|read/write| MEM["Memory<br/>short-term window<br/>+ long-term vector store"]
     ORC -->|validate in/out| GR["Guardrails<br/>PII + injection + safety"]
     ORC -->|checkpoint| ST[("State Store<br/>Postgres + Redis")]
-    ORC -.OTel traces/metrics.> OB["Observability<br/>Prometheus + Jaeger"]
+    ORC -.->|OTel traces/metrics| OB["Observability<br/>Prometheus + Jaeger"]
     style ORC fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style TR fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style MEM fill:#eaf2f8,stroke:#2980b9
@@ -106,10 +106,10 @@ graph TD
     ORC -->|"long-term"| VS[("Vector Store<br/>pgvector / Pinecone")]
     ORC -->|"in/out"| GR["Guardrails<br/>PII + injection + safety"]
     ORC -->|checkpoint each step| PG[("Postgres<br/>state + AES")]
-    ORC -.OTel.> OTC["OTel Collector"]
-    OTC -.metrics.> PROM["Prometheus / Thanos"]
-    OTC -.traces.> JAE["Jaeger / Datadog"]
-    ORC -.token metering.> COST["Cost Metering<br/>per-tenant budget"]
+    ORC -.->|OTel| OTC["OTel Collector"]
+    OTC -.->|metrics| PROM["Prometheus / Thanos"]
+    OTC -.->|traces| JAE["Jaeger / Datadog"]
+    ORC -.->|token metering| COST["Cost Metering<br/>per-tenant budget"]
     style ORC fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style TR fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style PG fill:#eaf2f8,stroke:#2980b9

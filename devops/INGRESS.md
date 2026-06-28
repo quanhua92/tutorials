@@ -157,8 +157,8 @@ graph LR
     CL["client<br/>HTTPS"] -->|"TLS"| CTRL["controller<br/>terminates TLS"]
     CTRL -->|"plain HTTP<br/>+ X-Forwarded-*"| SVC["service-api<br/>ClusterIP"]
     SVC --> POD["pod<br/>sees HTTP only"]
-    CM["cert-manager<br/>(Let's Encrypt)"] -.writes.-> SEC["Secret<br/>api-tls-secret"]
-    SEC -.mounted by.-> CTRL
+    CM["cert-manager<br/>(Let's Encrypt)"] -.->|writes| SEC["Secret<br/>api-tls-secret"]
+    SEC -.->|mounted by| CTRL
     style CL fill:#fef9e7,stroke:#f1c40f
     style CTRL fill:#eafaf1,stroke:#27ae60
     style SVC fill:#eaf2f8,stroke:#2980b9

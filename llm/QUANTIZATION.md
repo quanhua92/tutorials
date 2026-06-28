@@ -456,8 +456,8 @@ graph TD
     MLX --> EQ
     GPTQ --> EQ
     BAD["Mixing them (formula 3)<br/>off by ~scale*bias<br/>-> SILENT corruption"]
-    MLX -.wrong cross.-> BAD
-    GPTQ -.wrong cross.-> BAD
+    MLX -.->|wrong cross| BAD
+    GPTQ -.->|wrong cross| BAD
     style EQ fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style BAD fill:#fdecea,stroke:#c0392b
 ```

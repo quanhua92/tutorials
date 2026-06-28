@@ -38,8 +38,8 @@ graph TD
     Loop -- "picks the next ready coroutine" --> C2["coroutine B"]
     C1 -- "await asyncio.sleep(x)" --> Susp["SUSPENDED: yields back to loop"]
     C2 -- "await fetch()" --> Susp2["SUSPENDED: yields back to loop"]
-    Susp -. "loop free to run B" .-> Loop
-    Susp2 -. "loop free to run A" .-> Loop
+    Susp -.->|loop free to run B| Loop
+    Susp2 -.->|loop free to run A| Loop
     Block["time.sleep(x) / requests.get()<br/>SYNCHRONOUS blocking call"] -- "NO yield -> loop frozen" --> Frozen["the WHOLE loop stalls;<br/>no coroutine can progress"]
     style Loop fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style Susp fill:#eafaf1,stroke:#27ae60
@@ -161,7 +161,7 @@ graph LR
         S1["await sleep(0.10)"] --> S2["await sleep(0.20)"] --> SDone["~0.30s"]
     end
     subgraph CONC["asyncio.gather (max)"]
-        G1["sleep(0.10)"] -. overlaps .-> G2["sleep(0.20)"]
+        G1["sleep(0.10)"] -.->|overlaps| G2["sleep(0.20)"]
         G2 --> GDone["~0.20s"]
     end
     style SDone fill:#fdecea,stroke:#c0392b

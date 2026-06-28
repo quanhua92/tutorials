@@ -29,8 +29,8 @@ graph LR
     PROC -->|publish BidPlaced| EV["Kafka auction-events"]
     EV --> WSG["WebSocket Gateway<br/>(local conn map / auction)"]
     WSG -->|push < 1s| B2(["watchers"])
-    PROC -.winner on close.-> NS["Notification + Payment"]
-    NS -.email / push.-> B2
+    PROC -.->|winner on close| NS["Notification + Payment"]
+    NS -.->|email / push| B2
     style KF fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style PROC fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style BDB fill:#eafaf1,stroke:#27ae60,stroke-width:2px
@@ -104,8 +104,8 @@ graph TD
     EV --> WSG["WebSocket Gateway cluster<br/>(per-auction local conn map)"]
     WSG -->|WS / SSE push < 1s| CLI(["watchers / bidders"])
     CLOSE["Closing Scheduler Job<br/>(every 30s)"] -->|ScheduledClose per partition| KF
-    PROC -.CLOSED transition.-> NS["Notification + Payment"]
-    NS -.email / push.-> CLI
+    PROC -.->|CLOSED transition| NS["Notification + Payment"]
+    NS -.->|email / push| CLI
     style KF fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style PROC fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style BDB fill:#eafaf1,stroke:#27ae60,stroke-width:2px

@@ -75,14 +75,14 @@ graph LR
     subgraph "One OS thread (M) bound to one processor (P)"
         M["M = Machine<br/>(OS thread)<br/>runs ONE G at a time"]
         P["P = Processor<br/>(context)<br/>holds a local run queue"]
-        M -.executes.-> G1["G (running)"]
+        M -.->|executes| G1["G (running)"]
         P --> LRQ["LRQ: G, G, G ...<br/>(runnable goroutines)"]
     end
     GRQ["GRQ: Global Run Queue<br/>(not yet assigned to a P)"]
     NP["network poller<br/>(async I/O: epoll/kqueue)"]
     LRQ --> M
-    GRQ -.schedule.-> LRQ
-    NP -.ready G's.-> LRQ
+    GRQ -.->|schedule| LRQ
+    NP -.->|ready G's| LRQ
 
     P2["P' (another processor)"] -->|"work-stealing:<br/>take HALF of LRQ"| LRQ
 

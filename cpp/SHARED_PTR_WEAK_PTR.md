@@ -89,7 +89,7 @@ graph TD
     S1 --> OBJ
     S2 --> CB
     W1 --> CB
-    CB -. "strong hits 0 ->" .-> OBJ
+    CB -.->|strong hits 0 ->| OBJ
     style CB fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style OBJ fill:#eaf2f8,stroke:#2980b9
     style SP fill:#eafaf1,stroke:#27ae60

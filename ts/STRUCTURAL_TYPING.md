@@ -53,13 +53,13 @@ of the structural choice:
 graph TD
     subgraph Structural["STRUCTURAL (shape match)"]
         direction LR
-        S1["value {x,y,z}"] -.has at least.-> S2["type {x,y}"]
-        S1 -.name ignored.-> S2
+        S1["value {x,y,z}"] -.->|has at least| S2["type {x,y}"]
+        S1 -.->|name ignored| S2
     end
     subgraph Nominal["NOMINAL (name match)"]
         direction LR
-        N1["value: UserId"] -.must be declared.-> N2["type: UserId"]
-        N1 -.same shape NOT enough.-> N3["type: OrderId"]
+        N1["value: UserId"] -.->|must be declared| N2["type: UserId"]
+        N1 -.->|same shape NOT enough| N3["type: OrderId"]
     end
     subgraph Brand["THE BRAND PATTERN (fake nominal on top of structural)"]
         direction LR
@@ -67,7 +67,7 @@ graph TD
         B1 --> B3["runtime:<br/>just a string (sym erased)"]
     end
     Structural --> Brand
-    Nominal -.contrast.-> Brand
+    Nominal -.->|contrast| Brand
     style Structural fill:#e7f0ff,stroke:#3178c6,stroke-width:2px
     style Nominal fill:#fdecea,stroke:#c0392b,stroke-width:2px
     style Brand fill:#fef9e7,stroke:#f1c40f,stroke-width:2px

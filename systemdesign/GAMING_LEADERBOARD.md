@@ -27,7 +27,7 @@ graph LR
     ZS -->|"ZREVRANK"| API
     API -->|JSON / WebSocket| C(["client / esports broadcast"])
     SS -->|append event| KF[("Kafka / Redis Stream<br/>tournament events")]
-    KF -.recompaction.-> ZS
+    KF -.->|recompaction| ZS
     SS -->|audit row| PG[("Postgres<br/>score history")]
     style ZS fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style API fill:#eafaf1,stroke:#27ae60,stroke-width:2px
@@ -99,9 +99,9 @@ graph TD
     SUB -->|"2. ZADD ... GT"| RCL[("Redis Cluster<br/>ZSET, segmented + sharded")]
     SUB -->|3. audit row| PG[("Postgres<br/>score history")]
     SUB -->|4. append event| KF[("Kafka / Redis Stream<br/>tournament events")]
-    KF -.recompaction job.-> SN[("Snapshot ZSET<br/>windowed")]
+    KF -.->|recompaction job| SN[("Snapshot ZSET<br/>windowed")]
     RD -->|1 top-K cache miss| TC[("Top-K Cache<br/>1s TTL")]
-    TC -.miss.-> RCL
+    TC -.->|miss| RCL
     RD -->|"ZREVRANGE / ZREVRANK"| RCL
     RD -->|live push| WS["WebSocket<br/>esports broadcast"]
     style RCL fill:#eafaf1,stroke:#27ae60,stroke-width:3px

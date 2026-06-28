@@ -31,7 +31,7 @@ flowchart LR
     D --> FA[Facade]
     FA --> P[Proxy]
   end
-  CR -. shares vocabulary .-> ST
+  CR -.->|shares vocabulary| ST
   style S fill:#f39c12,color:#0d1117
   style F fill:#f39c12,color:#0d1117
   style AF fill:#f39c12,color:#0d1117

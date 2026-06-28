@@ -173,8 +173,8 @@ the mechanism behind:
 graph LR
     MC["makeCounter() call #1"] --> N1["heap cell n (3)"]
     MC2["makeCounter() call #2"] --> N2["heap cell n (1)"]
-    C1["counter closure #1"] -.references.-> N1
-    C2["counter closure #2"] -.references.-> N2
+    C1["counter closure #1"] -.->|references| N1
+    C2["counter closure #2"] -.->|references| N2
     style N1 fill:#eaf2f8,stroke:#2980b9
     style N2 fill:#eaf2f8,stroke:#2980b9
 ```

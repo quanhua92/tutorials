@@ -76,8 +76,8 @@ graph LR
     LAYER["LAYER OFFLOAD<br/>(llama.cpp)<br/>stream ALL weights/token<br/>350 GB / 64 GB/s<br/>~0.18 tok/s -- UNUSABLE"]
     EXPERT["EXPERT OFFLOAD<br/>(KTransformers, SOSP'25)<br/>weights stay in CPU DRAM<br/>only ~14 KB activations/token<br/>AMX runs the k active experts"]
 
-    GPUONLY -. "671B does not fit<br/>on a 24 GB GPU" .-> LAYER
-    LAYER -. "PCIe saturated by<br/>STATIC weights" .-> EXPERT
+    GPUONLY -.->|671B does not fit<br/>on a 24 GB GPU| LAYER
+    LAYER -.->|PCIe saturated by<br/>STATIC weights| EXPERT
 
     style GPUONLY fill:#eaf2f8,stroke:#2980b9
     style LAYER fill:#fdecea,stroke:#c0392b
@@ -170,7 +170,7 @@ time/token     = model_size / PCIe_BW
 graph LR
     W["STATIC weights<br/>350 GB"] -->|every token| PCIe["PCIe Gen4<br/>64 GB/s"]
     PCIe -->|5.47 s| GPU["GPU computes<br/>one token"]
-    GPU -. discard weights .-> W
+    GPU -.->|discard weights| W
     style W fill:#fdecea,stroke:#c0392b
     style PCIe fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style GPU fill:#eaf2f8,stroke:#2980b9

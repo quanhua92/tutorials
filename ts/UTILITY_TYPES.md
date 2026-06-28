@@ -44,8 +44,8 @@ graph TD
     COND --> C["Exclude / Extract / NonNullable"]
     COND --> D["ReturnType / Parameters  (via infer)"]
     REC --> E["Awaited"]
-    GLUE["keyof · typeof · indexed access T['k']"] -. feeds .-> MAP
-    GLUE -. feeds .-> COND
+    GLUE["keyof · typeof · indexed access T['k']"] -.->|feeds| MAP
+    GLUE -.->|feeds| COND
     style CAT fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style MAP fill:#eafaf1,stroke:#27ae60
     style COND fill:#fef9e7,stroke:#f1c40f

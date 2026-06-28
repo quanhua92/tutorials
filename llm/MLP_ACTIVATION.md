@@ -69,7 +69,7 @@ graph LR
     Axis2 --> B1["Vanilla MLP<br/>down(act(fc(x)))<br/>2 matrices, 4x ratio<br/>(GPT-2 / nanoGPT)"]
     B1 --> B2["SwiGLU MLP<br/>down(silu(gate)*up)<br/>3 matrices, ~5.4x<br/>(Llama / Qwen)"]
 
-    A3 -.combines with.-> B2
+    A3 -.->|combines with| B2
 
     style A1 fill:#fdecea,stroke:#c0392b
     style A2 fill:#fef9e7,stroke:#f1c40f
@@ -134,8 +134,8 @@ graph LR
     G["GELU(x) = x·Φ(x)<br/>≈ smooth probabilistic gate<br/>nonzero for small negatives"]
     S["SiLU(x) = x·sigmoid(x)<br/>smooth, self-gated,<br/>nonzero for all x&lt;0"]
 
-    R -. "smoother<br/>+ nonzero negatives" .-> G
-    G -. "simpler closed form<br/>+ smoother everywhere" .-> S
+    R -.->|smoother<br/>+ nonzero negatives| G
+    G -.->|simpler closed form<br/>+ smoother everywhere| S
 
     style R fill:#fdecea,stroke:#c0392b
     style G fill:#fef9e7,stroke:#f1c40f

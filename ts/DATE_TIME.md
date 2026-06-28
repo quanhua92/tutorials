@@ -42,11 +42,11 @@ graph TD
     D --> G4["IDENTITY vs VALUE<br/>two Dates are === by reference, not time"]
     D --> G5["NO TZ OBJECT<br/>only local zone + UTC; Intl formats but no type"]
     D --> G6["CONFLATED CLOCKS<br/>wall + monotonic in ONE object"]
-    G1 -.fix.-> T["Temporal proposal (stage 3)<br/>immutable, typed, tz-aware"]
-    G2 -.fix.-> T
-    G3 -.fix.-> T
-    G5 -.fix.-> T
-    G6 -.partial fix.-> P["performance.now() (ES2015)<br/>monotonic timer for DURATIONS"]
+    G1 -.->|fix| T["Temporal proposal (stage 3)<br/>immutable, typed, tz-aware"]
+    G2 -.->|fix| T
+    G3 -.->|fix| T
+    G5 -.->|fix| T
+    G6 -.->|partial fix| P["performance.now() (ES2015)<br/>monotonic timer for DURATIONS"]
     style G1 fill:#fadbd8,stroke:#e74c3c,stroke-width:3px
     style G2 fill:#fadbd8,stroke:#e74c3c
     style G3 fill:#fadbd8,stroke:#e74c3c

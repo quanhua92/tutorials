@@ -402,14 +402,14 @@ row-major into `[[g0h0, g0h1], [g1h0, g1h1]]` — groups preserved. Reshaping to
 ```mermaid
 graph TD
     subgraph ok["CORRECT: reshape to [H_kv, n_repeats, ...]"]
-        OK1["q group 0 = [Q0, Q1]"] -.uses.-> OKV0["KV head 0"]
-        OK2["q group 1 = [Q2, Q3]"] -.uses.-> OKV1["KV head 1"]
+        OK1["q group 0 = [Q0, Q1]"] -.->|uses| OKV0["KV head 0"]
+        OK2["q group 1 = [Q2, Q3]"] -.->|uses| OKV1["KV head 1"]
     end
     subgraph bad["WRONG: reshape to [n_repeats, H_kv, ...]"]
-        BK1["Q0"] -.uses.-> BKV0["KV0"]
-        BK2["Q1"] -.uses.-> BKV1["KV1  ✗ wrong!"]
-        BK3["Q2"] -.uses.-> BKV2["KV0  ✗ wrong!"]
-        BK4["Q3"] -.uses.-> BKV3["KV1"]
+        BK1["Q0"] -.->|uses| BKV0["KV0"]
+        BK2["Q1"] -.->|uses| BKV1["KV1  ✗ wrong!"]
+        BK3["Q2"] -.->|uses| BKV2["KV0  ✗ wrong!"]
+        BK4["Q3"] -.->|uses| BKV3["KV1"]
     end
     style ok fill:#eafaf1,stroke:#27ae60
     style bad fill:#fdecea,stroke:#c0392b

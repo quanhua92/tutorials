@@ -142,7 +142,7 @@ graph LR
     S -->|one at a time| H1[handler A]
     S -->|waits| H2[handler B]
     S -->|waits| H3[handler C]
-    S -.different strand.-> H4[handler D - may overlap A/B/C]
+    S -.->|different strand| H4[handler D - may overlap A/B/C]
 ```
 
 **Why It Beats a Mutex:** A mutex protects a *resource*; a strand serializes a *flow*. With a mutex you must remember to lock everywhere the resource is touched, and an async re-entry can self-deadlock (a handler holding the lock initiates an op whose completion handler also needs the lock). A strand sidesteps both: the serialization is declarative (bind once per op) and non-reentrant by construction — the next handler simply isn't scheduled until the current one returns.

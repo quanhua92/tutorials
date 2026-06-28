@@ -462,8 +462,8 @@ graph LR
     B --> MM2["(α/r)·B(Ax) [d]"]
     MM2 --> PLUS(("+"))
     PLUS --> y["y [d]"]
-    Q["QLoRA: W₀ -> 4-bit NF4 🔗<br/>A,B stay fp16"] -.applies to.-> W0
-    M["multi-adapter: 1 base + N (A_i,B_i)<br/>grouped GEMM / paged mem"] -.serves.-> PLUS
+    Q["QLoRA: W₀ -> 4-bit NF4 🔗<br/>A,B stay fp16"] -.->|applies to| W0
+    M["multi-adapter: 1 base + N (A_i,B_i)<br/>grouped GEMM / paged mem"] -.->|serves| PLUS
     style W0 fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
     style A fill:#fef9e7,stroke:#f1c40f
     style B fill:#fef9e7,stroke:#f1c40f

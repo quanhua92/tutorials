@@ -41,7 +41,7 @@ graph TD
   LOGIC --> P1
   LOGIC --> P2
   LOGIC --> P3
-  Q["WHERE created_at >= '2024-03-01'"] -. "prunes" .-> P3
+  Q["WHERE created_at >= '2024-03-01'"] -.->|prunes| P3
   style LOGIC fill:#1b1230,stroke:#8e44ad,stroke-width:3px,color:#fff
   style P3 fill:#13251b,stroke:#27ae60,stroke-width:3px,color:#fff
   style P1 fill:#0a0e14,stroke:#30363d,color:#8b949e
@@ -309,7 +309,7 @@ graph TD
   N0["node0  (shards S0, S2)"]
   N1["node1  (shards S1, S3)"]
   C -- "WHERE user_id = 42<br/>→ route to ONE node" --> N0
-  C -. "cross-shard<br/>fan-out + gather" .-> N1
+  C -.->|cross-shard<br/>fan-out + gather| N1
   style C fill:#1b1230,stroke:#8e44ad,stroke-width:3px,color:#fff
   style N0 fill:#13251b,stroke:#27ae60,stroke-width:3px,color:#fff
   style N1 fill:#0a0e14,stroke:#30363d,color:#8b949e

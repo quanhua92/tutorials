@@ -32,7 +32,7 @@ graph TD
     OWN -- "& (shared, read-only)" --> A1["r1 : &i32"]
     OWN -- "& (many allowed)" --> A2["r2 : &i32"]
     OWN -- "& (many allowed)" --> A3["r3 : &i32"]
-    OWN -. "&mut (EXCLUSIVE<br/>only ONE, no others)" .-> M["rm : &mut i32"]
+    OWN -.->|&mut (EXCLUSIVE<br/>only ONE, no others)| M["rm : &mut i32"]
     style OWN fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style M fill:#fadbd8,stroke:#c0392b,stroke-width:2px
 ```

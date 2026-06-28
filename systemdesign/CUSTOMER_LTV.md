@@ -39,7 +39,7 @@ graph LR
     CAL --> SEG["Segmentation<br/>Whale/Dolphin/Minnow"]
     SEG -->|value-based bidding| ADS[("Ads Platforms<br/>Google Enhanced Conv<br/>Meta CAPI")]
     SEG -->|save campaigns| CRM[("CRM / Cancel-flow<br/>discount offers")]
-    ADS -.conversion labels.-> SRC
+    ADS -.->|conversion labels| SRC
     style CLV fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CHN fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style FS fill:#eaf2f8,stroke:#2980b9
@@ -106,8 +106,8 @@ graph TD
     LB["Load Balancer"] --> AGW["API Gateway<br/>auth + rate-limit"]
     AGW -->|GET /clv, /churn-score| RT["Realtime Scorer<br/>Redis lookup + GBDT, <200ms"]
     AGW -->|POST /conversions/value| ADS[("Ads Integration<br/>Google Enhanced Conv / Meta CAPI")]
-    FLK[("Flink<br/>streaming RFM")] -.writes.-> REDIS[("Redis<br/>online features")]
-    RT -.reads.-> REDIS
+    FLK[("Flink<br/>streaming RFM")] -.->|writes| REDIS[("Redis<br/>online features")]
+    RT -.->|reads| REDIS
     REDIS --> BATCH["Nightly Batch Pipeline<br/>Spark: retrain + score 50M"]
     BATCH --> CLVM["CLV Model<br/>survival x NPV"]
     BATCH --> CHNM["Churn + Retention<br/>GBDT / Cox PH"]
@@ -116,8 +116,8 @@ graph TD
     CAL --> PG[("Score Store (Postgres)<br/>+ 90d history")]
     CAL --> SEG["Segmentation<br/>Whale/Dolphin/Minnow"]
     SEG --> CRM[("CRM / Cancel-flow<br/>save campaigns")]
-    PG -.cache.-> REDIS
-    BUS[("Conversion Labels<br/>ads + cancels")] -.monthly retrain.-> BATCH
+    PG -.->|cache| REDIS
+    BUS[("Conversion Labels<br/>ads + cancels")] -.->|monthly retrain| BATCH
     style CLVM fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CHNM fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style REDIS fill:#eaf2f8,stroke:#2980b9

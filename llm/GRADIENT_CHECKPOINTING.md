@@ -47,8 +47,8 @@ graph LR
     Q -->|keep NONE| S2["full recompute<br/>memory O(1)<br/>compute O(L^2)"]
     Q -->|keep every √L-th| S3["selective √L (Chen 2016)<br/>memory O(√L)<br/>compute O(L) +33%"]
 
-    S1 -.too much RAM.-> S3
-    S2 -.too slow.-> S3
+    S1 -.->|too much RAM| S3
+    S2 -.->|too slow| S3
 
     style S3 fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style S1 fill:#fef9e7,stroke:#f1c40f
@@ -216,11 +216,11 @@ graph LR
 graph LR
     subgraph full["full recompute -- backprop layer i redoes forwards 1..i"]
         direction LR
-        I["input<br/>keep"] -.recompute 1..5.-> B5["bwd L5"]
-        I -.recompute 1..4.-> B4["bwd L4"]
-        I -.recompute 1..3.-> B3["bwd L3"]
-        I -.recompute 1..2.-> B2["bwd L2"]
-        I -.recompute 1.-> B1["bwd L1"]
+        I["input<br/>keep"] -.->|recompute 1..5| B5["bwd L5"]
+        I -.->|recompute 1..4| B4["bwd L4"]
+        I -.->|recompute 1..3| B3["bwd L3"]
+        I -.->|recompute 1..2| B2["bwd L2"]
+        I -.->|recompute 1| B1["bwd L1"]
     end
     NOTE["memory = 1 activation (input)<br/>compute = 1+2+...+L = L(L+1)/2 = O(L^2)"]
     full --> NOTE
@@ -470,8 +470,8 @@ The √L memory curve flattening (store-all grows linearly, selective grows as �
 
 ```mermaid
 graph LR
-    Old["store-all backprop<br/>(1970s--2015)<br/>memory O(L)"] -->|too much RAM<br/>as models grew| Mid["full recompute<br/>(naive baseline)<br/>compute O(L^2)"]
-    Mid -->|O(L^2) too slow| Chen["selective √L<br/>(Chen 2016)<br/>memory O(√L), compute O(L)"]
+    Old["store-all backprop<br/>(1970s-2015)<br/>memory O(L)"] -->|"too much RAM as models grew"| Mid["full recompute<br/>(naive baseline)<br/>compute O(L^2)"]
+    Mid -->|"O(L²) too slow"| Chen["selective √L<br/>(Chen 2016)<br/>memory O(√L), compute O(L)"]
     Chen -->|productized| Torch["torch.utils.checkpoint<br/>(use_reentrant=False)"]
     Chen -->|transformer-tuned| Mega["Megatron selective<br/>(Korthikanti 2022)<br/>checkpoint parts WITHIN a layer"]
     style Chen fill:#eafaf1,stroke:#27ae60,stroke-width:3px

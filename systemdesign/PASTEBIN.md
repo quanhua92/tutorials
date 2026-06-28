@@ -21,14 +21,14 @@ access control) hangs off those two ops.
 ```mermaid
 graph LR
     U(["user"]) -->|POST /api/pastes| GW["API Gateway<br/>(rate limit, auth, abuse scan)"]
-    U -->|GET /{slug}| CDN["CDN<br/>(immutable, 24h+ TTL)"]
-    CDN -.miss.-> GW
+    U -->|"GET /{slug}"| CDN["CDN<br/>(immutable, 24h+ TTL)"]
+    CDN -.->|miss| GW
     GW -->|write| PS["Paste Service"]
     GW -->|read| PS
     PS -->|"SHA-256(body) = object key"| OBJ[("Object Storage<br/>S3, content-addressed")]
     PS -->|metadata| DB[("Metadata DB<br/>Postgres")]
     PS -->|warm hot tier| RC[("Redis<br/>recent pastes")]
-    PS -.expires_at.-> TTL["Cleanup Pipeline<br/>(soft 404 + async reclaim)"]
+    PS -.->|expires_at| TTL["Cleanup Pipeline<br/>(soft 404 + async reclaim)"]
     style CDN fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style PS fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style OBJ fill:#eaf2f8,stroke:#2980b9
@@ -104,17 +104,17 @@ graph LR
 graph TD
     LB["Load Balancer / CDN"] --> AGW["API Gateway<br/>rate-limit + auth + abuse scan"]
     AGW -->|POST /api/pastes| SH["Paste Service<br/>(create)"]
-    AGW -->|GET /{slug}| RD["Paste Service<br/>(read)"]
+    AGW -->|"GET /{slug}"| RD["Paste Service<br/>(read)"]
     SH -->|"1. SHA-256(body) = content_key"| HZ["Hash + slug mint"]
     HZ -->|2. write-once if new| OBJ[("Object Storage S3<br/>keyed by SHA-256")]
     HZ -->|3. metadata row| DB[("Metadata DB<br/>Postgres")]
     SH -->|warm| CA[("Redis hot tier<br/>recent 7 days")]
     RD -->|1 read cache| CA
-    CA -.miss.-> DB
+    CA -.->|miss| DB
     RD -->|2 fetch body| OBJ
-    DB -.tracks expires_at.-> CL["Cleanup Pipeline<br/>(nightly async reclaim)"]
-    CL -.deletes last-ref.-> OBJ
-    AGW -.inline scan.-> AB["Abuse Detection<br/>(YARA + entropy)"]
+    DB -.->|tracks expires_at| CL["Cleanup Pipeline<br/>(nightly async reclaim)"]
+    CL -.->|deletes last-ref| OBJ
+    AGW -.->|inline scan| AB["Abuse Detection<br/>(YARA + entropy)"]
     RD -->|3 serve immutable body| LB
     style CA fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style RD fill:#eafaf1,stroke:#27ae60,stroke-width:2px

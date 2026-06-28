@@ -228,7 +228,7 @@ graph LR
     subgraph single["Single GPU"]
         S0["∇L([X0;X1])"]
     end
-    AVG -.="exactly equal".-> S0
+    AVG -.->|is exactly equal to| S0
     AVG --> W0["W ← W − lr·avg  (rank 0)"]
     AVG --> W1["W ← W − lr·avg  (rank 1)"]
     W0 --> EQ["BIT-IDENTICAL<br/>on all ranks"]

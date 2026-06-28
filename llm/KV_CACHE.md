@@ -502,8 +502,8 @@ identical (within tolerance):
 
 ```mermaid
 graph LR
-    A1["all-at-once K[0:4]"] -.match.-> A2["dense K[0:4]"]
-    A2 -.match.-> A3["paged K[0:4]"]
+    A1["all-at-once K[0:4]"] -.->|match| A2["dense K[0:4]"]
+    A2 -.->|match| A3["paged K[0:4]"]
     WRONG["WRONG offset (slice(0,1))"] -.-> DIFF["DIFFERS from correct"]
     style A1 fill:#eafaf1,stroke:#27ae60
     style A2 fill:#eafaf1,stroke:#27ae60

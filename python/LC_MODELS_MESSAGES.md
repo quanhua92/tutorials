@@ -44,11 +44,11 @@ the message format and the Runnable contract recur in every later bundle.
 graph TD
     Conv["conversation = list of messages<br/>[SystemMessage, HumanMessage, AIMessage, ToolMessage]"] --> Inv["model.invoke(messages)"]
     Inv --> Out["AIMessage<br/>(content + tool_calls + usage_metadata)"]
-    Out -.reused as next turn.-> Conv
-    Model["any chat model"] -.implements.-> Runnable["Runnable<br/>invoke / batch / stream / ainvoke"]
-    Runnable -.same shape.-> Chain["chains<br/>(prompt | model | parser)"]
-    Runnable -.same shape.-> Retr["retrievers"]
-    Runnable -.same shape.-> Graph["compiled LangGraph"]
+    Out -.->|reused as next turn| Conv
+    Model["any chat model"] -.->|implements| Runnable["Runnable<br/>invoke / batch / stream / ainvoke"]
+    Runnable -.->|same shape| Chain["chains<br/>(prompt | model | parser)"]
+    Runnable -.->|same shape| Retr["retrievers"]
+    Runnable -.->|same shape| Graph["compiled LangGraph"]
     style Conv fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style Out fill:#eafaf1,stroke:#27ae60
     style Runnable fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
@@ -280,7 +280,7 @@ graph LR
     H2["HumanMessage('one-line example?')"] --> L
     L -->|model.invoke| M["chat model"]
     M --> A2["AIMessage"]
-    A2 -.append to history.-> L
+    A2 -.->|append to history| L
     style L fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style M fill:#eaf2f8,stroke:#2980b9
 ```

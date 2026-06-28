@@ -90,7 +90,7 @@ graph BT
     RA["random_access_iterator<br/>+ [], +=, it-j  (deque)"]
     CONT["contiguous_iterator<br/>+ &it[n] == &it[0]+n  (vector / T*)"]
     IN --> FWD --> BIDI --> RA --> CONT
-    OUT -.optionally add.-> IN
+    OUT -.->|optionally add| IN
     style CONT fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style RA fill:#eafaf1,stroke:#27ae60
     style BIDI fill:#fef9e7,stroke:#f1c40f

@@ -45,7 +45,7 @@ graph LR
       A0["A#0"] --- B0["B#0"]
       B0 --- C0["C#0"]
       C0 --- D0["D#0"]
-      D0 -.wrap.-> A0
+      D0 -.->|wrap| A0
     end
     k["key (hash)"] -->|"clockwise successor"| C0
     style A0 fill:#2980b9,color:#fff

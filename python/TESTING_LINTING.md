@@ -299,10 +299,10 @@ read" behavior trips up everyone once.
 ```mermaid
 graph TD
     subgraph "Before ruff (4 separate tools)"
-        A1["flake8"] -.lint.-> Code1["code.py"]
-        A2["isort"] -.sort imports.-> Code1
-        A3["black"] -.format.-> Code1
-        A4["pydocstyle"] -.docstrings.-> Code1
+        A1["flake8"] -.->|lint| Code1["code.py"]
+        A2["isort"] -.->|sort imports| Code1
+        A3["black"] -.->|format| Code1
+        A4["pydocstyle"] -.->|docstrings| Code1
     end
     subgraph "With ruff (1 Rust binary)"
         R["ruff check<br/>(lint rules: F, E, I, UP…)<br/>+ ruff format<br/>(Black-compatible)"]

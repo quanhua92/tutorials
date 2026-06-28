@@ -40,7 +40,7 @@ flowchart LR
     GW --> U[users-svc<br/>gRPC]
     GW --> P[catalog-svc<br/>HTTP]
     GW --> O[orders-svc<br/>HTTP]
-    GW -. "OPEN? fast-fail 503" .-> CB[(circuit breaker<br/>per backend)]
+    GW -.->|OPEN? fast-fail 503| CB[(circuit breaker<br/>per backend)]
     U --> DB[(DB)]
     P --> DB
 ```

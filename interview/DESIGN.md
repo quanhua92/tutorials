@@ -229,7 +229,7 @@ match: True
 
 ```mermaid
 graph LR
-    H["HEAD<br/>MRU side"] -.-> N1["k=1"] -.-> N2["k=2"] -.-> T["TAIL<br/>LRU side"]
+    H["HEAD<br/>MRU side"] -.->|-> N1["k=1"] -| N2["k=2"] -.-> T["TAIL<br/>LRU side"]
     GET["get(1)"] -->|"splice 1 to front"| H
     T -->|"on overflow: evict tail.prev"| DROP["drop LRU"]
     style H fill:#0e2e29,stroke:#1abc9c,color:#e6edf3

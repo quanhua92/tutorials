@@ -235,7 +235,7 @@ graph TD
     H["map value (pointer)<br/>-> hmap header"] --> B0["bucket 0<br/>8 slots"]
     H --> B1["bucket 1<br/>8 slots"]
     H --> BN["bucket N<br/>8 slots"]
-    B0 -.overflow.-> OF["overflow bucket<br/>(collision chain)"]
+    B0 -.->|overflow| OF["overflow bucket<br/>(collision chain)"]
     B1 -->|"grow: evacuate ~2<br/>buckets per insert"| GROW["new, bigger<br/>bucket array"]
     style H fill:#eaf2f8,stroke:#2980b9
     style GROW fill:#fef9e7,stroke:#f1c40f

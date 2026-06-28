@@ -545,8 +545,8 @@ build the same K,V three ways (no-cache, dense, paged) and confirm byte-equality
 
 ```mermaid
 graph LR
-    A1["no-cache K[0:4]"] -.match.-> A2["dense K[0:4]"]
-    A2 -.match.-> A3["paged K[0:4]<br/>(scattered pages)"]
+    A1["no-cache K[0:4]"] -.->|match| A2["dense K[0:4]"]
+    A2 -.->|match| A3["paged K[0:4]<br/>(scattered pages)"]
     style A1 fill:#eafaf1,stroke:#27ae60
     style A2 fill:#eafaf1,stroke:#27ae60
     style A3 fill:#eafaf1,stroke:#27ae60,stroke-width:3px

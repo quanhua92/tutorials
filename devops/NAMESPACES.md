@@ -171,7 +171,7 @@ graph LR
     H2["host PID 2 sshd"]:::host
     H3["host PID 3 /bin/sh"]:::ctr
     C1["container PID 1 /bin/sh"]:::ctr2
-    H3 -. "same process" .-> C1
+    H3 -.->|same process| C1
     classDef host fill:#eaf2f8,stroke:#2980b9
     classDef ctr fill:#fef9e7,stroke:#f1c40f
     classDef ctr2 fill:#eafaf1,stroke:#27ae60

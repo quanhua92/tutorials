@@ -584,7 +584,7 @@ cross-stage dependencies enforced:
 
 ```mermaid
 graph LR
-    REAL["Real multi-process PP<br/>(NCCL P2P send/recv,<br/>K devices, InfiniBand)"] -.math identical to.-> SIM["This simulation<br/>(1 process, deterministic<br/>F/B schedule, exact bubble)"]
+    REAL["Real multi-process PP<br/>(NCCL P2P send/recv,<br/>K devices, InfiniBand)"] -.->|math identical to| SIM["This simulation<br/>(1 process, deterministic<br/>F/B schedule, exact bubble)"]
     style SIM fill:#eafaf1,stroke:#27ae60,stroke-width:3px
 ```
 

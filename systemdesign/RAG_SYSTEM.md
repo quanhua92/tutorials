@@ -39,7 +39,7 @@ graph LR
     VS --> RR["Cross-encoder<br/>reranker<br/>top-100 -> top-10, ~80ms"]
     RR --> CG["Relevance gate<br/>& citation extract"]
     CG -->|top spans| LLM["LLM generator<br/>grounded + cited"]
-    CG -.below threshold.-> AB["abstain<br/>'I don't know'"]
+    CG -.->|below threshold| AB["abstain<br/>'I don't know'"]
     LLM --> A(["answer + citations"])
     style CH fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style RR fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
@@ -147,11 +147,11 @@ graph TD
         F --> R["cross-encoder<br/>rerank top-100"]
         R --> C["relevance gate<br/>+ citation extract"]
         C --> G["LLM generator<br/>(grounded prompt)"]
-        C -.weak context.-> ABS["abstain"]
+        C -.->|weak context| ABS["abstain"]
         G --> OUT["answer + citations<br/>(streamed)"]
     end
-    I4 -.HNSW.-> Q4
-    I5 -.posting lists.-> Q3
+    I4 -.->|HNSW| Q4
+    I5 -.->|posting lists| Q3
     style R fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style C fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style ABS fill:#fadbd8,stroke:#c0392b

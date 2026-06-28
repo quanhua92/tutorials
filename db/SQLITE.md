@@ -275,7 +275,7 @@ graph LR
         W["writer<br/>appends to -wal"] -- "(1 at a time)" --> WALF["-wal file"]
         R1["reader A"] --> MAIN[("main db file")]
         R2["reader B"] --> MAIN
-        R1 -. "snapshot = main + wal prefix" .-> WALF
+        R1 -.->|snapshot = main + wal prefix| WALF
     end
     CK["CHECKPOINT<br/>folds -wal → main<br/>(at ~1000 pages)"] --> MAIN
     WALF --> CK

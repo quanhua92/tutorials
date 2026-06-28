@@ -30,7 +30,7 @@ flowchart TD
     PQ --> REP["③ Reports<br/>render dashboard → PDF/CSV"]
     PQ --> RUM["④ RUM<br/>web vitals · sessions · replay"]
     PQ --> TRC["⑤ Traces<br/>OTLP → span waterfall"]
-    STR -.mutate rows.-> FN["⑥ Functions<br/>VRL · Python Actions"]
+    STR -.->|mutate rows| FN["⑥ Functions<br/>VRL · Python Actions"]
     ALERT --> DEST["destinations<br/>Slack · email · PagerDuty · webhook · Teams · Actions"]
     REP --> MAIL["email recipients"]
     DASH --> UI["O2 Web UI :5080"]

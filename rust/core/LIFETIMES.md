@@ -46,10 +46,10 @@ the compiler cannot unambiguously relate a returned reference to its source.
 ```mermaid
 graph TD
     subgraph "a lifetime = a code region"
-        A["let r;"]:::decl -. "'a starts (r declared)" .-> B
-        B["let x = 5;"] -. "'b starts" .-> C["r = &x;"]
-        C --> D["println!(&#123;r&#125;;"] -. "last use of r" .-> E
-        E["} x drops"]:::drop -. "'b ends BEFORE 'a -> ERROR" .-> F
+        A["let r;"]:::decl -.->|'a starts (r declared)| B
+        B["let x = 5;"] -.->|'b starts| C["r = &x;"]
+        C --> D["println!(&#123;r&#125;;"] -.->|last use of r| E
+        E["} x drops"]:::drop -.->|'b ends BEFORE 'a -> ERROR| F
     end
     classDef decl fill:#eaf2f8,stroke:#2980b9;
     classDef drop fill:#fadbd8,stroke:#c0392b;
@@ -230,7 +230,7 @@ its LAST USE**, not the scope boundary.
 
 ```mermaid
 graph LR
-    B["first = &v[0]"] --> U["println! first<br/>(LAST USE)"] -. "borrow dies here" .-> M["v.push(4)"]
+    B["first = &v[0]"] --> U["println! first<br/>(LAST USE)"] -.->|borrow dies here| M["v.push(4)"]
     M --> OK["OK under NLL"]
     style U fill:#fef9e7,stroke:#f1c40f
     style OK fill:#eafaf1,stroke:#27ae60

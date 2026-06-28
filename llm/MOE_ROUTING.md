@@ -70,10 +70,10 @@ graph LR
     MIX["Mixtral 8x7B<br/>top-2 of 8<br/>46.7B / 12.9B active<br/>(Mistral 2024)"]
     DS["DeepSeek-V3<br/>shared + fine-grained<br/>+ aux-loss-free bias<br/>671B / 37B active<br/>(DeepSeek 2024)"]
 
-    DENSE -. "decouple knowledge<br/>from compute" .-> SHAZ
-    SHAZ -. "simplify to top-1<br/>+ add capacity" .-> SWITCH
-    SWITCH -. "scale to LLMs<br/>(top-2, z-loss)" .-> MIX
-    MIX -. "kill the aux loss<br/>+ shared expert" .-> DS
+    DENSE -.->|decouple knowledge<br/>from compute| SHAZ
+    SHAZ -.->|simplify to top-1<br/>+ add capacity| SWITCH
+    SWITCH -.->|scale to LLMs<br/>(top-2, z-loss)| MIX
+    MIX -.->|kill the aux loss<br/>+ shared expert| DS
 
     style DENSE fill:#fdecea,stroke:#c0392b
     style SHAZ fill:#fef9e7,stroke:#f1c40f
@@ -409,7 +409,7 @@ graph TB
     SH --> PLUS["+"]
     RG --> PLUS
     PLUS --> Y["y = y_shared + y_routed"]
-    BIAS["dynamic bias b_i<br/>(aux-loss-free)"] -. nudges .-> RT
+    BIAS["dynamic bias b_i<br/>(aux-loss-free)"] -.->|nudges| RT
     style SH fill:#eaf2f8,stroke:#2980b9,stroke-width:2px
     style RG fill:#eafaf1,stroke:#27ae60
     style BIAS fill:#fef9e7,stroke:#f1c40f
@@ -463,8 +463,8 @@ graph LR
     subgraph GPU1["GPU 1 owns expert 1"]
         T1["receives t0,t1"]
     end
-    ALL["All-to-All<br/>(🔗 TENSOR_PARALLEL)"] -. routes tokens .-> GPU0
-    ALL -. routes tokens .-> GPU1
+    ALL["All-to-All<br/>(🔗 TENSOR_PARALLEL)"] -.->|routes tokens| GPU0
+    ALL -.->|routes tokens| GPU1
     GPU0 --> GEMM["Grouped GEMM<br/>(E matmuls, no pad)"]
     GPU1 --> GEMM
     style ALL fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
@@ -534,7 +534,7 @@ graph LR
     KT --> SM["softmax"]
     SM --> G["gate G [B,L,E]<br/>(k nonzero, sum=1)"]
     X --> EX["E SwiGLU experts<br/>(🔗 MLP_ACTIVATION)"]
-    G -. weight .-> EX
+    G -.->|weight| EX
     EX --> Y["y = Σ G_i·E_i(x) [B,L,D]"]
     style KT fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style G fill:#eafaf1,stroke:#27ae60,stroke-width:2px

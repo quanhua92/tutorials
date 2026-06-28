@@ -21,9 +21,9 @@
 graph LR
     JSX["JSX you write<br/>&lt;App/&gt;"] -->|Babel.transform<br/>runtime: classic| CE["React.createElement(...)<br/>plain function calls"]
     CE --> EL["element tree<br/>plain JS objects<br/>{ type, props, children }"]
-    EL -->|createRoot().render()| DOM["real DOM nodes<br/>inside #root"]
-    REACT["react@19.2.7<br/>(runtime: createElement,<br/>hooks)"] -.supplies.-> CE
-    RDC["react-dom@19.2.7/client<br/>(renderer: createRoot)"] -.supplies.-> DOM
+    EL -->|"createRoot().render()"| DOM["real DOM nodes<br/>inside #root"]
+    REACT["react@19.2.7<br/>(runtime: createElement,<br/>hooks)"] -.->|supplies| CE
+    RDC["react-dom@19.2.7/client<br/>(renderer: createRoot)"] -.->|supplies| DOM
     style JSX fill:#eaf2f8,stroke:#2980b9
     style EL fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style DOM fill:#fef9e7,stroke:#f1c40f

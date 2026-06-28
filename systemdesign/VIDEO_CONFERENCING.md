@@ -23,12 +23,12 @@ graph LR
     C1(["caller client"]) -->|WS: SDP offer| SIG["Signaling Service<br/>(WebSocket / TCP)"]
     SIG -->|relay SDP answer| C2(["callee client"])
     C1 -->|STUN binding| STUN["STUN Server<br/>(public IP discovery)"]
-    C1 -.symmetric NAT.-> TURN["TURN Relay (COTURN)<br/>~15% of connections"]
+    C1 -.->|symmetric NAT| TURN["TURN Relay (COTURN)<br/>~15% of connections"]
     C1 -->|SRTP / UDP<br/>simulcast 2.15 Mbps| SFU["SFU Cluster<br/>(forward RTP, no decode)"]
     SFU -->|forward 1 layer<br/>per receiver| C2
     SFU -->|RTP tap| REC["Recording Pipeline<br/>Kafka -> Worker -> S3"]
     SFU -->|RTCP audio level| AS["Active Speaker<br/>detection"]
-    AS -.select layer.-> SFU
+    AS -.->|select layer| SFU
     style SFU fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style SIG fill:#eaf2f8,stroke:#2980b9
     style TURN fill:#fdedec,stroke:#c0392b
@@ -97,11 +97,11 @@ graph TD
     API --> ROOMS[("Rooms / Participants<br/>PostgreSQL")]
     SIG -->|SDP offer/answer<br/>+ ICE candidates| CLI(["client"])
     CLI -->|STUN binding| STUN["STUN Server"]
-    CLI -.symmetric NAT.-> TURN["TURN Relay (COTURN)<br/>~15% connections"]
+    CLI -.->|symmetric NAT| TURN["TURN Relay (COTURN)<br/>~15% connections"]
     CLI -->|SRTP / UDP<br/>simulcast 3 layers| SFU["SFU Cluster<br/>(forward raw RTP)"]
     SFU --> COORD["SFU Coordinator<br/>(Redis: room -> node)"]
     SFU -->|RTCP: TWCC, audio-level| ADAPT["Bitrate + Active-Speaker<br/>(server-side GCC)"]
-    ADAPT -.layer select.-> SFU
+    ADAPT -.->|layer select| SFU
     SFU -->|1 layer per receiver| CLI
     SFU -->|RTP tap| KF["Kafka<br/>(at-least-once, 24h)"]
     KF --> WORK["Recording Worker<br/>-> MP4"]

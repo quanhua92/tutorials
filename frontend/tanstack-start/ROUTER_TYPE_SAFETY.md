@@ -29,7 +29,7 @@ graph TD
     DEF -->|inferred & piped through| UP
     DEF -->|inferred & piped through| US
     DEF -->|inferred & piped through| LD
-    GEN["generated route tree<br/>routeTree.gen.ts"] -.routes known in advance.-> DEF
+    GEN["generated route tree<br/>routeTree.gen.ts"] -.->|routes known in advance| DEF
     style DEF fill:#eaf2f8,stroke:#6366f1,stroke-width:3px
     style GEN fill:#fef9e7,stroke:#f1c40f
     style LINK fill:#eafaf1,stroke:#2ecc71

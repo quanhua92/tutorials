@@ -77,7 +77,7 @@ sibling language offers a different compile-time answer:
 graph LR
     subgraph PRIM["PRIMITIVE assignment  (copy by value)"]
         direction LR
-        PA["slot a = 1"] -.copy.-> PB["slot b = 1<br/>(independent value)"]
+        PA["slot a = 1"] -.->|copy| PB["slot b = 1<br/>(independent value)"]
         PA2["a = 2"] -.- PA2N["b stays 1"]
     end
     subgraph OBJ["OBJECT assignment  (share by reference)"]

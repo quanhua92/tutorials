@@ -22,7 +22,7 @@ hangs off the per-night inventory row + Redis hold decision.
 ```mermaid
 graph LR
     USER(["guest"]) -->|GET /search| SRCH["Search Service<br/>(Elasticsearch, stale-fast)"]
-    SRCH -.approx avail.-> USER
+    SRCH -.->|approx avail| USER
     USER -->|GET /availability| AVAIL["Availability Service<br/>(reads DB MIN)"]
     USER -->|POST /hold| BOOK["Booking Service"]
     BOOK -->|DECRBY, TTL 10m| HOLD[("Redis hold cache<br/>gate for last-room")]

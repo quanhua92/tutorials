@@ -596,6 +596,98 @@ drawAxes(85, "tok/s / user", [0,20,40,60,80]);
 `node --check` says this is valid JavaScript (it IS syntactically valid). Only
 the runtime smoke test catches it.
 
+---
+
+## 15.3 HTML styling conventions (badges, guide callout, table overflow)
+
+Every interactive `.html` must follow these three conventions. They are
+**non-negotiable** — re-spawn any worker that ships an `.html` without them.
+
+### 1. Color-coded source badges (📖 green `.md` + 📄 orange `.py`)
+
+The header has two badge links: one to the guide (`.md`), one to the source
+(`.py`). They must be **visually distinct** so users can tell there's a
+comprehensive written guide, not just source code.
+
+**CSS** (add right after existing badge or panel CSS):
+
+```css
+.badge{display:inline-block;border-radius:5px;padding:2px 9px;
+  font-size:.72rem;font-weight:600;margin-left:.5rem;text-decoration:none;
+  border:1px solid}
+.badge.md{background:#1c3a25;color:#27ae60;border-color:#27ae60}
+.badge.py{background:#3a2a14;color:#e67e22;border-color:#e67e22}
+```
+
+**HTML** (inside `<h1>` or right after, in the header):
+
+```html
+<a class="badge md" title="Full guide — diagrams, tradeoffs, pitfalls, cheat sheet"
+   href="{GITHUB_BASE}/{SECTION}/{NAME}.md">📖 {NAME}.md</a>
+<a class="badge py" title="Ground-truth source code"
+   href="{GITHUB_BASE}/{SECTION}/{name}.py">📄 {name}.py</a>
+```
+
+> If the section uses CSS variables (`var(--green)`, `var(--orange)`), use those
+> instead of hardcoded hex. The `.md` badge uses the section's green/accent; the
+> `.py` badge uses orange `#e67e22` universally.
+
+### 2. Guide callout div (after the header)
+
+A bordered box right after the `</h1>` that tells users the guide exists:
+
+**CSS:**
+
+```css
+.guide-callout{
+  margin:10px 0 0;padding:10px 14px;border-radius:8px;
+  background:rgba(39,174,96,.06);border:1px solid rgba(39,174,96,.2);
+  font-size:.82rem;color:var(--muted);line-height:1.5}
+.guide-callout a{color:#27ae60;font-weight:600;text-decoration:none}
+.guide-callout a:hover{text-decoration:underline}
+```
+
+> Replace `rgba(39,174,96,...)` with the section's accent color at low alpha
+> (e.g. `rgba(249,115,22,.06)` for orange sections).
+
+**HTML** (immediately after the header, before `<main>`):
+
+```html
+<div class="guide-callout">📖 <a href="{GITHUB_BASE}/{SECTION}/{NAME}.md">Read the full guide</a>
+  — architecture diagrams, decision tables, killer gotchas, cheat sheet.
+  This page is the interactive companion.</div>
+```
+
+### 3. Table overflow wrapper (prevent horizontal page overflow)
+
+Tables with many columns (4+) **will overflow** the panel on narrow screens,
+breaking the page layout. Wrap every `<table>` in a scroll container:
+
+```html
+<div style="overflow-x:auto;min-width:0">
+  <table class="..." id="..."></table>
+</div>
+```
+
+The `min-width:0` is **critical** — without it, flex children won't shrink below
+content width and `overflow-x:auto` never engages.
+
+**Never** place a `<table>` directly inside a `.panel` without this wrapper.
+This applies to ALL tables, including dynamically-populated ones (JS sets
+`innerHTML` on the `<table>`, the wrapper stays static).
+
+### Verification checklist (add to post-flight)
+
+- [ ] Every `.html` has `class="badge md"` + `class="badge py"` in the header
+      (not just `class="badge"`).
+- [ ] Every `.html` has a `.guide-callout` div after the header.
+- [ ] Every `<table>` is wrapped in `<div style="overflow-x:auto;min-width:0">`.
+- [ ] Badge CSS includes `.badge.md{...}` AND `.badge.py{...}` rules.
+
+---
+
+## 16. Project bootstrap from scratch (new learning repo)
+
 To start a brand-new project with this discipline:
 
 1. **Pick the flavor** — interactive (runnable + `.md` + `.html`) or

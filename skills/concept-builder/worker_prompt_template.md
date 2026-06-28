@@ -195,6 +195,17 @@ this rule block under HARD RULES:
   `.value` from a DOM element that returns empty string, then using it as a
   key/array index), calling a function that was never defined. If any runtime
   error occurs, fix it before reporting.
+- **BADGES + GUIDE CALLOUT (non-negotiable, see SKILL.md §15.3):**
+  * Header has TWO badge links: `class="badge md"` (📖 green) for the .md guide
+    and `class="badge py"` (📄 orange) for the .py source — NOT plain `class="badge"`.
+  * CSS must include `.badge.md{...}` and `.badge.py{...}` rules (distinct colors).
+  * A `.guide-callout` div sits right after the header: "📖 Read the full guide —
+    ... This page is the interactive companion."
+- **TABLE OVERFLOW WRAPPER (non-negotiable, see SKILL.md §15.3):**
+  Every `<table>` MUST be wrapped in `<div style="overflow-x:auto;min-width:0">`.
+  Never place a bare `<table>` inside a panel — it will overflow on narrow screens.
+  This applies to JS-populated tables too (the wrapper stays static around the
+  empty `<table>` element).
 ```
 
 > Relative links in `.html`/`.md` headers are a documented bug class — they must

@@ -316,29 +316,29 @@ exactly what top-p fixes.
 
 Keep the **smallest set** of tokens whose cumulative probability reaches `p`.
 The size of the set *adapts* to the distribution shape — that is the whole point
-(Holtzman et al., 2019). On this die, with `p=0.6`, the nucleus is **2 words**;
+(Holtzman et al., 2019). On this die, with `p=0.5`, the nucleus is **2 words**;
 on a confident die it might be 1, on an uncertain die it might be 20.
 
-**Narrate it on the fixed die (`p = 0.6`):** sort the faces most-likely first,
+**Narrate it on the fixed die (`p = 0.5`):** sort the faces most-likely first,
 then keep a running total of their *probabilities* (never their scores):
 
-1. **`"on"` (idx 5): prob 0.2903** → running total **0.2903**. Still under 0.6,
+1. **`"on"` (idx 5): prob 0.2903** → running total **0.2903**. Previous sum (0) is under 0.5,
    so **keep** it (it's also the top-1, which we always keep).
 2. **`"the"` (idx 0): prob 0.2377** → running total 0.2903 + 0.2377 =
-   **0.5281**. Still under 0.6, so **keep** it.
+   **0.5281**. Previous sum (0.2903) is under 0.5, so **keep** it.
 3. **`"cat"` (idx 1): prob 0.1761** → running total 0.5281 + 0.1761 =
-   **0.7042**. That **crosses** 0.6, so `"cat"` is **masked** (and so is every
+   **0.7042**. Previous sum (0.5281) **crosses** 0.5, so `"cat"` is **masked** (and so is every
    face after it, since the total only grows).
 
 ➡️ **Nucleus = `{on, the}` = indices `[0, 5]`**, holding **52.81%** of the
 mass. Everything else is masked to `-inf`. Note the nucleus mass (52.81%) is
-*below* `p=0.6` — that's because the token that would have pushed the total past
-`0.6` is excluded by the strict `cumsum < p` rule. We always include the top-1,
+*greater than or equal to* `p=0.5` — that's because the token that pushed the total past
+`0.5` is included. We always include the top-1,
 so the nucleus is never empty.
 
-> From `sampling.py` **Section E** — top-p=0.6, the algorithm step by step:
+> From `sampling.py` **Section E** — top-p=0.5, the algorithm step by step:
 >
-> | rank | idx | token | prob | cumsum | cumsum<0.6? | kept? |
+> | rank | idx | token |  prob   | cumsum  | prev_cumsum < 0.5? | kept? |
 > |---|---|---|---|---|---|---|
 > | 0 | 5 | on | 0.2903 | 0.2903 | yes | **KEEP** |
 > | 1 | 0 | the | 0.2377 | **0.5281** | yes | **KEEP** |
@@ -349,7 +349,7 @@ so the nucleus is never empty.
 > | 6 | 2 | xyz | 0.0356 | 0.9737 | no | mask |
 > | 7 | 4 | qqq | 0.0263 | 1.0000 | no | mask |
 >
-> **NUCLEUS (top-p=0.6) = indices `[0, 5]`** (`['the', 'on']`), prob mass `0.5281`.
+> **NUCLEUS (top-p=0.5) = indices `[0, 5]`** (`['the', 'on']`), prob mass `0.5281`.
 
 ```mermaid
 graph TD
@@ -363,11 +363,11 @@ graph TD
 
 **Top-k vs top-p on this distribution — they disagree:**
 
-> | | top-k=3 | top-p=0.6 |
+> | | top-k=3 | top-p=0.5 |
 > |---|---|---|
 > | kept indices | `[0, 1, 5]` | `[0, 5]` |
 > | size | 3 (fixed) | 2 (adaptive) |
-> | why | always 3 | top-2 already cover 52.8%; the 3rd would push cumsum to 70.4%, past 0.6 |
+> | why | always 3 | top-2 already cover 52.8%, which crosses 0.5, so the 3rd token is cut |
 
 Here top-p is **stricter** than top-k: the top-2 already cover most of the mass,
 so top-p correctly cuts the 3rd token. On a *flatter* distribution, top-p would
@@ -391,13 +391,13 @@ The single most common top-p bug. Log-probabilities are **negative** (every
 *every* token, and **nothing gets masked**. The "nucleus" silently becomes the
 whole vocabulary. No error, no crash — just degenerate, unfiltered sampling.
 
-> From `sampling.py` **Section F** — p=0.6, side by side:
+> From `sampling.py` **Section F** — p=0.5, side by side:
 >
-> | rank | idx | token | prob | cumsum(**probs**) | <p? | logprob | cumsum(**logprobs**) | <p? |
+> | rank | idx | token |  prob   | cumsum(probs) | <p? |  logprob  | cumsum(logprobs) | <p? |
 > |---|---|---|---|---|---|---|---|---|
 > | 0 | 5 | on | 0.2903 | 0.2903 | yes | −1.2367 | −1.2367 | yes |
-> | 1 | 0 | the | 0.2377 | 0.5281 | yes | −1.4367 | −2.6734 | yes |
-> | 2 | 1 | cat | 0.1761 | **0.7042** | **no** | −1.7367 | −4.4100 | **yes** ← bug |
+> | 1 | 0 | the | 0.2377 | 0.5281 | no | −1.4367 | −2.6734 | yes |
+> | 2 | 1 | cat | 0.1761 | 0.7042 | no | −1.7367 | −4.4100 | **yes** ← bug |
 > | 3 | 3 | sat | 0.1068 | 0.8110 | no | −2.2367 | −6.6467 | yes |
 > | 4 | 7 | mat | 0.0791 | 0.8901 | no | −2.5367 | −9.1834 | yes |
 > | 5 | 6 | a | 0.0480 | 0.9381 | no | −3.0367 | −12.2201 | yes |
@@ -426,29 +426,28 @@ draws once:
 graph TD
     L["logits : [V]"] --> G{"temp == 0?"}
     G -->|yes| AR["return argmax  (greedy, NO RNG)"]
-    G -->|no| K["top-k: mask outside top-k to -inf"]
+    G -->|no| DT["divide logits by temp"]
+    DT --> K["top-k: mask outside top-k to -inf"]
     K --> P["top-p: mask outside nucleus to -inf"]
-    P --> DT["divide logprobs by temp"]
-    DT --> CAT["categorical draw<br/>(the ONLY random step)"]
+    P --> CAT["categorical draw<br/>(the ONLY random step)"]
     style AR fill:#fdecea,stroke:#c0392b
     style CAT fill:#eafaf1,stroke:#27ae60,stroke-width:3px
 ```
 
-> From `sampling.py` **Section G** — config `temp=0.7, top_k=3, top_p=0.6`:
+> From `sampling.py` **Section G** — config `temp=0.7, top_k=3, top_p=0.5`:
 >
-> After `top-k=3` **then** `top-p=0.6`, kept indices = **`[5]`**
-> (only `"on"` survives both filters). After `/temp=0.7` and renormalize,
-> `idx 5` has prob **1.0000**; everything else 0.
+> After `temp=0.7`, `top-k=3` **then** `top-p=0.5`, kept indices = **`[0, 5]`**
+> (only `"on"` and `"the"` survive both filters). After renormalize,
+> `idx 5` has prob **0.5709**; `idx 0` has prob **0.4291**; everything else 0.
 >
 > `torch.manual_seed(0); multinomial → idx 5 ("on")`.
 
 **Subtle but critical:** composing the filters is **not** the set-intersection
-of their standalone results. Top-k=3 alone keeps `[0,1,5]`; top-p=0.6 alone
+of their standalone results. Top-k=3 alone keeps `[0,1,5]`; top-p=0.5 alone
 keeps `[0,5]`. But applying top-p *after* top-k operates on the **renormalized**
-post-top-k distribution (where `"on"` already holds 41% and `"the"` 34%) — so
-within that narrowed distribution the nucleus collapses to just `{"on"}`. The
-order and renormalization matter; treat the composition as one pipeline, not
-two independent masks.
+post-top-k distribution — so within that narrowed distribution the nucleus
+adjusts. The order and renormalization matter; treat the composition as one
+pipeline, not two independent masks.
 
 **Reproducibility:** the filter steps are fully deterministic. Only the final
 `multinomial` uses the RNG — so `torch.manual_seed(seed)` makes the *whole*
@@ -464,10 +463,10 @@ filter.
 graph TD
     Call["sample(logits, temp, top_k, top_p, seed)"] --> S0{"temp==0?"}
     S0 -->|yes| S1["return argmax(logits)"]
-    S0 -->|no| S2["top_k_mask: keep k highest, rest -inf"]
-    S2 --> S3["top_p_mask: log_softmax -> exp -> cumsum<br/>keep cumsum<p, always top-1"]
-    S3 --> S4["logprobs / temp"]
-    S4 --> S5["torch.multinomial(softmax(...))"]
+    S0 -->|no| S4["logits / temp"]
+    S4 --> S2["top_k_mask: keep k highest, rest -inf"]
+    S2 --> S3["top_p_mask: log_softmax -> exp -> cumsum<br/>keep (cumsum-prob)<p, always top-1"]
+    S3 --> S5["torch.multinomial(softmax(...))"]
     style S3 fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style S5 fill:#fef9e7,stroke:#f1c40f
 ```
@@ -494,7 +493,7 @@ in PyTorch with identical semantics. Key implementation notes:
 |---|---|---|---|
 | 1 | **Top-p cumsum on logprobs** (not probs) | Nucleus = whole vocab, no filtering, junk output | `cumsum(exp(logprobs))` — never raw logprobs (§8) |
 | 2 | Not always-keeping top-1 in top-p | Empty nucleus when top-1 prob ≥ p → crash / NaN | `keep[0] = True` unconditionally |
-| 3 | Applying temperature **before** top-k/top-p | Changes which tokens cross the threshold | Mask first (`-inf` survives), then `/temp` (§9 order) |
+| 3 | Applying temperature **after** top-k/top-p | Defeats temperature adaptivity | Scale logits *before* masking (`/temp`, then mask - §9 order) |
 | 4 | Treating top-k ∘ top-p as set-intersection | Wrong kept set; surprises after composition | Top-p re-runs on the renormalized post-top-k dist (§9) |
 | 5 | `temp=0` going through softmax | NaN (`-inf/0`) or wasted compute | Special-case: `temp==0` → `argmax`, skip softmax (§5) |
 | 6 | Computing `log(sum(exp(z)))` directly | Overflow → NaN for large logits | `z - logsumexp(z)` (the stable identity, §2) |
@@ -507,15 +506,12 @@ in PyTorch with identical semantics. Key implementation notes:
 
 ```mermaid
 graph LR
-    Z["logits : [V]"] --> LS["log_softmax = z - logsumexp(z)"]
-    LS --> F{"filter?"}
+    Z["logits : [V]"] --> F{"filter?"}
     F -->|temp=0| GR["argmax (greedy)"]
-    F -->|top-k| TK["keep k highest, rest -inf"]
-    F -->|top-p| TP["keep smallest set, cumsum(probs) >= p"]
-    TK --> TP2["then top-p (optional)"]
-    TP --> TM["/temp"]
-    TP2 --> TM
-    TM --> DR["multinomial (seeded)"]
+    F -->|temp| TM["/temp"]
+    TM --> TK["keep k highest, rest -inf"]
+    TK --> TP["keep smallest set, cumsum(probs) >= p"]
+    TP --> DR["multinomial (seeded)"]
     style TP fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style DR fill:#fef9e7,stroke:#f1c40f
 ```
@@ -526,10 +522,10 @@ graph LR
 - **Top-k:** mask all but the `k` highest logits to `-inf`. Fixed size.
 - **Top-p (nucleus):** sort desc by prob, `cumsum(probs)`, keep where `cumsum <
   p`, **always keep top-1**. Adaptive size. `cumsum` on PROBS, never logprobs.
-- **Order:** `top-k → top-p → /temp → multinomial`. Masking is deterministic; only
+- **Order:** `/temp → top-k → top-p → multinomial`. Masking is deterministic; only
   the final draw uses the RNG (`torch.manual_seed`).
 - **Gold (this guide):** logits `[2.3,2.0,0.4,1.5,0.1,2.5,0.7,1.2]` ⇒ top-k=3 →
-  `[0,1,5]`, top-p=0.6 → `[0,5]`, greedy → `idx 5`.
+  `[0,1,5]`, top-p=0.5 → `[0,5]`, greedy → `idx 5`.
 
 > 🔗 These logits are the *output* of the LM head sitting on top of the
 > attention layers in [`ROPE.md`](./ROPE.md) / [`ABSOLUTE_PE.md`](./ABSOLUTE_PE.md).

@@ -459,7 +459,7 @@ scale — that is the whole point.
 ```mermaid
 graph TD
     LN["LayerNorm<br/>Ba, Kiros, Hinton 2016<br/>arXiv:1607.06450<br/>(x−μ)/√(σ²+ε)·γ+β<br/>2 passes, γ+β"]
-    LN -->|"2019: re-centering is dispensable<br/>drop the mean, keep the RMS"| RN["RMSNorm<br/>Zhang & Sennrich 2019<br/>arXiv:1910.07467 (NeurIPS)<br/>(x/√mean(x²)+ε)·γ<br/>1 pass, γ only"]
+    LN -->|"2019: re-centering is dispensable<br/>drop the mean, keep the RMS"| RN["RMSNorm<br/>Zhang & Sennrich 2019<br/>arXiv:1910.07467 (NeurIPS)<br/>(x/√(mean(x²)+ε))·γ<br/>1 pass, γ only"]
     RN --> USED["Llama → Mistral → Qwen →<br/>Gemma → Falcon (all RMSNorm)"]
     LN --> OLD["GPT-2 / nanoGPT (still LayerNorm)"]
 

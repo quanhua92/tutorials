@@ -31,7 +31,7 @@ pair of tokens. The table grows as the *square* of the sequence length:
 | sequence length N | table cells (N × N) | table memory (4-byte floats) |
 |---|---|---|
 | 8 (our toy example) | 64 | 256 bytes |
-| 1,024 | ~1 million | 4 MB |
+| 1,024 | 1,048,576 | 4 MiB |
 | **8,192** | **~67 million** | **256 MiB** |
 
 > From `flash_attention.py` **Section A** — the same number, computed by the code:
@@ -545,7 +545,7 @@ assert (out_tiled - out_naive).abs().max() < 1e-5   # exact
 | 2 | Computing `p = exp(s − m_old)` (stale max) | Wrong normalization | Use `m_new`, the just-updated max |
 | 3 | Forgetting the final `o / l` division | Output magnitudes wildly off | Divide once after the tile loop |
 | 4 | Initializing `m = 0` instead of `−∞` | First-tile correction wrong → bias | `m_i = full((Br,), -inf)` |
-| 5 | Tile too big for SRAM | Spill to HBM (defeats the point) | Pick `Br,Bc` from SRAM budget: `Br·E + Br·E` floats ≤ SRAM |
+| 5 | SRAM budget | Using `Br=Bc=128` without checking if your SRAM can actually hold the tiles. | Pick `Br,Bc` from SRAM budget: `Br·d + Bc·d` floats ≤ SRAM. |
 | 6 | Treating it as an *approximation* | Wrong mental model | It is **EXACT**; assert `==` naive (§5) |
 | 7 | Causal mask on a tiled score without masking the `-inf` rows | `NaN` via `exp(−inf − −inf)` | Mask future cells to `−inf` *before* the max/exp |
 

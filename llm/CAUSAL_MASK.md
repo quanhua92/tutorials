@@ -467,9 +467,9 @@ is what they index over.
 > | 2. QK-Norm `q = rms_norm(q, q_norm[H,D])` (on D, **before** RoPE) | `(1, 4, 2, 8)` |
 > | 3. RoPE `q = rope(q, offset=slice(0,L))` (L is the position axis) | `(1, 4, 2, 8)` |
 > | 4. transpose `q = q.transpose(1,2)` → `[B,H,L,D]` | `(1, 2, 4, 8)` |
-> | 5. attention `scores = q @ k^T * scale + mask` → `[B,H,L,S]` | `(1, 2, 4, 4)` |
-> | 6. transpose back `q = q.transpose(1,2)` → `[B,L,H,D]` | `(1, 4, 2, 8)` |
-> | 7. reassemble `out = q.reshape(B, L, H*D)` → `[B,L,E]` | `(1, 4, 16)` |
+> | 5. attention `out = softmax(q @ k^T * scale + mask) @ v` → `[B,H,L,D]` | `(1, 2, 4, 8)` |
+> | 6. transpose back `out = out.transpose(1,2)` → `[B,L,H,D]` | `(1, 4, 2, 8)` |
+> | 7. reassemble `out = out.reshape(B, L, H*D)` → `[B,L,E]` | `(1, 4, 16)` |
 
 The mask `[L,S]` enters at step 5 and broadcasts over the `B` and `H` axes of
 `scores [B,H,L,S]` — same mask for every batch, every head.

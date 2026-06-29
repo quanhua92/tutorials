@@ -165,7 +165,7 @@ def top_p_mask(logits: torch.Tensor, p: float) -> torch.Tensor:
     sorted_idx = torch.argsort(probs, descending=True)
     sorted_probs = probs[sorted_idx]
     cumsum = torch.cumsum(sorted_probs, dim=-1)
-    keep = cumsum < p            # bool mask in sorted order
+    keep = (cumsum - sorted_probs) < p            # bool mask in sorted order
     keep[0] = True               # always keep the top-1 token
     # scatter back to original order: -inf where we don't keep
     remove_sorted = ~keep
@@ -292,41 +292,40 @@ def section_d_topk():
 
 
 def section_e_topp():
-    banner("SECTION E: top-p=0.6 nucleus  (keep smallest set, cumulative prob >= p)")
-    print("Algorithm (matches tiny-llm make_sampler):\n"
+    banner("SECTION E: top-p=0.5 nucleus  (keep smallest set, cumulative prob >= p)")
+    print("Algorithm (matches standard implementations):\n"
           "  1. sort tokens DESCENDING by probability\n"
           "  2. compute cumulative sum of the PROBABILITIES (NOT logprobs!)\n"
-          "  3. keep tokens where cumulative prob < p\n"
+          "  3. keep tokens where (cumsum - prob) < p\n"
           "  4. ALWAYS keep the top-1 (nucleus is never empty)\n")
     logprobs = log_softmax(LOGITS)
     probs = torch.exp(logprobs)
     sorted_idx = torch.argsort(probs, descending=True)
     sorted_probs = probs[sorted_idx]
     cumsum = torch.cumsum(sorted_probs, dim=-1)
-    print(f"Top-p = 0.6\n")
-    print("| rank | idx | token |  prob   | cumsum  | cumsum<0.6? | kept? |")
-    print("|------|-----|-------|---------|---------|-------------|-------|")
-    keep = cumsum < 0.6
+    print(f"Top-p = 0.5\n")
+    print("| rank | idx | token |  prob   | cumsum  | prev_cumsum < 0.5? | kept? |")
+    print("|------|-----|-------|---------|---------|--------------------|-------|")
+    keep = (cumsum - sorted_probs) < 0.5
     keep[0] = True
     for rank in range(V):
         idx = sorted_idx[rank].item()
         pr = sorted_probs[rank].item()
         cs = cumsum[rank].item()
-        lt = "yes" if (cumsum[rank] < 0.6).item() else "no"
+        prev_cs = cs - pr
+        lt = "yes" if prev_cs < 0.5 else "no"
         kp = "KEEP" if keep[rank].item() else "mask"
-        print(f"| {rank}    | {idx}   | {TOKENS[idx]:<5} | {pr:.4f}  | {cs:.4f}  | {lt:<11} | {kp} |")
-    masked = top_p_mask(LOGITS, p=0.6)
+        print(f"| {rank}    | {idx}   | {TOKENS[idx]:<5} | {pr:.4f}  | {cs:.4f}  | {lt:<18} | {kp} |")
+    masked = top_p_mask(LOGITS, p=0.5)
     nucleus = sorted([i for i in range(V) if masked[i] != float("-inf")])
     nucleus_mass = sum(probs[i].item() for i in nucleus)
-    print(f"\n  NUCLEUS (top-p=0.6) = indices {nucleus}  tokens {[TOKENS[i] for i in nucleus]}")
-    print(f"  nucleus prob mass   = {nucleus_mass:.4f}  (< p=0.6, because the token that")
-    print(f"  would cross 0.6 is excluded by the `cumsum < p` rule)")
-    print(f"\n  CONTRAST top-k=3 -> kept [0, 1, 5]  vs  top-p=0.6 -> kept {nucleus}")
+    print(f"\n  NUCLEUS (top-p=0.5) = indices {nucleus}  tokens {[TOKENS[i] for i in nucleus]}")
+    print(f"  nucleus prob mass   = {nucleus_mass:.4f}  (>= p=0.5)")
+    print(f"\n  CONTRAST top-k=3 -> kept [0, 1, 5]  vs  top-p=0.5 -> kept {nucleus}")
     print("  Here top-p is STRICTER than top-k: the top-2 already cover 52.8% of")
-    print("  the mass, so the 3rd token (which would push cumsum to 70.4%, past")
-    print("  0.6) is cut. top-k keeps it anyway. This is top-p ADAPTING to the shape.")
+    print("  the mass, which crosses 0.5, so the 3rd token is cut. top-k keeps it anyway.")
     assert nucleus == [0, 5]
-    print(f"\n  [check] top-p=0.6 nucleus == [0, 5]:  OK")
+    print(f"\n  [check] top-p=0.5 nucleus == [0, 5]:  OK")
 
 
 def section_f_pitfall():
@@ -342,7 +341,7 @@ def section_f_pitfall():
     sorted_probs = torch.exp(sorted_logprobs)
     cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
     cumsum_logprobs = torch.cumsum(sorted_logprobs, dim=-1)
-    p = 0.6
+    p = 0.5
     print(f"p = {p}\n")
     print("| rank | idx | token |  prob   | cumsum(probs) | <p? | "
           " logprob  | cumsum(logprobs) | <p? |")
@@ -357,9 +356,9 @@ def section_f_pitfall():
         print(f"| {rank}    | {idx}   | {TOKENS[idx]:<5} | {pr:.4f}  | "
               f"{csp:>13.4f} | {'yes' if csp<p else 'no ':<3} | "
               f"{lp:+.4f}  | {csl:>16.4f} | {'yes' if csl<p else 'no ':<3} |")
-    keep_probs = (cumsum_probs < p)
+    keep_probs = (cumsum_probs - sorted_probs) < p
     keep_probs[0] = True
-    keep_logprobs = (cumsum_logprobs < p)
+    keep_logprobs = (cumsum_logprobs - sorted_logprobs) < p
     keep_logprobs[0] = True
     nucleus_right = sorted([sorted_idx[i].item() for i in range(V) if keep_probs[i]])
     nucleus_wrong = sorted([sorted_idx[i].item() for i in range(V) if keep_logprobs[i]])
@@ -376,22 +375,22 @@ def section_f_pitfall():
 
 def section_g_combined_and_sample():
     banner("SECTION G: combined pipeline + seeded sample (the only RNG step)")
-    print("Production order (tiny-llm make_sampler):\n"
+    print("Production order:\n"
           "  1. temp==0  -> return argmax (greedy, no RNG)\n"
-          "  2. top-k    -> mask logits to -inf outside top-k\n"
-          "  3. top-p    -> mask logits to -inf outside the nucleus\n"
-          "  4. divide remaining logprobs by temp\n"
+          "  2. temp     -> divide logits by temp\n"
+          "  3. top-k    -> mask scaled logits to -inf outside top-k\n"
+          "  4. top-p    -> mask scaled logits to -inf outside the nucleus\n"
           "  5. categorical draw (THE only random step)\n")
     # typical config
-    cfg = dict(temp=0.7, top_k=3, top_p=0.6)
+    cfg = dict(temp=0.7, top_k=3, top_p=0.5)
     print(f"Config: {cfg}\n")
-    masked = top_k_mask(LOGITS, k=cfg["top_k"])
+    scaled_logits = LOGITS / cfg["temp"]
+    masked = top_k_mask(scaled_logits, k=cfg["top_k"])
     masked = top_p_mask(masked, p=cfg["top_p"])
-    lp = log_softmax(masked) / cfg["temp"]
-    probs = torch.exp(lp - torch.logsumexp(lp, dim=-1))
+    probs = softmax(masked)
     kept = sorted([i for i in range(V) if masked[i] != float("-inf")])
-    print(f"After top-k={cfg['top_k']} then top-p={cfg['top_p']}, kept indices = {kept}")
-    print(f"After /temp={cfg['temp']} and renormalize:\n")
+    print(f"After temp={cfg['temp']}, top-k={cfg['top_k']} then top-p={cfg['top_p']}, kept indices = {kept}")
+    print(f"Final renormalized probabilities:\n")
     print("| idx | token |   prob   |")
     print("|-----|-------|----------|")
     for i in range(V):
@@ -411,12 +410,12 @@ def section_g_combined_and_sample():
 def section_gold_summary():
     banner("GOLD VALUES (pin these — .html must reproduce them)")
     tk3 = top_k_mask(LOGITS, k=3)
-    tp6 = top_p_mask(LOGITS, p=0.6)
+    tp5 = top_p_mask(LOGITS, p=0.5)
     kept_k = sorted([i for i in range(V) if tk3[i] != float("-inf")])
-    kept_p = sorted([i for i in range(V) if tp6[i] != float("-inf")])
+    kept_p = sorted([i for i in range(V) if tp5[i] != float("-inf")])
     print(f"  LOGITS vector   : {[round(x, 2) for x in LOGITS.tolist()]}")
     print(f"  top-k=3 kept    : {kept_k}   (deterministic, no RNG)")
-    print(f"  top-p=0.6 nucleus: {kept_p}   (deterministic, no RNG)")
+    print(f"  top-p=0.5 nucleus: {kept_p}   (deterministic, no RNG)")
     print(f"  greedy (temp=0) : idx {greedy(LOGITS)}   (deterministic, no RNG)")
     print(f"\n  These three are the gold the .html recomputes and gold-checks against.")
 

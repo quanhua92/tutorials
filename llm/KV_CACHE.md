@@ -36,7 +36,7 @@
 | **page_size** | Tokens per page. Smaller → less last-page waste, more block-table overhead. |
 | **block table** | The per-request *index card*: logical page index → physical page id. (See §5.) |
 | **free list** | The pool's stack of available physical page ids — like an OS frame allocator's free frames. |
-| **fragmentation** | Reserved-but-unused memory — two distinct wastes: **internal waste / over-reservation** (empty slots *inside* a reserved block) and **external fragmentation** (free pages scattered too small to coalesce). Dense's killer is the former (up to 93.75%); paged pays only the last partial page (`< 1/page_size`). §4 unpacks the distinction. |
+| **fragmentation** | Reserved-but-unused memory — two distinct wastes: **internal waste / over-reservation** (empty slots *inside* a reserved block) and **external fragmentation** (free pages scattered too small to coalesce). Dense's killer is the former (up to 93.75%); paged pays only the last partial page (waste bounded by `page_size - 1` tokens). §4 unpacks the distinction. |
 | **offset** | How many tokens are already in the cache. **Equals RoPE's position offset** for the new chunk: `slice(offset, offset+L)`. |
 | **rewind(n)** | Tear out the last `n` tokens (when speculative decoding rejects them). Dense: `offset -= n`; paged: pop pages back to the free list (using **ceil**, never floor — see §8). |
 
@@ -75,7 +75,7 @@ weakness):
 graph LR
     Prob["Decode: token t needs K,V of tokens 0..t-1"] --> R["1. NO cache<br/>recompute K,V for ALL tokens<br/>every step -> O(L^2)"]
     Prob --> D["2. DENSE cache<br/>pre-alloc [B,H_kv,max_len,d]<br/>append once -> O(S)/step<br/>but wastes (1 - used/max)"]
-    Prob --> P["3. PAGED cache<br/>OS virtual memory<br/>logical->physical pages<br/>waste < 1/page_size"]
+    Prob --> P["3. PAGED cache<br/>OS virtual memory<br/>logical->physical pages<br/>waste < page_size tokens"]
 
     R -.->|"too slow"| D
     D -.->|"too wasteful (93%+)"| P
@@ -95,7 +95,7 @@ actually run.*
 | Per-decode-step K,V cost | recompute all `S` tokens = `O(S)` | append `1`, attend over `S` = `O(S)` | same `O(S)` (gather via block table) |
 | Total over `L` decode steps | `O(L²)` (token 0 recomputed `L`×) | `O(L)` | `O(L)` |
 | Memory reserved | none | `[B,H_kv,max_len,d]` up-front | on-demand pages, ~exact usage |
-| Worst-case waste | — | up to **93.75%** (used 512 / reserved 8192) | **< 1/page_size** (e.g. <4% in vLLM) |
+| Worst-case waste | — | up to **93.75%** (used 512 / reserved 8192) | **< page_size** tokens/seq (e.g. <4% in vLLM) |
 | Rewind (spec. decode) | free | truncate `offset` | pop pages to free list |
 | Used by | toy Week-1 `simple_generate` | `TinyKvFullCache` | **vLLM / PagedAttention** |
 
@@ -291,11 +291,11 @@ Dense reserves the *worst-case* slab per request. If a request reserves
 >
 > **PAGED cache waste bound** (only the LAST page of each request is partial):
 >
-> | page_size | worst-case internal waste |
+> | page_size | worst-case internal waste (tokens) |
 > |---|---|
-> | 4 | 25.00% |
-> | 16 | 6.25% ← vLLM default block size |
-> | 128 | 0.78% ← tiny-llm page_size (real) |
+> | 4 | 3 tokens |
+> | 16 | 15 tokens ← vLLM default block size |
+> | 128 | 127 tokens ← tiny-llm page_size (real) |
 >
 > vLLM measured: PagedAttention wastes **<4% in practice vs 60%–80%** for the
 > dense/over-reserving systems it replaced.
@@ -322,7 +322,7 @@ request actually fills; the only dark slot is inside the last partial page.*
 |---|---|---|
 | **93.75%** | *One* request's reserved-vs-used slab: `1 − 512/8192`. A clean illustrative arithmetic example. | Computed in `kv_cache.py` Section C. |
 | **60–80%** | *System-wide* KV-cache waste vLLM measured in prior serving systems (a mix of internal fragmentation + external fragmentation + over-reservation, summed across many concurrent requests of varied lengths). | [vLLM blog, Jun 2023](https://vllm.ai/blog/2023-06-20-vllm) + [PagedAttention paper, §3.1](https://arxiv.org/abs/2309.06180). |
-| **<4%** | *System-wide* KV-cache waste under PagedAttention in practice. | [PagedAttention paper, §3.2](https://arxiv.org/abs/2309.06180); only the last block of each sequence is partial, so waste is bounded by `1/page_size`. |
+| **<4%** | *System-wide* KV-cache waste under PagedAttention in practice. | [PagedAttention paper, §3.2](https://arxiv.org/abs/2309.06180); only the last block of each sequence is partial, so waste is bounded by `(page_size - 1)` tokens per sequence. |
 
 The 93.75% example is *not* vLLM's measurement — it's the per-request
 arithmetic that makes the intuition crisp. vLLM's 60–80% is the real-world
@@ -623,7 +623,7 @@ decode loop.*
 - **Dense cache:** pre-alloc `[B,H_kv,max_seq_len,d]`; append on axis 2; `O(S)`
   per step; wastes `(1 - used/max_seq_len)` (up to 93.75%).
 - **Paged cache:** pool `[num_pages,H_kv,page_size,d]`; per-request `page_ids[]`
-  (block table) + `page_lens[]`; waste `< 1/page_size` (<4% in vLLM).
+  (block table) + `page_lens[]`; waste `< page_size` tokens (<4% in vLLM).
 - **Invariant:** no-cache == dense == paged (proven in `kv_cache.py` Section E).
 - **`offset`:** `slice(current_len, current_len+L)` for RoPE — the 🔗 to
   [`ROPE.md`](./ROPE.md) §10.
@@ -649,7 +649,7 @@ decode loop.*
   - Verified (paper §3.1 + §3.2): existing serving systems waste **60%–80%** of
     KV memory to a mix of internal + external fragmentation and over-reservation;
     PagedAttention reduces that to **<4%** because only each sequence's last
-    block can be partial (waste bounded by `1/page_size`).
+    block can be partial (waste bounded by `page_size - 1` tokens per sequence).
 - **vLLM launch blog:** [vLLM: Easy, Fast, and Cheap LLM Serving with
   PagedAttention](https://vllm.ai/blog/2023-06-20-vllm) (Jun 2023).
   - Verified numbers: KV cache takes up to **~1.7 GiB per sequence** for

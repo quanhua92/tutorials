@@ -38,10 +38,10 @@
 
 ## Phase 5 — Modern CSS Layout (4)
 
-- [ ] 22 `css_nesting` — Native CSS nesting in v4 (& selector), nesting in @utility
-- [ ] 23 `subgrid_layout` — grid-template-columns: subgrid, inheriting tracks
-- [ ] 24 `gap_spacing` — The spacing scale (--spacing), gap/padding/margin derivation
-- [ ] 25 `aspect_ratio_object` — aspect-ratio, object-fit/position, sizing
+- [x] 22 `css_nesting` — Native CSS nesting in v4 (& selector), nesting in @utility
+- [x] 23 `subgrid_layout` — grid-template-columns: subgrid, inheriting tracks
+- [x] 24 `gap_spacing` — The spacing scale (--spacing), gap/padding/margin derivation
+- [x] 25 `aspect_ratio_object` — aspect-ratio, object-fit/position, sizing
 
 ## Phase 6 — Animations & Motion (7)
 

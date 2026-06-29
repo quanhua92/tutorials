@@ -56,8 +56,8 @@
 ## Phase 7 — Build, Directives & Production (6)
 
 - [x] 33 `source_detection` — @source, auto-detection, globs, monorepo
-- [ ] 34 `plugins_ecosystem` — @plugin (typography/forms), @reference, @variant
-- [ ] 35 `preflight_reset` — What Preflight resets, overrides, @layer base
-- [ ] 36 `build_tooling` — CLI, @tailwindcss/vite, @tailwindcss/postcss, Lightning CSS
-- [ ] 37 `v3_migration` — Breaking changes, upgrade tool, manual migration
-- [ ] 38 `production_optimization` — Content detection, tree-shaking, pinned builds
+- [x] 34 `plugins_ecosystem` — @plugin (typography/forms), @reference, @variant
+- [x] 35 `preflight_reset` — What Preflight resets, overrides, @layer base
+- [x] 36 `build_tooling` — CLI, @tailwindcss/vite, @tailwindcss/postcss, Lightning CSS
+- [x] 37 `v3_migration` — Breaking changes, upgrade tool, manual migration
+- [x] 38 `production_optimization` — Content detection, tree-shaking, pinned builds

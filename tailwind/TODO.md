@@ -49,13 +49,13 @@
 - [x] 27 `transitions_timing` — transition-*, duration-*, ease-*, delay-*
 - [x] 28 `transforms_3d` — rotate-*, scale-*, skew-*, translate-*, 3D, perspective
 - [x] 29 `starting_style` — @starting-style for enter/exit transitions
-- [ ] 30 `filters_masks` — backdrop-blur-*, filter-*, mask-*, mix-blend-*
-- [ ] 31 `scroll_driven` — animation-timeline: scroll(), view()
-- [ ] 32 `view_transitions_tw` — View Transitions API + Tailwind patterns
+- [x] 30 `filters_masks` — backdrop-blur-*, filter-*, mask-*, mix-blend-*
+- [x] 31 `scroll_driven` — animation-timeline: scroll(), view()
+- [x] 32 `view_transitions_tw` — View Transitions API + Tailwind patterns
 
 ## Phase 7 — Build, Directives & Production (6)
 
-- [ ] 33 `source_detection` — @source, auto-detection, globs, monorepo
+- [x] 33 `source_detection` — @source, auto-detection, globs, monorepo
 - [ ] 34 `plugins_ecosystem` — @plugin (typography/forms), @reference, @variant
 - [ ] 35 `preflight_reset` — What Preflight resets, overrides, @layer base
 - [ ] 36 `build_tooling` — CLI, @tailwindcss/vite, @tailwindcss/postcss, Lightning CSS

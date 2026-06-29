@@ -13,10 +13,10 @@
 ## Phase 2 — The Variant Ecosystem (7)
 
 - [x] 05 `group_peer` — group-*, peer-*: parent/sibling state-based styling
-- [ ] 06 `has_variant` — has-*, group-has-*, peer-has-* (:has() selector)
-- [ ] 07 `child_variants` — first:, last:, even:, odd:, only:, empty:, nth-
-- [ ] 08 `form_state` — required:, valid:, invalid:, autofill:, read-only:
-- [ ] 09 `a11y_variants` — motion-safe:, motion-reduce:, forced-colors:, contrast-more:
+- [x] 06 `has_variant` — has-*, group-has-*, peer-has-* (:has() selector)
+- [x] 07 `child_variants` — first:, last:, even:, odd:, only:, empty:, nth-
+- [x] 08 `form_state` — required:, valid:, invalid:, autofill:, read-only:
+- [x] 09 `a11y_variants` — motion-safe:, motion-reduce:, forced-colors:, contrast-more:
 - [ ] 10 `directional_media` — rtl:, ltr:, print:, open: (details/dialog)
 - [ ] 11 `data_attribute` — data-* variants, [data-state=open] patterns
 

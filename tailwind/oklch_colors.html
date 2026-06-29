@@ -1,0 +1,447 @@
+<!doctype html>
+<!--
+  oklch_colors.html — Phase 4 color & theming internals bundle #1 (OKLCH).
+  GROUND TRUTH: a single-file Tailwind v4 demo proving OKLCH color space works.
+  Companion: OKLCH_COLORS.md (guide). Rendered-ground-truth: NO .py.
+
+  The lesson: Tailwind v4 uses oklch() as its DEFAULT color space. OKLCH
+  (OK Lightness Chroma Hue) is perceptually uniform — equal numeric steps in
+  lightness look equal to the human eye. This fixes the central flaw of sRGB/HSL:
+  in HSL, "50% lightness" yellow is glaringly brighter than "50% lightness"
+  blue. In OKLCH, the same lightness value looks the same brightness across hues.
+
+  oklch(L C H)   — L: lightness 0..1, C: chroma 0..~0.4, H: hue 0..360
+  oklch(L C H / a) — with alpha (0..1)
+
+  CDN (verified 2026-06, >=2 sources): Tailwind v4 Play CDN =
+    https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4
+  The Play CDN compiles @theme (including oklch values) into CSS variables.
+
+  GOLD VALUE: a custom theme color --color-brand: oklch(0.7 0.15 250) is
+  defined in @theme and applied via bg-brand to a swatch. The gold-check
+  verifies getComputedStyle().backgroundColor resolves the oklch() to a real
+  rgb() value (not transparent/empty), and prints the conversion live.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OKLCH Colors — Tailwind CSS 4 Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+  <!-- @theme defines a custom OKLCH color. Processed by the Play CDN JIT. -->
+  <style type="text/tailwindcss">
+    @theme {
+      --color-brand: oklch(0.7 0.15 250);
+    }
+  </style>
+
+  <!-- House chrome styles (dark palette, Tailwind cyan #06b6d4). NOT the lesson. -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#06b6d4; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; font-size:13px; max-width:760px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s, color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(6,182,212,.5); background:rgba(6,182,212,.10); }
+    .badge.md:hover { color:#fff; border-color:var(--accent); background:rgba(6,182,212,.22); }
+    .guide-callout { margin:0 22px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(6,182,212,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    main { padding:22px; max-width:1000px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    .note { color:var(--muted); font-size:13px; margin-top:6px; line-height:1.6; }
+    p.note:first-child, .panel > .note:first-child { margin-top:0; }
+    code { background:rgba(6,182,212,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin-top:8px; overflow-x:auto; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700; margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+    .meas { color:var(--accent); font-weight:600; font-size:13px; min-height:1.2em; }
+    .stage { border:1px dashed var(--accent); padding:18px; border-radius:8px; background:#0b0f14; margin-top:10px; }
+
+    /* Range sliders — accent-colored thumbs */
+    input[type="range"] { accent-color:var(--accent); }
+    /* Swatch grid cells for ramps/wheels */
+    .ramp { display:flex; border-radius:6px; overflow:hidden; border:1px solid var(--line); }
+    .ramp > div { flex:1 1 0; min-width:0; height:46px; }
+    .swatch { display:inline-block; width:64px; height:64px; border-radius:8px;
+      border:1px solid var(--line); vertical-align:middle; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>oklch colors</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/tailwind/OKLCH_COLORS.md">📖 guide (.md)</a>
+      <a href="/tailwind/index.html">← tailwind deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live Tailwind demo with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/tailwind/OKLCH_COLORS.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="/frontend/tailwind/tailwind_design_tokens.html">frontend/tailwind: design tokens</a>
+    (the @theme namespace — OKLCH is the color value format v4 tokens live in).
+  </div>
+
+  <main>
+    <!-- Panel 1: Concept -->
+    <section class="panel">
+      <h2>sRGB/HSL → OKLCH: why v4 switched</h2>
+      <p class="note" style="margin-top:0">
+        CSS historically used sRGB (<code>#hex</code>, <code>rgb()</code>) and
+        HSL (<code>hsl()</code>). Both are <b>non-perceptual</b>: a "50% lightness"
+        yellow in HSL is glaringly brighter than a "50% lightness" blue — equal
+        numbers, unequal eyes. <b class="text-[#06b6d4]">OKLCH</b> is built on the
+        OKLab model, which is calibrated to human vision. Equal lightness steps
+        look equal across every hue. Tailwind v4 made OKLCH the default so its
+        <code>-50…-950</code> ramps are visually consistent for every color.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>axis</th><th>range</th><th>what it controls</th></tr>
+        <tr><td><b>L</b> — Lightness</td><td><code>0</code>–<code>1</code> (or <code>0%</code>–<code>100%</code>)</td><td>perceived brightness. <code>0</code>=black, <code>1</code>=white. Calibrated to vision, not to physics.</td></tr>
+        <tr><td><b>C</b> — Chroma</td><td><code>0</code>–<code>~0.4</code></td><td>colorfulness / saturation. <code>0</code>=gray, higher=vivid. Capped by the display gamut — very high C may clip on sRGB screens.</td></tr>
+        <tr><td><b>H</b> — Hue</td><td><code>0</code>–<code>360</code></td><td>the color wheel angle (0=red, 90=yellow-green, 180=cyan, 270=blue, 360=red again).</td></tr>
+        <tr><td>/ alpha</td><td><code>0</code>–<code>1</code> (or <code>%</code>)</td><td>opacity. Tailwind emits <code>color-mix(in oklab, … / alpha)</code> for <code>/40</code> modifiers.</td></tr>
+      </table></div>
+      <div class="src">oklch(0.7 0.15 250)        /* L=70% C=0.15 H=250 (blue) */
+oklch(0.7 0.15 25)         /* same L & C, hue=25 (red) — SAME perceived brightness */
+oklch(0.7 0.15 250 / 0.5)  /* 50% opacity */</div>
+    </section>
+
+    <!-- Panel 2: Interactive explorer -->
+    <section class="panel">
+      <h2>1 · OKLCH explorer — drag L / C / H, watch the swatch + live rgb conversion</h2>
+      <p class="note" style="margin-top:0">
+        Each slider drives one axis. The big swatch is set to
+        <code>oklch(L C H)</code> directly. The browser resolves it and we read
+        back <code>getComputedStyle</code> to show the live sRGB conversion —
+        proof the browser parses and applies OKLCH.
+      </p>
+
+      <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;">
+        <div style="flex:0 0 auto;">
+          <div id="live-swatch" class="swatch"
+               style="width:120px;height:120px;background:oklch(0.7 0.15 250);"></div>
+        </div>
+        <div style="flex:1 1 260px;min-width:240px;">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+            <label for="l-slider" style="color:var(--muted);font-size:13px;width:90px;">L (lightness)</label>
+            <input type="range" id="l-slider" min="0" max="1" step="0.01" value="0.7" style="flex:1;" />
+            <span id="l-readout" class="meas" style="min-width:46px;text-align:right;">0.70</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+            <label for="c-slider" style="color:var(--muted);font-size:13px;width:90px;">C (chroma)</label>
+            <input type="range" id="c-slider" min="0" max="0.4" step="0.005" value="0.15" style="flex:1;" />
+            <span id="c-readout" class="meas" style="min-width:46px;text-align:right;">0.150</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+            <label for="h-slider" style="color:var(--muted);font-size:13px;width:90px;">H (hue)</label>
+            <input type="range" id="h-slider" min="0" max="360" step="1" value="250" style="flex:1;" />
+            <span id="h-readout" class="meas" style="min-width:46px;text-align:right;">250°</span>
+          </div>
+          <p class="meas" id="live-oklch" style="margin-top:6px;">oklch(0.7 0.15 250)</p>
+          <p class="meas" id="live-rgb" style="color:var(--muted);">→ rgb(—)</p>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button class="pillbtn" data-oklch="0.7 0.15 250">blue 250</button>
+        <button class="pillbtn" data-oklch="0.7 0.15 25">red 25</button>
+        <button class="pillbtn" data-oklch="0.7 0.15 145">green 145</button>
+        <button class="pillbtn" data-oklch="0.7 0.15 0">red 0</button>
+        <button class="pillbtn alt" data-oklch="0.5 0.2 290">vivid violet</button>
+      </div>
+      <p class="note">
+        Click <b>blue 250</b> then <b>red 25</b>: same L and C, only H changes.
+        Notice the swatch brightness stays constant — that's perceptual uniformity.
+        In HSL the same hue-swap would make red look brighter than blue.
+      </p>
+    </section>
+
+    <!-- Panel 3: Perceptual uniformity — hue rings -->
+    <section class="panel">
+      <h2>2 · perceptual uniformity — same lightness, every hue</h2>
+      <p class="note" style="margin-top:0">
+        Both ramps below sweep the full hue wheel in equal steps with FIXED
+        lightness &amp; saturation. The <b class="text-[#06b6d4]">OKLCH</b> ramp
+        should look evenly bright across every hue. The <b class="text-[#06b6d4]">HSL</b>
+        ramp (same fixed lightness &amp; saturation) looks uneven: yellow glows,
+        blue stays muddy. Equal numbers, unequal eyes — the flaw OKLCH fixes.
+      </p>
+      <div style="overflow-x:auto;min-width:0">
+        <p class="meas" style="margin:4px 0;">OKLCH — L=0.70, C=0.13, H sweeps 0°→360°</p>
+        <div id="oklch-ring" class="ramp"></div>
+        <p class="meas" style="margin:10px 0 4px;">HSL — L=70%, S=75%, H sweeps 0°→360°</p>
+        <div id="hsl-ring" class="ramp"></div>
+      </div>
+    </section>
+
+    <!-- Panel 4: Same hue, different color spaces -->
+    <section class="panel">
+      <h2>3 · same hue, different color spaces — sRGB vs OKLCH gradient</h2>
+      <p class="note" style="margin-top:0">
+        Gradients between two colors of very different hue pass through a "gray
+        dead zone" in sRGB (the midpoint desaturates). OKLCH interpolation keeps
+        chroma up, so the transition stays vivid. The CSS engine uses
+        <code>in oklch</code> as the interpolation color space.
+      </p>
+      <div style="overflow-x:auto;min-width:0">
+        <p class="meas" style="margin:4px 0;">sRGB (default) — red → blue, muddy midpoint</p>
+        <div style="height:46px;border-radius:6px;border:1px solid var(--line);background:linear-gradient(to right, rgb(220,38,38), rgb(37,99,235));"></div>
+        <p class="meas" style="margin:10px 0 4px;">OKLCH interpolation — red → blue, vivid throughout</p>
+        <div style="height:46px;border-radius:6px;border:1px solid var(--line);background:linear-gradient(in oklch to right, oklch(0.6 0.22 25), oklch(0.6 0.22 250));"></div>
+      </div>
+      <div class="src">/* Tailwind v4 gradient utilities emit oklch interpolation by default */
+.bg-linear-to-r { background-image: linear-gradient(to right, var(--tw-gradient-stops)); }
+/* --tw-gradient-stops use the --color-* oklch values */</div>
+    </section>
+
+    <!-- Panel 5: Tailwind v4 OKLCH palette -->
+    <section class="panel">
+      <h2>4 · Tailwind v4 default palette — every -500 is OKLCH</h2>
+      <p class="note" style="margin-top:0">
+        These are the actual <code>--color-*-500</code> theme values shipped in
+        Tailwind v4 (verified against tailwindcss.com/docs/colors, v4.3). The
+        swatch is painted straight from the OKLCH value.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>token</th><th>OKLCH value</th><th>swatch</th><th>computed rgb (live)</th></tr>
+        <tr><td><code>red-500</code></td><td><code>oklch(0.637 0.237 25.331)</code></td><td><span class="swatch" style="background:oklch(0.637 0.237 25.331);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.637 0.237 25.331)">—</td></tr>
+        <tr><td><code>amber-500</code></td><td><code>oklch(0.769 0.188 70.080)</code></td><td><span class="swatch" style="background:oklch(0.769 0.188 70.080);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.769 0.188 70.080)">—</td></tr>
+        <tr><td><code>green-500</code></td><td><code>oklch(0.723 0.219 149.579)</code></td><td><span class="swatch" style="background:oklch(0.723 0.219 149.579);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.723 0.219 149.579)">—</td></tr>
+        <tr><td><code>cyan-500</code></td><td><code>oklch(0.715 0.143 215.221)</code></td><td><span class="swatch" style="background:oklch(0.715 0.143 215.221);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.715 0.143 215.221)">—</td></tr>
+        <tr><td><code>blue-500</code></td><td><code>oklch(0.623 0.214 259.815)</code></td><td><span class="swatch" style="background:oklch(0.623 0.214 259.815);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.623 0.214 259.815)">—</td></tr>
+        <tr><td><code>violet-500</code></td><td><code>oklch(0.606 0.250 292.717)</code></td><td><span class="swatch" style="background:oklch(0.606 0.250 292.717);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.606 0.250 292.717)">—</td></tr>
+        <tr><td><code>fuchsia-500</code></td><td><code>oklch(0.667 0.295 322.150)</code></td><td><span class="swatch" style="background:oklch(0.667 0.295 322.150);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.667 0.295 322.150)">—</td></tr>
+        <tr><td><code>pink-500</code></td><td><code>oklch(0.656 0.241 354.308)</code></td><td><span class="swatch" style="background:oklch(0.656 0.241 354.308);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.656 0.241 354.308)">—</td></tr>
+        <tr><td><code>gray-500</code></td><td><code>oklch(0.551 0.027 264.364)</code></td><td><span class="swatch" style="background:oklch(0.551 0.027 264.364);width:40px;height:28px;"></span></td><td data-rgb="oklch(0.551 0.027 264.364)">—</td></tr>
+      </table></div>
+      <p class="note">
+        Note the hue axis: red≈25, amber≈70, green≈150, cyan≈215, blue≈260,
+        violet≈293, pink≈354. The lightness of <code>green-500</code> (0.723)
+        and <code>cyan-500</code> (0.715) is nearly identical — so they look
+        equally bright side-by-side, by design.
+      </p>
+    </section>
+
+    <!-- Panel 6: Gold-check swatch (the falsifiable anchor) -->
+    <section class="panel">
+      <h2>5 · gold-check — @theme OKLCH token applied &amp; resolved</h2>
+      <p class="note" style="margin-top:0">
+        The swatch below uses <code>class="bg-brand"</code>. The <code>brand</code>
+        color is defined in the page's <code>&lt;style type="text/tailwindcss"&gt;</code>
+        block as <code>--color-brand: oklch(0.7 0.15 250)</code>. The gold-check
+        reads <code>getComputedStyle(swatch).backgroundColor</code> and confirms
+        the CDN compiled the OKLCH token into a real, opaque color — printing the
+        live rgb conversion as proof.
+      </p>
+      <div class="stage" style="text-align:center;">
+        <div id="gold-swatch" class="bg-brand"
+             style="display:inline-block;width:140px;height:90px;border-radius:10px;border:1px solid var(--line);"></div>
+        <p class="meas" id="gold-readout" style="margin-top:10px;">—</p>
+      </div>
+    </section>
+
+    <!-- Panel 7: Cheat sheet -->
+    <section class="panel">
+      <h2>intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>define a custom OKLCH color</td>
+          <td><code>@theme { --color-brand: oklch(0.7 0.15 250); }</code></td>
+          <td>enables <code>bg-brand</code>, <code>text-brand</code>, <code>border-brand</code> — perceptually uniform</td>
+        </tr>
+        <tr>
+          <td>50% opacity tint</td>
+          <td><code>bg-brand/50</code></td>
+          <td>v4 emits <code>color-mix(in oklab, var(--color-brand) 50%, transparent)</code> — perceptually correct alpha</td>
+        </tr>
+        <tr>
+          <td>override a default ramp</td>
+          <td><code>--color-gray-500: oklch(0.551 0.027 264.364)</code></td>
+          <td>redefine any <code>--color-*-*</code> token; utilities update automatically</td>
+        </tr>
+        <tr>
+          <td>vivid gradient (no dead zone)</td>
+          <td><code>bg-linear-to-r from-red-500 to-blue-500</code></td>
+          <td>v4 stops are OKLCH values → interpolation stays saturated</td>
+        </tr>
+        <tr>
+          <td>disable a color family</td>
+          <td><code>--color-lime-*: initial;</code></td>
+          <td>removes the <code>--color-lime-*</code> vars from output entirely</td>
+        </tr>
+        <tr>
+          <td>arbitrary OKLCH value</td>
+          <td><code>bg-[oklch(0.7_0.15_250)]</code></td>
+          <td>one-off color without touching <code>@theme</code> (underscores = spaces)</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  GOLD-CHECK + INTERACTIVE OKLCH EXPLORER (valid classic JS — passes node --check)
+    //  Tailwind CDN compiles async — poll via requestAnimationFrame.
+    // ======================================================================
+    (function () {
+      var badge       = document.getElementById("goldcheck");
+      var goldSwatch  = document.getElementById("gold-swatch");
+      var goldReadout = document.getElementById("gold-readout");
+      var MAX_FRAMES  = 160;
+
+      // ---------- GOLD-CHECK: @theme OKLCH token resolved to opaque rgb ----------
+      function runGoldCheck(frame) {
+        frame = frame || 0;
+        var cs = getComputedStyle(goldSwatch);
+        var bg = cs.backgroundColor; // browsers may return "rgb(...)" or "oklch(...)"
+
+        // An applied, opaque color means the CDN compiled --color-brand into bg-brand.
+        // Reject empty / fully transparent defaults.
+        var resolved = bg && bg.indexOf("rgba(0, 0, 0, 0)") < 0 &&
+                       bg.indexOf("transparent") < 0 && bg !== "";
+
+        if (resolved) {
+          // Count alpha channel presence for a stronger assertion (opaque = 3 channels).
+          var opaque = bg.indexOf("rgba") < 0 || /rgba?\([^,]+,[^,]+,[^,]+,\s*1\)/.test(bg) ||
+                       bg.indexOf("rgba") < 0;
+          goldReadout.textContent =
+            "@theme --color-brand: oklch(0.7 0.15 250)  →  computed: " + bg;
+          badge.textContent =
+            "[check] bg-brand resolved oklch→" + (bg.indexOf("oklch") === 0 ? "oklch" : "rgb") +
+            " (" + (opaque ? "opaque" : "alpha") + "): OK";
+          badge.style.color = "var(--ok)";
+          badge.style.background = "rgba(46,204,113,.08)";
+          return;
+        }
+
+        if (frame === 0) {
+          badge.textContent = "[check] waiting for Tailwind CDN to compile @theme --color-brand…";
+          badge.style.color = "var(--muted)";
+          badge.style.background = "rgba(139,148,158,.08)";
+          goldReadout.textContent = "waiting for CDN…";
+        }
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { runGoldCheck(frame + 1); });
+          return;
+        }
+        badge.textContent = "[check] bg-brand (oklch) did not apply within ~2.5s: FAIL";
+        badge.style.color = "var(--bad)";
+        badge.style.background = "rgba(231,76,60,.08)";
+        goldReadout.textContent = "FAIL — oklch token not applied";
+      }
+
+      // ---------- LIVE EXPLORER: L / C / H sliders ----------
+      var swatch  = document.getElementById("live-swatch");
+      var lSlider = document.getElementById("l-slider");
+      var cSlider = document.getElementById("c-slider");
+      var hSlider = document.getElementById("h-slider");
+      var lOut    = document.getElementById("l-readout");
+      var cOut    = document.getElementById("c-readout");
+      var hOut    = document.getElementById("h-readout");
+      var oklchOut = document.getElementById("live-oklch");
+      var rgbOut   = document.getElementById("live-rgb");
+
+      function fmt(n, d) { d = d || 2; return parseFloat(n).toFixed(d); }
+
+      function applyOklch(L, C, H) {
+        var css = "oklch(" + fmt(L, 2) + " " + fmt(C, 3) + " " + H + ")";
+        swatch.style.backgroundColor = css;
+        lOut.textContent = fmt(L, 2);
+        cOut.textContent = fmt(C, 3);
+        hOut.textContent = H + "°";
+        oklchOut.textContent = css;
+        // Read back the browser's conversion. oklch support varies; fall back gracefully.
+        var computed = getComputedStyle(swatch).backgroundColor;
+        rgbOut.textContent = "→ " + computed;
+      }
+
+      function readAndApply() {
+        applyOklch(parseFloat(lSlider.value), parseFloat(cSlider.value), parseInt(hSlider.value, 10));
+      }
+
+      lSlider.addEventListener("input", readAndApply);
+      cSlider.addEventListener("input", readAndApply);
+      hSlider.addEventListener("input", readAndApply);
+
+      // Preset buttons
+      document.querySelectorAll("[data-oklch]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var parts = btn.getAttribute("data-oklch").split(/\s+/);
+          lSlider.value = parts[0];
+          cSlider.value = parts[1];
+          hSlider.value = parts[2];
+          readAndApply();
+        });
+      });
+
+      // ---------- PERCEPTUAL UNIFORMITY RINGS ----------
+      function buildRing(elId, steps, cellStyle) {
+        var el = document.getElementById(elId);
+        var frag = document.createDocumentFragment();
+        for (var i = 0; i < steps; i++) {
+          var div = document.createElement("div");
+          div.setAttribute("style", cellStyle(i, steps));
+          frag.appendChild(div);
+        }
+        el.appendChild(frag);
+      }
+
+      buildRing("oklch-ring", 24, function (i, n) {
+        var H = Math.round((360 / n) * i);
+        return "background:oklch(0.7 0.13 " + H + ");";
+      });
+      buildRing("hsl-ring", 24, function (i, n) {
+        var H = Math.round((360 / n) * i);
+        return "background:hsl(" + H + " 75% 70%);";
+      });
+
+      // ---------- PALETTE TABLE: live rgb conversion ----------
+      document.querySelectorAll("[data-rgb]").forEach(function (td) {
+        var oklchVal = td.getAttribute("data-rgb");
+        // Temp element to resolve the color via the browser engine.
+        var probe = document.createElement("span");
+        probe.style.backgroundColor = oklchVal;
+        probe.style.display = "none";
+        document.body.appendChild(probe);
+        td.textContent = getComputedStyle(probe).backgroundColor;
+        document.body.removeChild(probe);
+      });
+
+      // Boot
+      readAndApply();
+      runGoldCheck();
+    })();
+  </script>
+</body>
+</html>

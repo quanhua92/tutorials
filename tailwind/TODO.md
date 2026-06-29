@@ -24,13 +24,13 @@
 
 - [x] 12 `arbitrary_values` — [17rem], [color:var(--x)], bg-[url(...)]
 - [x] 13 `arbitrary_variants` — [&:nth-child(3)]:, [@supports(...)]:, [data-state]:
-- [ ] 14 `functional_utility` — @utility with --value(integer), --modifier(n)
-- [ ] 15 `arbitrary_properties` — [--scroll-offset:7px], [mask-type:luminance]
+- [x] 14 `functional_utility` — @utility with --value(integer), --modifier(n)
+- [x] 15 `arbitrary_properties` — [--scroll-offset:7px], [mask-type:luminance]
 
 ## Phase 4 — Color & Theming Internals (6)
 
-- [ ] 16 `oklch_colors` — oklch() color space, perceptual uniformity
-- [ ] 17 `color_mix_opacity` — color-mix(), opacity modifiers (/40)
+- [x] 16 `oklch_colors` — oklch() color space, perceptual uniformity
+- [x] 17 `color_mix_opacity` — color-mix(), opacity modifiers (/40)
 - [ ] 18 `theme_inline` — @theme inline, cross-variable references
 - [ ] 19 `multi_theme` — Scoped themes, brand-per-route, data-theme switching
 - [ ] 20 `gradients_v4` — bg-linear-*, bg-radial-*, bg-conic-*, interpolation

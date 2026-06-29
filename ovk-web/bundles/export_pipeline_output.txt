@@ -1,0 +1,136 @@
+
+============================================================
+SECTION A: the 6-step pipeline (RFC §10) — ZERO TRANSLATION
+============================================================
+  RFC 0001 §10: 'Export is assembly + stamp + render — no format translation,
+  because the source files are already HF's files.'
+
+  1. assemble  — write workspace into HF layout: root index.html + compositions/slide-N.html + assets/
+  2. stamp     — replace __SLIDE_ID__ and every __FIELD__ in each composition from slide index.json
+  3. voiceover — edge-tts + ffprobe + ffmpeg concat → timings → data-start/data-duration + root DUR
+  4. captions  — build_captions() → caption layer + GSAP word-highlight into the root markers
+  5. render    — npx hyperframes render <workspace> --output scene.mp4
+  6. progress  — parse HF stdout → progress events → UI progress bar
+[check] the pipeline has exactly 6 stages: OK
+[check] no stage translates a foreign scene graph into HTML (zero translation): OK
+  → the assembler's output must obey the FULL AGENTS.md contract (export-target spec).
+
+============================================================
+SECTION B: ASSEMBLE — copy slide index.html VERBATIM into compositions/
+============================================================
+  RFC §10 step 1 + AGENTS.md 'Sub-composition model': each slide's index.html is
+  copied byte-for-byte into compositions/slide-N.html. No rewrite, no parser.
+
+  emitted HF layout tree:
+    workspace/
+      index.html                          (root HOST — markers)
+      compositions/slide-0.html               (slide index.html, copied verbatim)
+      compositions/slide-1.html               (slide index.html, copied verbatim)
+      assets/voiceover.mp3
+      assets/sha256-c0ffee.jpg
+[check] slide-0 index.html copied VERBATIM into compositions/slide-0.html: OK
+[check] slide-1 index.html copied VERBATIM into compositions/slide-1.html: OK
+[check] every emitted composition is still a bare <template> (no <html> wrapper): OK
+  PINNED: emitted files = 3 + assets/(2)
+
+============================================================
+SECTION C: STAMP — __SLIDE_ID__ + __FIELD__ (RFC §5.6)
+============================================================
+  RFC §10 step 2: replace __SLIDE_ID__ and every __FIELD__ from slide index.json.
+  HF getVariables() returns {} in sub-comps, so stamping IS the binding.
+
+  stamped compositions/slide-0.html:
+    <template>
+      <div data-composition-id="slide-0" data-width="1920" data-height="1080">
+        <div class="content">
+          <h1>Eco Bottle</h1>
+          <p>Refill. Reuse. Repeat.</p>
+        </div>
+        <style>
+          [data-composition-id="slide-0"] { background: #0a0a14; }
+          [data-composition-id="slide-0"] .content { text-align: center; padding-top: 38vh; }
+          [data-composition-id="slide-0"] h1 { font-size: 120px; }
+        </style>
+        <script>
+          var tl = gsap.timeline({ paused: true });
+          tl.from('[data-composition-id="slide-0"] .content > *', { opacity: 0, y: 40, duration: 0.4, stagger: 0.1 });
+          window.__timelines['slide-0'] = tl;
+        </script>
+      </div>
+    </template>
+[check] stamped composition contains data-composition-id="slide-0": OK
+[check] stamped composition contains the title text: OK
+[check] stamped composition contains the body text: OK
+[check] ZERO __ placeholders remain after stamp: OK
+  PINNED: remaining __...__ placeholders after stamp = 0  ← GOLD
+  GOLD:   countPlaceholders(stamped) === 0 => true
+
+============================================================
+SECTION D: VOICEOVER — edge-tts + ffprobe + ffmpeg → timings + DUR
+============================================================
+  AGENTS.md 'Voiceover pipeline': edge-tts each sentence → ffprobe measures
+  duration → ffmpeg anullsrc silence + concat → voiceover.mp3 + timings.json.
+  Smart timing: slide N start = prev_end + gap_between_slides.
+
+  ┌──────────┬──────────┬──────────┬──────────┬────────────────────────────────┐
+  │ slide    │ start    │ duration │ end      │ source                         │
+  ├──────────┼──────────┼──────────┼──────────┼────────────────────────────────┤
+  │ slide-0 │ 0.500000 │ 4.600000 │ 5.100000 │ INITIAL_LEAD (0.5)             │
+  │ slide-1 │ 5.900000 │ 3.400000 │ 9.300000 │ prev_end(5.100000) + GAP(0.8)  │
+  └──────────┴──────────┴──────────┴──────────┴────────────────────────────────┘
+
+  host divs written into root index.html (data-start/data-duration from timings):
+    <div data-composition-id="slide-0" data-composition-src="compositions/slide-0.html" data-start="0.500000" data-duration="4.600000" class="clip" style="position:absolute;inset:0;z-index:100;"></div>
+    <div data-composition-id="slide-1" data-composition-src="compositions/slide-1.html" data-start="5.900000" data-duration="3.400000" class="clip" style="position:absolute;inset:0;z-index:99;"></div>
+[check] root DUR stamped to the measured voiceover length: OK
+[check] slide-1 start = slide-0 end + gap_between_slides: OK
+[check] every host div carries position:absolute;inset:0 (AGENTS.md host-div format): OK
+
+  PINNED: root DUR = 9.300000 (last slide end)
+
+============================================================
+SECTION E: CAPTIONS — caption layer + GSAP word-highlight into root markers
+============================================================
+  AGENTS.md 'Voiceover pipeline' → captions.build_captions(): split into words,
+  char-ratio timing, caption HTML (phrase + word spans), GSAP color tween JS.
+  Injected via markers: <!-- CAPTION_LAYER -->, /* CAPTION_CSS */,
+  // CAPTION_TIMELINE, // SCENE_TRANSITIONS.
+
+  slide-0 caption "Eco bottles save the planet" (5 words, char-ratio over 4.600000s):
+    Eco      start=0.500000 dur=0.600000 end=1.100000
+    bottles  start=1.100000 dur=1.400000 end=2.500000
+    save     start=2.500000 dur=0.800000 end=3.300000
+    the      start=3.300000 dur=0.600000 end=3.900000
+    planet   start=3.900000 dur=1.200000 end=5.100000
+[check] <!-- CAPTION_LAYER --> marker replaced by caption phrase HTML: OK
+[check] // CAPTION_TIMELINE marker replaced by GSAP direct color tweens: OK
+[check] caption uses direct color tween (NOT className): OK
+[check] no root markers remain after caption injection: OK
+  PINNED: caption words emitted for slide-0 = 5
+  → caption + scene-transition JS are emitted into the SAME root index.html the renderer reads.
+
+============================================================
+SECTION F: RENDER + PROGRESS — npx hyperframes render; parse stdout
+============================================================
+  RFC §10 steps 5–6: render the assembled workspace to MP4; stream progress.
+
+  render command: npx hyperframes render workspace --output scene.mp4
+  HF stdout (fixed sample):
+    [hyperframes] loading composition
+    [hyperframes] rendering frame 1/270
+    [hyperframes] rendering frame 135/270
+    [hyperframes] rendering frame 270/270
+    [hyperframes] wrote scene.mp4
+
+  parsed progress events:
+    frame 1/270 → 0.370370%
+    frame 135/270 → 50.000000%
+    frame 270/270 → 100.000000%
+[check] progress parser extracts frame x/total from HF stdout: OK
+[check] final frame reaches 100%: OK
+  PINNED: progress events parsed = 3; final = 100.000000%
+  RFC §18 risk: the parser couples to HF's stdout format — pin HF version, integration-test it.
+
+============================================================
+DONE
+============================================================

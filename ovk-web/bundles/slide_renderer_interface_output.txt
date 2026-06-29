@@ -1,0 +1,141 @@
+
+============================================================
+SECTION A: the interface — preview AND export both go through it
+============================================================
+  RFC 0001 §9.1 — the SlideRenderer interface (verbatim):
+
+    interface SlideRenderer:
+        load(slide_html, fields, assets)   # mount a slide composition
+        render_at(timecode) -> frame       # render at time t (preview or capture)
+        duration() -> seconds
+
+  Three methods. The editor (§8 preview) and the export pipeline
+  (§10) BOTH program to this interface — they never reach around it.
+  That single constraint is what makes the engine replaceable (§9.3)
+  and fidelity drift structurally impossible (§9.4).
+
+[check] interface exposes load(slide_html, fields, assets): OK
+[check] interface exposes render_at(timecode) -> frame: OK
+[check] interface exposes duration() -> seconds: OK
+  → the TypeScript shape mirrors the RFC: a SlideRenderer with exactly
+    these three methods. Everything else (timeline, document model,
+    editor) is OURS (§9.5). Cross-ref 🔗 PREVIEW_ENGINE / EXPORT_PIPELINE.
+
+============================================================
+SECTION B: Impl 1 (POC, now) = HyperFrames
+============================================================
+  RFC 0001 §9.2 — HyperFrames is the initial renderer for BOTH preview
+  and export. Reuses today's render path (rendering.py).
+
+    backend = hyperframes
+    preview = instantiate HF's <hyperframes-player> per active slide; drive to playhead
+    export  = assemble slides + data into one HF composition; `npx hyperframes render` once
+    tools   = <hyperframes-player>, npx hyperframes render, npx hyperframes lint
+
+    hf.load(...) → mounted; hf.renderAt(2.0) →
+      { slideId: "slide-0", time: 2.000000, loaded: true, hasContent: true }
+[check] HF preview path uses <hyperframes-player>: OK
+[check] HF export path uses `npx hyperframes render`: OK
+[check] HF impl satisfies the interface (load -> renderAt -> duration all work): OK
+  → HF is one IMPLEMENTATION of the seam, not the seam itself. The
+    editor never imports HF directly — it imports the interface (§9.5).
+
+============================================================
+SECTION C: Impl 2 (future) = headless Chromium + FFmpeg (the swap path)
+============================================================
+  RFC 0001 §9.3 — our own renderer. Headless-Chromium frame capture +
+  FFmpeg encode/mux, targeting visual determinism (§11). Swaps in
+  BEHIND THE SAME INTERFACE; editor + export pipeline are unchanged.
+
+    backend = own-renderer
+    preview = headless-Chromium frame capture; seek GSAP to t, capture the frame
+    export  = headless-Chromium capture every frame index 0..N-1 + FFmpeg encode/mux
+    tools   = headless-Chromium (Page.screenshot / CDP), FFmpeg encode/mux
+
+    own.load(...) → mounted; own.renderAt(2.0) →
+      { slideId: "slide-0", time: 2.000000, loaded: true, hasContent: true }
+[check] own-renderer preview path uses headless-Chromium frame capture: OK
+[check] own-renderer export path uses FFmpeg encode/mux: OK
+[check] swap is invisible to callers: own-renderer satisfies the SAME interface: OK
+  → headless Chromium (Page.screenshot / CDP) is the standard frame-
+    capture primitive; FFmpeg is the standard encode/mux step. Both
+    are documented, battle-tested tools. The swap is a packaging
+    concern, not an architecture change. Cross-ref 🔗 VISUAL_DETERMINISM.
+
+============================================================
+SECTION D: §9.4 — why fidelity drift is STRUCTURALLY IMPOSSIBLE
+============================================================
+  RFC 0001 §9.4 (decision record): 'Preview and export share ONE
+  interface → ONE engine at every stage. POC: both use HF →
+  consistent. Later: both swap to our renderer together → still
+  consistent. "It looked different when I exported" is structurally
+  impossible, because preview and render are never two different
+  engines.'
+
+    POC   preview.renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+    POC   export .renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+    LATER preview.renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+    LATER export .renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+    MIXED preview.renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}  (HF backend)
+    MIXED export .renderAt(2) = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}  (own backend)
+
+[check] POC stage: preview + export use the SAME backend (both HF) → frames match: OK
+[check] LATER stage: preview + export use the SAME backend (both own) → frames match: OK
+[check] the MIXED case (preview≠export engine) is exactly what the architecture FORBIDS: OK
+  → there is no code path where preview and export pick different
+    engines. The seam enforces one engine per stage; drift cannot arise.
+    This is the single biggest risk of a decoupled-preview architecture,
+    eliminated by construction (RFC §18 risk row).
+
+============================================================
+SECTION E: §9.5 — make HF smaller (it contracts to one job)
+============================================================
+  RFC 0001 §9.5 — HF's role contracts from 'the whole composition
+  engine' to 'render this one slide at time t.' Timeline orchestration,
+  the document model, and the editor are all OURS; HF is a pluggable
+  rendering primitive.
+
+    HF owns   = "render one slide at time t"
+    OURS      = timeline orchestration, document model, editor, asset library, AI
+
+[check] HF's surface is the 3-method interface (load / render_at / duration): OK
+[check] timeline + document model + editor + assets + AI are OURS (5 concerns, not HF's): OK
+  → contracting HF to one job is what makes it replaceable (§9.3).
+    If HF owned the timeline or document model, swapping it would mean
+    rewriting the editor. It doesn't, so it doesn't.
+
+============================================================
+SECTION F: the mock impl + contract invariants
+============================================================
+  A deterministic MockSlideRenderer implements the seam. The contract
+  every real impl (HF or ours) must satisfy:
+
+    (1) render_at() BEFORE load()  → error (load-before-render)
+    (2) render_at(t) after load    → PURE function of t (determinism)
+    (3) duration()                 → stable across calls
+
+    (1) before load: renderAt(1.0) → throws Error
+        message: "SlideRenderer.render_at() called before load()"
+[check] render_at() before load() throws (load-before-render invariant): OK
+
+    r.load(SAMPLE_SLIDE_HTML, SAMPLE_FIELDS, SAMPLE_ASSETS) → mounted
+    r.duration() = 5.000000  (mocks ffprobe on the voiceover)
+
+    (2) renderAt(2.0) #1 = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+        renderAt(2.0) #2 = {"slideId":"slide-0","time":2,"loaded":true,"hasContent":true}
+        byte-identical? true
+[check] render_at(t) is PURE: same t → byte-identical frame descriptor: OK
+
+    GOLD: renderAt(2.0).time = 2.000000 === 2.000000  (html gold-checks this)
+[check] GOLD: render_at(2.0).time === 2.0 (the pinned value the html recomputes): OK
+
+    (3) duration() ×3 = 5.000000, 5.000000, 5.000000  (stable)
+[check] duration() is stable across calls (same value every time): OK
+[check] determinism: fresh instance, same inputs → same measured duration: OK
+
+  PINNED: render_at(2.0).time = 2.000000; measured duration = 5.000000;
+  no Date.now / Math.random / FS anywhere — re-running is byte-identical.
+
+============================================================
+DONE
+============================================================

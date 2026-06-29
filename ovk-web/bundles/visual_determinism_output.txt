@@ -1,0 +1,142 @@
+
+============================================================
+SECTION A: visual determinism, NOT byte-identical (RFC §11 + §3)
+============================================================
+  RFC 0001 §11 — Determinism (verbatim):
+
+    ## 11. Determinism
+    
+    **Visual determinism**, not byte-identical.
+    
+    - Same input → visually equivalent output across re-renders. Minor byte
+      differences (encoder/browser non-determinism) are allowed.
+    - FFmpeg with fixed params is near-byte-deterministic; the variable part is
+      browser capture, which only matters once we ship our own renderer.
+    - Cache keying and "did this edit change the output" diffs use **perceptual
+      hashing**, not byte hashing.
+    
+    Byte-identical determinism is a non-goal. If it ever becomes required (e.g.,
+    for CI gate precision), it can be tightened later (pin Chromium, force CPU
+    rasterization, full asset preload) without rearchitecting.
+
+  RFC 0001 §3 Non-Goals — the byte-identical line (verbatim):
+    "Byte-identical determinism (visual determinism suffices — see §11)."
+
+[check] §11 opens with 'Visual determinism, not byte-identical': OK
+[check] §11 declares byte-identical a non-goal (tighten-able later): OK
+[check] §3 Non-Goals lists byte-identical determinism (defers to §11): OK
+  → the contract is VISUAL equivalence across re-renders, not byte equality.
+    Minor byte diffs (encoder / browser non-determinism) are allowed by design.
+
+============================================================
+SECTION B: where non-determinism enters (FFmpeg stable; browser capture is the variable part)
+============================================================
+  RFC §11 bullet: 'FFmpeg with fixed params is near-byte-deterministic; the
+  variable part is browser capture, which only matters once we ship our own
+  renderer.'
+
+  RFC §9.3 (own-renderer, verbatim):
+    "Headless-Chromium frame capture + FFmpeg encode/mux, targeting visual determinism (§11)."
+
+[check] FFmpeg (fixed params) is the near-byte-deterministic half: OK
+[check] browser capture is the variable half — own-renderer only (§9.3): OK
+  → today (HF POC, §9.2) the determinism surface is HF's own pipeline. The
+    browser-capture variable only enters when the own-renderer (§9.3) ships.
+    Cross-ref 🔗 SLIDE_RENDERER_INTERFACE (§9.3 is where determinism engineering lands).
+
+============================================================
+SECTION C: perceptual hashing (aHash) — downscale → grayscale → mean → threshold
+============================================================
+  RFC §11: cache keying + 'did this edit change the output?' diffs use
+  PERCEPTUAL hashing, not byte hashing. The algorithm below is aHash
+  (average hash), verbatim recipe from JohannesBuchner/imagehash:
+
+    1. reduce size     -> resize to 8x8 (hash_size=8 -> 64-bit hash)
+    2. reduce color    -> convert to grayscale ('L'): one luma value 0..255 per cell
+    3. compute mean    -> avg = mean(all 64 luma values)
+    4. threshold       -> bit = 1 if pixel > avg else 0   (strictly greater than)
+
+  GRID = 8x8 -> 64-bit hash
+
+  Frame A (vertical split: left=30, right=200)
+    mean(A)            = 115.000000  (== 115 exactly: 32*30+32*200 = 7360; /64)
+    popcount(aHash(A)) = 32  (32 above mean, 32 below — balanced)
+    hex(aHash(A))      = 0f0f0f0f0f0f0f0f
+    aHash(A) bit grid  (# = above mean, . = below mean):
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+  . . . . # # # #
+[check] mean(A) === 115.000000 (clean threshold, no boundary ambiguity): OK
+[check] aHash(A) is a 64-bit hash (8x8 grid): OK
+[check] aHash is DETERMINISTIC: aHash(A) computed twice is byte-identical: OK
+  → aHash reduces a frame to a 64-bit fingerprint of its luminance structure.
+    Two visually-similar frames → small Hamming distance; different → large.
+
+============================================================
+SECTION D: Hamming distance — 'how different are two hashes' (count of differing bits)
+============================================================
+  Hamming distance (Wikipedia): 'the number of positions at which the
+  corresponding symbols are different.' For binary strings, equals the
+  population count (number of 1s) of a XOR b. Identical hashes -> 0.
+
+    hex(A)  = 0f0f0f0f0f0f0f0f
+    hex(A') = 0f0f0f0f0f0f0f0f   (byte-identical copy of A)
+    hex(B)  = 8f0f0f0f0f0f0f0f   (A with cell[0][0] flipped across the mean)
+    hex(C)  = 00000000ffffffff   (horizontal split — different content)
+
+    distance(A, A)  = 0   (same object)
+    distance(A, A') = 0   (IDENTICAL frames)
+    distance(A, B)  = 1   (1 cell changed -> SMALL)
+    distance(A, C)  = 32   (different layout -> LARGE)
+[check] IDENTICAL frames -> Hamming distance === 0: OK
+[check] 1 cell changed -> small Hamming distance (=== 1): OK
+[check] different content -> large Hamming distance (32 of 64 bits differ): OK
+  → Hamming distance is the right metric for VISUAL equivalence: it is
+    insensitive to tiny byte diffs (B ≈ A) but catches real changes (C ≠ A).
+
+============================================================
+SECTION E: the cache decision — perceptual-hash diff below threshold -> HIT
+============================================================
+  RFC §11 use case: 'did this edit change the output?' Diff the perceptual
+  hashes; if Hamming distance <= threshold (5), the frames are
+  visually equivalent -> cache HIT (reuse the rendered output, no re-render).
+  Above threshold -> cache MISS (re-render).
+
+    distance A vs A' (identical) =  0  ->  cache HIT
+    distance A vs B  (1 cell)    =  1  ->  cache HIT
+    distance A vs C  (different) = 32  ->  cache MISS
+
+[check] identical + 1-cell jitter -> cache HIT (distance <= 5): OK
+[check] different content -> cache MISS (distance > 5): OK
+  → this is why byte hashing is the WRONG tool: a 1-byte encoder diff would
+    force a byte-hash MISS and a wasted re-render. aHash says 'visually same'
+    -> HIT -> skip the render. Cross-ref 🔗 EXPORT_PIPELINE (the render we cache).
+
+============================================================
+SECTION F: the tightening path — byte-identical CAN be tightened later, no rearchitect
+============================================================
+  RFC §11 (last paragraph, verbatim): 'Byte-identical determinism is a non-goal.
+  If it ever becomes required (e.g., for CI gate precision), it can be tightened
+  later (pin Chromium, force CPU rasterization, full asset preload) without
+  rearchitecting.'
+
+  tightening levers (from §11):
+    - pin Chromium
+    - force CPU rasterization
+    - full asset preload
+
+[check] §11 names all three tightening levers (Chromium pin / CPU raster / full preload): OK
+[check] §11 guarantees tightening needs NO rearchitecture ('without rearchitecting'): OK
+  → visual determinism is the v1 bar; byte-identical is a LATER, additive
+    tightening (a CI precision knob), not a redesign. The SlideRenderer seam
+    (§9) is untouched either way. Cross-ref 🔗 STAGE_CANVAS (real-time preview
+    can stay non-frame-accurate without breaking this export-time contract).
+
+============================================================
+DONE
+============================================================

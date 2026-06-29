@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>stage_canvas — the center panel: scaled, real-time preview of the active slide</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --border:#2a3140;
+    --text:#e6edf3; --muted:#9aa6b2; --green:#27ae60; --orange:#e67e22;
+    --yellow:#ffea00; --red:#e5534b; --blue:#58a6ff; --purple:#a371f7;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:22px 28px 8px;border-bottom:1px solid var(--border)}
+  h1{margin:0;font-size:1.35rem;font-weight:700}
+  h1 .sub{color:var(--muted);font-weight:400;font-size:.9rem;margin-left:8px}
+  .badges{margin-top:8px}
+  .badge{display:inline-block;border-radius:5px;padding:2px 9px;font-size:.72rem;
+    font-weight:600;margin-right:.4rem;text-decoration:none;border:1px solid}
+  .badge.md{background:#1c3a25;color:var(--green);border-color:var(--green)}
+  .badge.ts{background:#3a2a14;color:var(--orange);border-color:var(--orange)}
+  .guide-callout{margin:10px 28px 0;padding:10px 14px;border-radius:8px;
+    background:rgba(39,174,96,.06);border:1px solid rgba(39,174,96,.2);
+    font-size:.82rem;color:var(--muted)}
+  .guide-callout a{color:var(--green);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+  main{padding:18px 28px 40px;display:grid;gap:18px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .panel h2{margin:0 0 10px;font-size:.95rem;color:var(--blue);font-weight:600}
+  .gold{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:.82rem;padding:3px 9px;border-radius:5px;font-weight:700}
+  .gold.ok{background:#1c3a25;color:var(--green);border:1px solid var(--green)}
+  .gold.fail{background:#3a1c1c;color:var(--red);border:1px solid var(--red)}
+  .hint{color:var(--muted);font-size:.82rem}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:.85em;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .pinned{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--yellow)}
+  table{border-collapse:collapse;width:100%;font-size:.82rem;margin-top:6px}
+  th,td{border:1px solid var(--border);padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--blue)}
+  .field{color:var(--purple);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  /* the scaled-canvas stage */
+  .stage-wrap{display:flex;flex-direction:column;gap:10px}
+  .vp-controls{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  button.act{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    border-radius:5px;padding:4px 10px;cursor:pointer;font-size:.78rem}
+  button.act:hover{border-color:var(--blue)}
+  button.act.on{border-color:var(--green);color:var(--green)}
+  .viewport{position:relative;background:#000;border:1px solid var(--border);
+    border-radius:6px;overflow:hidden;margin:6px 0;box-shadow:0 4px 18px rgba(0,0,0,.4)}
+  /* canvas-frame is authored at 1920x1080, scaled to fit */
+  .canvas-frame{position:absolute;top:0;left:0;width:1920px;height:1080px;
+    transform-origin:top left;background:#0a0a14}
+  .slide-content{text-align:center;padding-top:38vh;color:#fff}
+  .slide-content h3{margin:0;font-size:120px;font-weight:800;letter-spacing:-2px}
+  .slide-content p{margin:18px 0 0;font-size:48px;color:rgba(255,255,255,.65);font-weight:500}
+  .slide-tag{position:absolute;top:48px;left:48px;font-size:34px;color:rgba(255,255,255,.35);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .playhead-track{position:absolute;left:0;right:0;bottom:0;height:8px;background:rgba(255,255,255,.12)}
+  .playhead-fill{position:absolute;left:0;top:0;bottom:0;background:var(--yellow);width:0%}
+  .playhead-knob{position:absolute;top:-6px;width:4px;height:20px;background:var(--yellow);
+    box-shadow:0 0 12px rgba(255,234,0,.8)}
+  .gap-msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:24px}
+  /* scrubber */
+  .scrub{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .scrub input[type=range]{flex:1;min-width:200px;accent-color:var(--yellow)}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--text)}
+  .readout span.k{color:var(--muted)}
+  .readout span.v{color:var(--yellow)}
+  .readout span.g{color:var(--green)}
+  .readout span.r{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <h1>stage_canvas <span class="sub">— the center panel: a real-time, scaled preview of the active slide</span></h1>
+  <div class="badges">
+    <a class="badge md" title="Full guide — diagram, scale-to-fit math, decoupling rationale, pitfalls, cheat sheet" href="./STAGE_CANVAS.md">📖 STAGE_CANVAS.md</a>
+    <a class="badge ts" title="Ground-truth source code" href="./stage_canvas.ts">📄 stage_canvas.ts</a>
+  </div>
+</header>
+<div class="guide-callout">📖 <a href="./STAGE_CANVAS.md">Read the full guide</a> — the Stage/Canvas surface, the scale-to-fit (object-fit: contain) math, the playhead→local-time clamp, the real-time-vs-frame-accurate decoupling, and the <code>position:absolute;inset:0;</code> host-div rule. This page is the interactive companion.</div>
+
+<main>
+  <div class="panel">
+    <h2>Gold check vs <code>stage_canvas.ts</code></h2>
+    <div>The runnable pins <span class="pinned">aspect = 1920/1080 = 1.777778 (= 16/9)</span>. This page recomputes <code>1920/1080</code> and compares to <code>16/9</code> within <code>1e-6</code>.</div>
+    <div style="margin-top:8px">Status: <span id="gold" class="gold ok">[check: OK]</span> aspect = <span id="aspect">1.777778</span>, |aspect − 16/9| = <span id="diff">0.000000</span></div>
+    <div class="hint" style="margin-top:4px">The badge can only be green: <code>1920/1080 === 16/9</code> is a mathematical identity. If it were ever red, the canvas dims in <code>root index.json</code> were wrong.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Pinned scale-to-fit values (match <code>stage_canvas.ts</code> Section B)</h2>
+    <div class="hint">Scale = <code>min(vw/cw, vh/ch)</code>; scaled = <code>(cw·scale, ch·scale)</code>; letterbox the remainder.</div>
+    <div style="overflow-x:auto;min-width:0">
+      <table>
+        <thead><tr><th>Viewport (vw×vh)</th><th>scale</th><th>scaled canvas (cw×ch)</th><th>result</th></tr></thead>
+        <tbody>
+          <tr><td>800×450 (16:9)</td><td><span class="pinned">0.416667</span></td><td>800×450</td><td>fills viewport, no bars</td></tr>
+          <tr><td>600×500 (taller)</td><td><span class="pinned">0.312500</span></td><td>600×337.5</td><td>letterboxed top &amp; bottom</td></tr>
+          <tr><td>1280×720 (16:9)</td><td><span class="pinned">0.666667</span></td><td>1280×720</td><td>fills viewport, no bars</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Live stage — scaled canvas + playhead scrubber</h2>
+    <div class="hint">The 1920×1080 canvas is authored at full size and <strong>scaled</strong> into the viewport (object-fit: contain). Scrub the playhead to cross slide boundaries — the active composition swaps (RFC §7/§8).</div>
+    <div class="stage-wrap">
+      <div class="vp-controls">
+        <span class="hint">viewport preset:</span>
+        <button class="act on" data-vw="640" data-vh="360">640×360 (16:9)</button>
+        <button class="act" data-vw="600" data-vh="420">600×420 (taller)</button>
+        <button class="act" data-vw="500" data-vh="400">500×400 (taller)</button>
+        <span class="hint" style="margin-left:auto">canvas = 1920×1080 (16:9)</span>
+      </div>
+      <div class="viewport" id="viewport">
+        <div class="canvas-frame" id="canvasFrame">
+          <div class="slide-tag" id="slideTag">slide-?</div>
+          <div class="slide-content" id="slideContent">
+            <h3 id="slideTitle">—</h3>
+            <p id="slideBody">—</p>
+          </div>
+          <div class="playhead-track">
+            <div class="playhead-fill" id="phFill"></div>
+            <div class="playhead-knob" id="phKnob"></div>
+          </div>
+        </div>
+        <div class="gap-msg" id="gapMsg" style="display:none">// gap — no active slide</div>
+      </div>
+      <div class="scrub">
+        <button class="act" id="playBtn">▶ play</button>
+        <span class="hint">playhead (global):</span>
+        <input id="scrubber" type="range" min="0" max="16.3" step="0.1" value="0.5" />
+        <span class="readout"><span class="k">global</span> <span class="v" id="roGlobal">0.500</span>s</span>
+      </div>
+      <div class="readout" id="readout"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Why it works this way — the load-bearing rules</h2>
+    <div style="overflow-x:auto;min-width:0">
+      <table>
+        <thead><tr><th>Rule</th><th>Mechanism</th><th>What breaks without it</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field">scale = min(vw/cw, vh/ch)</span></td><td>Uniform scale; limiting axis wins (object-fit: contain). Letterbox the rest.</td><td>Non-uniform scale stretches the 16:9 canvas → warped text/captions.</td></tr>
+          <tr><td><span class="field">local = clamp(global − start, 0, dur)</span></td><td>Translate shared global playhead into the active slide's GSAP time.</td><td>Negative or past-end seeks freeze/jump the preview.</td></tr>
+          <tr><td><span class="field">one active slide</span></td><td>Mount exactly one composition; swap on boundary cross (RFC §7).</td><td>Re-rendering the whole timeline every paint → janky preview.</td></tr>
+          <tr><td><span class="field">position:absolute;inset:0;</span></td><td>Stretch the host div to the scaled canvas (AGENTS.md).</td><td>Sub-comp collapses to zero size → <strong>blank stage</strong>.</td></tr>
+          <tr><td><span class="field">real-time, not frame-accurate</span></td><td>Seek GSAP per rAF paint (variable dt). Export is the rigorous path (§10/§11).</td><td>Locking preview to 1/fps makes scrubbing sluggish for no fidelity gain.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+  // ---- the SAME logic as stage_canvas.ts, recomputed in JS (gold-checked) ----
+  // GOLD VALUE — must match the .ts pinned aspect identity. Both files assert
+  // 1920/1080 === 16/9 within 1e-6.
+  const CANVAS_W = 1920, CANVAS_H = 1080;
+  const ASPECT = CANVAS_W / CANVAS_H;
+  const SIXTEEN_NINTHS = 16 / 9;
+
+  function fix(n){ return Number(n).toFixed(6); }
+  function pad(n){ return Number(n).toFixed(3); }
+
+  // scale-to-fit (object-fit: contain) — identical to stage_canvas.ts
+  function scaleToFit(cw, ch, vw, vh){
+    const scale = Math.min(vw / cw, vh / ch);
+    return { scale: scale, w: cw * scale, h: ch * scale };
+  }
+
+  // playhead math — identical to stage_canvas.ts
+  function localTime(globalTime, slideStart, slideDuration){
+    const raw = globalTime - slideStart;
+    if (raw < 0) return 0;
+    if (raw > slideDuration) return slideDuration;
+    return raw;
+  }
+
+  // sample project slides — same windows as stage_canvas.ts Section D
+  const SLIDES = [
+    { id: "slide-0", start: 0.5,  duration: 5.0, title: "Eco Bottle",   body: "Sustainable by design." },
+    { id: "slide-1", start: 5.9,  duration: 4.0, title: "Ocean Plastic", body: "Every minute counts." },
+    { id: "slide-2", start: 10.3, duration: 6.0, title: "Join Us",       body: "Refill. Reuse. Repeat." }
+  ];
+  const TOTAL_DUR = SLIDES[SLIDES.length - 1].start + SLIDES[SLIDES.length - 1].duration; // 16.3
+
+  function activeSlideAt(globalTime){
+    for (let i = 0; i < SLIDES.length; i++){
+      const s = SLIDES[i];
+      if (globalTime >= s.start && globalTime < s.start + s.duration) return s;
+    }
+    return null;
+  }
+
+  // ---- gold check (recomputes the .ts identity) ----
+  function renderGold(){
+    const diff = Math.abs(ASPECT - SIXTEEN_NINTHS);
+    const pass = diff < 1e-6;
+    const gold = document.getElementById("gold");
+    gold.textContent = pass ? "[check: OK]" : "[check: FAIL]";
+    gold.className = "gold " + (pass ? "ok" : "fail");
+    document.getElementById("aspect").textContent = fix(ASPECT);
+    document.getElementById("diff").textContent = fix(diff);
+  }
+
+  // ---- stage state ----
+  const state = {
+    vw: 640, vh: 360,     // viewport preset (px, for display)
+    playhead: 0.5,        // global playhead time (seconds)
+    playing: false,
+    raf: null,
+    lastTs: null
+  };
+
+  function setViewportPreset(vw, vh){
+    state.vw = vw; state.vh = vh;
+    const btns = document.querySelectorAll(".vp-controls .act");
+    for (let i = 0; i < btns.length; i++){
+      const b = btns[i];
+      const on = Number(b.getAttribute("data-vw")) === vw && Number(b.getAttribute("data-vh")) === vh;
+      b.className = "act" + (on ? " on" : "");
+    }
+    renderStage();
+  }
+
+  function renderStage(){
+    const vp = document.getElementById("viewport");
+    const frame = document.getElementById("canvasFrame");
+    const gapMsg = document.getElementById("gapMsg");
+
+    // viewport (real px)
+    vp.style.width = state.vw + "px";
+    vp.style.height = state.vh + "px";
+    vp.style.maxWidth = "100%";
+
+    // scale-to-fit the 1920x1080 canvas into the viewport
+    const r = scaleToFit(CANVAS_W, CANVAS_H, state.vw, state.vh);
+    const offX = (state.vw - r.w) / 2;
+    const offY = (state.vh - r.h) / 2;
+    frame.style.transform = "scale(" + r.scale + ")";
+    frame.style.top = offY + "px";
+    frame.style.left = offX + "px";
+
+    // active slide + local time
+    const active = activeSlideAt(state.playhead);
+    const tag = document.getElementById("slideTag");
+    const title = document.getElementById("slideTitle");
+    const body = document.getElementById("slideBody");
+    const phFill = document.getElementById("phFill");
+    const phKnob = document.getElementById("phKnob");
+
+    if (active){
+      frame.style.opacity = "1";
+      gapMsg.style.display = "none";
+      tag.textContent = active.id;
+      title.textContent = active.title;
+      body.textContent = active.body;
+      const lt = localTime(state.playhead, active.start, active.duration);
+      const pct = (lt / active.duration) * 100;
+      phFill.style.width = pct + "%";
+      phKnob.style.left = pct + "%";
+    } else {
+      // gap between slides — render a neutral state (never fall back to a default slide)
+      frame.style.opacity = "0.15";
+      gapMsg.style.display = "flex";
+      tag.textContent = "—";
+      title.textContent = "";
+      body.textContent = "";
+      phFill.style.width = "0%";
+      phKnob.style.left = "0%";
+    }
+
+    // readout
+    const ro = document.getElementById("readout");
+    const ltxt = active ? fix(localTime(state.playhead, active.start, active.duration)) : "—";
+    const activeId = active ? ("<span class=\"g\">" + active.id + "</span>") : "<span class=\"r\">null (gap)</span>";
+    ro.innerHTML =
+      "<span class=\"k\">active slide:</span> " + activeId +
+      " &nbsp; <span class=\"k\">local:</span> <span class=\"v\">" + ltxt + "</span>s" +
+      " &nbsp; <span class=\"k\">scale:</span> <span class=\"v\">" + fix(r.scale) + "</span>" +
+      " &nbsp; <span class=\"k\">scaled canvas:</span> <span class=\"v\">" + fix(r.w) + " × " + fix(r.h) + "</span>" +
+      " &nbsp; <span class=\"k\">letterbox:</span> <span class=\"v\">" + fix(state.vw - r.w) + " × " + fix(state.vh - r.h) + "</span>";
+    document.getElementById("roGlobal").textContent = pad(state.playhead);
+  }
+
+  // ---- playback (real-time, NOT frame-accurate — RFC §8) ----
+  function tick(ts){
+    if (!state.playing) return;
+    if (state.lastTs == null) state.lastTs = ts;
+    const dt = (ts - state.lastTs) / 1000;
+    state.lastTs = ts;
+    state.playhead += dt;
+    if (state.playhead > TOTAL_DUR) state.playhead = 0;
+    const scrub = document.getElementById("scrubber");
+    scrub.value = String(state.playhead);
+    renderStage();
+    state.raf = requestAnimationFrame(tick);
+  }
+  function togglePlay(){
+    state.playing = !state.playing;
+    const btn = document.getElementById("playBtn");
+    btn.textContent = state.playing ? "⏸ pause" : "▶ play";
+    btn.className = "act" + (state.playing ? " on" : "");
+    if (state.playing){
+      state.lastTs = null;
+      state.raf = requestAnimationFrame(tick);
+    } else if (state.raf != null){
+      cancelAnimationFrame(state.raf);
+      state.raf = null;
+    }
+  }
+
+  // ---- wire up ----
+  function init(){
+    renderGold();
+
+    const vpBtns = document.querySelectorAll(".vp-controls .act");
+    for (let i = 0; i < vpBtns.length; i++){
+      const b = vpBtns[i];
+      b.addEventListener("click", function(){
+        setViewportPreset(Number(b.getAttribute("data-vw")), Number(b.getAttribute("data-vh")));
+      });
+    }
+
+    const scrub = document.getElementById("scrubber");
+    scrub.max = String(TOTAL_DUR);
+    scrub.addEventListener("input", function(){
+      state.playhead = Number(scrub.value);
+      renderStage();
+    });
+
+    document.getElementById("playBtn").addEventListener("click", togglePlay);
+
+    setViewportPreset(640, 360);
+    state.playhead = 0.5;
+    scrub.value = "0.5";
+    renderStage();
+  }
+
+  init();
+</script>
+</body>
+</html>

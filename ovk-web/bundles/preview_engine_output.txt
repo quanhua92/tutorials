@@ -1,0 +1,136 @@
+
+============================================================
+SECTION A: the engine renders the ACTIVE slide via SlideRenderer
+============================================================
+  RFC 0001 §8 — 'Renders the active slide's index.html (the bare
+  <template>) in the browser via the SlideRenderer interface.'
+  RFC 0001 §7 — Stage binds to the ACTIVE slide; the engine mounts
+  exactly ONE slide composition at a time.
+
+  SlideRenderer interface (RFC §9.1, verbatim):
+    interface SlideRenderer:
+        load(slide_html, fields, assets)   # mount a slide composition
+        render_at(timecode) -> frame       # render at time t (preview or capture)
+        duration() -> seconds
+
+  ACTIVE_SLIDE_ID = "slide-0" (mounted via SlideRenderer.load)
+[check] exactly one active slide is mounted at a time: OK
+[check] SlideRenderer exposes load() / render_at() / duration(): OK
+  → preview does NOT render the whole timeline at once; it renders
+    the ONE active slide and swaps on boundary cross (Section F).
+
+============================================================
+SECTION B: drive GSAP from the playhead — tl.time(t) (SEEK, not play)
+============================================================
+  RFC 0001 §8 — 'Drives GSAP timelines from the playhead time.'
+  AGENTS.md slide <script> registers the timeline PAUSED, keyed by id:
+
+    var tl = gsap.timeline({ paused: true });
+    tl.from('[data-composition-id="__SLIDE_ID__"] .content > *',
+            { opacity: 0, y: 40, duration: 0.4, stagger: 0.1 });
+    window.__timelines['__SLIDE_ID__'] = tl;
+
+  GSAP docs, Timeline.time() (https://gsap.com/docs/v3/GSAP/Timeline/time()):
+    'Gets or sets the local position of the playhead (essentially the
+    current time)... sets time, jumping to new value just like seek().'
+  → the preview calls tl.time(playheadTime) on the PAUSED timeline. The
+    playhead moves; the timeline does NOT auto-play. Deterministic given t.
+
+    tl.time(0.000000)  →  value 0.000000   (registry["slide-0"], paused)
+    tl.time(0.250000)  →  value 0.250000   (registry["slide-0"], paused)
+    tl.time(0.500000)  →  value 0.500000   (registry["slide-0"], paused)
+    tl.time(0.750000)  →  value 0.750000   (registry["slide-0"], paused)
+    tl.time(1.000000)  →  value 1.000000   (registry["slide-0"], paused)
+[check] tl.time(t) seeks without playing (playhead setter; value at 0.5 === 0.5): OK
+[check] window.__timelines['__SLIDE_ID__'] = tl  registers the paused timeline: OK
+
+  PINNED: tl.time(0.500000) on slide-0 → value 0.500000 (lerp midpoint).
+
+============================================================
+SECTION C: the interpolation math — lerp between keyframes
+============================================================
+  Wikipedia, 'Linear interpolation' — between known points (x0,y0),(x1,y1):
+    y = y0 + (x - x0) * (y1 - y0) / (x1 - x0)
+  In lerp form (t in [0,1] within a segment):
+    lerp(a, b, t) = a + t * (b - a)
+
+  2-keyframe timeline slide-0: keyframes (t=0, v=0.0) , (t=1, v=1.0), linear:
+    playhead 0.250000 → localT 0.250000 → lerp(0, 1, 0.250000) = 0.250000
+    playhead 0.500000 → localT 0.500000 → lerp(0, 1, 0.500000) = 0.500000
+    playhead 0.750000 → localT 0.750000 → lerp(0, 1, 0.750000) = 0.750000
+[check] 2-keyframe lerp at t=0.5 === 0.5 (lerp(0,1,0.5)): OK
+[check] 2-keyframe lerp at t=0.25 === 0.25, t=0.75 === 0.75: OK
+
+  3-keyframe timeline slide-1: (0,0.0) → (1,1.0) → (2,0.5), linear (piecewise):
+    playhead 0.500000 → segment value 0.500000
+    playhead 1.000000 → segment value 1.000000
+    playhead 1.500000 → segment value 0.750000
+    detail @1.5: segment [1,2], localT=(1.5-1)/(2-1)=0.5 → lerp(1.0, 0.5, 0.5) = 0.750000
+[check] 3-keyframe multi-segment lerp at t=1.5 === 0.75 (lerp(1.0, 0.5, 0.5)): OK
+
+  PINNED: sampleAt(slide-0, 0.5) = 0.500000; sampleAt(slide-1, 1.5) = 0.750000.
+
+============================================================
+SECTION D: real-time, NOT frame-accurate (the decoupling rationale)
+============================================================
+  RFC 0001 §8 (verbatim): "Real-time, not frame-accurate. That is the point of decoupling: the preview is responsive for editing; the export is rigorous (§10)."
+  RFC 0001 §11 — visual determinism is enforced at EXPORT, not in preview.
+
+  PREVIEW (real-time): on each browser paint (rAF) the engine calls
+  tl.time(playhead). dt between paints is variable (browser-paced), so
+  frame indices may REPEAT (slow paint) or SKIP (scrub/fast-forward):
+    playhead 0.000000s → tl.time(0.000000); value 0.000000; nearest frame 0
+    playhead 0.040000s → tl.time(0.040000); value 0.040000; nearest frame 1
+    playhead 0.060000s → tl.time(0.060000); value 0.060000; nearest frame 1
+    playhead 0.120000s → tl.time(0.120000); value 0.120000; nearest frame 3
+    playhead 0.130000s → tl.time(0.130000); value 0.130000; nearest frame 3
+
+  EXPORT (frame-accurate): npx hyperframes render steps frame index
+  0..N-1 at exactly 1/fps = 0.033333s each (RFC §10, §11):
+    frame[0] → render_at(0.000000)  (exact, no repeat/skip)
+    frame[1] → render_at(0.033333)  (exact, no repeat/skip)
+    frame[2] → render_at(0.066667)  (exact, no repeat/skip)
+    frame[3] → render_at(0.100000)  (exact, no repeat/skip)
+    frame[4] → render_at(0.133333)  (exact, no repeat/skip)
+[check] preview sample dt is NOT 1/fps (real-time, variable cadence): OK
+[check] export step IS exactly 1/fps (frame-accurate, deterministic): OK
+
+  → preview responsiveness and export rigor are DIFFERENT jobs; decoupling
+    them (§8) keeps the editor fast without lying about the final video.
+    Cross-ref 🔗 STAGE_CANVAS (the surface) / EXPORT_PIPELINE (the rigorous path).
+
+============================================================
+SECTION E: app-owned — the editor drives; HF is not a black box
+============================================================
+  RFC 0001 §8 (verbatim): "The preview is app-owned — the editor drives it; HyperFrames is not in the editing loop as a black box."
+  RFC 0001 §9.5 — HF's role contracts from 'the whole composition engine'
+  to 'render this one slide at time t.' Timeline orchestration, the document
+  model, and the editor are OURS; HF is a pluggable rendering primitive.
+
+[check] §8 quote asserts app ownership (editor drives; HF not a black box): OK
+[check] SlideRenderer is the pluggable seam (engine swappable behind one interface): OK
+  → because preview and export share one SlideRenderer (§9.4),
+    'it looked different when I exported' is structurally impossible.
+
+============================================================
+SECTION F: active-slide swap — load the new slide's timeline
+============================================================
+  RFC 0001 §7 — the stage binds to the ACTIVE slide. When the playhead
+  crosses into the next slide's window, the active id changes and
+  SlideRenderer.load() mounts the new composition. The engine looks up the
+  NEW slide's timeline in window.__timelines and seeks THAT one.
+
+  registry keys: slide-0, slide-1
+
+  active="slide-0", playhead 0.5 → value 0.500000  (2-keyframe)
+  active="slide-1", playhead 1.5 → value 0.750000  (3-keyframe)
+[check] swap changes the active slide id (slide-0 → slide-1): OK
+[check] each active slide resolves to its OWN timeline value via the registry: OK
+
+  → the swap is a mount/unmount via SlideRenderer + a registry lookup;
+    between-slide transitions live in ROOT index.html (RFC §5.1).
+    Cross-ref 🔗 STAGE_CANVAS for the surface whose playhead this consumes.
+
+============================================================
+DONE
+============================================================

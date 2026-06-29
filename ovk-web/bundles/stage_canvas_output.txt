@@ -1,0 +1,142 @@
+
+============================================================
+SECTION A: the stage renders the ACTIVE slide via SlideRenderer
+============================================================
+  RFC 0001 §7 — 'Stage / Canvas (center) | binds to: active slide |
+  job: live preview via SlideRenderer; play/scrub.'
+  RFC 0001 §8 — 'Renders the active slide's index.html (the bare
+  <template>) in the browser via the SlideRenderer interface.'
+
+  SlideRenderer interface (RFC §9.1, verbatim):
+    interface SlideRenderer:
+        load(slide_html, fields, assets)   # mount a slide composition
+        render_at(timecode) -> frame       # render at time t (preview or capture)
+        duration() -> seconds
+
+  ACTIVE_SLIDE_ID = "slide-0" (mounted via SlideRenderer.load)
+[check] exactly one active slide is mounted at a time: OK
+[check] SlideRenderer exposes load() / render_at() / duration(): OK
+  → the stage never renders all slides at once; it renders the ONE
+    active slide. Switching slides swaps the mounted composition (Section D).
+
+============================================================
+SECTION B: canvas dims, aspect ratio (16:9), and scale-to-fit
+============================================================
+  RFC 0001 §5.2 + AGENTS.md 'Layout file format': canvas is
+  {width:1920, height:1080} (data-width/data-height on each composition).
+
+    width  = 1920
+    height = 1080
+    aspect = width/height = 1.777778
+    16/9                = 1.777778
+[check] 1920/1080 === 16/9 within 1e-6: OK
+[check] aspect is the standard 16:9 (1.777778): OK
+
+  Scale-to-fit (MDN object-fit: contain — 'sized to maintain its aspect
+  ratio while fitting within the element's content box'). The limiting
+  axis wins; the canvas is letterboxed, never stretched:
+
+    scale = min(vw/cw, vh/ch);  w = cw*scale;  h = ch*scale
+
+    viewport 800x450: scale=0.416667 → canvas 800.000000x450.000000  (same 16:9 aspect → no letterbox)
+    viewport 600x500: scale=0.312500 → canvas 600.000000x337.500000  (taller viewport → letterbox top/bottom)
+    viewport 1280x720: scale=0.666667 → canvas 1280.000000x720.000000  (same aspect, larger viewport)
+[check] 800x450 viewport (16:9) → scale 0.416667, canvas 800x450 (fills, no bars): OK
+[check] 600x500 viewport (taller) → scale 0.312500, canvas 600x337.5 (letterboxed): OK
+
+  PINNED: aspect = 1.777778; fit 1920x1080 into 800x450 → scale 0.416667;
+  fit into 600x500 → scale 0.312500, canvas 600.000000x337.500000.
+
+============================================================
+SECTION C: playhead → local time (clamp to [0, slideDuration])
+============================================================
+  RFC 0001 §8 — 'Drives GSAP timelines from the playhead time.'
+  The stage converts the SHARED global playhead into the ACTIVE slide's
+  local time, then seeks the slide's GSAP timeline to it.
+
+    local = clamp(globalTime - slideStart, 0, slideDuration)
+
+    globalTime=4.000000  →  local=0.000000   (slide-1: start=5.900000, dur=4.000000)
+    globalTime=5.900000  →  local=0.000000   (slide-1: start=5.900000, dur=4.000000)
+    globalTime=7.500000  →  local=1.600000   (slide-1: start=5.900000, dur=4.000000)
+    globalTime=9.890000  →  local=3.990000   (slide-1: start=5.900000, dur=4.000000)
+    globalTime=11.000000  →  local=4.000000   (slide-1: start=5.900000, dur=4.000000)
+[check] before slide start (global 4.0) clamps UP to local 0: OK
+[check] after slide end (global 11.0) clamps DOWN to slideDuration (4.0): OK
+
+  PINNED: globalTime 7.5, slide-1 start 5.9 → local 1.600000 (GSAP seeks here).
+  → the playhead is SHARED with the timeline panel (🔗 TIMELINE_PANEL).
+
+============================================================
+SECTION D: switching slides = swapping the mounted composition
+============================================================
+  RFC 0001 §7 — the stage binds to the ACTIVE slide. When the playhead
+  crosses into the next slide's [start, start+duration), the active id
+  changes and SlideRenderer.load() mounts the new composition (unmounting
+  the previous one).
+
+  project slides (global timeline windows):
+    slide-0: [0.500000, 5.500000)
+    slide-1: [5.900000, 9.900000)
+    slide-2: [10.300000, 16.300000)
+
+    activeSlideAt(7.5)  = slide-1
+    activeSlideAt(11.0) = slide-2
+    activeSlideAt(5.6)  = null  (in a gap between slides)
+[check] active slide swaps when the playhead crosses a slide boundary: OK
+[check] activeSlideAt returns null in a gap (no slide contains the time): OK
+  → the swap is a mount/unmount via SlideRenderer; BETWEEN-slide
+    transitions (crossfade/push) live in the ROOT index.html (RFC §5.1),
+    not in the stage. Cross-ref 🔗 BARE_TEMPLATE for the swapped content.
+
+============================================================
+SECTION E: real-time, NOT frame-accurate (the decoupling rationale)
+============================================================
+  RFC 0001 §8 — 'Real-time, not frame-accurate. That is the point of
+  decoupling: the preview is responsive for editing; the export is rigorous.'
+  RFC 0001 §11 — visual determinism is enforced at EXPORT, not in preview.
+
+  PREVIEW (real-time): stage seeks GSAP to the playhead per paint;
+  dt is variable (browser-paced) — frame indices repeat/skip:
+    playhead 0.000000s → seek(0.000000); nearest frame index 0
+    playhead 0.060000s → seek(0.060000); nearest frame index 1
+    playhead 0.090000s → seek(0.090000); nearest frame index 2
+    playhead 0.150000s → seek(0.150000); nearest frame index 4
+    playhead 0.166000s → seek(0.166000); nearest frame index 4
+
+  EXPORT (frame-accurate): npx hyperframes render steps frame index
+  0..N-1 at exactly 1/fps = 0.033333s each (RFC §10, §11):
+    frame[0] → render_at(0.000000)  (exact, no repeat/skip)
+    frame[1] → render_at(0.033333)  (exact, no repeat/skip)
+    frame[2] → render_at(0.066667)  (exact, no repeat/skip)
+    frame[3] → render_at(0.100000)  (exact, no repeat/skip)
+    frame[4] → render_at(0.133333)  (exact, no repeat/skip)
+[check] preview sample dt is NOT 1/fps (real-time, variable cadence): OK
+[check] export step IS exactly 1/fps (frame-accurate, deterministic): OK
+
+  → preview responsiveness and export rigor are DIFFERENT jobs;
+    decoupling them (§8) is what lets the editor stay fast without lying
+    about the final video (§10/§11). Cross-ref 🔗 PREVIEW_ENGINE / EXPORT_PIPELINE.
+
+============================================================
+SECTION F: why position:absolute;inset:0; on the host div
+============================================================
+  AGENTS.md 'Host div format' — the slide composition is mounted INTO this
+  div. Quoted rule: 'position:absolute;inset:0; is REQUIRED on the host div
+  — without it, sub-comp content collapses to zero size.'
+
+    <div data-composition-id="slide-0"
+         data-composition-src="compositions/slide-0.html"
+         data-start="0.5" data-duration="5.0"
+         class="clip" style="position:absolute;inset:0;z-index:100;"></div>
+
+[check] host div carries position:absolute;inset:0; (REQUIRED, non-negotiable): OK
+[check] host div references the composition (data-composition-src) + class="clip": OK
+  → inset:0 stretches the host to fill the scaled canvas; without it the
+    mounted <template> content has zero size and the stage shows nothing.
+    (HF sub-comp mounting context quirk — AGENTS.md 'Why NOT flex/absolute'.)
+    Cross-ref 🔗 BARE_TEMPLATE for the slide HTML mounted into this div.
+
+============================================================
+DONE
+============================================================

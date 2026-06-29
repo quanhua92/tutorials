@@ -6,13 +6,13 @@
 ## Phase 1 — Container Queries (4)
 
 - [x] 01 `container_basics` ⭐ **STYLE ANCHOR** — @container, container-type, why container queries
-- [ ] 02 `container_named` — Named containers (@container/sidebar), scoped queries
-- [ ] 03 `container_variants` — @sm:, @md:, @lg: variants, range queries (@max-md:)
-- [ ] 04 `container_patterns` — Component-driven responsive design patterns
+- [x] 02 `container_named` — Named containers (@container/sidebar), scoped queries
+- [x] 03 `container_variants` — @sm:, @md:, @lg: variants, range queries (@max-md:)
+- [x] 04 `container_patterns` — Component-driven responsive design patterns
 
 ## Phase 2 — The Variant Ecosystem (7)
 
-- [ ] 05 `group_peer` — group-*, peer-*: parent/sibling state-based styling
+- [x] 05 `group_peer` — group-*, peer-*: parent/sibling state-based styling
 - [ ] 06 `has_variant` — has-*, group-has-*, peer-has-* (:has() selector)
 - [ ] 07 `child_variants` — first:, last:, even:, odd:, only:, empty:, nth-
 - [ ] 08 `form_state` — required:, valid:, invalid:, autofill:, read-only:

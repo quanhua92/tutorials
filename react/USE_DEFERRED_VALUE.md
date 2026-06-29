@@ -119,13 +119,13 @@ sequenceDiagram
     R->>DV: urgent render — give me deferredQuery
     DV-->>R: "" (the OLD value)
     R->>DOM: paint input="Item 5", list still 300 (memo skips)
-    Note over R,BG: input is responsive; deferred work begins
+    Note over R,BG: input is responsive, deferred work begins
     R->>BG: schedule interruptible render with NEW value
     BG->>DV: deferred render — give me deferredQuery
     DV-->>BG: "Item 5" (the NEW value)
     BG->>BG: useMemo filters → 11 rows
     BG->>DOM: commit: list swaps to 11 items
-    Note over U,BG: if user types again, BG is abandoned & restarted with latest value
+    Note over U,BG: if user types again, BG is abandoned and restarted
 ```
 
 1. **Keystroke** → `setQuery` schedules an update.

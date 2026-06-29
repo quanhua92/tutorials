@@ -14,8 +14,8 @@
 
 ```mermaid
 graph LR
-    C["click handler calls<br/>navigateTo('detail')"] -->|document.<br/>startViewTransition(cb)| S["1. snapshot OLD DOM<br/>(browser screenshot)"]
-    S -->|cb() runs synchronously| R["2. React setState fires<br/>→ re-render commits NEW DOM"]
+    C["click handler calls<br/>navigateTo('detail')"] -->|"document.<br/>startViewTransition(cb)"| S["1. snapshot OLD DOM<br/>(browser screenshot)"]
+    S -->|"cb() runs synchronously"| R["2. React setState fires<br/>→ re-render commits NEW DOM"]
     R -->|updateCallbackDone resolves| X["3. crossfade<br/>OLD screenshot → NEW DOM"]
     X -->|finished resolves| P["paint complete<br/>pseudo-elements removed"]
     style S fill:#fef9e7,stroke:#f1c40f,stroke-width:2px

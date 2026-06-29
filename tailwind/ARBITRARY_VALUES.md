@@ -15,8 +15,8 @@ one CSS rule.
 
 ```mermaid
 flowchart LR
-  spec["design spec<br/>17rem wide, #1da1f2"] --> class["class=\"w-[17rem]<br/>bg-[#1da1f2]\""]
-  class --> jit["JIT compiler<br/>reads brackets"]
+  spec["design spec<br/>17rem wide, #1da1f2"] --> util["utility classes<br/>w-17rem  bg-#1da1f2"]
+  util --> jit["JIT compiler<br/>reads brackets"]
   jit --> css["width: 17rem<br/>background-color: #1da1f2"]
   css -.->|getComputedStyle| check["272px ✓"]
   style spec fill:#eaf2f8,stroke:#2980b9

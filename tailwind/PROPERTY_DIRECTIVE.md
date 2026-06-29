@@ -23,12 +23,12 @@
 ```mermaid
 graph TD
     subgraph "WITHOUT @property (unregistered)"
-        U1["--x: '0deg' (string)"] -->|@keyframes| U2["browser can't interpolate a string"]
+        U1["--x: '0deg' (string)"] -->|"@keyframes"| U2["browser can't interpolate a string"]
         U2 --> U3["animation type = DISCRETE<br/>value SNAPS at the 50% mark"]
     end
     subgraph "WITH @property (registered)"
         R1["@property --x {<br/>syntax:'<angle>'<br/>initial-value:0deg<br/>inherits:false}"] -->|registers| R2["browser knows --x is an angle"]
-        R2 -->|@keyframes| R3["animation type = by-computed-value<br/>SMOOTH interpolation 0deg → 360deg"]
+        R2 -->|"@keyframes"| R3["animation type = by-computed-value<br/>SMOOTH interpolation 0deg → 360deg"]
     end
     U3 -.broken animation.-> BROKEN["spinner appears frozen:<br/>0deg and 360deg look identical"]
     R3 -.working animation.-> WORKS["spinner rotates smoothly"]

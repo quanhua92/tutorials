@@ -128,14 +128,14 @@ disappears and only the confirmed state remains.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant F as &lt;form action={dispatchAction}&gt;
+    participant F as <form action={dispatchAction}>
     participant R as reducerAction (async)
     participant OS as useOptimistic
     participant React as React
 
     U->>F: submit
     F->>React: wrap in startTransition
-    React->>OS: addOptimistic(pred) — paint prediction
+    React->>OS: addOptimistic(pred) - paint prediction
     React->>R: reducerAction(prevState, formData)
     R-->>React: await fetch… (isPending = true)
     Note over F: useFormStatus().pending === true

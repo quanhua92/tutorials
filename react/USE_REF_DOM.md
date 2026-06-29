@@ -14,9 +14,9 @@
 
 ```mermaid
 graph LR
-    R["useRef(initialValue)<br/>returns { current: initialValue }"] -->|same object<br/>every render| P[".current persists<br/>across renders"]
+    R["useRef(initialValue)<br/>returns { current: initialValue }"] -->|"same object<br/>every render"| P[".current persists<br/>across renders"]
     P -->|write X| W["ref.current = X<br/>NO re-render scheduled"]
-    P -->|attach ref={myRef}| D["React assigns<br/>myRef.current = DOM node"]
+    P -->|"attach ref={myRef}"| D["React assigns<br/>myRef.current = DOM node"]
     D -->|after mount| CMD["myRef.current.focus()<br/>.offsetWidth .scrollIntoView()"]
     style R fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style W fill:#fdedec,stroke:#e74c3c

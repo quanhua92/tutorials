@@ -23,9 +23,9 @@
 graph LR
     CSS["app.css<br/>@import 'tailwindcss'<br/>@theme / @source / @utility"] --> SRC["source files<br/>.tsx .jsx .html .vue"]
     SRC --> TOOL{"build path<br/>(pick one)"}
-    TOOL -->|Vite plugin<br/>@tailwindcss/vite| VITE["vite.config.ts<br/>plugins:[tailwindcss()]<br/>→ fastest HMR"]
-    TOOL -->|PostCSS plugin<br/>@tailwindcss/postcss| PCSS["postcss.config.mjs<br/>Next.js / Angular / Rails"]
-    TOOL -->|CLI<br/>@tailwindcss/cli| CLI["npx ... -i app.css -o dist.css<br/>or standalone binary (no Node)"]
+    TOOL -->|"Vite plugin<br/>@tailwindcss/vite"| VITE["vite.config.ts<br/>plugins:[tailwindcss()]<br/>→ fastest HMR"]
+    TOOL -->|"PostCSS plugin<br/>@tailwindcss/postcss"| PCSS["postcss.config.mjs<br/>Next.js / Angular / Rails"]
+    TOOL -->|"CLI<br/>@tailwindcss/cli"| CLI["npx ... -i app.css -o dist.css<br/>or standalone binary (no Node)"]
     VITE --> LCSS["Lightning CSS engine<br/>(Rust): minify · prefixes<br/>nesting polyfill · @import inline"]
     PCSS --> LCSS
     CLI --> LCSS

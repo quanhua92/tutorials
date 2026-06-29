@@ -17,13 +17,13 @@ identically in flexbox and grid — it replaces v3's removed `space-x-*` /
 
 ```mermaid
 graph LR
-    S["--spacing: 0.25rem<br/>(the ONE variable)"] -->|calc(var * N)| M["multiplier N<br/>1, 2, 4, 6, 8, 13, …"]
+    S["--spacing: 0.25rem<br/>(the ONE variable)"] -.->|"calc(var * N)"| M["multiplier N<br/>1, 2, 4, 6, 8, 13, …"]
     M --> P["p-4 → padding: 16px"]
     M --> G["gap-6 → gap: 24px"]
     M --> W["w-8 → width: 32px"]
     M --> MG["m-12 → margin: 48px"]
-    S -.->|"override 0.3rem"| P
-    S -.->|"override 0.3rem"| G
+    S -->|"override 0.3rem"| P
+    S -->|"override 0.3rem"| G
     style S fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style M fill:#fef9e7,stroke:#f1c40f
 ```

@@ -17,11 +17,11 @@
 
 ```mermaid
 graph LR
-    U["user types<br/>keystroke"] -->|setInput(v)| URG["URGENT queue<br/>high priority"]
-    U -->|startTransition(() =><br/>setFilter(v))| TR["TRANSITION queue<br/>low priority, interruptible"]
+    U["user types<br/>keystroke"] -.->|"setInput(v)"| URG["URGENT queue<br/>high priority"]
+    U -->|"startTransition(() =><br/>setFilter(v))"| TR["TRANSITION queue<br/>low priority, interruptible"]
     URG -->|renders first| P1["paint input<br/>(typing feels instant)"]
     TR -->|renders when idle| P2["paint filtered list<br/>(catches up)"]
-    P1 -.->|new keystroke interrupts| TR
+    P1 -->|new keystroke interrupts| TR
     style URG fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style TR fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style P1 fill:#eaf2f8,stroke:#2980b9

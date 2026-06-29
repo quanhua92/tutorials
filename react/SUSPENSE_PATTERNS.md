@@ -16,10 +16,10 @@
 graph TD
     R["component renders"] -->|reads resource| RD["resource.read() / use(promise)"]
     RD -->|not ready| TH["THROWS the promise"]
-    TH -->|React catches| FB["nearest &lt;Suspense fallback&gt; renders"]
+    TH -->|React catches| FB["nearest <Suspense fallback> renders"]
     FB -->|meanwhile| P["promise resolves (data ready)"]
     P -->|React retries subtree| R2["component re-renders"]
-    R2 -->|read() returns| OK["real UI paints"]
+    R2 -->|"read() returns"| OK["real UI paints"]
     style TH fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style FB fill:#eaf2f8,stroke:#2980b9
     style OK fill:#eafaf1,stroke:#27ae60

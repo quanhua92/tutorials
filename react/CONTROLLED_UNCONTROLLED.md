@@ -110,24 +110,24 @@ the per-keystroke re-render is wasteful or impossible.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant DOM as <input>
+    participant DOM as input element
     participant R as React
-    participant S as state / ref
+    participant S as state/ref
 
-    Note over U,S: CONTROLLED — every keystroke is a round trip
-    U->>DOM: type "h"
+    Note over U,S: CONTROLLED: every keystroke is a round trip
+    U->>DOM: type h
     DOM->>R: onChange (synthetic)
-    R->>S: setText("h")
-    R->>DOM: re-render → value="H"
-    Note over R,S: React saw the keystroke; transform applied
+    R->>S: setText(h)
+    R->>DOM: re-render value=H (uppercase)
+    Note over R,S: React saw keystroke, transform applied
 
-    Note over U,S: UNCONTROLLED — keystrokes go nowhere near React
-    U->>DOM: type "h"
+    Note over U,S: UNCONTROLLED: keystrokes go nowhere near React
+    U->>DOM: type h
     Note over DOM: value silently updates in DOM
     Note over R,S: React was NOT notified
     U->>R: click submit
-    R->>S: read inputRef.current.value  (the live DOM value)
-    Note over R,S: React sees the value only now, at read time
+    R->>S: read inputRef.current.value
+    Note over R,S: React sees value only now, at read time
 ```
 
 | Aspect | Controlled | Uncontrolled |

@@ -20,7 +20,7 @@ flowchart LR
   M["color-mix(<br/>in oklch,<br/>var(--color-cyan-500) 40%,<br/>transparent)"]
   R["browser resolves<br/>→ rgb(...) / 0.4<br/>or oklch(... / 0.4)"]
   U -->|CDN / build compiles| M
-  T -.->|var() substituted| M
+  T -.->|"var() substituted"| M
   M -->|computed style| R
 
   style U fill:#eafaf1,stroke:#27ae60,stroke-width:2px

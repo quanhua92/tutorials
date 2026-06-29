@@ -14,9 +14,9 @@
 
 ```mermaid
 graph TD
-    A["app boots — main chunk only"] -->|user navigates to route| B["&lt;LazyRoute/&gt; renders"]
-    B -->|load() called ONCE| C["dynamic import('./route')"]
-    C -->|network: chunk streams| S["&lt;Suspense fallback&gt; paints (Loading…)"]
+    A["app boots - main chunk only"] -->|user navigates to route| B["<LazyRoute/> renders"]
+    B -->|"load() called ONCE"| C["dynamic import('./route')"]
+    C -->|"network: chunk streams"| S["<Suspense fallback> paints (Loading…)"]
     S -->|chunk resolves| R["React caches result, retries subtree"]
     R -->|"reads .default"| D["real route UI paints"]
     D -->|revisit later| CACHE["chunk already cached → instant, no fallback"]
@@ -120,9 +120,9 @@ in the demo is faked — the Suspense fallback → resolved transition is genuin
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant T as &lt;LazyRoute/&gt;
+    participant T as <LazyRoute/>
     participant L as React.lazy wrapper
-    participant S as &lt;Suspense&gt;
+    participant S as <Suspense>
     participant N as Bundler chunk (network)
     participant D as DOM
 

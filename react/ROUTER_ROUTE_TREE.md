@@ -94,7 +94,7 @@ routes compare their rank arrays position-by-position. When a prefix ties, a
 
 ```mermaid
 graph LR
-  subgraph same length — static wins
+  subgraph same length - static wins
     A1["/users/new<br/>rank [0,0]"] -->|tried first| M1{{"/users/new"}}
     A2["/users/$id<br/>rank [0,1]"] -->|fallback| M1
   end

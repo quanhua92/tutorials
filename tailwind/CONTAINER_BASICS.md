@@ -15,11 +15,11 @@
 ```mermaid
 graph LR
     subgraph "Media Query (viewport)"
-        VP["viewport: 1200px"] -->|md:grid-cols-2| MA["ALL cards get 2 cols<br/>even in a 300px sidebar"]
+        VP["viewport: 1200px"] -->|"md:grid-cols-2"| MA["ALL cards get 2 cols<br/>even in a 300px sidebar"]
     end
     subgraph "Container Query (component)"
-        CW["container: 300px"] -->|@md:grid-cols-1| CA["sidebar card: 1 col"]
-        CW2["container: 800px"] -->|@md:grid-cols-2| CA2["hero card: 2 cols"]
+        CW["container: 300px"] -->|"@md:grid-cols-1"| CA["sidebar card: 1 col"]
+        CW2["container: 800px"] -->|"@md:grid-cols-2"| CA2["hero card: 2 cols"]
     end
     style VP fill:#fef9e7,stroke:#f1c40f
     style CW fill:#eafaf1,stroke:#27ae60

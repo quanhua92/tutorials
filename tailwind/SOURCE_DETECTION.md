@@ -22,10 +22,10 @@
 graph LR
     BASE["@import tailwindcss<br/>(base path = cwd)"] --> AUTO{"auto-detect?<br/>default: yes"}
     AUTO -->|yes| CRAWL["crawl every file as PLAIN TEXT<br/>skip .gitignore / node_modules / binaries / CSS / lockfiles"]
-    AUTO -->|source(none)| ONLY["@source paths only<br/>(explicitly registered)"]
+    AUTO -->|"source(none)"| ONLY["@source paths only<br/>(explicitly registered)"]
     CRAWL --> SRC["@source add<br/>@source not exclude"]
     ONLY --> SRC
-    SRC --> TOK["extract candidate tokens<br/>(no AST — just class-like strings)"]
+    SRC --> TOK["extract candidate tokens<br/>(no AST - just class-like strings)"]
     TOK --> MAP{"token maps<br/>to a utility?"}
     MAP -->|yes| CSS["emit the CSS rule"]
     MAP -->|no| DROP["throw it away"]

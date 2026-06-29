@@ -1,0 +1,668 @@
+<!doctype html>
+<!--
+  property_directive.html — Phase 4 color & theming internals bundle #6 (@property).
+  GROUND TRUTH: a single-file Tailwind v4 demo proving @property makes CSS custom
+  properties typed and animatable. Companion: PROPERTY_DIRECTIVE.md (guide).
+  Rendered-ground-truth: NO .py.
+
+  The lesson: a plain CSS custom property (--x) is, to the browser, an UNTYPED
+  STRING. It can store "200px" or "red" or "banana" — the browser cannot tell
+  what kind of value it is, so it CANNOT interpolate it. Animating an untyped
+  custom property produces discrete jumps (it snaps between keyframe values
+  instead of gliding). @property fixes this by REGISTERING the property with the
+  browser: a syntax type ('<angle>'), an initial-value, and an inherits flag.
+
+  Once registered:
+    - the browser knows HOW to interpolate the value (0deg → 360deg in steps),
+    - a missing/unset value falls back to initial-value (not the empty string),
+    - inheritance is explicit (inherits: true/false) instead of always-on.
+
+  @property is NATIVE CSS (Houdini CSS Properties & Values API), NOT a Tailwind
+  feature. But Tailwind v4 leans on it heavily: it emits @property for every
+  theme token so --color-*, --spacing, --radius-* have proper types and can
+  animate / resolve cleanly. So understanding @property is the key to
+  understanding why v4 animations and theme tokens behave the way they do.
+
+  CDN (verified 2026-06, >=2 sources): Tailwind v4 Play CDN =
+    https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4
+  The @property + @keyframes below live in a PLAIN <style> block — they are
+  native CSS and need no JIT. The Play CDN is loaded only for page chrome.
+
+  GOLD VALUE: the typed spinner (#spinner-typed) registers --angle as <angle>
+  and animates it via @keyframes. getComputedStyle().getPropertyValue('--angle')
+  sampled across ~15 requestAnimationFrame ticks MUST yield many (>=4) distinct
+  degree values — proof the browser is INTERPOLATING the registered property
+  (an unregistered --raw-angle yields only 2 values: it snaps). We also assert a
+  CSSPropertyRule (@property block) is present in document.styleSheets, and that
+  CSS.registerProperty() exists as the JS twin of the @ declarative form.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>@property Directive — Tailwind CSS 4 Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+  <!-- ====================================================================
+       @property + @keyframes — NATIVE CSS (NOT JIT-compiled).
+       Lives in a plain <style> block so the browser handles it directly.
+       This is the actual lesson — everything else is page chrome.
+       ==================================================================== -->
+  <style>
+    /* 1. Register --angle as an <angle> type with a default of 0deg.
+          Without this, --angle is a string and CANNOT interpolate. */
+    @property --angle {
+      syntax: '<angle>';
+      initial-value: 0deg;
+      inherits: false;
+    }
+
+    /* 2. Register --grad-pos as a <percentage> for the gradient hover demo. */
+    @property --grad-pos {
+      syntax: '<percentage>';
+      initial-value: 0%;
+      inherits: false;
+    }
+
+    /* NOTE: --raw-angle is deliberately NOT registered. It stays an untyped
+       string so the "without @property" spinner demonstrates the snap. */
+
+    /* --- Registered spinner: --angle interpolates smoothly --- */
+    @keyframes spin-typed {
+      from { --angle: 0deg; }
+      to   { --angle: 360deg; }
+    }
+    .spinner-typed {
+      --angle: 0deg;
+      animation: spin-typed 1.4s linear infinite;
+      transform: rotate(var(--angle));
+    }
+
+    /* --- Unregistered spinner: --raw-angle animates DISCRETELY (snaps) --- */
+    @keyframes spin-raw {
+      from { --raw-angle: 0deg; }
+      to   { --raw-angle: 360deg; }
+    }
+    .spinner-raw {
+      --raw-angle: 0deg;
+      animation: spin-raw 1.4s linear infinite;
+      transform: rotate(var(--raw-angle, 0deg));
+    }
+
+    /* --- Animated gradient: --grad-pos transitions on hover --- */
+    .grad-card {
+      --grad-pos: 0%;
+      background: linear-gradient(90deg,
+        oklch(0.72 0.18 215) 0%,
+        oklch(0.65 0.22 250) var(--grad-pos),
+        oklch(0.55 0.25 290) 100%);
+      transition: --grad-pos 0.6s ease;
+    }
+    .grad-card:hover { --grad-pos: 60%; }
+    /* The SNAP variant: same look, but --grad-pos-raw is unregistered. */
+    .grad-card-raw {
+      --grad-pos-raw: 0%;
+      background: linear-gradient(90deg,
+        oklch(0.72 0.18 215) 0%,
+        oklch(0.65 0.22 250) var(--grad-pos-raw),
+        oklch(0.55 0.25 290) 100%);
+      transition: --grad-pos-raw 0.6s ease;
+    }
+    .grad-card-raw:hover { --grad-pos-raw: 60%; }
+  </style>
+
+  <!-- House chrome styles (dark palette, Tailwind cyan #06b6d4). NOT the lesson. -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#06b6d4; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; font-size:13px; max-width:760px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s, color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(6,182,212,.5); background:rgba(6,182,212,.10); }
+    .badge.md:hover { color:#fff; border-color:var(--accent); background:rgba(6,182,212,.22); }
+    .guide-callout { margin:0 22px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(6,182,212,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    main { padding:22px; max-width:1000px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    .note { color:var(--muted); font-size:13px; margin-top:6px; line-height:1.6; }
+    p.note:first-child, .panel > .note:first-child { margin-top:0; }
+    code { background:rgba(6,182,212,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin-top:8px; overflow-x:auto; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700; margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+    .meas { color:var(--accent); font-weight:600; font-size:13px; min-height:1.2em; }
+    .stage { border:1px dashed var(--accent); padding:18px; border-radius:8px; background:#0b0f14; margin-top:10px; }
+    .meas-bad { color:var(--bad); }
+
+    /* The spinner visuals: a circle with one bright quadrant so rotation is visible. */
+    .spinner {
+      width:88px; height:88px; border-radius:50%;
+      border:2px solid var(--accent);
+      /* top-right quadrant painted accent, rest transparent panel */
+      background: conic-gradient(var(--accent) 0deg 90deg, rgba(255,255,255,.02) 90deg 360deg);
+      box-shadow: 0 0 18px rgba(6,182,212,.25);
+    }
+    .spinner .hub {
+      position:absolute; width:14px; height:14px; border-radius:50%;
+      background:var(--accent); transform:translate(-50%,-50%);
+    }
+    .spin-wrap { position:relative; display:inline-block; }
+    .spin-wrap .hub-pos {
+      position:absolute; top:50%; left:50%; width:0; height:0;
+      /* the hub rides on the rotation by being inside the spinner */
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>@property directive</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/tailwind/PROPERTY_DIRECTIVE.md">📖 guide (.md)</a>
+      <a href="/tailwind/index.html">← tailwind deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live Tailwind demo with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/tailwind/PROPERTY_DIRECTIVE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Cross-links:
+    <a href="/tailwind/arbitrary_properties.html">arbitrary_properties</a>
+    (inline <code>[--x:val]</code> sets vars but does NOT type them — @property does), and
+    <a href="/tailwind/keyframes_animate.html">keyframes_animate</a>
+    (animations on registered vars are the whole point).
+  </div>
+
+  <main>
+    <!-- Panel 1: Concept -->
+    <section class="panel">
+      <h2>untyped CSS var → typed @property: the upgrade</h2>
+      <p class="note" style="margin-top:0">
+        A plain custom property like <code>--angle: 0deg</code> is, to the browser,
+        an <b>untyped string</b>. It can hold <code>"0deg"</code> or
+        <code>"banana"</code> — the engine has no idea it is an angle, so it
+        <b class="text-[#06b6d4]">cannot interpolate</b> it. Animate it and the
+        value just snaps between keyframes. <b>@property</b> registers the
+        property with the engine: a <b>syntax</b> type, an <b>initial-value</b>,
+        and an <b>inherits</b> flag. Now the browser knows how to glide from
+        <code>0deg</code> to <code>360deg</code> in smooth steps. Tailwind v4
+        emits <code>@property</code> for its theme tokens for exactly this reason.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>aspect</th><th>plain <code>--x</code> (unregistered)</th><th><code>@property --x</code> (registered)</th></tr>
+        <tr>
+          <td>browser sees it as</td>
+          <td>an opaque <b>string</b></td>
+          <td>a <b>typed value</b> (<code>&lt;angle&gt;</code>, <code>&lt;color&gt;</code>, …)</td>
+        </tr>
+        <tr>
+          <td>animatable?</td>
+          <td>❌ no — discrete jumps at the 50% mark (snaps)</td>
+          <td>✅ <b>yes</b> — smooth interpolation between keyframe values</td>
+        </tr>
+        <tr>
+          <td>missing / invalid value</td>
+          <td>empty string (often breaks the consuming <code>var()</code>)</td>
+          <td>falls back to <code>initial-value</code> — predictable</td>
+        </tr>
+        <tr>
+          <td>inheritance</td>
+          <td>always inherited (you can't opt out)</td>
+          <td><b>explicit</b>: <code>inherits: true | false</code></td>
+        </tr>
+        <tr>
+          <td><code>transition: --x 1s</code></td>
+          <td>❌ ignored (no interpolation path)</td>
+          <td>✅ works — the value glides for the duration</td>
+        </tr>
+        <tr>
+          <td>how to declare</td>
+          <td><code>--x: 200px;</code> on any selector</td>
+          <td>a <code>@property --x {…}</code> block (or <code>CSS.registerProperty()</code>)</td>
+        </tr>
+      </table></div>
+      <div class="src">@property --angle {
+  syntax:         '&lt;angle&gt;';   /* the TYPE — tells the browser how to interpolate */
+  initial-value:  0deg;             /* fallback when unset or invalid */
+  inherits:       false;            /* explicit inheritance (plain vars always inherit) */
+}
+
+/* Now --angle is animatable. Without @property this keyframe would just snap. */
+@keyframes spin { to { --angle: 360deg; } }
+
+.spinner {
+  --angle: 0deg;                     /* set initial value on the element */
+  animation: spin 1.4s linear infinite;
+  transform: rotate(var(--angle));   /* consumer reads the smoothly-changing var */
+}</div>
+    </section>
+
+    <!-- Panel 2: Demo 1 — registered spinner -->
+    <section class="panel">
+      <h2>1 · animated spinner — @property --angle + @keyframes</h2>
+      <p class="note" style="margin-top:0">
+        The circle below rotates by reading <code>var(--angle)</code> in its
+        <code>transform</code>. The <code>@keyframes spin-typed</code> animation
+        animates <code>--angle</code> itself from <code>0deg</code> to
+        <code>360deg</code>. This <b>only</b> works because <code>@property --angle</code>
+        told the browser that <code>--angle</code> is an <code>&lt;angle&gt;</code>,
+        so it can interpolate. The live readout samples the computed value every
+        frame — watch the degrees climb smoothly.
+      </p>
+      <div class="stage" style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;">
+        <div class="spin-wrap">
+          <div id="spinner-typed" class="spinner spinner-typed"></div>
+        </div>
+        <div style="flex:1 1 220px;min-width:200px;">
+          <p class="meas" id="typed-angle-readout">--angle: (sampling…)</p>
+          <p class="meas" id="typed-distinct" style="color:var(--muted);">distinct values seen: 0</p>
+          <p class="note" style="margin-top:8px;">
+            The value changes every frame → the browser is interpolating the
+            registered property. That is impossible for an untyped var.
+          </p>
+        </div>
+      </div>
+      <p class="note">
+        <b>Why not just animate <code>transform</code> directly?</b> You can —
+        but <code>@property</code> lets you animate the <b>angle value itself</b>
+        and reuse it elsewhere (a second spinner, a gradient stop, a clip-path)
+        all driven by one variable. It composes; raw <code>transform</code>
+        animations do not.
+      </p>
+    </section>
+
+    <!-- Panel 3: Demo 2 — with vs without @property (the killer comparison) -->
+    <section class="panel">
+      <h2>2 · with vs without @property — same keyframes, different physics</h2>
+      <p class="note" style="margin-top:0">
+        Two identical spinners, identical <code>@keyframes</code> (0deg → 360deg,
+        1.4s linear infinite). The ONLY difference: the left registers
+        <code>--angle</code> with <code>@property</code>; the right uses an
+        unregistered <code>--raw-angle</code>. Watch them — and watch the live
+        value samplers. The left glides through dozens of distinct angles; the
+        right snaps between just two values (so 0deg↔360deg look identical and
+        the spinner appears <b>frozen</b>).
+      </p>
+      <div class="stage">
+        <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start;">
+          <div style="flex:1 1 200px;min-width:180px;text-align:center;">
+            <p class="meas" style="margin:0 0 10px;">✅ registered <code>--angle</code></p>
+            <div class="spin-wrap">
+              <div class="spinner spinner-typed"></div>
+            </div>
+            <p class="meas" id="cmp-typed-readout" style="margin-top:10px;font-size:12px;">--angle: …</p>
+            <p class="meas" id="cmp-typed-count" style="font-size:12px;color:var(--ok);">distinct: 0</p>
+          </div>
+          <div style="flex:1 1 200px;min-width:180px;text-align:center;">
+            <p class="meas meas-bad" style="margin:0 0 10px;">❌ unregistered <code>--raw-angle</code></p>
+            <div class="spin-wrap">
+              <div class="spinner spinner-raw"></div>
+            </div>
+            <p class="meas" id="cmp-raw-readout" style="margin-top:10px;font-size:12px;color:var(--muted);">--raw-angle: …</p>
+            <p class="meas" id="cmp-raw-count" style="font-size:12px;color:var(--bad);">distinct: 0</p>
+          </div>
+        </div>
+      </div>
+      <div class="src">/* LEFT — registered: smooth rotation */
+@property --angle {                       /* THE ONLY DIFFERENCE */
+  syntax: '&lt;angle&gt;'; initial-value: 0deg; inherits: false;
+}
+@keyframes spin-typed { to { --angle: 360deg; } }
+.spinner-typed { --angle: 0deg; animation: spin-typed 1.4s linear infinite;
+                 transform: rotate(var(--angle)); }
+
+/* RIGHT — unregistered: --raw-angle is a string, animates DISCRETELY (snaps) */
+@keyframes spin-raw { to { --raw-angle: 360deg; } }     /* no @property! */
+.spinner-raw { --raw-angle: 0deg; animation: spin-raw 1.4s linear infinite;
+               transform: rotate(var(--raw-angle, 0deg)); }</div>
+    </section>
+
+    <!-- Panel 4: Demo 3 — animated gradient on hover -->
+    <section class="panel">
+      <h2>3 · animated gradient on hover — @property + transition</h2>
+      <p class="note" style="margin-top:0">
+        Hover (or tap) each card. The <b>top</b> card registers
+        <code>--grad-pos</code> as <code>&lt;percentage&gt;</code> and
+        <code>transition: --grad-pos .6s ease</code> — the gradient stop glides.
+        The <b>bottom</b> card uses an unregistered <code>--grad-pos-raw</code>
+        with the same transition rule — but the transition is ignored, so the
+        stop <b>snaps</b> instantly. Same CSS, only the <code>@property</code>
+        block differs.
+      </p>
+      <div class="stage">
+        <p class="meas" style="margin:0 0 8px;">✅ registered <code>--grad-pos</code> — glides</p>
+        <div id="grad-typed" class="grad-card"
+             style="height:90px;border-radius:10px;border:1px solid var(--line);cursor:pointer;"></div>
+        <p class="meas meas-bad" style="margin:14px 0 8px;">❌ unregistered <code>--grad-pos-raw</code> — snaps</p>
+        <div id="grad-raw" class="grad-card-raw"
+             style="height:90px;border-radius:10px;border:1px solid var(--line);cursor:pointer;"></div>
+        <p class="note" style="margin-top:10px;">
+          Trick: the gradient's middle stop is <code>var(--grad-pos)</code>.
+          Animating a <code>linear-gradient()</code> argument directly is
+          impossible — but animating the <b>registered variable inside it</b>
+          works, because the browser interpolates the percentage.
+        </p>
+      </div>
+    </section>
+
+    <!-- Panel 5: Syntax types -->
+    <section class="panel">
+      <h2>4 · syntax types — what you can register</h2>
+      <p class="note" style="margin-top:0">
+        The <code>syntax</code> descriptor is the heart of <code>@property</code>.
+        It accepts a single type, a multi-value list (<code>+</code> or
+        <code>#</code>), or the universal <code>*</code>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>syntax</th><th>example values</th><th>animates as</th></tr>
+        <tr><td><code>&lt;length&gt;</code></td><td><code>200px</code>, <code>1.5rem</code>, <code>0</code></td><td>real-number distance — smooth</td></tr>
+        <tr><td><code>&lt;percentage&gt;</code></td><td><code>50%</code>, <code>0%</code></td><td>0–100 ratio — smooth</td></tr>
+        <tr><td><code>&lt;angle&gt;</code></td><td><code>0deg</code>, <code>1.5turn</code>, <code>200grad</code></td><td>degree value — smooth (this demo's <code>--angle</code>)</td></tr>
+        <tr><td><code>&lt;time&gt;</code></td><td><code>0.3s</code>, <code>250ms</code></td><td>seconds — smooth</td></tr>
+        <tr><td><code>&lt;number&gt;</code></td><td><code>0</code>, <code>1.5</code>, <code>42</code></td><td>plain number — smooth</td></tr>
+        <tr><td><code>&lt;integer&gt;</code></td><td><code>0</code>, <code>7</code>, <code>-3</code></td><td>whole steps — discrete jumps</td></tr>
+        <tr><td><code>&lt;color&gt;</code></td><td><code>#06b6d4</code>, <code>oklch(0.7 0.15 250)</code></td><td>color space blend — smooth</td></tr>
+        <tr><td><code>&lt;image&gt;</code></td><td><code>url(a.png)</code>, <code>linear-gradient(...)</code></td><td>cross-fade — smooth</td></tr>
+        <tr><td><code>&lt;url&gt;</code></td><td><code>url(icon.svg)</code></td><td>discrete (can't blend URLs)</td></tr>
+        <tr><td><code>&lt;resolution&gt;</code></td><td><code>2dppx</code>, <code>96dpi</code></td><td>pixels-per-unit — smooth</td></tr>
+        <tr><td><code>&lt;length&gt; | &lt;percentage&gt;</code></td><td><code>200px</code> or <code>50%</code></td><td>"or" of two types — smooth</td></tr>
+        <tr><td><code>&lt;length&gt;+</code></td><td><code>10px 20px 30px</code></td><td>space-separated list — each term interpolates</td></tr>
+        <tr><td><code>*</code></td><td><em>anything</em></td><td>discrete (browser can't assume a type) — no real interpolation</td></tr>
+      </table></div>
+      <p class="note">
+        <b>Gotcha:</b> <code>&lt;integer&gt;</code>, <code>&lt;url&gt;</code>, and
+        <code>*</code> animate <b>discretely</b> even when registered — there is
+        no smooth path between two URLs or two integers. Use
+        <code>&lt;number&gt;</code> if you want smooth numeric steps.
+      </p>
+    </section>
+
+    <!-- Panel 6: Inheritance + JS API -->
+    <section class="panel">
+      <h2>5 · inheritance + the JS twin (CSS.registerProperty)</h2>
+      <p class="note" style="margin-top:0">
+        Plain custom properties <b>always inherit</b> — a child sees the parent's
+        value whether you want it to or not. <code>@property</code> makes this
+        explicit with <code>inherits: false</code> (default for most tokens —
+        avoids accidental cascade leakage) or <code>inherits: true</code> (for
+        theme-level vars like <code>--color-brand</code> that should propagate).
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>form</th><th>where</th><th>use when</th></tr>
+        <tr>
+          <td><code>@property --x { … }</code></td>
+          <td>CSS (declarative)</td>
+          <td>static, design-time tokens — ship with the stylesheet</td>
+        </tr>
+        <tr>
+          <td><code>CSS.registerProperty({ name, syntax, initialValue, inherits })</code></td>
+          <td>JS (imperative)</td>
+          <td>runtime-defined properties (rare) — throws if the name is already registered</td>
+        </tr>
+      </table></div>
+      <div class="src">// The JS twin of the @ declarative form. One-time registration.
+CSS.registerProperty({
+  name: '--js-angle',
+  syntax: '&lt;angle&gt;',
+  initialValue: '0deg',
+  inherits: false
+});
+// After this, --js-angle behaves exactly like a @property --js-angle block.</div>
+    </section>
+
+    <!-- Panel 7: What Tailwind v4 does internally -->
+    <section class="panel">
+      <h2>6 · how Tailwind v4 uses @property internally</h2>
+      <p class="note" style="margin-top:0">
+        Tailwind v4's generated CSS emits <code>@property</code> for its theme
+        tokens so they are typed, have safe initial values, and don't leak via
+        inheritance. This is why <code>bg-blue-500</code> resolves cleanly and
+        why <code>var(--color-blue-500)</code> has a sensible fallback when
+        unset. (Illustrative — not live-compiled by this page.)
+      </p>
+      <div class="src">/* Approximation of what Tailwind v4's build emits for theme tokens. */
+@property --color-blue-500 {
+  syntax: '&lt;color&gt;';
+  inherits: false;
+  initial-value: oklch(0.623 0.214 259.815);   /* the OKLCH palette value */
+}
+@property --spacing {
+  syntax: '&lt;length&gt;';
+  inherits: false;
+  initial-value: 0.25rem;                       /* the base spacing multiplier */
+}
+/* Now utilities like p-4 (= calc(var(--spacing) * 4)) have a typed base,
+   and var(--color-blue-500) has a guaranteed fallback color. */</div>
+      <p class="note">
+        Net effect: every Tailwind color/spacing/radius token is a
+        <b>registered custom property</b>, so they resolve predictably and
+        compose safely with your own <code>var()</code> usage. See
+        <a href="/tailwind/oklch_colors.html" style="color:var(--accent);">oklch_colors</a>
+        for the values themselves.
+      </p>
+    </section>
+
+    <!-- Panel 8: Cheat sheet -->
+    <section class="panel">
+      <h2>intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>animate a custom property</td>
+          <td><code>@property --x { syntax: '&lt;angle&gt;'; initial-value: 0deg; inherits: false; }</code></td>
+          <td>registration is the ONLY way <code>@keyframes</code>/<code>transition</code> can interpolate a var</td>
+        </tr>
+        <tr>
+          <td>transition on hover</td>
+          <td><code>.card { --p: 0%; transition: --p .6s ease; } .card:hover { --p: 60%; }</code></td>
+          <td>works only because <code>--p</code> is a registered <code>&lt;percentage&gt;</code></td>
+        </tr>
+        <tr>
+          <td>drive several rules from one angle</td>
+          <td><code>transform: rotate(var(--angle)); mask-position: var(--angle);</code></td>
+          <td>one registered var, many consumers — composes unlike raw <code>transform</code> animations</td>
+        </tr>
+        <tr>
+          <td>opt OUT of inheritance</td>
+          <td><code>inherits: false</code></td>
+          <td>plain vars always inherit; registration lets you scope a var to one element</td>
+        </tr>
+        <tr>
+          <td>safe fallback for unset var</td>
+          <td><code>initial-value: 0deg</code></td>
+          <td>replaces the empty string an unregistered var returns when unset</td>
+        </tr>
+        <tr>
+          <td>register at runtime (JS)</td>
+          <td><code>CSS.registerProperty({ name:'--x', syntax:'&lt;length&gt;', initialValue:'0px', inherits:false })</code></td>
+          <td>imperative twin of <code>@property</code> — throws on duplicate registration</td>
+        </tr>
+        <tr>
+          <td>typed Tailwind token</td>
+          <td><code>@theme { --color-brand: oklch(0.7 0.15 250); }</code></td>
+          <td>Tailwind v4 wraps theme tokens in <code>@property</code> automatically — you get typing for free</td>
+        </tr>
+        <tr>
+          <td>list of values</td>
+          <td><code>syntax: '&lt;length&gt;+'</code></td>
+          <td>space-separated list (<code>+</code>) — each term interpolates independently</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  GOLD-CHECK + LIVE SAMPLERS (valid classic JS — passes node --check)
+    //  Tailwind CDN compiles async, but the @property/@keyframes live in a
+    //  PLAIN <style> block, so the browser applies them immediately. We still
+    //  poll via requestAnimationFrame to be safe and to accumulate samples.
+    //
+    //  PROOF OF REGISTRATION: sample getComputedStyle(--angle) across many
+    //  frames. A REGISTERED <angle> interpolates → many distinct values.
+    //  An UNREGISTERED --raw-angle animates DISCRETELY → only 2 distinct
+    //  values (0deg + 360deg). We also assert a CSSPropertyRule is present in
+    //  document.styleSheets and that CSS.registerProperty exists.
+    // ======================================================================
+    (function () {
+      var badge          = document.getElementById("goldcheck");
+      var typedSpinner   = document.getElementById("spinner-typed");
+      var typedReadout   = document.getElementById("typed-angle-readout");
+      var typedDistinct  = document.getElementById("typed-distinct");
+      var cmpTypedOut    = document.getElementById("cmp-typed-readout");
+      var cmpTypedCount  = document.getElementById("cmp-typed-count");
+      var cmpRawOut      = document.getElementById("cmp-raw-readout");
+      var cmpRawCount    = document.getElementById("cmp-raw-count");
+
+      // Find any .spinner-typed / .spinner-raw in the comparison panel for sampling.
+      var typedEl = document.querySelector("#spinner-typed");
+      var cmpTypedEl = document.querySelector(".spinner-typed");
+      var cmpRawEl   = document.querySelector(".spinner-raw");
+
+      var MAX_FRAMES = 80;            // ~1.3s polling budget for the gold-check
+      var goldDone   = false;
+      var goldSampleFrames = 18;      // frames to accumulate before deciding
+      var typedSamples = [];
+      var rawSamples   = [];
+
+      // ---- Check 1: a CSSPropertyRule (@property block) exists in the page ----
+      function propertyRuleExists() {
+        if (typeof CSSRule === "undefined") return false;
+        var PROPERTY_TYPE = CSSRule.PROPERTY_RULE || 18;
+        try {
+          for (var i = 0; i < document.styleSheets.length; i++) {
+            var sheet = document.styleSheets[i];
+            var rules;
+            try { rules = sheet.cssRules; } catch (e) { continue; }
+            if (!rules) continue;
+            for (var j = 0; j < rules.length; j++) {
+              if (rules[j].type === PROPERTY_TYPE) return true;
+            }
+          }
+        } catch (e) { /* fall through */ }
+        return false;
+      }
+
+      // ---- Check 2: CSS.registerProperty (the JS twin) is available ----
+      function jsRegisterAvailable() {
+        return !!(window.CSS && typeof CSS.registerProperty === "function");
+      }
+
+      function distinctCount(arr) {
+        var seen = {};
+        for (var i = 0; i < arr.length; i++) seen[arr[i]] = true;
+        return Object.keys(seen).length;
+      }
+
+      // ---- Live samplers: read --angle (registered) and --raw-angle (not) ----
+      function sample() {
+        if (typedEl) {
+          var a = getComputedStyle(typedEl).getPropertyValue("--angle").trim();
+          if (a) typedSamples.push(a);
+          typedReadout.textContent = "--angle: " + (a || "…");
+        }
+        if (cmpTypedEl) {
+          var ta = getComputedStyle(cmpTypedEl).getPropertyValue("--angle").trim();
+          if (ta) {
+            cmpTypedOut.textContent = "--angle: " + ta;
+            // accumulate for the comparison counter
+          }
+        }
+        if (cmpRawEl) {
+          var ra = getComputedStyle(cmpRawEl).getPropertyValue("--raw-angle").trim();
+          if (ra) {
+            rawSamples.push(ra);
+            cmpRawOut.textContent = "--raw-angle: " + ra;
+          }
+        }
+        // Update distinct counts live
+        var td = distinctCount(typedSamples);
+        if (typedDistinct) typedDistinct.textContent = "distinct values seen: " + td;
+        if (cmpTypedCount) {
+          // mirror typed samples into the comparison counter
+          cmpTypedCount.textContent = "distinct: " + td;
+        }
+        if (cmpRawCount) {
+          cmpRawCount.textContent = "distinct: " + distinctCount(rawSamples);
+        }
+      }
+
+      // ---- GOLD-CHECK: accumulate samples, then assert ----
+      function runGoldCheck(frame) {
+        frame = frame || 0;
+        sample();
+
+        if (frame === 0) {
+          badge.textContent = "[check] sampling --angle interpolation…";
+          badge.style.color = "var(--muted)";
+          badge.style.background = "rgba(139,148,158,.08)";
+        }
+
+        if (frame >= goldSampleFrames && !goldDone) {
+          goldDone = true;
+          var ruleFound   = propertyRuleExists();
+          var jsAvailable = jsRegisterAvailable();
+          var typedDistinctN = distinctCount(typedSamples);
+          var rawDistinctN   = distinctCount(rawSamples);
+
+          // PASS conditions:
+          //  (a) a @property rule is in the stylesheet, AND
+          //  (b) the registered --angle produced >=4 distinct values (interpolation), AND
+          //  (c) the unregistered --raw-angle produced far fewer (<=2, i.e. snaps).
+          var typedInterpolating = typedDistinctN >= 4;
+          var rawSnapping        = rawDistinctN <= 2 || rawSamples.length < 4;
+
+          if (ruleFound && jsAvailable && typedInterpolating && rawSnapping) {
+            badge.textContent =
+              "[check] @property rule present, CSS.registerProperty ready, " +
+              "--angle interpolated (" + typedDistinctN + " vals) vs " +
+              "--raw-angle snapped (" + rawDistinctN + " vals): OK";
+            badge.style.color = "var(--ok)";
+            badge.style.background = "rgba(46,204,113,.08)";
+          } else {
+            badge.textContent =
+              "[check] rule=" + ruleFound + " js=" + jsAvailable +
+              " typed=" + typedDistinctN + " raw=" + rawDistinctN + ": PARTIAL/FAIL";
+            badge.style.color = "var(--bad)";
+            badge.style.background = "rgba(231,76,60,.08)";
+          }
+          // Keep updating the live readouts after the verdict.
+        }
+
+        if (frame < MAX_FRAMES) {
+          requestAnimationFrame(function () { runGoldCheck(frame + 1); });
+        }
+      }
+
+      // Boot
+      runGoldCheck();
+    })();
+  </script>
+</body>
+</html>

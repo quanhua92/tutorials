@@ -31,10 +31,10 @@
 
 - [x] 16 `oklch_colors` — oklch() color space, perceptual uniformity
 - [x] 17 `color_mix_opacity` — color-mix(), opacity modifiers (/40)
-- [ ] 18 `theme_inline` — @theme inline, cross-variable references
-- [ ] 19 `multi_theme` — Scoped themes, brand-per-route, data-theme switching
-- [ ] 20 `gradients_v4` — bg-linear-*, bg-radial-*, bg-conic-*, interpolation
-- [ ] 21 `property_directive` — @property for typed CSS custom properties
+- [x] 18 `theme_inline` — @theme inline, cross-variable references
+- [x] 19 `multi_theme` — Scoped themes, brand-per-route, data-theme switching
+- [x] 20 `gradients_v4` — bg-linear-*, bg-radial-*, bg-conic-*, interpolation
+- [x] 21 `property_directive` — @property for typed CSS custom properties
 
 ## Phase 5 — Modern CSS Layout (4)
 

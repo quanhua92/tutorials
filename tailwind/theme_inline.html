@@ -1,0 +1,531 @@
+<!doctype html>
+<!--
+  theme_inline.html — Phase 4 color & theming internals bundle (THEME INLINE).
+  GROUND TRUTH: a single-file Tailwind v4 demo proving @theme inline resolves
+  CSS variables at the element, not at :root. Companion: THEME_INLINE.md.
+  Rendered-ground-truth: NO .py.
+
+  The lesson: regular `@theme` emits CSS variables to :root and utilities
+  reference them via var(). The var() inside a theme value is RESOLVED ONCE at
+  :root computed-value time — so a token like `--color-x: var(--brand)` freezes
+  to whatever --brand is at :root. Change --brand on a child element and the
+  utility DOES NOT follow.
+
+  `@theme inline` fixes this: it does NOT emit the var() to :root. Instead it
+  INLINES the value into each generated utility. So `.bg-x` becomes
+  `background-color: var(--brand)` — the var() now resolves at the ELEMENT that
+  uses the utility, picking up whatever --brand is in scope there.
+
+  When to use which:
+    `@theme`        → static values (oklch colors, fixed spacing). Emitted to :root.
+    `@theme inline` → dynamic values that reference OTHER CSS vars (bridging
+                      external vars, JS-controlled theming, data-theme palettes).
+
+  CDN (verified 2026-06, >=2 sources): Tailwind v4 Play CDN =
+    https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4
+  The Play CDN JIT-compiles @theme and @theme inline from <style type="text/tailwindcss">.
+
+  GOLD VALUE: `--color-dynamic: var(--brand)` is defined with @theme inline,
+  applied as `bg-dynamic` to a swatch. A toggle changes `--brand` on the demo
+  container via JS. The gold-check asserts getComputedStyle().backgroundColor of
+  the `bg-dynamic` swatch CHANGES after the toggle — proving element-level
+  resolution. The sibling `bg-broken` swatch (defined with regular @theme) is
+  asserted NOT to change, proving the :root freeze.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>@theme inline — Tailwind CSS 4 Deep Dive</title>
+
+  <!-- Tailwind v4 Play CDN (verified 2026-06, jsDelivr @tailwindcss/browser@4) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+
+  <!--
+    @theme vs @theme inline — processed by the Play CDN JIT.
+
+    --brand is the EXTERNAL css var (the "bridge" target). It has a :root
+    default; the demo container overrides it. The two theme blocks show the
+    resolution difference:
+
+      @theme        { --color-broken:  var(--brand); }  → freezes at :root
+      @theme inline { --color-dynamic: var(--brand); }  → resolves at element
+  -->
+  <style type="text/tailwindcss">
+    /* External CSS var — default at :root. The demo container overrides this. */
+    :root { --brand: oklch(0.62 0.02 264); }   /* slate-ish gray default */
+
+    /* REGULAR @theme: emits `--color-broken: var(--brand)` to :root.
+       The var(--brand) is resolved ONCE at :root computed-value time, then
+       the result is inherited. Changing --brand on a descendant has NO effect
+       on .bg-broken — the inherited computed value is frozen. */
+    @theme {
+      --color-broken: var(--brand);
+    }
+
+    /* @theme inline: does NOT emit a new :root var. Instead it INLINES the
+       value into each utility. So .bg-dynamic compiles to
+       `background-color: var(--brand)` — and var(--brand) resolves at the
+       ELEMENT using the utility, picking up the descendant override. */
+    @theme inline {
+      --color-dynamic: var(--brand);
+    }
+
+    /* A static @theme token for contrast — normal, works fine (no var() ref). */
+    @theme {
+      --color-static: oklch(0.7 0.15 250);
+    }
+  </style>
+
+  <!-- House chrome styles (dark palette, Tailwind cyan #06b6d4). NOT the lesson. -->
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+      --accent:#06b6d4; --line:#30363d; --ok:#2ecc71; --bad:#e74c3c; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    header { padding:14px 22px; border-bottom:1px solid var(--line);
+      display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+    header h1 { font-size:16px; margin:0; color:var(--accent); }
+    header .links { margin-left:auto; font-size:13px; }
+    header a { color:var(--muted); text-decoration:none; margin-left:14px; }
+    header a:hover { color:var(--ink); }
+    .goldcheck { display:inline-block; padding:4px 10px; border-radius:5px;
+      font-weight:700; border:1px solid currentColor; font-size:13px; max-width:760px; }
+    .badge { display:inline-block; padding:3px 10px; border-radius:6px; font-size:12px;
+      font-weight:600; text-decoration:none; border:1px solid var(--line);
+      transition:border-color .15s, color .15s; }
+    .badge.md { color:var(--accent); border-color:rgba(6,182,212,.5); background:rgba(6,182,212,.10); }
+    .badge.md:hover { color:#fff; border-color:var(--accent); background:rgba(6,182,212,.22); }
+    .guide-callout { margin:0 22px 16px; padding:10px 14px; border-left:3px solid var(--accent);
+      background:rgba(6,182,212,.06); border-radius:0 6px 6px 0; font-size:13px;
+      color:var(--muted); line-height:1.6; }
+    .guide-callout a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .guide-callout a:hover { text-decoration:underline; }
+    main { padding:22px; max-width:1000px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:18px; margin-bottom:16px; }
+    h2 { font-size:14px; color:var(--accent); margin:0 0 10px; text-transform:uppercase; letter-spacing:.05em; }
+    .note { color:var(--muted); font-size:13px; margin-top:6px; line-height:1.6; }
+    p.note:first-child, .panel > .note:first-child { margin-top:0; }
+    code { background:rgba(6,182,212,.14); color:var(--accent); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+    .src { background:#010409; border:1px solid var(--line); border-radius:6px; padding:12px;
+      color:var(--ink); font-size:12.5px; white-space:pre-wrap; word-break:break-word; margin-top:8px; overflow-x:auto; }
+    table { border-collapse:collapse; font-size:13px; width:100%; margin-top:8px; }
+    td,th { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; }
+    .pillbtn { background:var(--accent); color:var(--bg); border:0; padding:6px 12px;
+      border-radius:6px; cursor:pointer; font:inherit; font-size:13px; font-weight:700; margin:8px 4px 0 0; }
+    .pillbtn.alt { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+    .pillbtn:hover { opacity:.85; }
+    .meas { color:var(--accent); font-weight:600; font-size:13px; min-height:1.2em; }
+    .stage { border:1px dashed var(--accent); padding:18px; border-radius:8px; background:#0b0f14; margin-top:10px; }
+    .swatch-card { border:1px solid var(--line); border-radius:8px; padding:12px; background:#010409; }
+    .swatch-box { height:84px; border-radius:6px; border:1px solid var(--line); margin-bottom:8px; }
+    .label-tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:4px;
+      font-weight:700; letter-spacing:.03em; }
+    .label-tag.broken  { color:var(--bad);  border:1px solid rgba(231,76,60,.5);  background:rgba(231,76,60,.10); }
+    .label-tag.dynamic { color:var(--ok);   border:1px solid rgba(46,204,113,.5);  background:rgba(46,204,113,.10); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>@theme inline</h1>
+    <span id="goldcheck" class="goldcheck">[check: …]</span>
+    <div class="links">
+      <a class="badge md" title="Full guide"
+         href="https://github.com/quanhua92/tutorials/blob/main/tailwind/THEME_INLINE.md">📖 guide (.md)</a>
+      <a href="/tailwind/index.html">← tailwind deep dive</a>
+    </div>
+  </header>
+
+  <div class="guide-callout">
+    📖 Pair this live Tailwind demo with the
+    <a href="https://github.com/quanhua92/tutorials/blob/main/tailwind/THEME_INLINE.md">companion guide (.md)</a>
+    — this page is the rendered ground truth.
+    ↗ Builds on
+    <a href="/tailwind/oklch_colors.html">oklch_colors</a>
+    (static @theme color tokens) and
+    <a href="/frontend/tailwind/tailwind_design_tokens.html">frontend/tailwind: design tokens</a>
+    (the @theme namespace) — @theme inline is the dynamic-resolution variant.
+  </div>
+
+  <main>
+    <!-- Panel 1: Concept -->
+    <section class="panel">
+      <h2>regular @theme → :root · @theme inline → element</h2>
+      <p class="note" style="margin-top:0">
+        A regular <code>@theme</code> block emits CSS variables to <code>:root</code>,
+        and utilities reference them with <code>var()</code>. The catch: if your
+        theme value <i>itself</i> contains a <code>var()</code> — like
+        <code>--color-x: var(--brand)</code> — that inner reference is resolved
+        <b class="text-[#06b6d4]">ONCE at :root computed-value time</b>, then the
+        result is inherited down the tree. Change <code>--brand</code> on a child
+        and the utility <b>does not follow</b>. <code>@theme inline</code> flips
+        this: it skips emitting the :root var and <b>inlines the value into each
+        utility</b>, so <code>var(--brand)</code> resolves at the element that
+        actually uses the class — picking up whatever <code>--brand</code> is in
+        scope there. Dynamic theming works.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>aspect</th><th><code>@theme</code></th><th><code>@theme inline</code></th></tr>
+        <tr>
+          <td>emits <code>--color-x</code> to <code>:root</code>?</td>
+          <td>✅ yes — utility is <code>background: var(--color-x)</code></td>
+          <td>❌ no — value is inlined into the utility directly</td>
+        </tr>
+        <tr>
+          <td>generated utility</td>
+          <td><code>.bg-x { background-color: var(--color-x) }</code></td>
+          <td><code>.bg-x { background-color: var(--brand) }</code> (value inlined)</td>
+        </tr>
+        <tr>
+          <td>where the inner <code>var()</code> resolves</td>
+          <td><b>at :root</b> (computed once, result inherited)</td>
+          <td><b>at the element</b> using the utility (live, per-scope)</td>
+        </tr>
+        <tr>
+          <td>best for</td>
+          <td>static values — oklch colors, fixed spacing, font stacks</td>
+          <td>values that reference OTHER css vars — dynamic themes, JS control</td>
+        </tr>
+        <tr>
+          <td>does descendant <code>--brand</code> override propagate?</td>
+          <td>❌ no — frozen to :root's value</td>
+          <td>✅ yes — utility reads the element's scope</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 2: Interactive demo -->
+    <section class="panel">
+      <h2>1 · toggle --brand on the container — watch which swatch moves</h2>
+      <p class="note" style="margin-top:0">
+        Both swatches below are inside the same demo container. The container's
+        <code>--brand</code> starts as the inherited <code>:root</code> default
+        (slate gray). Click <b>Set --brand = cyan</b> to override
+        <code>--brand</code> <i>on the container only</i>. The
+        <span class="label-tag dynamic">bg-dynamic</span> swatch follows
+        (resolves <code>var(--brand)</code> at the element). The
+        <span class="label-tag broken">bg-broken</span> swatch does
+        <b>not</b> — its value was frozen at <code>:root</code>.
+      </p>
+
+      <div style="margin-bottom:10px;">
+        <button class="pillbtn" id="btn-cyan">Set --brand = cyan</button>
+        <button class="pillbtn" id="btn-rose">Set --brand = rose</button>
+        <button class="pillbtn alt" id="btn-reset">Reset to :root default</button>
+      </div>
+
+      <!-- The demo container: --brand is overridden HERE (not on :root). -->
+      <div class="stage">
+        <div id="demo-container" style="padding:14px; border-radius:8px;">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+            <!-- bg-broken: regular @theme. var(--brand) resolved at :root. Frozen. -->
+            <div class="swatch-card">
+              <span class="label-tag broken">bg-broken · @theme</span>
+              <div id="swatch-broken" class="swatch-box bg-broken"></div>
+              <p class="note" style="margin:0;font-size:12px;">
+                compiled: <code>background: var(--color-broken)</code><br/>
+                <code>--color-broken</code> was resolved at :root → frozen.
+              </p>
+            </div>
+
+            <!-- bg-dynamic: @theme inline. var(--brand) inlined, resolves HERE. -->
+            <div class="swatch-card">
+              <span class="label-tag dynamic">bg-dynamic · @theme inline</span>
+              <div id="swatch-dynamic" class="swatch-box bg-dynamic"></div>
+              <p class="note" style="margin:0;font-size:12px;">
+                compiled: <code>background: var(--brand)</code><br/>
+                <code>var(--brand)</code> resolves at this element → live.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="meas" id="meas-status" style="margin-top:10px;">
+        --brand(container): — · bg-broken: — · bg-dynamic: —
+      </p>
+    </section>
+
+    <!-- Panel 3: Why :root resolution freezes -->
+    <section class="panel">
+      <h2>2 · why regular @theme freezes (the cascade mechanism)</h2>
+      <p class="note" style="margin-top:0">
+        CSS custom properties are inherited as <b>computed values</b>. When
+        <code>--color-broken: var(--brand)</code> is declared on
+        <code>:root</code>, the browser computes <code>--color-broken</code> by
+        substituting <code>var(--brand)</code> using the value of
+        <code>--brand</code> <b>at :root</b>. The substituted result is then
+        inherited. A descendant that overrides <code>--brand</code> is too late —
+        its inherited <code>--color-broken</code> is already the frozen
+        <code>:root</code>-resolved value.
+      </p>
+      <div class="src">/* regular @theme — :root emission */
+:root {
+  --brand: oklch(0.62 0.02 264);          /* default slate */
+  --color-broken: var(--brand);           /* ← resolved HERE at :root */
+}                                          /*   → --color-broken = slate, inherited */
+
+.demo-container { --brand: oklch(0.7 0.15 195); }  /* override on child */
+.bg-broken { background-color: var(--color-broken); }   /* still slate ❌ */
+
+/* ─────────────────────────────────────────────────── */
+
+/* @theme inline — value inlined, no :root var emitted */
+@theme inline {
+  --color-dynamic: var(--brand);          /* ← NOT resolved at :root */
+}                                          /*   the var() is inlined into utilities */
+
+.bg-dynamic { background-color: var(--brand); }  /* resolves at element → cyan ✅ */</div>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>step</th><th><code>@theme</code> (broken)</th><th><code>@theme inline</code> (dynamic)</th></tr>
+        <tr>
+          <td>1. define token</td>
+          <td><code>--color-broken: var(--brand)</code> → written to <code>:root</code></td>
+          <td>value <code>var(--brand)</code> marked for inlining; no :root var</td>
+        </tr>
+        <tr>
+          <td>2. compile utility</td>
+          <td><code>.bg-broken { bg: var(--color-broken) }</code></td>
+          <td><code>.bg-dynamic { bg: var(--brand) }</code> ← inlined</td>
+        </tr>
+        <tr>
+          <td>3. compute at :root</td>
+          <td><code>--color-broken</code> resolves <code>var(--brand)</code> → slate; inherited as slate</td>
+          <td>nothing to compute at :root — no var emitted</td>
+        </tr>
+        <tr>
+          <td>4. element uses utility</td>
+          <td>reads inherited (frozen) <code>--color-broken</code> → slate</td>
+          <td>reads <code>--brand</code> in its own scope → cyan</td>
+        </tr>
+        <tr>
+          <td>5. descendant overrides <code>--brand</code></td>
+          <td>❌ ignored — inherited value already settled</td>
+          <td>✅ honored — resolution is at the element</td>
+        </tr>
+      </table></div>
+    </section>
+
+    <!-- Panel 4: When to use which + chaining -->
+    <section class="panel">
+      <h2>3 · when to use which · css var chaining</h2>
+      <p class="note" style="margin-top:0">
+        Rule of thumb: if the value is a <b>literal</b> (oklch, hex, px, a font
+        stack), use <code>@theme</code>. If the value <b>references another css
+        variable</b> — especially one that changes per <code>data-theme</code>,
+        per component, or via JS — use <code>@theme inline</code>.
+      </p>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>scenario</th><th>use</th><th>why</th></tr>
+        <tr>
+          <td>brand color = literal oklch value</td>
+          <td><code>@theme</code></td>
+          <td>static — emit to :root, cache forever</td>
+        </tr>
+        <tr>
+          <td>brand color = <code>var(--user-brand)</code> set by JS at runtime</td>
+          <td><code>@theme inline</code></td>
+          <td>must resolve at element so JS updates are picked up</td>
+        </tr>
+        <tr>
+          <td><code>[data-theme="dark"]</code> swaps <code>--bg</code>, utilities follow</td>
+          <td><code>@theme inline</code></td>
+          <td>per-scope resolution — dark mode overrides cascade into utilities</td>
+        </tr>
+        <tr>
+          <td>spacing scale = fixed rem values</td>
+          <td><code>@theme</code></td>
+          <td>static — never changes</td>
+        </tr>
+        <tr>
+          <td>component-local <code>--accent</code> bridged into <code>bg-accent</code></td>
+          <td><code>@theme inline</code></td>
+          <td>each component sets its own <code>--accent</code>; utilities follow locally</td>
+        </tr>
+        <tr>
+          <td>aliasing one token to another (<code>--color-link: var(--color-brand)</code>)</td>
+          <td><code>@theme inline</code></td>
+          <td>so redefining <code>--color-brand</code> later propagates to <code>--color-link</code></td>
+        </tr>
+      </table></div>
+
+      <p class="note" style="margin-top:12px;"><b>CSS var chaining:</b> with
+        <code>@theme inline</code>, a chain like
+        <code>--color-link → var(--color-brand) → var(--brand)</code> resolves
+        link-by-link at the element, so the leaf (<code>--brand</code>) is live.
+        With regular <code>@theme</code>, the whole chain collapses at :root on
+        first compute — the leaf is baked in and later overrides are invisible.</p>
+      <div class="src">/* Chaining with @theme inline — leaf is live */
+:root      { --brand: oklch(0.7 0.15 250); }                 /* leaf */
+@theme inline {
+  --color-brand: var(--brand);            /* link 1 — inlined */
+  --color-link:  var(--color-brand);      /* link 2 — inlined (NOT --color-link) */
+}
+/* .text-link → color: var(--color-brand) → (element scope) → var(--brand) → live */
+
+[data-theme="night"] { --brand: oklch(0.4 0.12 250); }      /* leaf override */
+/* text-link inside [data-theme="night"] now reads the night brand automatically. */</div>
+    </section>
+
+    <!-- Panel 5: Cheat sheet -->
+    <section class="panel">
+      <h2>intent → pattern</h2>
+      <div style="overflow-x:auto;min-width:0"><table>
+        <tr><th>intent</th><th>pattern</th><th>why</th></tr>
+        <tr>
+          <td>static brand color (literal)</td>
+          <td><code>@theme { --color-brand: oklch(0.7 0.15 250); }</code></td>
+          <td>emitted to :root; <code>bg-brand</code> = <code>var(--color-brand)</code></td>
+        </tr>
+        <tr>
+          <td>bridge an external css var</td>
+          <td><code>@theme inline { --color-brand: var(--user-brand); }</code></td>
+          <td><code>bg-brand</code> inlines to <code>var(--user-brand)</code> — resolves at element</td>
+        </tr>
+        <tr>
+          <td>JS-controlled theme</td>
+          <td>JS sets <code>el.style.setProperty('--user-brand', cyan)</code></td>
+          <td>with @theme inline, <code>bg-brand</code> on descendants updates live</td>
+        </tr>
+        <tr>
+          <td>data-theme palettes</td>
+          <td><code>[data-theme="dark"] { --bg: #000 }</code> + <code>@theme inline { --color-bg: var(--bg) }</code></td>
+          <td>utilities follow whichever theme scope the element is in</td>
+        </tr>
+        <tr>
+          <td>alias one token to another</td>
+          <td><code>@theme inline { --color-link: var(--color-brand); }</code></td>
+          <td>keeps the alias live — editing the source token propagates</td>
+        </tr>
+        <tr>
+          <td>check resolution scope at runtime</td>
+          <td><code>getComputedStyle(el).backgroundColor</code></td>
+          <td>if it changes when you set <code>--brand</code> on a child → inline worked</td>
+        </tr>
+      </table></div>
+    </section>
+  </main>
+
+  <script>
+    // ======================================================================
+    //  GOLD-CHECK + TOGGLE LOGIC (valid classic JS — passes node --check).
+    //  Tailwind CDN compiles async — poll via requestAnimationFrame.
+    //
+    //  GOLD-CHECK recipe:
+    //    1. wait for .bg-dynamic to have a non-transparent bg (Tailwind compiled)
+    //    2. record bg-dynamic + bg-broken initial colors
+    //    3. set --brand on the demo container to a new value (simulates --external)
+    //    4. assert bg-dynamic CHANGED (inline works) and bg-broken did NOT (frozen)
+    // ======================================================================
+    (function () {
+      var container = document.getElementById("demo-container");
+      var dynSwatch = document.getElementById("swatch-dynamic");
+      var brkSwatch = document.getElementById("swatch-broken");
+      var badge     = document.getElementById("goldcheck");
+      var measStat  = document.getElementById("meas-status");
+      var MAX_FRAMES = 200;
+
+      var BRAND_CYAN   = "oklch(0.7 0.15 195)";   /* cyan-ish */
+      var BRAND_ROSE   = "oklch(0.65 0.22 15)";   /* rose-ish */
+      var BRAND_RESET  = "";                        /* remove inline → inherit :root */
+
+      function setBrand(val) {
+        if (val === "") {
+          container.style.removeProperty("--brand");
+        } else {
+          container.style.setProperty("--brand", val);
+        }
+      }
+
+      function readBg(el) {
+        return getComputedStyle(el).backgroundColor;
+      }
+
+      function readBrand() {
+        return getComputedStyle(container).getPropertyValue("--brand").trim() || "(inherited)";
+      }
+
+      function renderMeasured() {
+        measStat.textContent =
+          "--brand(container): " + readBrand() +
+          "  |  bg-broken: " + readBg(brkSwatch) +
+          "  |  bg-dynamic: " + readBg(dynSwatch);
+      }
+
+      // Gold-check: prove @theme inline resolves at the element.
+      function runGoldCheck(frame) {
+        frame = frame || 0;
+        var dynBg = readBg(dynSwatch);
+        var brkBg = readBg(brkSwatch);
+        renderMeasured();
+
+        // Step 1: wait until Tailwind has compiled bg-dynamic to a real color.
+        var compiled = dynBg && dynBg !== "rgba(0, 0, 0, 0)" && dynBg !== "transparent";
+        if (!compiled) {
+          if (frame === 0) {
+            badge.textContent = "[check] waiting for Tailwind CDN to compile bg-dynamic…";
+            badge.style.color = "var(--muted)";
+            badge.style.background = "rgba(139,148,158,.08)";
+          }
+          if (frame < MAX_FRAMES) {
+            requestAnimationFrame(function () { runGoldCheck(frame + 1); });
+          } else {
+            badge.textContent = "[check] bg-dynamic never compiled: FAIL";
+            badge.style.color = "var(--bad)";
+            badge.style.background = "rgba(231,76,60,.08)";
+          }
+          return;
+        }
+
+        // Step 2-4: set --brand on the container, assert bg-dynamic changes,
+        // bg-broken does NOT.
+        var dynBefore = dynBg;
+        var brkBefore = brkBg;
+        setBrand(BRAND_CYAN);
+        // give the style recalc a frame
+        requestAnimationFrame(function () {
+          var dynAfter = readBg(dynSwatch);
+          var brkAfter = readBg(brkSwatch);
+          renderMeasured();
+
+          var dynChanged = dynAfter !== dynBefore;
+          var brkFrozen  = brkAfter === brkBefore;
+
+          if (dynChanged && brkFrozen) {
+            badge.textContent =
+              "[check] --brand→cyan: bg-dynamic " + dynBefore + " → " + dynAfter +
+              " (live), bg-broken frozen " + brkBefore + ": OK";
+            badge.style.color = "var(--ok)";
+            badge.style.background = "rgba(46,204,113,.08)";
+          } else {
+            badge.textContent =
+              "[check] dynamic changed=" + dynChanged + " · broken frozen=" + brkFrozen + ": FAIL";
+            badge.style.color = "var(--bad)";
+            badge.style.background = "rgba(231,76,60,.08)";
+          }
+        });
+      }
+
+      // Toggle buttons
+      document.getElementById("btn-cyan").addEventListener("click", function () {
+        setBrand(BRAND_CYAN);
+        requestAnimationFrame(renderMeasured);
+      });
+      document.getElementById("btn-rose").addEventListener("click", function () {
+        setBrand(BRAND_ROSE);
+        requestAnimationFrame(renderMeasured);
+      });
+      document.getElementById("btn-reset").addEventListener("click", function () {
+        setBrand(BRAND_RESET);
+        requestAnimationFrame(renderMeasured);
+      });
+
+      // Boot
+      runGoldCheck();
+    })();
+  </script>
+</body>
+</html>

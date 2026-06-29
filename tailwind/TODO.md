@@ -17,13 +17,13 @@
 - [x] 07 `child_variants` — first:, last:, even:, odd:, only:, empty:, nth-
 - [x] 08 `form_state` — required:, valid:, invalid:, autofill:, read-only:
 - [x] 09 `a11y_variants` — motion-safe:, motion-reduce:, forced-colors:, contrast-more:
-- [ ] 10 `directional_media` — rtl:, ltr:, print:, open: (details/dialog)
-- [ ] 11 `data_attribute` — data-* variants, [data-state=open] patterns
+- [x] 10 `directional_media` — rtl:, ltr:, print:, open: (details/dialog)
+- [x] 11 `data_attribute` — data-* variants, [data-state=open] patterns
 
 ## Phase 3 — Arbitrary Values & Dynamic Utilities (4)
 
-- [ ] 12 `arbitrary_values` — [17rem], [color:var(--x)], bg-[url(...)]
-- [ ] 13 `arbitrary_variants` — [&:nth-child(3)]:, [@supports(...)]:, [data-state]:
+- [x] 12 `arbitrary_values` — [17rem], [color:var(--x)], bg-[url(...)]
+- [x] 13 `arbitrary_variants` — [&:nth-child(3)]:, [@supports(...)]:, [data-state]:
 - [ ] 14 `functional_utility` — @utility with --value(integer), --modifier(n)
 - [ ] 15 `arbitrary_properties` — [--scroll-offset:7px], [mask-type:luminance]
 

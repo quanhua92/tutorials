@@ -45,10 +45,10 @@
 
 ## Phase 6 — Animations & Motion (7)
 
-- [ ] 26 `keyframes_animate` — @keyframes + --animate-* namespace
-- [ ] 27 `transitions_timing` — transition-*, duration-*, ease-*, delay-*
-- [ ] 28 `transforms_3d` — rotate-*, scale-*, skew-*, translate-*, 3D, perspective
-- [ ] 29 `starting_style` — @starting-style for enter/exit transitions
+- [x] 26 `keyframes_animate` — @keyframes + --animate-* namespace
+- [x] 27 `transitions_timing` — transition-*, duration-*, ease-*, delay-*
+- [x] 28 `transforms_3d` — rotate-*, scale-*, skew-*, translate-*, 3D, perspective
+- [x] 29 `starting_style` — @starting-style for enter/exit transitions
 - [ ] 30 `filters_masks` — backdrop-blur-*, filter-*, mask-*, mix-blend-*
 - [ ] 31 `scroll_driven` — animation-timeline: scroll(), view()
 - [ ] 32 `view_transitions_tw` — View Transitions API + Tailwind patterns

@@ -13,10 +13,10 @@
 
 ```mermaid
 graph LR
-    OP["op: get(k) / put(k,v)"] -->|O(1) locate| HM["HashMap<br/>key -> node / val"]
-    HM -->|O(1) splice out| POS["policy structure<br/>DLL / freq bucket"]
-    POS -->|O(1) re-insert at MRU| POS
-    POS -.->|if full, O(1)| VICT["evict policy victim<br/>LRU tail / min_freq bucket"]
+    OP["op: get(k) / put(k,v)"] -->|"O(1) locate"| HM["HashMap<br/>key -> node / val"]
+    HM -->|"O(1) splice out"| POS["policy structure<br/>DLL / freq bucket"]
+    POS -->|"O(1) re-insert at MRU"| POS
+    POS -.->|"if full, O(1)"| VICT["evict policy victim<br/>LRU tail / min_freq bucket"]
     style HM fill:#0e2e29,stroke:#1abc9c,color:#e6edf3
     style POS fill:#1a1410,stroke:#e67e22,color:#e6edf3
     style VICT fill:#3a1414,stroke:#c0392b,color:#e6edf3
@@ -229,7 +229,7 @@ match: True
 
 ```mermaid
 graph LR
-    H["HEAD<br/>MRU side"] -.->|-> N1["k=1"] -| N2["k=2"] -.-> T["TAIL<br/>LRU side"]
+    H["HEAD<br/>MRU side"] -.-> N1["k=1"] --> N2["k=2"] -.-> T["TAIL<br/>LRU side"]
     GET["get(1)"] -->|"splice 1 to front"| H
     T -->|"on overflow: evict tail.prev"| DROP["drop LRU"]
     style H fill:#0e2e29,stroke:#1abc9c,color:#e6edf3

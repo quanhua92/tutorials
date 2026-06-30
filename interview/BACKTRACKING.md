@@ -197,15 +197,15 @@ def letter_combinations(digits):
 
 ```mermaid
 graph TD
-    R["first=0<br/>[1,2,3]"] -->|swap(0,0)| A1["first=1 [1,2,3]"]
-    R -->|swap(0,1)| A2["first=1 [2,1,3]"]
-    R -->|swap(0,2)| A3["first=1 [3,2,1]"]
-    A1 -->|swap(1,1)| B1["[1,2,3] ✓"]
-    A1 -->|swap(1,2)| B2["[1,3,2] ✓"]
-    A2 -->|swap(1,1)| B3["[2,1,3] ✓"]
-    A2 -->|swap(1,2)| B4["[2,3,1] ✓"]
-    A3 -->|swap(1,1)| B5["[3,2,1] ✓"]
-    A3 -->|swap(1,2)| B6["[3,1,2] ✓"]
+    R["first=0<br/>[1,2,3]"] -->|"swap(0,0)"| A1["first=1 [1,2,3]"]
+    R -->|"swap(0,1)"| A2["first=1 [2,1,3]"]
+    R -->|"swap(0,2)"| A3["first=1 [3,2,1]"]
+    A1 -->|"swap(1,1)"| B1["[1,2,3] ✓"]
+    A1 -->|"swap(1,2)"| B2["[1,3,2] ✓"]
+    A2 -->|"swap(1,1)"| B3["[2,1,3] ✓"]
+    A2 -->|"swap(1,2)"| B4["[2,3,1] ✓"]
+    A3 -->|"swap(1,1)"| B5["[3,2,1] ✓"]
+    A3 -->|"swap(1,2)"| B6["[3,1,2] ✓"]
     style R fill:#161b22,stroke:#30363d,color:#e6edf3
     style A1 fill:#0e2e29,stroke:#1abc9c,color:#48d1b0
     style A2 fill:#0e2e29,stroke:#1abc9c,color:#48d1b0

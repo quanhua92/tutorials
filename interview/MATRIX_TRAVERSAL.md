@@ -210,7 +210,7 @@ graph TD
 
 ```mermaid
 graph LR
-    ORIG["1 2 3<br/>4 5 6<br/>7 8 9"] -->|transpose<br/>(i,j)↔(j,i), i<j| TR["1 4 7<br/>2 5 8<br/>3 6 9"]
+    ORIG["1 2 3<br/>4 5 6<br/>7 8 9"] -->|"transpose<br/>(i,j)↔(j,i), i<j"| TR["1 4 7<br/>2 5 8<br/>3 6 9"]
     TR -->|reverse each row| ROT["7 4 1<br/>8 5 2<br/>9 6 3"]
     style ORIG fill:#0e2e29,stroke:#1abc9c,color:#48d1b0
     style TR fill:#3a2f12,stroke:#f1c40f,color:#f1c40f

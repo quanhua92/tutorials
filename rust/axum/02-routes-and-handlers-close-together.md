@@ -106,16 +106,16 @@ Each station knows exactly what it does, has all its tools nearby, and can opera
 
 ```mermaid
 graph TB
-    A[HTTP Request] --> B{Main Router}
-    B --> C[root() Module]
-    B --> D[get_foo() Module]
-    B --> E[post_foo() Module]
+    A["HTTP Request"] --> B{"Main Router"}
+    B --> C["root() Module"]
+    B --> D["get_foo() Module"]
+    B --> E["post_foo() Module"]
     
-    C --> C1[Handler: "Hello, World!"]
-    D --> D1[Handler: "Hi from GET /foo"]
-    E --> E1[Handler: "Hi from POST /foo"]
+    C --> C1["Handler: &quot;Hello, World!&quot;"]
+    D --> D1["Handler: &quot;Hi from GET /foo&quot;"]
+    E --> E1["Handler: &quot;Hi from POST /foo&quot;"]
     
-    C1 --> F[Response]
+    C1 --> F["Response"]
     D1 --> F
     E1 --> F
 ```

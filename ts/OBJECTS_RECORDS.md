@@ -177,7 +177,7 @@ is gone and reads as `undefined`, exactly like a key that was never there.
 ```mermaid
 graph LR
     L["const o = { b:1, a:2, 2:3, 1:4 }<br/>written order: b, a, 2, 1"] --> K["Object.keys(o)"]
-    K --> R['["1","2","b","a"]<br/>integer keys FIRST (ascending),<br/>then strings (insertion)']
+    K --> R["[&quot;1&quot;,&quot;2&quot;,&quot;b&quot;,&quot;a&quot;]<br/>integer keys FIRST (ascending),<br/>then strings (insertion)"]
     style R fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```
 

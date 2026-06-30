@@ -22,7 +22,7 @@ flowchart LR
     SH -->|'a' -> shard 0| TR[(Trie Store<br/>in-memory, top-K/node)]
     SH -.->|cache hit| RC[(Redis<br/>top-K per prefix)]
     RC --> AS
-    TR -->|O(L) prefix walk| AS
+    TR -->|"O(L) prefix walk"| AS
     OV[(Trending Overlay<br/>Kafka recent counter)] --> AS
     PS[(Personalization<br/>user history)] --> AS
     AS -->|merge + rank| U

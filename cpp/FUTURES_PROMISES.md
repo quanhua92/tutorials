@@ -33,8 +33,8 @@ ends plus the **shared state** that joins them.
 
 ```mermaid
 graph LR
-    P["std::promise<T><br/>(WRITE side)"] -->|get_future()<br/>once, at setup| PAIR["shared state<br/>(the rendezvous:<br/>holds value OR exception<br/>+ ready flag)"]
-    PAIR -->|get() / wait()<br/>blocks until ready| F["std::future<T><br/>(READ side)"]
+    P["std::promise<T><br/>(WRITE side)"] -->|"get_future()<br/>once, at setup"| PAIR["shared state<br/>(the rendezvous:<br/>holds value OR exception<br/>+ ready flag)"]
+    PAIR -->|"get() / wait()<br/>blocks until ready"| F["std::future<T><br/>(READ side)"]
     P -->|"set_value(x) / set_exception(e)<br/>(make ready)"| PAIR
     style P fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style PAIR fill:#fef9e7,stroke:#f1c40f,stroke-width:3px

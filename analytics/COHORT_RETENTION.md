@@ -31,7 +31,7 @@ probability a user is still active N days after signup. Its complement `1 &#8722
 graph LR
     A["events table<br/>(login, action, $)"] --> B["anchor CTE<br/>MIN(ts) per user"]
     B --> C["activity flags<br/>days_since_anchor"]
-    C --> D["retention flags<br/>MAX(CASE WHEN off=N ...)"
+    C --> D["retention flags<br/>MAX(CASE WHEN off=N ...)"]
     D --> E["cohort aggregation<br/>AVG(flag) per cohort"]
     E --> F["retention heatmap<br/>(cohort &#215; horizon)"]
     F --> G["curve + fit + churn"]

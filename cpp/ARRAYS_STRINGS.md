@@ -328,9 +328,9 @@ borrow — ⟷ Rust's `&str`. That is its strength (cheap to pass) and its trap:
 
 ```mermaid
 graph TD
-    L["\"literal\"<br/>(string literal)"] -->|"static storage<br/>(whole program)"| SV1["sv1<br/>SAFE: literal outlives everything"]
+    L["&quot;literal&quot;<br/>(string literal)"] -->|"static storage<br/>(whole program)"| SV1["sv1<br/>SAFE: literal outlives everything"]
     S["std::string s<br/>(owns heap buffer)"] -->|"borrows buffer"| SV2["sv2<br/>SAFE while s lives & isn't resized"]
-    T["std::string(\"temp\")<br/>(TEMPORARY)"] -->|"borrows buffer"| SVB["string_view<br/>DANGLING at the ';'"]
+    T["std::string(&quot;temp&quot;)<br/>(TEMPORARY)"] -->|"borrows buffer"| SVB["string_view<br/>DANGLING at the ';'"]
     SVB -.->|"reading it is<br/>UNDEFINED BEHAVIOR"| X["✗ use-after-free"]
     style SV1 fill:#eafaf1,stroke:#27ae60
     style SV2 fill:#eafaf1,stroke:#27ae60

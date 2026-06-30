@@ -199,8 +199,8 @@ instead of letting an unbounded buffer eat memory:
 ```mermaid
 graph LR
     P["PRODUCER<br/>push(v)"] -->|buffer < capacity| B["BUFFER<br/>[a, b]"]
-    P -->|buffer FULL -> AWAITS<br/>(backpressure)| W["pushWaiters"]
-    B -->|next()| C["CONSUMER<br/>drains head"]
+    P -->|"buffer FULL -> AWAITS<br/>(backpressure)"| W["pushWaiters"]
+    B -->|"next()"| C["CONSUMER<br/>drains head"]
     C -->|frees a slot| R["resume pushWaiter<br/>(producer unblocks)"]
     W -.->|slot freed| R
     style P fill:#fef9e7,stroke:#f1c40f

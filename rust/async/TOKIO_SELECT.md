@@ -348,15 +348,15 @@ sequenceDiagram
     S->>W: poll (if !work_done)
     S->>C: poll
     alt work Ready && not done
-        S-->>L: run work handler; work_done = true
+        S-->>L: run work handler, work_done = true
     else Some(v) from channel
-        S-->>L: push v; drop loser branch (cancel)
+        S-->>L: push v, drop loser branch (cancel)
     else recv() == None (all disabled)
-        S-->>L: else => break; loop ENDS
+        S-->>L: else => break, loop ENDS
     else nothing Ready
-        S-->>S: return Pending; await (NO else)
+        S-->>S: return Pending, await (NO else)
     end
-    L->>S: (unless break) re-enter; re-evaluate preconditions
+    L->>S: (unless break) re-enter, re-evaluate preconditions
 ```
 
 🔗 [TOKIO_CHANNELS](./TOKIO_CHANNELS.md) — `mpsc`/`oneshot`/`broadcast`/`watch`

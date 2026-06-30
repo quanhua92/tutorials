@@ -32,7 +32,7 @@ graph TD
     OWN -- "& (shared, read-only)" --> A1["r1 : &i32"]
     OWN -- "& (many allowed)" --> A2["r2 : &i32"]
     OWN -- "& (many allowed)" --> A3["r3 : &i32"]
-    OWN -.->|&mut (EXCLUSIVE<br/>only ONE, no others)| M["rm : &mut i32"]
+    OWN -.->|"&mut (EXCLUSIVE<br/>only ONE, no others)"| M["rm : &mut i32"]
     style OWN fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style M fill:#fadbd8,stroke:#c0392b,stroke-width:2px
 ```
@@ -140,12 +140,12 @@ compile error; the compiler now tracks actual use.
 sequenceDiagram
     participant Code
     Note over Code: let mut s = "nll";
-    Code->>s: let r1 = &s;   (immutable borrow #1 starts)
-    Code->>s: let r2 = &s;   (immutable borrow #2 starts)
-    Code->>s: println r1, r2;  ◄── LAST USE: r1, r2 now DEAD
+    Code->>s: let r1 = &s   (immutable borrow #1 starts)
+    Code->>s: let r2 = &s   (immutable borrow #2 starts)
+    Code->>s: println r1, r2  ◄── LAST USE: r1, r2 now DEAD
     Note over Code: NLL ends the immutable borrows here.
-    Code->>s: let r3 = &mut s;  (legal: no overlap with the dead & borrows)
-    Code->>s: r3.push_str(...); (mutate)
+    Code->>s: let r3 = &mut s  (legal: no overlap with the dead & borrows)
+    Code->>s: r3.push_str(...) (mutate)
 ```
 
 > From `borrowing.rs` Section D:

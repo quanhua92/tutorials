@@ -113,10 +113,10 @@ detect).
 ```mermaid
 graph LR
     A1["a1 P0<br/>[1,0,0]"] --> A2["a2 P0 send<br/>[2,0,0]"]
-    A2 -->|msg [2,0,0]| B1["b1 P1 recv<br/>[2,1,0]"]
+    A2 -->|"msg [2,0,0]"| B1["b1 P1 recv<br/>[2,1,0]"]
     B1 --> B2["b2 P1<br/>[2,2,0]"]
     B2 --> B3["b3 P1 send<br/>[2,3,0]"]
-    B3 -->|msg [2,3,0]| C3["c3 P2 recv<br/>[2,3,3]"]
+    B3 -->|"msg [2,3,0]"| C3["c3 P2 recv<br/>[2,3,3]"]
     C1["c1 P2<br/>[0,0,1]"] --> C2["c2 P2<br/>[0,0,2]"]
     C2 --> C3
     style A2 fill:#eaf2f8,stroke:#2980b9

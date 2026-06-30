@@ -55,7 +55,7 @@ graph TD
     Send --> Resp["Response<br/>(status + headers + body)"]
     Resp -->|".status()"| St["StatusCode"]
     Resp -->|".error_for_status()"| Efs["Ok(Response) on 2xx<br/>Err on 4xx/5xx"]
-    Resp -->|".json::<T>().await" / .text()| Body["decoded T"]
+    Resp -->|"&quot;.json::<T>().await&quot; / .text()"| Body["decoded T"]
     style C fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style Send fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style Resp fill:#eaf2f8,stroke:#2980b9,stroke-width:2px

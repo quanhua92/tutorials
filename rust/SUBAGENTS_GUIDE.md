@@ -12,7 +12,7 @@
 
 ```mermaid
 graph TD
-    ME["YOU (orchestrator)<br/>briefs, manifests, launch, verify — NEVER edit bundles"] -->|add [[bin]] + one prompt each| A1["worker: bundle A"]
+    ME["YOU (orchestrator)<br/>briefs, manifests, launch, verify — NEVER edit bundles"] -->|"add [[bin]] + one prompt each"| A1["worker: bundle A"]
     ME --> A2["worker: bundle B"]
     ME --> A3["worker: bundle C ..."]
     ME --> GUIDE["SUBAGENTS_GUIDE.md<br/>(THIS file)"]

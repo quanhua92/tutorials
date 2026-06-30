@@ -33,7 +33,7 @@ chart, the five paradigms, and one `[check]`-verified worked example per paradig
 ```mermaid
 flowchart LR
     Q["interview problem"] --> S["Which access pattern?"]
-    S -->|O(1) lookup| HT["hash table"]
+    S -->|"O(1) lookup"| HT["hash table"]
     S -->|ordered / range| BST["balanced BST"]
     S -->|min/max repeatedly| HP["heap"]
     Q --> P["Which structure?"]

@@ -255,12 +255,12 @@ follower, and counts a majority to commit).
 flowchart LR
   subgraph Chain["chain — serialized, O(N) latency"]
     direction LR
-    CH["head"] --> C1[""] --> C2[""] --> CT["tail"]
+    CH["head"] --> C1[" "] --> C2[" "] --> CT["tail"]
   end
   subgraph Raft["raft — parallel, O(1) latency, O(N) leader work"]
-    RL["leader"] --> R1[""]
-    RL --> R2[""]
-    RL --> R3[""]
+    RL["leader"] --> R1[" "]
+    RL --> R2[" "]
+    RL --> R3[" "]
   end
   style CH fill:#10241a,stroke:#27ae60,color:#7ee29a
   style CT fill:#1c2a3a,stroke:#2980b9,color:#aed6f1

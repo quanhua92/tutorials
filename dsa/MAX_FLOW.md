@@ -290,10 +290,14 @@ sum equals the max flow. This is the **max-flow min-cut theorem**
 ```mermaid
 graph LR
     subgraph A ["A = S-side  {s, v1, v2, v4}"]
-      S(("s")) V1["v1"] V2["v2"] V4["v4"]
+      S(("s"))
+      V1["v1"]
+      V2["v2"]
+      V4["v4"]
     end
     subgraph B ["B = T-side  {v3, t}"]
-      V3["v3"] T(("t"))
+      V3["v3"]
+      T(("t"))
     end
     S --> V1 & V2
     V2 --> V4

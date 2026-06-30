@@ -130,10 +130,10 @@ Two expert details in that snippet:
 
 ```mermaid
 graph TD
-    Q{"typeof Bun?"} -->|"!== undefined"| B["return \"bun\""]
+    Q{"typeof Bun?"} -->|"!== undefined"| B["return &quot;bun&quot;"]
     Q -->|"undefined"| Q2{"typeof Deno?"}
-    Q2 -->|"!== undefined"| D["return \"deno\""]
-    Q2 -->|"undefined"| N["return \"node\"<br/>(process.versions.node is the signal)"]
+    Q2 -->|"!== undefined"| D["return &quot;deno&quot;"]
+    Q2 -->|"undefined"| N["return &quot;node&quot;<br/>(process.versions.node is the signal)"]
     style N fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
 ```
 

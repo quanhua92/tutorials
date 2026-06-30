@@ -134,7 +134,7 @@ To *modify* parsed input, convert: `crow::json::wvalue wval (rval);`. The constr
 ```mermaid
 graph LR
     W["wire body<br/>{&quot;a&quot;:1,&quot;b&quot;:2}"] -->|crow::json::load| RV["rvalue (immutable)<br/>x[&quot;a&quot;].i()"]
-    RV -->|wvalue w(rval);<br/>deep copy| WV["wvalue (mutable)<br/>w[&quot;c&quot;]=3"]
+    RV -->|"wvalue w(rval);<br/>deep copy"| WV["wvalue (mutable)<br/>w[&quot;c&quot;]=3"]
     WV -->|return from handler| OUT["200 OK<br/>Content-Type: application/json<br/>{...}"]
     IL["initializer list<br/>{ {k,v}, ... }"] --> WV
     L["wvalue::list({...})"] --> WV

@@ -315,9 +315,9 @@ sequenceDiagram
     Note over C,L: Wait() atomically: unlock L, suspend, re-lock L on wake
     C->>M: consumerReady (parked in Wait)
     M->>L: Lock()
-    M->>C: enqueue 11,22,33; cond.Signal(); Unlock()
-    C->>L: (re-locked by Wait) re-check: len>0 -> exit loop
-    C->>C: consume; defer Unlock()
+    M->>C: enqueue 11,22,33, cond.Signal(), Unlock()
+    C->>L: (re-locked by Wait) re-check: len>0, exit loop
+    C->>C: consume, defer Unlock()
 ```
 
 `sync.Cond` is a condition variable: a goroutine that finds its condition false

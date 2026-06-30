@@ -187,8 +187,8 @@ leaves**, multiplying by each node's local Jacobian (the chain rule). For
 
 ```mermaid
 graph RL
-    z["z<br/>grad seed = 1"] -->|d(sum)/dy = 1| y
-    y -->|d(x²+3)/dx = 2x| x["x.grad = 2x"]
+    z["z<br/>grad seed = 1"] -->|"d(sum)/dy = 1"| y
+    y -->|"d(x²+3)/dx = 2x"| x["x.grad = 2x"]
     style z fill:#eaf2f8,stroke:#2980b9
     style x fill:#eafaf1,stroke:#27ae60,stroke-width:3px
 ```

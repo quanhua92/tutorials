@@ -61,8 +61,8 @@ graph TD
 
 ```mermaid
 graph LR
-    I["interface value i<br/>(type, value) pair"] -->|assert i.(T)<br/>or switch i.(type)| RT["RUNTIME<br/>inspect dynamic type"]
-    X["typed value x"] -->|convert T(x)| CT["COMPILE-TIME<br/>change representation"]
+    I["interface value i<br/>(type, value) pair"] -->|"assert i.(T)<br/>or switch i.(type)"| RT["RUNTIME<br/>inspect dynamic type"]
+    X["typed value x"] -->|"convert T(x)"| CT["COMPILE-TIME<br/>change representation"]
     RT -->|match| V1["value as T"]
     RT -->|miss, 1-form| P["panic:<br/>interface conversion: ..."]
     RT -->|miss, 2-form| Z["(zero, false)"]

@@ -20,8 +20,8 @@ graph TD
     URL -->|pathname segment| PATH["$postId path param<br/>read with useParams()<br/>typed by route tree"]
     URL -->|query string| QS["?page=2&sort=desc<br/>raw text (user-facing)"]
     QS -->|JSON-first parse| JSON["page=2 → 2 (number)<br/>sort=desc → 'desc' (string)"]
-    JSON -->|validateSearch schema<br/>(Zod / standard-schema)| SCH["parse + validate + default"]
-    SCH -->|useSearch()| TYPED["typed, validated object<br/>{ page: number, sort: 'asc'|'desc' }"]
+    JSON -->|"validateSearch schema<br/>(Zod / standard-schema)"| SCH["parse + validate + default"]
+    SCH -->|"useSearch()"| TYPED["typed, validated object<br/>{ page: number, sort: 'asc'|'desc' }"]
     style PATH fill:#eaf2f8,stroke:#6366f1,stroke-width:3px
     style TYPED fill:#eafaf1,stroke:#2ecc71,stroke-width:3px
     style SCH fill:#fef9e7,stroke:#f1c40f

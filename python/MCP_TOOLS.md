@@ -471,12 +471,12 @@ schema. They differ in **where the function runs**:
 ```mermaid
 graph TB
     subgraph LC["LangChain @tool (in-process)"]
-        LFn["def add(a,b)->int"] -->|@tool| LTool["StructuredTool (Runnable)"]
+        LFn["def add(a,b)->int"] -->|"@tool"| LTool["StructuredTool (Runnable)"]
         LTool -->|bind_tools| LAgent["agent in SAME process"]
         LAgent -->|".invoke({a,b})"| LFn
     end
     subgraph MCP_S["MCP @mcp.tool (wire protocol)"]
-        MFn["def add(a,b)->int"] -->|@mcp.tool| MSrv["FunctionTool (server)"]
+        MFn["def add(a,b)->int"] -->|"@mcp.tool"| MSrv["FunctionTool (server)"]
         MSrv -->|"tools/list (JSON-RPC)"| MHost["host / client (maybe remote)"]
         MHost -->|"tools/call {a,b}"| MSrv
         MSrv -->|runs server-side| MFn

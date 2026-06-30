@@ -35,7 +35,7 @@ graph LR
     Tpl["ChatPromptTemplate<br/>input_variables = ['topic']"] -->|".invoke({'topic':'cats'})"| CPV["ChatPromptValue<br/>(typed message list)"]
     CPV -->|".to_messages()"| ML["[SystemMessage, HumanMessage(...'cats'...)]"]
     ML --> Model["chat model<br/>(real or FakeMessagesListChatModel)"]
-    Tpl -.->"|.partial(role='teacher')|" Tpl2["new template<br/>input_variables = ['topic']"]
+    Tpl -.->|".partial(role='teacher')"| Tpl2["new template<br/>input_variables = ['topic']"]
     style Tpl fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style CPV fill:#fef9e7,stroke:#f1c40f
     style ML fill:#eaf2f8,stroke:#2980b9

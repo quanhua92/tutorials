@@ -15,7 +15,7 @@
 ```mermaid
 sequenceDiagram
     participant U as user
-    participant L as &lt;Link preload="intent"&gt;
+    participant L as Link preload="intent"
     participant R as router
     participant D as route loader
     U->>L: hover (intent)

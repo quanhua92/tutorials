@@ -257,7 +257,7 @@ sequenceDiagram
   participant DB as version chain
   participant T2 as T501
   T1->>DB: t1 SELECT (snapshot S1, xmax=501) → v1, balance=100
-  T2->>DB: t3 UPDATE balance=200 → write v2(501), stamp v1.xmax=501; COMMIT
+  T2->>DB: t3 UPDATE balance=200 → write v2(501), stamp v1.xmax=501, COMMIT
   Note over DB: chain now: v2(501,0) live, v1(100,501) dead
   T1->>DB: t4 SELECT (FRESH snapshot S2, xmax=502) → v2, balance=200
   Note over T1: NON-REPEATABLE READ (100 → 200)

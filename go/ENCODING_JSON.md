@@ -142,10 +142,10 @@ literal too, and it is why re-running this bundle is byte-identical.
 graph LR
     F["struct field"] --> T{"json tag?"}
     T -->|"none"| N["use Go field name"]
-    T -->|"\"name\""| R["rename key"]
-    T -->|"\",omitempty\""| O["drop if zero value"]
-    T -->|"\"-\""| S["ALWAYS skip"]
-    T -->|"\",string\""| ST["number -> quoted string"]
+    T -->|"&quot;name&quot;"| R["rename key"]
+    T -->|"&quot;,omitempty&quot;"| O["drop if zero value"]
+    T -->|"&quot;-&quot;"| S["ALWAYS skip"]
+    T -->|"&quot;,string&quot;"| ST["number -> quoted string"]
     style S fill:#fadbd8,stroke:#e74c3c
     style O fill:#fef9e7,stroke:#f1c40f
     style ST fill:#eaf2f8,stroke:#2980b9
@@ -313,10 +313,10 @@ if you `Encode` into a buffer and then compare to a `Marshal` literal, the extra
 
 ```mermaid
 graph TD
-    J["JSON: {\"type\":\"rgb\",\"data\":{...}}"] --> U1["Unmarshal envelope<br/>(type + raw bytes)"]
+    J["JSON: {&quot;type&quot;:&quot;rgb&quot;,&quot;data&quot;:{...}}"] --> U1["Unmarshal envelope<br/>(type + raw bytes)"]
     U1 --> T{"envelope.Type?"}
-    T -->|"\"rgb\""| D1["Unmarshal Data into RGB"]
-    T -->|"\"reading\""| D2["Unmarshal Data into Reading"]
+    T -->|"&quot;rgb&quot;"| D1["Unmarshal Data into RGB"]
+    T -->|"&quot;reading&quot;"| D2["Unmarshal Data into Reading"]
     RM["json.RawMessage = []byte<br/>captures bytes, defers the parse"] -.-> T
     style RM fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```

@@ -35,7 +35,7 @@ while the primitive `str` "is usually seen in its borrowed form, `&str`"
 
 ```mermaid
 graph TD
-    Lit["\"hello\" literal<br/>baked into the read-only binary"]
+    Lit["&quot;hello&quot; literal<br/>baked into the read-only binary"]
     Lit -->|type &'static str| Str["&str = {ptr, len}<br/>a BORROWED view (fat pointer)"]
     Owned["String = {ptr, len, capacity}<br/>owns a heap buffer"]
     Owned -->|"push / push_str / +"| Grow["buffer GROWS on the heap"]

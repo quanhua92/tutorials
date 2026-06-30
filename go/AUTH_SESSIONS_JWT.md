@@ -228,8 +228,8 @@ segment keeps both header and payload decodable, so the failure is cleanly
 graph TD
     A["attacker forges<br/>header alg=none,<br/>empty signature"] --> PARSE["jwt.Parse(token, keyfunc)"]
     PARSE --> KF["keyfunc receives token:<br/>is Method a *SigningMethodHMAC?"]
-    KF -->|"NO (none / RS256)" --> ERR["return error -> Parse fails"]
-    KF -->|"YES (HS256)" --> KEY["return HMAC key -> verify signature"]
+    KF -->|"NO (none / RS256)"| ERR["return error -> Parse fails"]
+    KF -->|"YES (HS256)"| KEY["return HMAC key -> verify signature"]
     ERR --> REJ["REJECTED (token not valid)"]
     KEY --> OK["validated if signature matches"]
     style ERR fill:#eafaf1,stroke:#27ae60,stroke-width:3px

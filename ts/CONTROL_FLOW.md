@@ -87,7 +87,7 @@ graph TD
     Q1 -->|"numeric index"| C["for (let i=0; i&lt;n; i++)"]
     Q1 -->|"pre-check bool"| WH["while (cond)"]
     Q1 -->|"post-check, ≥1 run"| DW["do { } while (cond)"]
-    OF --> TRAP["TRAP: for...in over an array yields<br/>STRING keys \"0\",\"1\",\"2\" AND any extra props"]
+    OF --> TRAP["TRAP: for...in over an array yields<br/>STRING keys &quot;0&quot;,&quot;1&quot;,&quot;2&quot; AND any extra props"]
     style OF fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style TRAP fill:#fadbd8,stroke:#e74c3c,stroke-width:3px
     style KEYS fill:#eafaf1,stroke:#27ae60
@@ -99,9 +99,10 @@ single question: **what counts as "missing"?**
 ```mermaid
 graph TD
     X["a OP default"] --> Q{"which operator?"}
-    Q -->|"??"| NC["nullish: RHS only if a is null or undefined<br/>0 ?? 99 = 0   (0 PRESERVED)<br/>\"\" ?? 99 = \"\"   (empty string PRESERVED)"]
-    Q -->|"||"| LO["logical OR: RHS if a is ANY falsy<br/>0 || 99 = 99   (0 DROPPED — the trap)<br/>\"\" || 99 = 99   (empty string DROPPED)"]
-    Q -->"?."| OC["optional chaining: short-circuit to undefined<br/>if the LHS is null/undefined (no throw)<br/>obj?.prop   obj?.method()   fn?.()"]
+    Q -->|"??"| NC["nullish: RHS only if a is null or undefined<br/>0 ?? 99 = 0   (0 PRESERVED)<br/>&quot;&quot; ?? 99 = &quot;&quot;   (empty string PRESERVED)"]
+    Q -->|"||"| LO["logical OR: RHS if a is ANY falsy<br/>0 || 99 = 99   (0 DROPPED — the trap)<br/>&quot;&quot; || 99 = 99   (empty string DROPPED)"]
+    Q -->|"?."| OC["optional chaining: short-circuit to undefined<br/>if the LHS is null/undefined (no throw)<br/>obj?.prop   obj?.method()   fn?.()"]
+
     style NC fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style LO fill:#fadbd8,stroke:#e74c3c,stroke-width:3px
     style OC fill:#eaf2f8,stroke:#2980b9

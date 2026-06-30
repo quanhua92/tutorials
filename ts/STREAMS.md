@@ -46,7 +46,7 @@ graph LR
     Q -->|"reader.read() / for await"| SINK["underlying sink<br/>write(chunk) -> Promise"]
     SINK -.->|"backpressure:<br/>desiredSize <= 0<br/>→ slow the producer"| SRC
     style Q fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
-    style SINK-.->SRC stroke:#e74c3c,stroke-width:2px
+    linkStyle 2 stroke:#e74c3c,stroke-width:2px
     style SRC fill:#eaf2f8,stroke:#2980b9
     style SINK fill:#eafaf1,stroke:#27ae60
 ```

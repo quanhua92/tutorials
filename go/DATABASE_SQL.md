@@ -33,9 +33,9 @@ query code changes** — only the driver name and the connection string.
 
 ```mermaid
 graph TD
-    APP["your code<br/>import \"database/sql\""] -->|"sql.Open(\"sqlite\", \":memory:\")<br/>sql.Query / Exec / Prepare"| DB["*sql.DB<br/>the CONNECTION POOL"]
+    APP["your code<br/>import &quot;database/sql&quot;"] -->|"sql.Open(&quot;sqlite&quot;, &quot;:memory:&quot;)<br/>sql.Query / Exec / Prepare"| DB["*sql.DB<br/>the CONNECTION POOL"]
     DB -->|"hands work to a<br/>registered driver"| REG["sql.Drivers()<br/>name -> driver.Driver"]
-    REG --> DRV["glebarez/go-sqlite<br/>pure-Go SQLite<br/>sql.Register(\"sqlite\", ...)"]
+    REG --> DRV["glebarez/go-sqlite<br/>pure-Go SQLite<br/>sql.Register(&quot;sqlite&quot;, ...)"]
     style DB fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style REG fill:#fef9e7,stroke:#f1c40f
     style DRV fill:#eaf2f8,stroke:#2980b9
@@ -72,7 +72,7 @@ three knobs.
 
 ```mermaid
 graph TD
-    OPEN["sql.Open(\"sqlite\", \":memory:\")<br/>does NOT connect yet"] --> DB["*sql.DB<br/>(the POOL)"]
+    OPEN["sql.Open(&quot;sqlite&quot;, &quot;:memory:&quot;)<br/>does NOT connect yet"] --> DB["*sql.DB<br/>(the POOL)"]
     DB -->|"SetMaxOpenConns(n)<br/>cap concurrent connections"| MX["max open"]
     DB -->|"SetMaxIdleConns(n)<br/>cap idle keep-alive"| ID["idle list"]
     DB -->|"SetConnMaxLifetime(d)<br/>recycle stale conns"| LT["max age"]
@@ -237,10 +237,10 @@ Always `Scan`.
 
 ```mermaid
 graph TD
-    P["db.Prepare(\"INSERT ... VALUES (?, ?)\")"] --> ST["*sql.Stmt<br/>(parsed once, reusable)"]
-    ST -->|"stmt.Exec(\"Dave\", \"d@x\")"| E1["bind params -> exec"]
-    ST -->|"stmt.Exec(\"Eve\", \"e@x\")"| E2["bind params -> exec"]
-    ST -->|"stmt.Exec(\"Frank\", \"f@x\")"| E3["bind params -> exec"]
+    P["db.Prepare(&quot;INSERT ... VALUES (?, ?)&quot;)"] --> ST["*sql.Stmt<br/>(parsed once, reusable)"]
+    ST -->|"stmt.Exec(&quot;Dave&quot;, &quot;d@x&quot;)"| E1["bind params -> exec"]
+    ST -->|"stmt.Exec(&quot;Eve&quot;, &quot;e@x&quot;)"| E2["bind params -> exec"]
+    ST -->|"stmt.Exec(&quot;Frank&quot;, &quot;f@x&quot;)"| E3["bind params -> exec"]
     ST -.->|"defer stmt.Close()"| DONE["release"]
     style ST fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```

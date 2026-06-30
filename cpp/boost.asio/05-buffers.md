@@ -131,7 +131,7 @@ This is auto-enabled under MSVC's iterator debugging or GCC's `_GLIBCXX_DEBUG`, 
 
 ```mermaid
 graph LR
-    S[std::string msg<br/>owns the bytes] -->|asio::buffer(msg)<br/>non-owning view| B[mutable_buffer<br/>ptr + size]
+    S[std::string msg<br/>owns the bytes] -->|"asio::buffer(msg)<br/>non-owning view"| B[mutable_buffer<br/>ptr + size]
     B -->|async_write socket, B, h| K[(kernel send buffer)]
     K -->|bytes drain out over time| Net[Network]
     S -.->|destroyed before h fires<br/>= UB| X[💥 use-after-free]

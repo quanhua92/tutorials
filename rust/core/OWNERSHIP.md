@@ -38,7 +38,7 @@ graph TD
     Copy --> BothValid["both x and y valid<br/>(cheap bitwise copy)"]
     Owner -->|"} end of scope"| Drop["Drop::drop runs ONCE<br/>(deterministic, RAII)"]
     Move --> Shallow["shallow: only the handle copies<br/>{ptr,len,cap} = O(1)"]
-    Poisoned -->|.clone() alternative| Clone["deep copy: both usable"]
+    Poisoned -->|".clone() alternative"| Clone["deep copy: both usable"]
     style Owner fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style Move fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     style Drop fill:#eaf2f8,stroke:#2980b9,stroke-width:2px

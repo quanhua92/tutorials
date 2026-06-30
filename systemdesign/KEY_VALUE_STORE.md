@@ -34,9 +34,9 @@ graph LR
     classDef store fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     classDef mem fill:#fef9e7,stroke:#f1c40f,stroke-width:2px
     classDef log fill:#fdecea,stroke:#c0392b,stroke-width:2px
-    class WAL,log
-    class MEM,mem
-    class L0,L1,L2,store
+    class WAL log
+    class MEM mem
+    class L0,L1,L2 store
 ```
 
 ```mermaid
@@ -54,9 +54,9 @@ graph LR
     classDef hit fill:#eafaf1,stroke:#27ae60
     classDef miss fill:#fdecea,stroke:#c0392b
     classDef io fill:#fef9e7,stroke:#f1c40f
-    class HIT1,HIT2,hit
-    class DEL,MISS,miss
-    class DR,io
+    class HIT1,HIT2 hit
+    class DEL,MISS miss
+    class DR io
 ```
 
 > **One-line definition:** An **LSM-tree KV store** turns every write into a
@@ -128,9 +128,9 @@ graph TB
     FL --> CP["5. background compaction"]
     CP --> LV["L1, L2, ... (10x larger each)"]
     classDef hot fill:#eafaf1,stroke:#27ae60,stroke-width:2px
-    class W1,W2,W3,hot
+    class W1,W2,W3 hot
     classDef cool fill:#eaf2f8,stroke:#2980b9
-    class FL,CP,LV,cool
+    class FL,CP,LV cool
 ```
 
 ### Read path (GET)
@@ -147,9 +147,9 @@ graph LR
     classDef hit fill:#eafaf1,stroke:#27ae60
     classDef io fill:#fef9e7,stroke:#f1c40f
     classDef miss fill:#fdecea,stroke:#c0392b
-    class DONE,hit
-    class L0,L1,LN,io
-    class MISS,miss
+    class DONE hit
+    class L0,L1,LN io
+    class MISS miss
 ```
 
 ### Key Components
@@ -285,7 +285,7 @@ graph LR
     AE["periodic anti-entropy:<br/>Merkle root compare"] --> A
     AE --> C
     classDef fix fill:#eafaf1,stroke:#27ae60
-    class RR,C,fix
+    class RR,C fix
 ```
 
 ---

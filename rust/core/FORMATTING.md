@@ -35,9 +35,9 @@ or hand-write `impl Display`.
 ```mermaid
 graph TD
     Lit["format string literal<br/>(parsed at COMPILE time)"]
-    Lit -->|each {} | Spec["format spec<br/>[[fill]align][sign][#][0][width][.prec][type]"]
+    Lit -->|"each {} "| Spec["format spec<br/>[[fill]align][sign][#][0][width][.prec][type]"]
     Spec -->|type field selects| Trait{"which trait?"}
-    Trait -->|nothing / {}| Disp["Display  → user-facing"]
+    Trait -->|"nothing / {}"| Disp["Display  → user-facing"]
     Trait -->|?| Dbg["Debug    → dev-facing (derive)"]
     Trait -->|x / X / o / b| Radix["LowerHex/UpperHex/Octal/Binary"]
     Trait -->|e / E| Exp["LowerExp/UpperExp"]

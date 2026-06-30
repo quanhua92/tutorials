@@ -241,9 +241,9 @@ natural reading order, every run.
 
 ```mermaid
 graph TD
-    P["pattern: (\\d+)-(\\d+)"] --> M0["group 0 = FULL match<br/>\"2024-06\""]
-    P --> M1["group 1 = 1st paren (\\d+)<br/>\"2024\""]
-    P --> M2["group 2 = 2nd paren (\\d+)<br/>\"06\""]
+    P["pattern: (\\d+)-(\\d+)"] --> M0["group 0 = FULL match<br/>&quot;2024-06&quot;"]
+    P --> M1["group 1 = 1st paren (\\d+)<br/>&quot;2024&quot;"]
+    P --> M2["group 2 = 2nd paren (\\d+)<br/>&quot;06&quot;"]
     P --> N["(?P<name>...) rides the<br/>SAME index; look up via SubexpIndex"]
     style M0 fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style M1 fill:#eaf2f8,stroke:#2980b9

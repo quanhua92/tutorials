@@ -101,7 +101,7 @@ graph BT
 graph LR
     SRC["source range<br/>(a vector, or iota = ∞)"] -->|views::filter p| F[".filter_view<br/>stores p + a REFERENCE<br/>runs NOTHING"]
     F -->|views::transform f| T[".transform_view<br/>stores f + a reference<br/>runs NOTHING"]
-    T -->|"for (x : v)"<br/>the only thing that pulls| LOOP["the consumer loop<br/>calls ++ / * on demand"]
+    T -->|"&quot;for (x : v)&quot;<br/>the only thing that pulls"| LOOP["the consumer loop<br/>calls ++ / * on demand"]
     LOOP -.->|reads| SRC
     style SRC fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style LOOP fill:#eafaf1,stroke:#27ae60,stroke-width:3px

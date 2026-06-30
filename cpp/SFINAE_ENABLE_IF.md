@@ -420,7 +420,7 @@ graph TD
     Q["I need to constrain / branch on a type at compile time"] --> Q1{"what do I want?"}
     Q1 -->|"reject bad types at the API boundary<br/>with a good error"| Concept["concepts (C++20)<br/>template <std::integral T>"]
     Q1 -->|"branch on type INSIDE one function"| IfC["if constexpr (C++17)<br/>(discarded branch not instantiated)"]
-    Q1 -->|"just fail fast with a message"| SA["static_assert(cond, \"...\")"]
+    Q1 -->|"just fail fast with a message"| SA["static_assert(cond, &quot;...&quot;)"]
     Q1 -->|"select among overloads by category<br/>(legacy/pre-C++20 codebase)"| SFINAE["enable_if / void_t<br/>(this bundle — read it, don't write it)"]
     style Concept fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style IfC fill:#eafaf1,stroke:#27ae60

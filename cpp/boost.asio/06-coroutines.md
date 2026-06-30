@@ -160,14 +160,14 @@ This turns the classic timeout race (read vs. deadline timer) into one readable 
 
 ```mermaid
 graph TB
-    Start[co_spawn exec, echo socket, detached] --> Frame[allocate coroutine frame<br/>locals: data[1024], n]
-    Frame --> Await1[co_await async_read_some]
-    Await1 -->|suspends: thread free| Suspended1[frame parked]
-    Suspended1 -->|read completes| Resume1[resume: n = bytes read]
-    Resume1 --> Await2[co_await async_write]
-    Await2 -->|suspends: thread free| Suspended2[frame parked]
-    Suspended2 -->|write completes| Resume2[resume]
-    Resume2 --> Loop[loop back to read]
+    Start["co_spawn exec, echo socket, detached"] --> Frame["allocate coroutine frame<br/>locals: data[1024], n"]
+    Frame --> Await1["co_await async_read_some"]
+    Await1 -->|suspends: thread free| Suspended1["frame parked"]
+    Suspended1 -->|read completes| Resume1["resume: n = bytes read"]
+    Resume1 --> Await2["co_await async_write"]
+    Await2 -->|suspends: thread free| Suspended2["frame parked"]
+    Suspended2 -->|write completes| Resume2["resume"]
+    Resume2 --> Loop["loop back to read"]
 ```
 
 **Why It Beats Callbacks:** The locals (`data`, `n`) live in the coroutine frame, not captured piecemeal into nested lambdas. Control flow is the code's textual order — no "inversion." Error handling is `try/catch` instead of `if (ec)` in every handler. And, crucially for the buffer lifetime problem (`05-buffers.md`): a stack array `char data[1024]` *inside the coroutine* is safe across `co_await`, because the frame outlives each suspension. Coroutines dissolve the dangling-buffer footgun that haunts callback code.

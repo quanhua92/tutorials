@@ -51,9 +51,9 @@ This bundle teaches the four-move English skeleton that fixes all three:
 ```mermaid
 flowchart LR
     P["1. PROBLEM<br/>name it plainly + evidence<br/>(The challenge we're facing…<br/>Currently, we struggle with…)"]
-    S["2. SOLUTION<br/>clear active verb<br/>(I propose that we…<br/>My recommendation is…<br/>We should…)"
-    B["3. BENEFITS<br/>quantified payoff<br/>(The benefits of this approach…<br/>This would result in…<br/>The expected impact is…)"
-    A["4. ASK<br/>one clear request + next step<br/>(I'm seeking approval to…<br/>Could we pilot this…<br/>Next steps:…)"
+    S["2. SOLUTION<br/>clear active verb<br/>(I propose that we…<br/>My recommendation is…<br/>We should…)"]
+    B["3. BENEFITS<br/>quantified payoff<br/>(The benefits of this approach…<br/>This would result in…<br/>The expected impact is…)"]
+    A["4. ASK<br/>one clear request + next step<br/>(I'm seeking approval to…<br/>Could we pilot this…<br/>Next steps:…)"]
     P --> S --> B --> A
     style P fill:#fdecea,stroke:#c0392b,stroke-width:2px
     style S fill:#dbeafe,stroke:#58a6ff,stroke-width:2px

@@ -97,9 +97,9 @@ harness removes wall-clock from every assertion:
 
 ```mermaid
 graph LR
-    A0["call #1<br/>FAIL"] -->|sleep base*2^0+j"] A1["call #2<br/>FAIL"]
-    A1 -->|sleep base*2^1+j"] A2["call #3<br/>FAIL"]
-    A2 -->|sleep base*2^2+j"] A3["call #4<br/>SUCCESS"]
+    A0["call #1<br/>FAIL"] -->|"sleep base*2^0+j"| A1["call #2<br/>FAIL"]
+    A1 -->|"sleep base*2^1+j"| A2["call #3<br/>FAIL"]
+    A2 -->|"sleep base*2^2+j"| A3["call #4<br/>SUCCESS"]
     A3 --> R["return ok"]
     A2 -.->|"OR maxAttempts hit"| EX["return last error"]
     style R fill:#eafaf1,stroke:#27ae60
@@ -255,7 +255,7 @@ instead of piling up blocked goroutines.
 
 ```mermaid
 graph LR
-    B["token bucket<br/>size = burst b<br/>refill = r tokens/sec<br/>initially FULL"] -->|Allow() consumes 1 token| D{"token available?"}
+    B["token bucket<br/>size = burst b<br/>refill = r tokens/sec<br/>initially FULL"] -->|"Allow() consumes 1 token"| D{"token available?"}
     D -->|yes| OK["return true<br/>(event allowed)"]
     D -->|no / &lt; 1 token| NO["return false<br/>(drop), OR<br/>Wait blocks for one"]
     style OK fill:#eafaf1,stroke:#27ae60

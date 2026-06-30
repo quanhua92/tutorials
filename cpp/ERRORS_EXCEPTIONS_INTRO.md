@@ -73,7 +73,7 @@ spans **both** philosophies. Section E shows the same divide both ways.
 
 ```mermaid
 graph TD
-    T["throw std::runtime_error(\"msg\");<br/>constructs the EXCEPTION OBJECT<br/>(dynamic storage duration)"] --> UW["STACK UNWINDING<br/>control travels UP the call stack;<br/>dtors run for every automatic object<br/>in REVERSE order of construction"]
+    T["throw std::runtime_error(&quot;msg&quot;);<br/>constructs the EXCEPTION OBJECT<br/>(dynamic storage duration)"] --> UW["STACK UNWINDING<br/>control travels UP the call stack;<br/>dtors run for every automatic object<br/>in REVERSE order of construction"]
     UW --> M{"a matching<br/>catch handler?"}
     M -->|"yes"| C["catch (const std::exception& e)<br/>-> e.what() ; object then destroyed"]
     M -->|"no handler<br/>found"| TERM["std::terminate()<br/>-> std::abort<br/>(program ends)"]

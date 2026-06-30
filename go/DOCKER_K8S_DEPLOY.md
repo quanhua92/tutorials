@@ -250,7 +250,7 @@ sequenceDiagram
     participant K as kubelet / control plane
     participant E as EndpointSlice / Service
     participant C as Container (PID 1 = your app)
-    K->>E: 1. mark Pod Terminating; remove from endpoints (no new traffic)
+    K->>E: 1. mark Pod Terminating, remove from endpoints (no new traffic)
     K->>C: 2. run preStop hook (exec/httpGet)
     K->>C: 3. send SIGTERM to PID 1
     Note over C: app: stop accept, drain in-flight (Shutdown), exit

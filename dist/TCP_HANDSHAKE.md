@@ -282,7 +282,7 @@ sequenceDiagram
     S->>C: FIN,ACK  seq=5001  ack=1802
     Note left of C: client enters TIME_WAIT
     C->>S: ACK  seq=1802  ack=5002
-    Note over C,S: SERVER CLOSED; CLIENT in TIME_WAIT (2*MSL)
+    Note over C,S: SERVER CLOSED, CLIENT in TIME_WAIT (2*MSL)
 ```
 
 ### Why TIME_WAIT, and why it exhausts ports

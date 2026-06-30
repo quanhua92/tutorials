@@ -26,7 +26,7 @@ graph LR
     S -->|slug='hello-world'| U3["/blog/hello-world"]
     S -->|slug='release-notes'| U4["/blog/release-notes"]
     R -->|path='2024/01/r1'| U5["/blog/2024/01/r1"]
-    R -->|path=undefined"| U6["/blog"]
+    R -->|path=undefined| U6["/blog"]
     classDef static fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     classDef param fill:#eef2ff,stroke:#6366f1,stroke-width:2px
     classDef rest fill:#fef9e7,stroke:#f1c40f,stroke-width:2px

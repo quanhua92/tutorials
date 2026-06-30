@@ -73,7 +73,7 @@ and `errors.As` traverse that tree **pre-order, depth-first**.
 
 ```mermaid
 graph TD
-    W["wrapped<br/>fmt.Errorf(\"load: %w\", inner)"] -->|Unwrap| I["inner<br/>fmt.Errorf(\"db: %w\", ErrNotFound)"]
+    W["wrapped<br/>fmt.Errorf(&quot;load: %w&quot;, inner)"] -->|Unwrap| I["inner<br/>fmt.Errorf(&quot;db: %w&quot;, ErrNotFound)"]
     I -->|Unwrap| S["ErrNotFound<br/>(sentinel)"]
     J["joined = errors.Join(e1, e2)"] -->|Unwrap &#40;&#41; &#91;&#93;error| E1["e1"]
     J -->|Unwrap &#40;&#41; &#91;&#93;error| E2["e2"]

@@ -36,15 +36,15 @@ production.
 graph TD
     Crate["crate root<br/>(main.rs / lib.rs)"]
     Crate -->|mod foo;| File["file-tree form<br/>foo.rs OR foo/mod.rs"]
-    Crate -->|mod foo { .. }| Inline["inline form<br/>(same semantics)"]
+    Crate -->|"mod foo { .. }"| Inline["inline form<br/>(same semantics)"]
     Inline --> Node["a named node in the<br/>module tree"]
     File --> Node
     Node --> Items["items: fns, structs,<br/>enums, sub-modules"]
     Items -->|"no annotation"| Priv["PRIVATE by default<br/>(current module + descendants)"]
     Items -->|pub| Pub["public: reachable wherever<br/>the module chain is reachable"]
-    Items -->|pub(crate)| CrateVis["crate-visible"]
-    Items -->|pub(super)| ParentVis["parent-visible"]
-    Items -->|pub(in path)| ScopeVis["scope-visible"]
+    Items -->|"pub(crate)"| CrateVis["crate-visible"]
+    Items -->|"pub(super)"| ParentVis["parent-visible"]
+    Items -->|"pub(in path)"| ScopeVis["scope-visible"]
     Node -->|use a::b| Use["bring name into local scope<br/>(shortcut, like a symlink)"]
     Node -->|pub use a::b| Reexp["re-export: bring up<br/>AND make public (facade)"]
     style Crate fill:#eafaf1,stroke:#27ae60,stroke-width:3px

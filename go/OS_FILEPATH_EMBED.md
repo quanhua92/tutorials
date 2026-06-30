@@ -54,8 +54,8 @@ graph TD
     IF -->|implemented by| DIR["os.DirFS(dir)<br/>real OS files (syscall-backed)"]
     OS["os package<br/>syscall-backed FILE I/O<br/>ReadFile / WriteFile / Create / Open<br/>returns *os.File (an io.ReadWriteCloser)"]
     FP["path/filepath<br/>CROSS-PLATFORM path STRINGS<br/>Join / Base / Dir / Ext / Clean / WalkDir"]
-    OS -.->|DirFS(dir) wraps a real dir as fs.FS| DIR
-    FP -.->|pure string ops (no I/O)<br/>except WalkDir / Glob / Abs| OS
+    OS -.->|"DirFS(dir) wraps a real dir as fs.FS"| DIR
+    FP -.->|"pure string ops (no I/O)<br/>except WalkDir / Glob / Abs"| OS
     style IF fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
     style EMB fill:#eafaf1,stroke:#27ae60
     style DIR fill:#eafaf1,stroke:#27ae60
@@ -89,7 +89,7 @@ graph LR
         FS["io/fs<br/>fs.FS interface<br/>read-only, abstract"]
     end
     PF -.->|Join uses filepath.Separator| OS
-    FS -->|os.DirFS(dir) + embed.FS both produce| OS
+    FS -->|"os.DirFS(dir) + embed.FS both produce"| OS
     style PF fill:#eafaf1,stroke:#27ae60
     style FS fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
 ```
@@ -270,7 +270,7 @@ the raw absolute string. This keeps `_output.txt` reproducible across machines.
 ```mermaid
 graph TD
     R["WalkDir(root, fn)"] -->|visit root| FN["fn(path, fs.DirEntry, err)"]
-    FN -->|d.IsDir() == true| RECURSE["ReadDir the dir<br/>(sorted, in-memory)<br/>then recurse"]
+    FN -->|"d.IsDir() == true"| RECURSE["ReadDir the dir<br/>(sorted, in-memory)<br/>then recurse"]
     FN -->|return SkipDir| SD["skip this directory's children"]
     FN -->|return SkipAll| SA["skip everything remaining"]
     FN -->|return other non-nil| STOP["stop the walk, return err"]

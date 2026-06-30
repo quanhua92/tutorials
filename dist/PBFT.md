@@ -280,7 +280,7 @@ sequenceDiagram
   R0->>R1: PRE-PREPARE 'X'
   R0->>R2: PRE-PREPARE 'X'
   R0->>R3: PRE-PREPARE 'Y'  (equivocate)
-  Note over R1,R3: Prepare splits; nobody reaches 2f+1
+  Note over R1,R3: Prepare splits, nobody reaches 2f+1
   R1-->>R2: VIEW-CHANGE(v=1)
   R2-->>R1: VIEW-CHANGE(v=1)
   R3-->>R1: VIEW-CHANGE(v=1)

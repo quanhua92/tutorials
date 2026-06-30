@@ -94,9 +94,9 @@ graph TD
     A["write a class that OWNS a resource"] --> B["CTOR: acquire (open/lock/new)<br/>establish the invariant<br/>or THROW — no half-built object"]
     B --> C["object lives on the stack<br/>(automatic storage)"]
     C --> D{"how does its<br/>scope end?"}
-    D -->|"normal `}`"| E["DTOR runs: release (close/unlock/delete)"]
-    D -->|"early `return`"| E
-    D -->|"`throw` propagates"| F["stack UNWINDING:<br/>DTOR runs anyway"]
+    D -->|"normal }"| E["DTOR runs: release (close/unlock/delete)"]
+    D -->|"early return"| E
+    D -->|"throw propagates"| F["stack UNWINDING:<br/>DTOR runs anyway"]
     E --> G["no leak — by construction"]
     F --> G
     style B fill:#eafaf1,stroke:#27ae60
@@ -329,7 +329,7 @@ RAII + move:
 
 ```mermaid
 graph LR
-    A1["OwnedInt a(7)<br/>p_ -> heap int"] --"std::move"|> B1["OwnedInt b<br/>p_ -> heap int<br/>(stolen)"]
+    A1["OwnedInt a(7)<br/>p_ -> heap int"] -->|"std::move"| B1["OwnedInt b<br/>p_ -> heap int<br/>(stolen)"]
     A1 --> A2["a moved-from<br/>p_ == nullptr"]
     A2 -->|"dtor: p_==null<br/>= SAFE NO-OP"| END1["no double-free"]
     B1 -->|"dtor: delete p_"| END2["one free, no leak"]

@@ -392,7 +392,7 @@ const bad: UserId = "u-42";   // ERROR — bare string lacks the phantom brand
 
 ```mermaid
 sequenceDiagram
-    participant Code as "const id = mkUserId(\"u-42\")"
+    participant Code as const id = mkUserId("u-42")
     participant Factory as mkUserId factory
     participant Compiler as tsc (compile-time)
     participant Runtime as V8 (runtime)

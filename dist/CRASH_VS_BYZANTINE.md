@@ -250,12 +250,12 @@ graph LR
   subgraph BYZ["Byzantine f=2, N=7, Q=5"]
     B1["S1 = {0,1,2,3,4}"]
     B2["S2 = {2,3,4,5,6}"]
-    B1 ===>"overlap {2,3,4}<br/>= f+1, hides 2 liars,<br/>≥1 honest survives" B2
+    B1 ==>|"overlap {2,3,4}<br/>= f+1, hides 2 liars,<br/>≥1 honest survives"| B2
   end
   subgraph CRA["Crash f=2, N=5, Q=3"]
     C1["S1 = {0,1,2}"]
     C2["S2 = {2,3,4}"]
-    C1 ===>"overlap {2}<br/>= 1, crashes never lie" C2
+    C1 ==>|"overlap {2}<br/>= 1, crashes never lie"| C2
   end
   style B1 fill:#1a2a3a,stroke:#2980b9,color:#aed6f1
   style B2 fill:#2a1a3a,stroke:#8e44ad,color:#d7bde2

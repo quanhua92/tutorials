@@ -272,11 +272,11 @@ polymorphism. The fix is a one-character change: `Base` → `const Base&`.
 graph LR
     subgraph BY_VALUE["describe_by_value(Base b)  ← by value"]
         D1["Derived obj<br/>{b, d, vptr->Derived}"] -->|"copy ctor copies<br/>only the Base subobject"| B1["b: a Base<br/>{b, vptr->BASE}<br/>d is GONE"]
-        B1 -.->|"b.who() dispatches<br/>on dynamic type Base"| R1["\"Base\""]
+        B1 -.->|"b.who() dispatches<br/>on dynamic type Base"| R1["&quot;Base&quot;"]
     end
     subgraph BY_REF["describe_by_ref(const Base& b)  ← by ref"]
         D2["Derived obj"] -->|"alias; NO copy"| A2["same object:<br/>dynamic type still Derived"]
-        A2 -.->|"b.who() dispatches<br/>on dynamic type Derived"| R2["\"Derived\""]
+        A2 -.->|"b.who() dispatches<br/>on dynamic type Derived"| R2["&quot;Derived&quot;"]
     end
     style B1 fill:#fdecea,stroke:#c0392b,stroke-width:3px
     style R1 fill:#fdecea,stroke:#c0392b

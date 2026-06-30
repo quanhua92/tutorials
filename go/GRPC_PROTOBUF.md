@@ -232,7 +232,7 @@ generated parser would, and assert the round-trip.
 ```mermaid
 graph LR
     M["message = 08 96 01 12 05 68 65 6c 6c 6f"] --> R1["08 96 01<br/>field 1 (varint) = 150"]
-    M --> R2["12 05 68 65 6c 6c 6f<br/>field 2 (LEN) = \"hello\""]
+    M --> R2["12 05 68 65 6c 6c 6f<br/>field 2 (LEN) = &quot;hello&quot;"]
     R2 --> L["12 = tag (field 2, type 2)"]
     R2 --> LEN["05 = length: 5 bytes follow"]
     R2 --> PAY["68 65 6c 6c 6f = UTF-8 of hello"]
@@ -350,7 +350,7 @@ graph LR
     BYTES -->|decode| OLD["older parser<br/>fields 1, 2 only"]
     OLD --> S1["field 1 -> 150 (decoded)"]
     OLD --> S99["field 99 -> SKIPPED<br/>(wire type says 2 bytes)"]
-    OLD --> S2["field 2 -> \"hello\" (decoded)"]
+    OLD --> S2["field 2 -> &quot;hello&quot; (decoded)"]
     style S99 fill:#fef9e7,stroke:#f1c40f
     style BYTES fill:#eafaf1,stroke:#27ae60,stroke-width:3px
 ```

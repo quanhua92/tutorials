@@ -51,7 +51,7 @@ graph TD
     Tok -->|rustc loads the dylib & calls| Fn["derive_greet(TokenStream)<br/>(a Rust fn in pmacros-derive)"]
     Fn -->|syn::parse_macro_input!| Ast["DeriveInput { ident: User, data, generics, attrs }"]
     Ast -->|inspect fields / attrs / ident| Walk["walk the AST<br/>(the part macro_rules! CANNOT do)"]
-    Walk -->|quote! { impl ... { fn greet ... } }| Out["output TokenStream<br/>(the generated impl)"]
+    Walk -->|"quote! { impl ... { fn greet ... } }"| Out["output TokenStream<br/>(the generated impl)"]
     Out -->|appended AFTER the struct| Emit["compiled like hand-written code:<br/>impl User { fn greet(&self) ... }"]
     style Sub fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style Ast fill:#fef9e7,stroke:#f1c40f,stroke-width:2px

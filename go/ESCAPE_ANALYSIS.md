@@ -193,7 +193,7 @@ Labs emphasizes.
 graph TD
     I["int n = 42"] -->|"strconv.Itoa(n)"| S1["monomorphic: small(n)<br/>returns substring of<br/>const 'smalls' (read-only data)"]
     S1 --> Z["0 allocs"]
-    I -->|"fmt.Sprintf(\"%d\", n)"| B["n BOXED into any<br/>(...any variadic)"]
+    I -->|"fmt.Sprintf(&quot;%d&quot;, n)"| B["n BOXED into any<br/>(...any variadic)"]
     B --> D["dynamic reflection-style<br/>formatting builds a fresh string"]
     D --> H["1 heap alloc (the result string)"]
     B -.->|"compiler says: n escapes to heap"| H

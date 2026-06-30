@@ -138,7 +138,7 @@ graph TD
     SCHEMA -->|"db.select().from(users)"| QB["query builder<br/>emits: SELECT id, name, age FROM users"]
     SCHEMA -->|"drizzle-kit generate"| MIG["migration SQL<br/>CREATE TABLE users (...)"]
     QB --> SQL["better-sqlite3<br/>(the driver you already have)"]
-    MIG --> DB[("SQLite database<br/>(must already exist)"]
+    MIG --> DB[("SQLite database<br/>(must already exist)")]
     SQL --> DB
     style SCHEMA fill:#eaf2f8,stroke:#2980b9,stroke-width:3px
     style TYPE fill:#eafaf1,stroke:#27ae60

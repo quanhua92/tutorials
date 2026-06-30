@@ -74,7 +74,7 @@ erDiagram
   orders   ||--|| payments    : "one (UNIQUE)"
   users {
     uuid id PK
-    text email UNIQUE
+    text email "UNIQUE"
   }
   orders {
     uuid id PK

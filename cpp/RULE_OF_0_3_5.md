@@ -50,7 +50,7 @@ The **Rule of 0/3/5** is the discipline that prevents all three:
 graph TD
     START["you are writing a class"] --> Q{"does it own a<br/>RAW resource?<br/>(raw ptr, FILE*, fd, ...)"}
     Q -->|"NO — members are RAII<br/>(string, vector, unique_ptr)"| R0["RULE OF 0<br/>write NONE of the five<br/>compiler defaults are CORRECT"]
-    Q -->|"YES — raw handle" --> D["write the DESTRUCTOR<br/>(frees the resource)"]
+    Q -->|"YES — raw handle"| D["write the DESTRUCTOR<br/>(frees the resource)"]
     D --> R3["RULE OF 3<br/>ALSO write copy ctor + copy assign<br/>(DEEP copy — else double-free)"]
     R3 --> Q5{"want MOVE efficiency?<br/>(O(1) steal vs O(n) copy)"}
     Q5 -->|"YES (almost always)"| R5["RULE OF 5<br/>ALSO write move ctor + move assign<br/>(STEAL: pointer-copy + null source)"]

@@ -46,7 +46,7 @@ the compiler cannot unambiguously relate a returned reference to its source.
 ```mermaid
 graph TD
     subgraph "a lifetime = a code region"
-        A["let r;"]:::decl -.->|'a starts (r declared)| B
+        A["let r;"]:::decl -.->|"'a starts (r declared)"| B
         B["let x = 5;"] -.->|'b starts| C["r = &x;"]
         C --> D["println!(&#123;r&#125;;"] -.->|last use of r| E
         E["} x drops"]:::drop -.->|'b ends BEFORE 'a -> ERROR| F

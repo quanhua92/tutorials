@@ -159,8 +159,8 @@ complaints. Naming them is the first step to fixing them:
 ```mermaid
 flowchart TD
     L1["Vietnamese instinct on a complaint"] --> BL{"Which way do you swing?"}
-    BL -->|"BLUNT (literal translation)"| B["\"This is bad / broken. Fix it.\"\n(no hedge, imperative)"]
-    BL -->|"OVER-APOLOGETIC (face-saving leak)"| O["\"I'm so sorry, so sorry, but… the thing… is… maybe… a little… broken?\"\n(hedge over-applied, ask never lands)"]
+    BL -->|"BLUNT (literal translation)"| B["&quot;This is bad / broken. Fix it.&quot;\n(no hedge, imperative)"]
+    BL -->|"OVER-APOLOGETIC (face-saving leak)"| O["&quot;I'm so sorry, so sorry, but… the thing… is… maybe… a little… broken?&quot;\n(hedge over-applied, ask never lands)"]
     B --> FIX["The arc: hedge → fact → ask"]
     O --> FIX
     style B fill:#fdecea,stroke:#c0392b,stroke-width:2px

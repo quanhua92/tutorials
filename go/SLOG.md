@@ -64,7 +64,7 @@ to emit it and how to serialize it. The split is *frontend* (`Logger`) calls
 
 ```mermaid
 graph TD
-    CALL["logger.Info(\"login\", \"user\", \"al\", \"count\", 3)"] --> REC["Record{time, level, msg, attrs}"]
+    CALL["logger.Info(&quot;login&quot;, &quot;user&quot;, &quot;al&quot;, &quot;count&quot;, 3)"] --> REC["Record{time, level, msg, attrs}"]
     REC -->|Enabled?| EN["Handler.Enabled(ctx, level) bool<br/>early bail-out: drop if below min level"]
     EN -->|yes| HD["Handler.Handle(ctx, Record) error<br/>serializes the record"]
     HD --> TH["TextHandler<br/>key=value text"]
@@ -270,8 +270,8 @@ this is a measurable speedup.
 
 ```mermaid
 graph LR
-    G["slog.Group(\"req\",<br/> method GET, path /x)"] --> TH["TextHandler:<br/>req.method=GET req.path=/x<br/>(dotted keys)"]
-    G --> JH["JSONHandler:<br/>\"req\":{ \"method\":\"GET\", \"path\":\"/x\" }<br/>(nested object)"]
+    G["slog.Group(&quot;req&quot;,<br/> method GET, path /x)"] --> TH["TextHandler:<br/>req.method=GET req.path=/x<br/>(dotted keys)"]
+    G --> JH["JSONHandler:<br/>&quot;req&quot;:{ &quot;method&quot;:&quot;GET&quot;, &quot;path&quot;:&quot;/x&quot; }<br/>(nested object)"]
     style G fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```
 

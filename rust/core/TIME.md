@@ -45,13 +45,13 @@ graph TD
     Span["Duration<br/>{ secs: u64, nanos: u32 }<br/>Copy, Ord, pure value"]
     Span -->|from_secs / from_millis / ...| Built["built from CONSTANTS<br/>(deterministic)"]
     Span -->|checked_* / saturating_*| Edge["overflow -> None / clamp"]
-    Monotonic["Instant<br/>MONOTONIC clock"] -->|now()| IPoint["opaque Instant<br/>(value NOT printed: varies)"]
-    IPoint -->|elapsed() / duration_since()| IDur["Duration (INFALLIBLE)"]
+    Monotonic["Instant<br/>MONOTONIC clock"] -->|"now()"| IPoint["opaque Instant<br/>(value NOT printed: varies)"]
+    IPoint -->|"elapsed() / duration_since()"| IDur["Duration (INFALLIBLE)"]
     IPoint -->|later - earlier| MonoOK["always >= 0; saturates to 0"]
-    Wall["SystemTime<br/>WALL clock"] -->|now()| SPoint["opaque SystemTime<br/>(value NOT printed: varies / jumps)"]
-    SPoint -->|duration_since() / elapsed()| SDur["Result&lt;Duration, SystemTimeError&gt; (FALLIBLE)"]
+    Wall["SystemTime<br/>WALL clock"] -->|"now()"| SPoint["opaque SystemTime<br/>(value NOT printed: varies / jumps)"]
+    SPoint -->|"duration_since() / elapsed()"| SDur["Result&lt;Duration, SystemTimeError&gt; (FALLIBLE)"]
     SPoint -->|can step backwards| JumpErr["Err if earlier - later"]
-    Span -->|thread::sleep(d)| Block["blocks current thread<br/>>= d (never less; maybe more)"]
+    Span -->|"thread::sleep(d)"| Block["blocks current thread<br/>>= d (never less; maybe more)"]
     style Monotonic fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style Wall fill:#fdedec,stroke:#c0392b,stroke-width:2px
     style Span fill:#eaf2f8,stroke:#2980b9,stroke-width:2px

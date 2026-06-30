@@ -108,15 +108,15 @@ three output slots: **`[0]=MODEL, [1]=CLIP, [2]=VAE`**.
 
 ```mermaid
 graph BT
-    N4["node 4<br/>CheckpointLoaderSimple<br/>MODEL·CLIP·VAE"] -->|MODEL[0]| N3
-    N4 -->|CLIP[1]| N6["node 6<br/>CLIPTextEncode (+)"]
-    N4 -->|CLIP[1]| N7["node 7<br/>CLIPTextEncode (-)"]
-    N4 -->|VAE[2]| N8
-    N5["node 5<br/>EmptyLatentImage"] -->|LATENT[0]| N3
+    N4["node 4<br/>CheckpointLoaderSimple<br/>MODEL·CLIP·VAE"] -->|"MODEL[0]"| N3
+    N4 -->|"CLIP[1]"| N6["node 6<br/>CLIPTextEncode (+)"]
+    N4 -->|"CLIP[1]"| N7["node 7<br/>CLIPTextEncode (-)"]
+    N4 -->|"VAE[2]"| N8
+    N5["node 5<br/>EmptyLatentImage"] -->|"LATENT[0]"| N3
     N6 -->|"CONDITIONING[0]"| N3["node 3<br/>KSampler"]
     N7 -->|"CONDITIONING[0]"| N3
-    N3 -->|LATENT[0]| N8["node 8<br/>VAEDecode"]
-    N8 -->|IMAGE[0]| N9["node 9<br/>SaveImage"]
+    N3 -->|"LATENT[0]"| N8["node 8<br/>VAEDecode"]
+    N8 -->|"IMAGE[0]"| N9["node 9<br/>SaveImage"]
     style N4 fill:#0c4a6e,stroke:#0ea5e9,color:#fff
     style N5 fill:#0c4a6e,stroke:#0ea5e9,color:#fff
     style N6 fill:#1c3a25,stroke:#27ae60,color:#fff

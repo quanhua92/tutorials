@@ -332,10 +332,10 @@ re-reads the same element).
 graph LR
     M["matrix (3,4)"] --> Add["+ row_vec (4,)"]
     RV["row_vec (4,)"] --> Add
-    Add -->|align trailing: (3,4)+(3,4)| R1["result (3,4)"]
+    Add -->|"align trailing: (3,4)+(3,4)"| R1["result (3,4)"]
     CV["col_vec (3,1)"] --> Mul["* one_row (1,4)"]
     OR["one_row (1,4)"] --> Mul
-    Mul -->|both dims broadcast: (3,4)*(3,4)| R2["result (3,4) — outer product"]
+    Mul -->|"both dims broadcast: (3,4)*(3,4)"| R2["result (3,4) — outer product"]
     style R1 fill:#eafaf1,stroke:#27ae60
     style R2 fill:#eafaf1,stroke:#27ae60
 ```

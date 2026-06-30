@@ -18,7 +18,7 @@
 ```mermaid
 graph LR
     subgraph SFN["Server Function (createServerFn)"]
-        C1["client<br/>getGreeting({ data })"] -->|compiler stubs to fetch(/_serverFn/id)| C2["server: .validator(schema)<br/>validates + types input"]
+        C1["client<br/>getGreeting({ data })"] -->|"compiler stubs to fetch(/_serverFn/id)"| C2["server: .validator(schema)<br/>validates + types input"]
         C2 -->|if valid| C3["server: .handler({ data })<br/>runs ONLY here (DB/secrets/fs)"]
         C3 -->|typed return inferred| C4["client: typed result<br/>(message:string, chars:number)"]
     end

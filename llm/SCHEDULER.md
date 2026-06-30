@@ -198,7 +198,7 @@ stateDiagram-v2
     [*] --> WAITING: add(seq)
     WAITING --> RUNNING: schedule() + allocate()<br/>(whole prompt scheduled)
     RUNNING --> FINISHED: postprocess()<br/>EOS or max_tokens
-    RUNNING --> WAITING: preempt()<br/>(OOM; re-queue FRONT)
+    RUNNING --> WAITING: preempt()<br/>(OOM, re-queue FRONT)
     FINISHED --> [*]
 ```
 
@@ -667,7 +667,7 @@ graph LR
     D --> E
     E --> F["postprocess:<br/>hash + advance cached<br/>+ append + FINISH/deallocate"]
     F -->|RUNNING| C
-    F -->|WAITING (preempted)| A
+    F -->|"WAITING (preempted)"| A
     F -->|FINISHED| G["done"]
     style B fill:#fef9e7,stroke:#e67e22
     style D fill:#eaf2f8,stroke:#2980b9

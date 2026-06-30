@@ -52,7 +52,7 @@ an array. Two eras of solution:
 ```mermaid
 graph TD
     SRC["template &lt;typename... Ts&gt;<br/>void f(Ts... args)<br/>(BLUEPRINT, any arity)"]
-    SRC -->|"call f(1, 2.0, \"x\")"| DED["DEDUCTION<br/>Ts = {int, double, const char*}<br/>args = {1, 2.0, \"x\"}"]
+    SRC -->|"call f(1, 2.0, &quot;x&quot;)"| DED["DEDUCTION<br/>Ts = {int, double, const char*}<br/>args = {1, 2.0, &quot;x&quot;}"]
     DED --> PACK["a PARAMETER PACK<br/>(NOT an array — not indexable)"]
     PACK -->|"pre-C++17"| REC["RECURSIVE idiom<br/>head T + tail Ts...<br/>base case: 0 args"]
     PACK -->|"C++17+"| FOLD["FOLD expression<br/>(args op ...)<br/>one line, no recursion"]

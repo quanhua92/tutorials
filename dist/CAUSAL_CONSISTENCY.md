@@ -27,8 +27,8 @@ writes fan out to the other replicas.
 graph LR
     Alice["Alice posts<br/>A = 'Hello'<br/>deps = {}"] -->|Bob SEES A,<br/>then writes| Bob["Bob replies<br/>B = 'Re:Hello'<br/>deps = {alice:1}"]
     Alice -.->|replicate| R0["R0"]
-    Alice -.->|replicate (SLOW)| R2["R2"]
-    Bob -.->|replicate (FAST)| R2
+    Alice -.->|"replicate (SLOW)"| R2["R2"]
+    Bob -.->|"replicate (FAST)"| R2
     Bob -.->|replicate| R0
     style Alice fill:#eaf2f8,stroke:#2980b9
     style Bob fill:#eaf2f8,stroke:#2980b9
@@ -49,7 +49,7 @@ tracked and respected.
 ```mermaid
 graph LR
     Ev["EVENTUAL<br/>all replicas converge<br/>(same final writes)<br/>NO causal guarantee<br/>NO real-time guarantee"] -->|+ track &amp; respect<br/>causal deps| Cau["CAUSAL<br/>if A→B then A before B<br/>on every replica<br/>concurrent ops: any order"]
-    Cau -->|+ global coordination<br/>(quorum / TrueTime)| Lin["LINEARIZABLE<br/>one total order<br/>+ real-time respected<br/>(Spanner, etcd)"]
+    Cau -->|"+ global coordination<br/>(quorum / TrueTime)"| Lin["LINEARIZABLE<br/>one total order<br/>+ real-time respected<br/>(Spanner, etcd)"]
     style Ev fill:#fdecea,stroke:#c0392b
     style Cau fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style Lin fill:#eaf2f8,stroke:#2980b9

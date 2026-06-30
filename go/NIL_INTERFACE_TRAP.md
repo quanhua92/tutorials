@@ -70,16 +70,16 @@ runtime also caches an *itable*, but the conceptual model is just the pair.)
 ```mermaid
 graph LR
     subgraph NIL["truly nil interface  (== nil is TRUE)"]
-        T0["type  word = nil"] :::nilword
-        V0["value word = nil"] :::nilword
+        T0["type  word = nil"]:::nilword
+        V0["value word = nil"]:::nilword
     end
     subgraph TYPED["typed-nil interface  (== nil is FALSE)"]
-        T1["type  word = *T"] :::setword
-        V1["value word = nil"] :::nilword
+        T1["type  word = *T"]:::setword
+        V1["value word = nil"]:::nilword
     end
     subgraph REAL["interface holding 3  (== nil is FALSE)"]
-        T2["type  word = int"] :::setword
-        V2["value word = →3"] :::setword
+        T2["type  word = int"]:::setword
+        V2["value word = →3"]:::setword
     end
     classDef nilword fill:#eafaf1,stroke:#27ae60
     classDef setword fill:#fadbd8,stroke:#c0392b,stroke-width:2px
@@ -192,7 +192,7 @@ compares nil.
 ```mermaid
 graph TD
     INSIDE["INSIDE bad()"] -->|var e *MyError| E["e = (*MyError)(nil)<br/>e == nil is TRUE"]
-    E -->|return e<br/>(return type = error)| BOX["interface boxing<br/>at the return boundary"]
+    E -->|"return e<br/>(return type = error)"| BOX["interface boxing<br/>at the return boundary"]
     BOX --> OUT["caller's err = (type=*MyError, value=nil)"]
     OUT --> CHECK["if err != nil { ... }  FIRES"]
     CHECK --> BUG["*** no real error, but the branch runs ***"]

@@ -200,7 +200,7 @@ liveness probe, OOMKill) or delete the Pod.
 ```mermaid
 graph LR
     R["Running<br/>(brief)"] -->|exit 1| CR["CrashLoopBackOff"]
-    CR -->|wait delay(n)| W["back-off<br/>10, 20, 40, 80, 160, 300s"]
+    CR -->|"wait delay(n)"| W["back-off<br/>10, 20, 40, 80, 160, 300s"]
     W -->|restart #n+1| R
     W -.->|cap reached| WCAP["pinned at 300s"]
     style CR fill:#3a1414,stroke:#c0392b,color:#ff9a8a,stroke-width:3px

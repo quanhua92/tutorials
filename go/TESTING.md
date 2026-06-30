@@ -296,11 +296,12 @@ graph LR
         A1["s=''"] -->|+part, NEW alloc| A2["'the'"]
         A2 -->|+part, NEW alloc| A3["'thequick'"]
         A3 -->|+part, NEW alloc| A4["..."]
-        A4 -->|5 more|style A2 fill:#fadbd8,stroke:#e74c3c
+        A4 -->|5 more| A5["..."]
+        style A2 fill:#fadbd8,stroke:#e74c3c
     end
     subgraph "strings.Builder (3 allocs)"
         B1["b := Builder{}"] -->|WriteString x8,<br/>buffer doubles| B2["amortized growth"]
-        B2 -->|b.String()| B3["final string"]
+        B2 -->|"b.String()"| B3["final string"]
         style B2 fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     end
 ```

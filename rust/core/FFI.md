@@ -42,11 +42,11 @@ rules and guarantees, and Rust can't check them"* ([Book ch20.1][book-unsafe]).
 graph TD
     RSIDE["Rust (safe, borrow-checked)"]
     CSIDE["C (libc / your .so / .dylib)"]
-    RSIDE -->|"unsafe extern \"C\" { fn abs(..) }<br/>call inside unsafe {}"| CallC["call C's abs/strlen<br/>(libc linked by default)"]
+    RSIDE -->|"unsafe extern &quot;C&quot; { fn abs(..) }<br/>call inside unsafe {}"| CallC["call C's abs/strlen<br/>(libc linked by default)"]
     CSIDE -->|"CString.as_ptr()<br/>*const c_char (NUL-terminated)"| CallC
     CSIDE -->|"C symbol rust_add<br/>(#[unsafe(no_mangle)])"| Export["Rust fn callable from C<br/>crate-type = cdylib/staticlib"]
     Export --> CHeader["cbindgen generates the .h<br/>int32_t rust_add(int32_t, int32_t);"]
-    RSIDE -->|"extern \"C\" fn double<br/>(a function pointer)"| Cb["callback handed to C<br/>int (*)(int)"]
+    RSIDE -->|"extern &quot;C&quot; fn double<br/>(a function pointer)"| Cb["callback handed to C<br/>int (*)(int)"]
     Both["#[repr(C)] struct<br/>field order + padding = C ABI<br/>(default Rust repr is UNSPECIFIED)"]:::core
     CallC --> Both
     Export --> Both

@@ -46,7 +46,7 @@ and still compile.
 
 ```mermaid
 graph TD
-    subgraph RT["runtime `if (cond)`"]
+    subgraph RT["runtime if (cond)"]
         RCOND["cond: RUNTIME value"]
         RCOND --> RA["if-branch<br/>INSTANTIATED<br/>(must compile)"]
         RCOND --> RB["else-branch<br/>INSTANTIATED<br/>(must compile)"]
@@ -54,7 +54,7 @@ graph TD
         RA --> RCPU
         RB --> RCPU
     end
-    subgraph CT["`if constexpr (cond)` (C++17)"]
+    subgraph CT["if constexpr (cond) (C++17)"]
         CCOND["cond: CONSTANT expression<br/>(evaluated at COMPILE TIME)"]
         CCOND --> CK{"cond?"}
         CK -->|true| CA["if-branch<br/>KEPT & instantiated"]

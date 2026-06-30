@@ -21,9 +21,9 @@
 
 ```mermaid
 graph LR
-    NEED["a utility doesn't exist"] -->|@utility| U["new single-purpose class<br/>works with hover:/lg: ..."]
-    REPEAT["a cluster of classes<br/>repeats everywhere"] -->|@apply| A["one .card class<br/>(inlines the utilities)"]
-    STATE["a new condition<br/>data-theme, media query"] -->|@custom-variant| V["name:utility<br/>e.g. midnight:bg-black"]
+    NEED["a utility doesn't exist"] -->|"@utility"| U["new single-purpose class<br/>works with hover:/lg: ..."]
+    REPEAT["a cluster of classes<br/>repeats everywhere"] -->|"@apply"| A["one .card class<br/>(inlines the utilities)"]
+    STATE["a new condition<br/>data-theme, media query"] -->|"@custom-variant"| V["name:utility<br/>e.g. midnight:bg-black"]
     style U fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style A fill:#eaf2f8,stroke:#2980b9
     style V fill:#fef9e7,stroke:#f1c40f

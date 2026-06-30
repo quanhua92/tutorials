@@ -48,12 +48,12 @@ impossible by construction).
 ```mermaid
 graph LR
     subgraph BEFORE["BEFORE  `let s2 = s1;`"]
-        S1["s1 (stack handle)<br/>ptr,len,cap → heap \"hello\""]
+        S1["s1 (stack handle)<br/>ptr,len,cap → heap &quot;hello&quot;"]
     end
     subgraph AFTER["AFTER (move)"]
         S1b["s1 (stack handle)<br/>UNINITIALIZED ⨯"]
-        S2["s2 (stack handle)<br/>ptr,len,cap → heap \"hello\""]
-        HEAP[("heap \"hello\"<br/>(owned once, by s2)")]
+        S2["s2 (stack handle)<br/>ptr,len,cap → heap &quot;hello&quot;"]
+        HEAP[("heap &quot;hello&quot;<br/>(owned once, by s2)")]
         S2 --> HEAP
     end
     BEFORE -->|"copy 3-word handle,<br/>poison s1's place"| AFTER
@@ -245,9 +245,9 @@ fn make_greeter() -> impl Fn() -> String {
 ```mermaid
 graph LR
     SCOPE["make_greeter scope<br/>let greeting = String::from(hello)"] -->|"move keyword"| CL["Closure struct<br/>{ greeting: String }<br/>(owns the field)"]
-    CL -->|"returned as impl Fn()"| CALLER["caller's `greeter`<br/>callable after scope ends"]
+    CL -->|"returned as impl Fn()"| CALLER["caller's greeter<br/>callable after scope ends"]
     SCOPE -.->|"NO move (default)"| CL2["Closure struct<br/>{ greeting: &String }<br/>borrows — DANGLING ⨯"]
-    CL2 -.->|"rejected: E0597"| REJ["`greeting` does not<br/>live long enough"]
+    CL2 -.->|"rejected: E0597"| REJ["greeting does not<br/>live long enough"]
     style CL fill:#d4efdf,stroke:#27ae60,stroke-width:2px
     style CL2 fill:#fadbd8,stroke:#c0392b,stroke-dasharray: 5 5
     style REJ fill:#fadbd8,stroke:#c0392b

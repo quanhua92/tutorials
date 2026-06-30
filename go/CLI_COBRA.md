@@ -40,7 +40,7 @@ that makes a CLI a first-class, in-process testable unit.
 
 ```mermaid
 graph TD
-    F["stdlib flag<br/>(single command, flat FlagSet)"] -->|hand-rolled switch<br/>on os.Args[1]| SW["manual dispatch"]
+    F["stdlib flag<br/>(single command, flat FlagSet)"] -->|"hand-rolled switch<br/>on os.Args[1]"| SW["manual dispatch"]
     SW --> CB["cobra (you are here)<br/>command TREE + persistent flags<br/>+ Args validators + RunE<br/>+ auto help/completion"]
     CB --> TS["TESTING<br/>SetArgs/SetOut -> Execute<br/>= an in-process test"]
     CB --> LD["BUILD_LDFLAGS_GENERATE<br/>inject version into a cobra cmd"]

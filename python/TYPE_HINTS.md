@@ -422,8 +422,8 @@ class SupportsClose(Protocol):
     F["class FileLike:
     def close(self) -> None: ..."]
     N["class IntegerOnly: ..."]
-    F -->|has close()| SAT["structural subtype<br/>isinstance == True"]
-    N -->|no close()| NSAT["NOT a subtype<br/>isinstance == False"]
+    F -->|"has close()"| SAT["structural subtype<br/>isinstance == True"]
+    N -->|"no close()"| NSAT["NOT a subtype<br/>isinstance == False"]
     F -.->|no inheritance!| NI["SupportsClose NOT in FileLike.__mro__"]
     style P fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style SAT fill:#eafaf1,stroke:#27ae60

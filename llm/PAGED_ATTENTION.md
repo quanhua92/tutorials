@@ -195,10 +195,10 @@ graph TD
         FL["free_list: stack of free page ids<br/>(the OS free-frame list)"]
         Used["used: set of owned page ids"]
     end
-    Alloc["allocate()"] -->|.pop() free_list| Slab
-    Alloc -->|.add() used| Used
-    Free["free_page(id)"] -->|.discard() used| Used
-    Free -->|.append() free_list| FL
+    Alloc["allocate()"] -->|".pop() free_list"| Slab
+    Alloc -->|".add() used"| Used
+    Free["free_page(id)"] -->|".discard() used"| Used
+    Free -->|".append() free_list"| FL
     style Slab fill:#eafaf1,stroke:#27ae60,stroke-width:2px
     style FL fill:#fef9e7,stroke:#f1c40f
     style Alloc fill:#eaf2f8,stroke:#2980b9

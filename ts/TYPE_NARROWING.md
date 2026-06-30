@@ -420,10 +420,10 @@ compiler tells you a case is missing. (The throw-based variant lives in
 ```mermaid
 graph LR
     U["declared type<br/>Shape = Circle | Square"] --> TAG{"switch (s.kind)"}
-    TAG -->|"case \"circle\""| C["s narrowed to Circle<br/>s.radius compiles"]
-    TAG -->|"case \"square\""| SQ["s narrowed to Square<br/>s.side compiles"]
-    TAG -->|"default<br/>(all handled)"| N["s narrowed to never<br/>assigning to `never` OK"]
-    TAG -.->|"add Triangle later,<br/>remove a case"| FAIL["`never` assignment errors<br/>= completeness alarm"]
+    TAG -->|"case &quot;circle&quot;"| C["s narrowed to Circle<br/>s.radius compiles"]
+    TAG -->|"case &quot;square&quot;"| SQ["s narrowed to Square<br/>s.side compiles"]
+    TAG -->|"default<br/>(all handled)"| N["s narrowed to never<br/>assigning to never OK"]
+    TAG -.->|"add Triangle later,<br/>remove a case"| FAIL["never assignment errors<br/>= completeness alarm"]
     style U fill:#eaf2f8,stroke:#2980b9
     style C fill:#eafaf1,stroke:#27ae60
     style SQ fill:#eafaf1,stroke:#27ae60

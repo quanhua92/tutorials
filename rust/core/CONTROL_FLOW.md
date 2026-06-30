@@ -437,10 +437,10 @@ help: consider adding return type
 
 ```mermaid
 flowchart TD
-    Call["caller calls run_pipeline(\"9\")"] --> R1["first_char(\"9\")"]
-    R1 -->|Ok('9')| R2["digit_value('9')"]
-    R2 -->|Ok(9)| R3["scale(9)"]
-    R3 -->|Err TooLarge(9)| Q3["scale(d)?"]
+    Call["caller calls run_pipeline(&quot;9&quot;)"] --> R1["first_char(&quot;9&quot;)"]
+    R1 -->|"Ok('9')"| R2["digit_value('9')"]
+    R2 -->|"Ok(9)"| R3["scale(9)"]
+    R3 -->|"Err TooLarge(9)"| Q3["scale(d)?"]
     Q3 -->|"? = early return Err(...)"| Caller["caller receives Err(TooLarge(9))"]
     Q3 -.->|"From::from converts E<br/>(here a no-op: already PipeErr)"| Caller
     style Q3 fill:#fdedec,stroke:#c0392b,stroke-width:3px

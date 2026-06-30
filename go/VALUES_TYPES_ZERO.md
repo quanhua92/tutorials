@@ -59,7 +59,7 @@ graph TD
     T --> A["Aggregate<br/>(array, struct)"]
     T --> R["Reference<br/>(pointer, slice, map, chan, func)"]
     T --> I["Interface"]
-    B --> ZB["zero = type-specific:<br/>bool→false, numeric→0, string→\"\""]
+    B --> ZB["zero = type-specific:<br/>bool→false, numeric→0, string→&quot;&quot;"]
     A --> ZA["zero = each element / field<br/>zeroed recursively"]
     R --> ZR["zero = nil<br/>(slice/map/chan/func/pointer)"]
     I --> ZI["zero = nil<br/>(a (type=nil, val=nil) pair)"]
@@ -177,7 +177,7 @@ redeclaration is the same location.
 graph LR
     L["literal / iota / expr<br/>(UNTYPED)"] -->|arbitrary precision,<br/>no overflow| U["untyped constant"]
     U -->|"used where a type<br/>is required"| DT["default type<br/>(bool/rune/int/float64/...)"]
-    U -->|explicit conversion T(c)| T["typed value T"]
+    U -->|"explicit conversion T(c)"| T["typed value T"]
     U -->|assigned to typed const<br/>or typed var| T
     style U fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
 ```

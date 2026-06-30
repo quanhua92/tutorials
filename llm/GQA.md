@@ -248,8 +248,8 @@ memory win — you've materialized the full MHA-size cabinet set. The trick is:
 ```mermaid
 graph TD
     Q["q [B, H_q, L, D]"] -->|reshape| QG["qg [B, H_kv, n_repeats, L, D]"]
-    K["k [B, H_kv, S, D]"] -->|reshape (size-1)| KG["kg [B, H_kv, 1, S, D]"]
-    V["v [B, H_kv, S, D]"] -->|reshape (size-1)| VG["vg [B, H_kv, 1, S, D]"]
+    K["k [B, H_kv, S, D]"] -->|"reshape (size-1)"| KG["kg [B, H_kv, 1, S, D]"]
+    V["v [B, H_kv, S, D]"] -->|"reshape (size-1)"| VG["vg [B, H_kv, 1, S, D]"]
     QG --> MM["scores = qg @ kg^T / √d<br/>broadcasts n_repeats × 1"]
     KG --> MM
     MM --> SM["softmax over S"]

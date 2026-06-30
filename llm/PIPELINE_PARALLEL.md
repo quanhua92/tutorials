@@ -55,12 +55,9 @@ The lineage is four refinements of the same idea — each kills a different cost
 
 ```mermaid
 graph LR
-    NAIVE["naive pipeline<br/>(one batch, K stages)<br/>75% of GPUs idle"] -->|split batch into M pieces|
-    GP["GPipe<br/>(Huang 2019)<br/>fill the pipeline<br/>bubble = (K-1)/(K+M-1)"]
-    GP -->|start backward EARLY|
-    F1B["1F1B / PipeDream-Flush<br/>(Narayanan SC21)<br/>SAME bubble<br/>but mem M x -> K x"]
-    F1B -->|V virtual stages/device|
-    INT["Interleaved 1F1B<br/>(Megatron-LM)<br/>bubble = (K-1)/(K+M*V-1)"]
+    NAIVE["naive pipeline<br/>(one batch, K stages)<br/>75% of GPUs idle"] -->|"split batch into M pieces"| GP["GPipe<br/>(Huang 2019)<br/>fill the pipeline<br/>bubble = (K-1)/(K+M-1)"]
+    GP -->|"start backward EARLY"| F1B["1F1B / PipeDream-Flush<br/>(Narayanan SC21)<br/>SAME bubble<br/>but mem M x -> K x"]
+    F1B -->|"V virtual stages/device"| INT["Interleaved 1F1B<br/>(Megatron-LM)<br/>bubble = (K-1)/(K+M*V-1)"]
 
     style NAIVE fill:#fdecea,stroke:#c0392b
     style GP fill:#fef9e7,stroke:#f1c40f

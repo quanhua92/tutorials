@@ -41,7 +41,7 @@ learner materials.
 
 ```mermaid
 graph TD
-    CORPUS["{name}_corpus.md<br/>(GROUND TRUTH)<br/>every real example + source URL + IPA + freq rank"] -->|quoted verbatim under<br/>> From {name}_corpus.md:| MD["{NAME}.md<br/>(readable guide:<br/>what + why + L1 pitfalls + cheat sheet)"]
+    CORPUS["{name}_corpus.md<br/>(GROUND TRUTH)<br/>every real example + source URL + IPA + freq rank"] -->|"quoted verbatim under<br/>> From {name}_corpus.md:"| MD["{NAME}.md<br/>(readable guide:<br/>what + why + L1 pitfalls + cheat sheet)"]
     CORPUS -->|every chunk/dialog line traces to a row| HTML["{name}.html<br/>(PRIMARY learner artifact:<br/>the 7-feature practice player)"]
     MD -.->|mirrors| HTML
     style CORPUS fill:#eafaf1,stroke:#27ae60,stroke-width:3px

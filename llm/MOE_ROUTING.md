@@ -72,7 +72,7 @@ graph LR
 
     DENSE -.->|decouple knowledge<br/>from compute| SHAZ
     SHAZ -.->|simplify to top-1<br/>+ add capacity| SWITCH
-    SWITCH -.->|scale to LLMs<br/>(top-2, z-loss)| MIX
+    SWITCH -.->|"scale to LLMs<br/>(top-2, z-loss)"| MIX
     MIX -.->|kill the aux loss<br/>+ shared expert| DS
 
     style DENSE fill:#fdecea,stroke:#c0392b

@@ -196,7 +196,7 @@ The exporter records both, attributes **sorted by key** for stable output.
 graph LR
     SP["span"] --> A["Attributes<br/>key/value metadata<br/>user=al, attempt=3"]
     SP --> ST["Status<br/>Unset (default) / Error / Ok"]
-    ST -->|"SetStatus(codes.Error, \"card declined\")"| ER["code=Error<br/>description=\"card declined\""]
+    ST -->|"SetStatus(codes.Error, &quot;card declined&quot;)"| ER["code=Error<br/>description=&quot;card declined&quot;"]
     style ER fill:#fadbd8,stroke:#e74c3c
 ```
 

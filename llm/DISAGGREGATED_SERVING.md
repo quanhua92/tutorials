@@ -333,12 +333,12 @@ sequenceDiagram
     participant BT as Decode block table (🔗 PAGED)
 
     R->>PF: prompt [100..105]
-    PF->>PF: prefill -> compute KV (S, D)
+    PF->>PF: prefill → compute KV (S, D)
     PF->>Net: stream KV bytes
     Net->>DP: Size_KV / bandwidth (~ms)
-    DP->>BT: append_page(KV)  (logical -> physical)
+    DP->>BT: append_page(KV)  (logical → physical)
     BT-->>DP: gathered KV == original (byte-equal)
-    Note over DP: decode from received KV; prefill skipped
+    Note over DP: decode from received KV, prefill skipped
 ```
 
 > From `disaggregated_serving.py` **Section D** — tiny demo (D=8, 1 layer, 1

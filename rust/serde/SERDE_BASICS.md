@@ -37,7 +37,7 @@ backend. This bundle is the Rust analog of Go's `encoding/json` and Python's
 ```mermaid
 graph TD
     Code["#[derive(Serialize, Deserialize)]<br/>on a Rust struct"] -->|proc-macro at COMPILE TIME| Impl["impl Serialize + impl Deserialize<br/>(generated, zero reflection)"]
-    Impl -->|"serde_json::to_string(&v)"| JSONout["JSON text string<br/>{\"name\":\"Al\",\"age\":9}"]
+    Impl -->|"serde_json::to_string(&v)"| JSONout["JSON text string<br/>{&quot;name&quot;:&quot;Al&quot;,&quot;age&quot;:9}"]
     JSONout -->|"serde_json::from_str::&lt;T&gt;(s)"| Back["same struct value<br/>(round-trip == v)"]
     Attrs["field attributes shape the JSON"] --> Rename["rename: 'name' -> 'full_name'"]
     Attrs --> Skip["skip: field ABSENT in JSON<br/>(Default on the way back)"]

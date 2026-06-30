@@ -456,15 +456,15 @@ sequenceDiagram
     Note over Sch: request Q2 finishes
     Sch->>RC: release(Q2)
     RC->>RC: ref_count-- on Q2's path<br/>(root, system node, [210,211] leaf)
-    Note over RC: [210,211] leaf ref -> 0<br/>(now evictable)
+    Note over RC: [210,211] leaf ref → 0<br/>(now evictable)
     Note over Sch: GPU memory overflows
     Sch->>RC: evict_lru_leaves(1)
     RC->>RC: find LRU leaf with ref==0<br/>(= [210,211])
     RC->>G: free [210,211]'s KV pages
-    RC->>RC: walk up: parent still has<br/>[200,...] child -> STOP
+    RC->>RC: walk up: parent still has<br/>[200,...] child → STOP
     Note over Sch: later, Q4=[...,210,999] arrives
     Sch->>RC: match(Q4)
-    RC-->>Sch: matched=3 (was 4 before<br/>eviction; [210,...] is gone)
+    RC-->>Sch: matched=3 (was 4 before<br/>eviction, [210,...] is gone)
 ```
 
 > From `prefix_cache.py` **Section F** — start from the full tree

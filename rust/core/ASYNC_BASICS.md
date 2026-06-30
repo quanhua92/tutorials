@@ -47,7 +47,7 @@ for the underlying computation to make progress"** ([`std::future::Future`][std-
 graph TD
     AF["async fn add(a,b) -> i32"] -->|desugars| GEN["a generated STATE MACHINE<br/>(one state per .await point)"]
     GEN -->|implements| FUT["impl Future&lt;Output=i32&gt;<br/>(INERT until polled)"]
-    FUT -->|block_on: loop poll(cx)| POLL["poll(self: Pin<&mut Self>, cx)<br/>-> Poll&lt;T&gt;"]
+    FUT -->|"block_on: loop poll(cx)"| POLL["poll(self: Pin<&mut Self>, cx)<br/>-> Poll&lt;T&gt;"]
     POLL -->|not ready| PEND["Poll::Pending<br/>+ stores Waker, then yields"]
     POLL -->|ready| READY["Poll::Ready(T)<br/>-> returns T"]
     PEND -->|Waker wakes -> re-poll| POLL
@@ -236,7 +236,7 @@ sequenceDiagram
     participant E as block_on (executor)
     participant F as YieldOnce
     E->>F: poll #1(cx)
-    F->>F: yielded=false -> set true; store+wake(cx.waker)
+    F->>F: yielded=false, set true, store+wake(cx.waker)
     F-->>E: Poll::Pending
     E->>E: (busy loop / re-scheduled by wake)
     E->>F: poll #2(cx)

@@ -144,7 +144,7 @@ graph TD
     A[Need to push data after first byte?] -->|No| B["Return a normal Response<br/>(c.json / c.text)"]
     A -->|Yes| C{Consumer protocol?}
     C -->|Browser EventSource<br/>or one-way live feed| D[streamSSE<br/>text/event-stream]
-    C -->|Plain text stream<br/>(LLM tokens, logs)| E[streamText<br/>chunked text/plain]
+    C -->|"Plain text stream<br/>(LLM tokens, logs)"| E[streamText<br/>chunked text/plain]
     C -->|Binary or arbitrary| F[stream<br/>StreamingApi]
     C -->|Bidirectional, full-duplex| G["Use WebSockets instead<br/>🔗 WEBSOCKETS_SSE"]
     D --> H{Need backpressure / abort?}

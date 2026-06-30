@@ -316,11 +316,11 @@ produced, not after.
 
 ```mermaid
 graph TD
-    SRC["var version = \"dev\"<br/>(source: constant-string init)"] --> COMPILE["compile"]
+    SRC["var version = &quot;dev&quot;<br/>(source: constant-string init)"] --> COMPILE["compile"]
     COMPILE -->|"default value carried through"| LINK["go tool link"]
-    X["-ldflags \"-X 'main.version=v1.2.3'\""] -->|"linker REWRITES the var"| LINK
-    LINK --> BIN["binary: version == \"v1.2.3\""]
-    NORUN["go run (no -ldflags)"] -->|"default survives"| BIN2["binary: version == \"dev\""]
+    X["-ldflags &quot;-X 'main.version=v1.2.3'&quot;"] -->|"linker REWRITES the var"| LINK
+    LINK --> BIN["binary: version == &quot;v1.2.3&quot;"]
+    NORUN["go run (no -ldflags)"] -->|"default survives"| BIN2["binary: version == &quot;dev&quot;"]
     style X fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style BIN fill:#eafaf1,stroke:#27ae60
 ```

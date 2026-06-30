@@ -243,14 +243,14 @@ sequenceDiagram
     participant C as DenseKVCache
     participant A as attention
 
-    Note over X: PREFILL (L=3): offset = slice(0,3) -> rows [0,1,2]
+    Note over X: PREFILL (L=3): offset = slice(0,3) → rows [0,1,2]
     X->>R: rotate Q,K at true positions 0..2
-    R->>C: store K,V; offset becomes 3
+    R->>C: store K,V, offset becomes 3
     Note over A: Q[3] @ K[3]^T (all-at-once)
 
-    Note over X: DECODE (L=1): offset = slice(3,4) -> row [3] ✓
+    Note over X: DECODE (L=1): offset = slice(3,4) → row [3] ✓
     X->>R: rotate ONE new token at TRUE position 3
-    R->>C: append K[1],V[1]; offset becomes 4
+    R->>C: append K[1],V[1], offset becomes 4
     C-->>A: full K,V [B,H_kv,4,D]
     A->>A: Q[1,d] @ K[4,d]^T = O(S)
 ```

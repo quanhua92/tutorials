@@ -363,7 +363,7 @@ graph TD
     T["ToArray&lt;string | number&gt;<br/>T extends any ? T[] : never"] --> N{"is T a<br/>NAKED type parameter?"}
     N -->|"yes — naked T"| D["DISTRIBUTES over the union:<br/>ToArray&lt;string&gt; | ToArray&lt;number&gt;<br/>= string[] | number[]"]
     N -->|"no — wrapped [T]"| ND["NON-distributive:<br/>(string | number)[]<br/>(union checked as one whole)"]
-    D -.->|"observable difference:<br/>['a', 1] fits (string|number)[]<br/>but NOT string[] | number[]"| DIFF["mixed array rejected<br/>by the distributed form"]
+    D -.->|"observable difference:<br/>['a', 1] fits (string &#124; number)[]<br/>but NOT string[] &#124; number[]"| DIFF["mixed array rejected<br/>by the distributed form"]
     style D fill:#e7f0ff,stroke:#3178c6,stroke-width:3px
     style ND fill:#eafaf1,stroke:#27ae60,stroke-width:3px
     style DIFF fill:#fadbd8,stroke:#e74c3c

@@ -452,7 +452,7 @@ route.
 
 ```mermaid
 graph LR
-    R["route @app.get('/admin/')"] -->|Security(get_current_user, scopes=['admin'])| S["SecurityScopes(scopes=['admin'])"]
+    R["route @app.get('/admin/')"] -->|"Security(get_current_user, scopes=['admin'])"| S["SecurityScopes(scopes=['admin'])"]
     S --> GC["get_current_user(security_scopes, token)"]
     JWT["token payload: scope='read admin'"] --> GC
     GC -->|for each needed: in payload scopes?| D{match?}

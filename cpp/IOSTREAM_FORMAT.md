@@ -28,8 +28,8 @@ modern C++ user:
 
 ```mermaid
 graph LR
-    E1["ERA 1: &lt;iostream&gt;<br/>std::cout &lt;&lt; x<br/>(type-safe streams<br/>+ sticky manipulators)"] -->|C++20| E2["ERA 2: std::format<br/>std::format(\"{}\", x)<br/>(Python-style {} fields<br/>compile-checked)"]
-    E2 -->|C++23| E3["ERA 3: std::print/println<br/>std::print(\"{}\", x)<br/>(direct to stdout<br/>no stream object)"]
+    E1["ERA 1: &lt;iostream&gt;<br/>std::cout &lt;&lt; x<br/>(type-safe streams<br/>+ sticky manipulators)"] -->|C++20| E2["ERA 2: std::format<br/>std::format(&quot;{}&quot;, x)<br/>(Python-style {} fields<br/>compile-checked)"]
+    E2 -->|C++23| E3["ERA 3: std::print/println<br/>std::print(&quot;{}&quot;, x)<br/>(direct to stdout<br/>no stream object)"]
     style E1 fill:#eaf2f8,stroke:#2980b9
     style E2 fill:#fef9e7,stroke:#f1c40f,stroke-width:3px
     style E3 fill:#eafaf1,stroke:#27ae60,stroke-width:3px

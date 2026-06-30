@@ -203,7 +203,7 @@ graph TB
         CG["_GLOBAL_COUNTER = 999<br/>(child's OWN copy)"]
     end
     PG -.->|"fork: copy-on-write<br/>spawn: re-import (stays 0)"| CG
-    CG -.x|"NO write-back"| PG
+    CG -.-x|"NO write-back"| PG
     style PG fill:#eafaf1,stroke:#27ae60
     style CG fill:#fef9e7,stroke:#f1c40f
 ```

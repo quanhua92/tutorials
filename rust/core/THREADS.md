@@ -37,7 +37,7 @@ program either compiles (race-free) or it doesn't (with a precise diagnostic).
 ```mermaid
 graph TD
     Spawn["thread::spawn(F)<br/>F: FnOnce() -> T + Send + 'static"]
-    Spawn -->|"closure + captures<br/>must be 'static"| Move["`move` closure -> OWNERSHIP<br/>transfers into the thread"]
+    Spawn -->|"closure + captures<br/>must be 'static"| Move["move closure -> OWNERSHIP<br/>transfers into the thread"]
     Spawn --> OS["new OS thread runs F"]
     Spawn --> Handle["returns JoinHandle&lt;T&gt;<br/>(drop = detach)"]
     Handle -->|"handle.join()"| Join["BLOCKS until thread ends;<br/>happens-before established"]

@@ -63,16 +63,16 @@ attributes ([Serde — Enum representations][serde-enum]).
 ```mermaid
 graph LR
     subgraph EXT["externally tagged (DEFAULT)"]
-        E["{\"Circle\": {\"radius\": 2.5}}"]
+        E["{&quot;Circle&quot;: {&quot;radius&quot;: 2.5}}"]
     end
-    subgraph INT["internally tagged<br/>#[serde(tag=\"kind\")]"]
-        I["{\"kind\":\"Circle\", \"radius\":2.5}"]
+    subgraph INT["internally tagged<br/>#[serde(tag=&quot;kind&quot;)]"]
+        I["{&quot;kind&quot;:&quot;Circle&quot;, &quot;radius&quot;:2.5}"]
     end
-    subgraph ADJ["adjacently tagged<br/>#[serde(tag=\"t\", content=\"c\")]"]
-        A["{\"t\":\"Circle\", \"c\":{\"radius\":2.5}}"]
+    subgraph ADJ["adjacently tagged<br/>#[serde(tag=&quot;t&quot;, content=&quot;c&quot;)]"]
+        A["{&quot;t&quot;:&quot;Circle&quot;, &quot;c&quot;:{&quot;radius&quot;:2.5}}"]
     end
     subgraph UN["untagged<br/>#[serde(untagged)]"]
-        U["{\"radius\":2.5}  (no tag)"]
+        U["{&quot;radius&quot;:2.5}  (no tag)"]
     end
     E -.->|"add #[serde(tag=..)]"| I
     I -.->|"split tag/content"| A
@@ -326,10 +326,10 @@ or the inner struct ([Serde — Struct flattening][serde-flatten]).
 ```mermaid
 graph LR
     subgraph BEFORE["Rust value"]
-        P["Page { name: \"users\",<br/>pagination: Pagination {<br/>  limit: 100, offset: 0<br/>} }"]
+        P["Page { name: &quot;users&quot;,<br/>pagination: Pagination {<br/>  limit: 100, offset: 0<br/>} }"]
     end
     subgraph AFTER["JSON (flattened)"]
-        J["{ \"name\":\"users\",<br/>  \"limit\":100,<br/>  \"offset\":0 }"]
+        J["{ &quot;name&quot;:&quot;users&quot;,<br/>  &quot;limit&quot;:100,<br/>  &quot;offset&quot;:0 }"]
     end
     P -->|"to_string<br/>(#[serde(flatten)])"| J
     J -->|"from_str<br/>(re-nests)"| P
@@ -411,7 +411,7 @@ graph TD
     V --> Num["Number(Number)<br/>i64 / u64 / f64"]
     V --> Str["String(String)"]
     V --> Arr["Array(Vec&lt;Value&gt;)<br/>index with [usize]"]
-    V --> Obj["Object(Map&lt;String,Value&gt;)<br/>BTreeMap (sorted keys)<br/>index with [\"key\"]"]
+    V --> Obj["Object(Map&lt;String,Value&gt;)<br/>BTreeMap (sorted keys)<br/>index with [&quot;key&quot;]"]
     Obj -.->|"missing key<br/>=> Value::Null (never panics)"| Null
     style V fill:#f4ecf7,stroke:#8e44ad,stroke-width:3px
     style Obj fill:#eaf2f8,stroke:#2980b9,stroke-width:2px

@@ -112,7 +112,7 @@ the hit cost.
 ```mermaid
 graph TD
     subgraph ring["Consistent Hash Ring  (0 → 2³²)"]
-        direction clockwise
+        direction LR
         VA["vnode A#0"] --> VB["vnode B#3"]
         VB --> VC["vnode C#1"]
         VC --> VA2["vnode A#2"]

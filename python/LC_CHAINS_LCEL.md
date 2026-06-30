@@ -416,7 +416,7 @@ traceable, streamable.
 ```mermaid
 graph LR
     IN["{'question': 'origin of cats?'}"] --> AS["RunnablePassthrough.assign<br/>(context = stub-fn)"]
-    AS -->|{'question','context'}| P["ChatPromptTemplate"]
+    AS -->|"{'question','context'}"| P["ChatPromptTemplate"]
     P -->|messages| M["ChatModel"]
     M -->|AIMessage| PS["StrOutputParser"]
     PS -->|str| OUT["'Answer: cats were domesticated ...'"]

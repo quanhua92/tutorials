@@ -1,0 +1,214 @@
+kto_alignment.py - reference impl. All numbers below feed KTO_ALIGNMENT.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources (the KTO paper arXiv:2402.01306
++ HuggingFace TRL + prospect theory 1992); see kto_alignment_reference.txt.
+
+==========================================================================
+  SECTION A: the relative reward r_theta + the KT value function
+==========================================================================
+The shared DPO/KTO building block -- the RELATIVE REWARD (in nats):
+    r_theta(x,y) = log pi_theta(y|x) - log pi_ref(y|x)
+    relative_reward = beta * r_theta   (the DPO form TRL logs)
+
+| logpi_theta | logpi_ref | r_theta (nats) | beta*r (reward) |
+|-------------|-----------|----------------|-----------------|
+|       -1.00 |     -1.60 |         0.6000 |          0.6000 |
+|       -0.90 |     -1.10 |         0.2000 |          0.2000 |
+|       -1.50 |     -1.00 |        -0.5000 |         -0.5000 |
+|       -1.00 |     -1.00 |         0.0000 |          0.0000 |
+|       -1.00 |     -0.60 |        -0.4000 |         -0.4000 |
+
+Reading the table: a POSITIVE r means the policy raised y's prob
+relative to the reference (SFT) model; a NEGATIVE r means it lowered
+it. r=0 is the no-change point. beta simply rescales the axis.
+
+---- the KT value function: canonical (power) vs KTO (logistic) ----
+Prospect theory says humans are LOSS-AVERSE: a loss of magnitude d
+hurts MORE than a gain of d pleases, by factor lambda (~2.25). And
+both are measured RELATIVE to a reference point z0. Below: canonical
+KT v(z) = z^0.88 (gain) / -2.25*(-z)^0.88 (loss), z0=0:
+
+| z (outcome) | canonical v(z) |  KTO-logistic v(z) | meaning |
+|-------------|----------------|---------------------|---------|
+|       -1.00 |        -2.2500 |              1.6449 | LOSS (steeper) |
+|       -0.50 |        -1.2226 |              1.4005 | LOSS (steeper) |
+|        0.00 |         0.0000 |              0.5000 | reference pt (flat) |
+|        0.50 |         0.5434 |              0.6225 | gain (concave) |
+|        1.00 |         1.0000 |              0.7311 | gain (concave) |
+
+Both functions share the SAME three prospect-theory properties:
+  (1) a REFERENCE POINT z0=0 (outcomes judged relative to it);
+  (2) CONCAVITY in gains (diminishing sensitivity as z grows);
+  (3) LOSS AVERSION (the loss column is steeper than the gain column).
+
+GOLD LOSS-AVERSION ANCHOR (canonical KT, lambda=2.25):
+  v(+0.5) = 0.5^0.88       = +0.5434   (a gain of half a nat)
+  v(-0.5) = -2.25*0.5^0.88 = -1.2226   (a loss of half a nat)
+  |v(-0.5)| / v(+0.5)      = 2.2500  == lambda (losses loom 2.25x larger than gains)
+  [check] canonical KT is loss-averse: |v(-0.5)| > v(+0.5): OK
+  [check] the loss-aversion ratio equals lambda exactly (2.25): OK
+  [check] canonical KT v(0) == 0 (reference point is flat): OK
+  [check] relative_reward == beta * relative_logratio: OK
+  [check] r_theta is antisymmetric in (logpi, logpi_ref) swap: OK
+
+==========================================================================
+  SECTION B: the KTO per-example loss (desirable + undesirable branches)
+==========================================================================
+With beta=1.0, lambda_D=lambda_U=1.0, z0=0.0 (held flat here; Section C estimates z0 from a batch):
+
+DESIRABLE branch (thumbs-up): the model is REWARDED for raising r
+above z0. v = lambda_D*sigma(beta*(r-z0)); loss = lambda_D - v.
+  -> a large POSITIVE r -> v near lambda_D -> loss near 0 (good).
+  -> a NEGATIVE r (model wrongly lowered a good output) -> loss near lambda_D.
+
+| r_theta | desirable v(r) | loss = 1 - v | reading |
+|---------|----------------|--------------|---------|
+|    1.00 |         0.7311 |       0.2689 | near 0 (great) |
+|    0.50 |         0.6225 |       0.3775 | near 0 (great) |
+|    0.00 |         0.5000 |       0.5000 | boundary |
+|   -0.50 |         0.3775 |       0.6225 | near 1 (bad) |
+|   -1.00 |         0.2689 |       0.7311 | near 1 (bad) |
+
+UNDESIRABLE branch (thumbs-down): the model is PENALIZED for a
+positive r on a bad output. v = lambda_U*sigma(beta*(z0-r)); loss =
+lambda_U - v. NOTE the argument is FLIPPED (z0 - r).
+  -> a NEGATIVE r (model correctly lowered a bad output) -> loss near 0.
+  -> a POSITIVE r (model failed to lower a bad output) -> loss near lambda_U.
+
+| r_theta | undesirable v(r) | loss = 1 - v | reading |
+|---------|------------------|--------------|---------|
+|    1.00 |           0.2689 |       0.7311 | near 1 (penalized) |
+|    0.50 |           0.3775 |       0.6225 | near 1 (penalized) |
+|    0.00 |           0.5000 |       0.5000 | boundary |
+|   -0.50 |           0.6225 |       0.3775 | near 0 (correct) |
+|   -1.00 |           0.7311 |       0.2689 | near 0 (correct) |
+
+Key contrast: for the SAME r, the two branches demand OPPOSITE
+behaviour. r=+0.5 gives loss 0.3775 on a DESIRABLE example (good --
+the model correctly raised a good output) but loss 0.6225 on an
+UNDESIRABLE example (bad -- the model failed to lower a bad output).
+That sign-flip inside the sigmoid is the whole mechanism.
+  [check] desirable loss finite & >=0 at r=-2.00: OK
+  [check] desirable loss finite & >=0 at r=-1.50: OK
+  [check] desirable loss finite & >=0 at r=-1.00: OK
+  [check] desirable loss finite & >=0 at r=-0.50: OK
+  [check] desirable loss finite & >=0 at r=0.00: OK
+  [check] desirable loss finite & >=0 at r=0.50: OK
+  [check] desirable loss finite & >=0 at r=1.00: OK
+  [check] desirable loss finite & >=0 at r=1.50: OK
+  [check] desirable loss finite & >=0 at r=2.00: OK
+  [check] undesirable loss finite & >=0 at r=-2.00: OK
+  [check] undesirable loss finite & >=0 at r=-1.50: OK
+  [check] undesirable loss finite & >=0 at r=-1.00: OK
+  [check] undesirable loss finite & >=0 at r=-0.50: OK
+  [check] undesirable loss finite & >=0 at r=0.00: OK
+  [check] undesirable loss finite & >=0 at r=0.50: OK
+  [check] undesirable loss finite & >=0 at r=1.00: OK
+  [check] undesirable loss finite & >=0 at r=1.50: OK
+  [check] undesirable loss finite & >=0 at r=2.00: OK
+  [check] at r=z0 both branches equal lambda/2 (=0.5 with lambda=1): OK
+  [check] r=+0.5 desirable loss < r=+0.5 undesirable loss: OK
+
+==========================================================================
+  SECTION C: KL reference point z0 + batch loss (GOLD ANCHOR)
+==========================================================================
+The 4-example UNPAIRED toy batch (the GOLD inputs pinned for the .html):
+| i | label        | logpi_theta | logpi_ref | r_theta |
+|---|--------------|-------------|-----------|---------|
+| 0 | desirable   |       -1.00 |     -1.60 |  0.6000 |
+| 1 | desirable   |       -1.20 |     -1.70 |  0.5000 |
+| 2 | undesirable |       -0.90 |     -1.10 |  0.2000 |
+| 3 | undesirable |       -1.50 |     -1.00 | -0.5000 |
+
+KL reference point z0 (prospect theory's reference point):
+    mismatched-pair log-ratios = [0.04, 0.06, -0.02, 0.08]
+    z_hat_0 = max(0, mean([0.04, 0.06, -0.02, 0.08]))
+           = max(0, +0.0400)
+           = 0.0400
+    (the max(0,.) clamp gives positive bias / low variance; we do
+     NOT backprop through z0 -- it only controls loss saturation.)
+
+Per-example value v and loss (beta=1.0, lambda_D=lambda_U=1, z0=0.0400):
+| i | label        | r_theta |   v(x,y) | loss=l-v | branch arg |
+|---|--------------|---------|----------|----------|------------|
+| 0 | desirable   |  0.6000 |   0.6365 |   0.3635 |    +0.5600 |
+| 1 | desirable   |  0.5000 |   0.6130 |   0.3870 |    +0.4600 |
+| 2 | undesirable |  0.2000 |   0.4601 |   0.5399 |    -0.1600 |
+| 3 | undesirable | -0.5000 |   0.6318 |   0.3682 |    +0.5400 |
+
+Reading the table like a story:
+  - ex 0,1 (desirable, r>0): the policy correctly RAISED the prob
+    of good outputs -> v is high -> loss is LOW (0.3635, 0.3870).
+  - ex 2 (undesirable, r=+0.2): the policy FAILED to lower a bad
+    output -> the undesirable branch's flipped argument is NEGATIVE
+    -> v is LOW -> loss is HIGH (0.5399). This is the
+    example a loss-averse weighting (Section D) will hit hardest.
+  - ex 3 (undesirable, r=-0.5): the policy correctly LOWERED a bad
+    output -> flipped argument is positive -> v is high -> loss LOW (0.3682).
+
+GOLD PIN (kto_alignment.html recomputes this identically):
+    batch loss = mean(per-example losses)
+              = (0.3635 + 0.3870 + 0.5399 + 0.3682) / 4
+              = 0.4147
+
+  [check] batch loss is finite and non-negative: OK
+  [check] z0 == max(0, mean(KL_LOGRATIOS)) == 0.04: OK
+  [check] ex 2 (undesirable, r=+0.2) has the HIGHEST loss in the batch: OK
+  [check] desirable examples (r>0) have loss < 0.5 (v > 0.5): OK
+  [check] batch loss is the mean of per-example losses: OK
+
+==========================================================================
+  SECTION D: the loss-aversion effect -- sweeping lambda_U
+==========================================================================
+Prospect theory says losses are weighted MORE than gains (lambda ~= 2.25).
+In KTO that knob is lambda_U: the weight on the undesirable branch.
+Holding lambda_D=1 and beta=1, we sweep lambda_U over the toy batch
+(which has 2 undesirable examples, one of which the model got WRONG):
+
+| lambda_U | desirables loss | undesirables loss | BATCH loss | undesirable share |
+|----------|-----------------|-------------------|------------|-------------------|
+|     0.50 |          0.7505 |            0.4541 |     0.3011 |            0.3769 |
+|     1.00 |          0.7505 |            0.9081 |     0.4147 |            0.5475 |
+|     1.50 |          0.7505 |            1.3622 |     0.5282 |            0.6447 |
+|     2.25 |          0.7505 |            2.0432 |     0.6984 |            0.7314 |
+
+Reading the sweep:
+  - as lambda_U rises, the undesirable examples' losses are scaled UP;
+  - the batch loss INCREASES (the model is punished more for the bad
+    output it failed to lower);
+  - the undesirable share of the total loss grows -- exactly the
+    'losses loom larger' effect from prospect theory.
+
+NOTE on tuning (paper Eq 9): for class imbalance, set lambda_D, lambda_U
+so that lambda_D*n_D / (lambda_U*n_U) is in [1, 1.5]. With this batch's
+2:2 balance and lambda_D=1, the paper's rule gives lambda_U in [0.67, 1.0];
+lambda_U=2.25 would be for a task where avoiding bad outputs (e.g.
+toxicity) matters more than producing good ones.
+  [check] batch loss is MONOTONE increasing in lambda_U: OK
+  [check] undesirable share of loss is MONOTONE increasing in lambda_U: OK
+  [check] lambda_U=1.0 reproduces the Section C batch loss exactly: OK
+  [check] canonical prospect-theory lambda (2.25) gives the highest batch loss: OK
+
+==========================================================================
+  SECTION E: the decision recap -- DPO (paired) vs KTO (unpaired)
+==========================================================================
+| method    | data it needs                       | what it buys you       | the cost                              |
+|-----------|-------------------------------------|------------------------|----------------------------------------|
+| RLHF / PPO | reward model + PPO                  | matches true human prefs | 2 stages, RL unstable, PAIRS needed    |
+| DPO       | closed-form on (chosen, rejected) PAIRS | no RL, no reward model | STILL needs preference PAIRS           |
+| KTO       | closed-form on UNPAIRED binary (thumbs-up/down) | cheap abundant data; matches DPO at 1B-30B | needs KL estimate z0; tune {lambda_D, lambda_U} |
+
+The single question that picks the row:
+  CAN YOU GET PAIRS (a human compares 2 outputs)?  -> DPO.
+  ONLY UNPAIRED binary (thumbs-up/down) feedback?  -> KTO.
+  Need the reward model for downstream eval too?   -> RLHF/PPO.
+
+Practical: KTO often wins on cost-per-aligned-model because binary
+feedback is ~free in production (every 👍/👎 is a training example),
+whereas DPO pairs need a dedicated annotation pipeline.
+  [check] the three methods differ in the data they consume: OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

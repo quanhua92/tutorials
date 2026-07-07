@@ -1,0 +1,165 @@
+vocab_rationalization.py - the vocabulary parameter tax.
+All numbers below feed VOCAB_RATIONALIZATION.md.  torch = 2.12.1
+
+NOTE: every total N is COUNTED from each model's web-verified config
+(no marketing numbers, no hand-computed totals). Configs reproduce each
+model's official size class -- that cross-validates the param counter.
+
+========================================================================
+  SECTION A: the vocab tax formula  embed = V*H  (tied vs untied)
+========================================================================
+One embedding table holds V*H numbers (V rows of H dims each):
+
+| V        \ H   | H=2048 | H=3072 | H=4096 |
+|---|---|---|---|
+| V=49152        | 100.66M | 150.99M | 201.33M |
+| V=128256       | 262.67M | 394.00M | 525.34M |
+| V=256000       | 524.29M | 786.43M | 1.05B |
+
+GOLD ANCHOR (vocab_rationalization.html recomputes & gold-checks this):
+    V=49152, H=2048  ->  embed = 49152*2048 = 100,663,296 (100.66M)
+  [check] V=49152,H=2048 embed == 100,663,296: OK
+
+TIED vs UNTIED -- the lm_head doubles the tax unless weights are tied:
+
+| V        | H    | tied (1 table) | untied (2 tables) | untied/tied |
+|----------|------|----------------|-------------------|-------------|
+| 49152    | 2048 |   100,663,296 |       201,326,592 |         2.0x |
+| 128256   | 4096 |   525,336,576 |     1,050,673,152 |         2.0x |
+| 256000   | 2304 |   589,824,000 |     1,179,648,000 |         2.0x |
+| 151936   | 1536 |   233,373,696 |       466,747,392 |         2.0x |
+
+  -> tying recovers exactly ONE V*H table (halves the tax).
+     Llama-3 is UNTIED (2*525.3M = 1.05B of its 8.03B is pure vocab);
+     SmolLM2 / Qwen2.5 / Gemma-2 are TIED (one table).  See Section B.
+
+  absurd check: a nominal-1.5B model, H=2048, V=256000, UNTIED would spend
+    2 * 524,288,000 = 1,048,576,000 (1.05B) on vocab
+    ALONE -> 70% of a 1.5B budget consumed by tables.
+
+  [check] untied V=256k,H=2048 = 1,048,576,000: OK
+
+========================================================================
+  SECTION B: the real-models table -- the vocab tax across 5 models
+========================================================================
+Configs verified from each model's config.json (see _reference.txt).
+Total N is COUNTED from the config (matches each size class exactly).
+
+| model          | V       | H    | tied | embed (V*H)  | total N      | vocab cost | vocab % |
+|----------------|---------|------|------|--------------|--------------|------------|---------|
+| SmolLM2-135M   |  49,152 | 576  | True |   28,311,552 |  134,515,008 | 28,311,552 |   21.0% |
+| SmolLM2-1.7B   |  49,152 | 2048 | True |  100,663,296 | 1,711,376,384 | 100,663,296 |    5.9% |
+| Gemma-2-2B     | 256,000 | 2304 | True |  589,824,000 | 2,614,222,080 | 589,824,000 |   22.6% |
+| Llama-3-8B     | 128,256 | 4096 | False |  525,336,576 | 8,030,261,248 | 1,050,673,152 |   13.1% |
+| Qwen2.5-1.5B   | 151,936 | 1536 | True |  233,373,696 | 1,543,656,960 | 233,373,696 |   15.1% |
+
+  read it like this:
+    * Gemma-2-2B (V=256k, TIED): embed alone = 589.8M -> 22.5% of 2.61B.
+      Its vocab table is bigger than ALL of SmolLM2-1.7B. That is the tax.
+    * Llama-3-8B (V=128k, UNTIED): 2 tables = 1.05B -> 13.1% of 8.03B.
+      A big model can afford to UNTIE; an SLM cannot.
+    * SmolLM2-1.7B (V=49k, TIED): embed = 100.7M -> only 5.9% of 1.71B.
+      The 49k vocab is WHY it is a lean SLM, not a vocab-heavy one.
+
+  [check] max vocab% is Gemma-2-2B: OK
+  [check] min vocab% is SmolLM2-1.7B: OK
+  [check] every computed total lands in its model's size class: OK
+
+========================================================================
+  SECTION C: the param-budget pie -- vocab steals from the body
+========================================================================
+Hold the TOTAL budget N fixed and ask: how much goes to vocab vs the
+attention+MLP body (the reasoning core)? Bigger V -> thinner body.
+
+Fixed nominal budget N = 1,500,000,000 (1.50B), H = 2048, L = 24.
+
+| V        | vocab (tied) | vocab % | body budget  | per-layer budget | vs V=49k body |
+|----------|--------------|---------|--------------|------------------|----------------|
+|   32,768 |   67,108,864 |    4.5%  | 1,432,891,136 |       59,703,797 |           1.02x |
+|   49,152 |  100,663,296 |    6.7%  | 1,399,336,704 |       58,305,696 |           1.00x |
+|   65,536 |  134,217,728 |    8.9%  | 1,365,782,272 |       56,907,595 |           0.98x |
+|  128,256 |  262,668,288 |   17.5%  | 1,237,331,712 |       51,555,488 |           0.88x |
+|  256,000 |  524,288,000 |   35.0%  |  975,712,000 |       40,654,667 |           0.70x |
+
+  * V=49k leaves 1,399,336,704 (1.40B) for the body;
+    V=256k leaves only 975,712,000 (975.71M) -- it EATS ~423.62M
+    of capacity (≈6 transformer layers worth of attention+MLP at H=2048).
+  * If the model were UNTIED, double the vocab slice. A 256k untied 1.5B
+    model has NO budget left for a body -- which is why nobody ships that.
+
+  [check] V=49k tied vocab < N (body exists): OK
+  [check] V=256k UNTIED vocab (2*V*H) eats the MAJORITY of a 1.5B budget: OK
+Real-model pies (embed / body / lm_head slices of N):
+| model          | embed % | body % | lm_head % |
+|----------------|---------|--------|-----------|
+| SmolLM2-135M   |   21.0% |  79.0% |      0.0% |
+| SmolLM2-1.7B   |    5.9% |  94.1% |      0.0% |
+| Gemma-2-2B     |   22.6% |  77.4% |      0.0% |
+| Llama-3-8B     |    6.5% |  86.9% |      6.5% |
+| Qwen2.5-1.5B   |   15.1% |  84.9% |      0.0% |
+
+  [check] body is the largest slice in every model: OK
+
+========================================================================
+  SECTION D: param cost (linear) vs inference compression (sublinear)
+========================================================================
+Two forces with vocab size V, for a fixed text corpus:
+
+  (1) PARAM COST:    embed = V*H            -> grows LINEARLY in V.
+  (2) COMPRESSION:   tokens(V) = tokens(V0)*(V0/V)**alpha  (BPE: alpha<1,
+                       sublinear -- bigger vocab packs more chars/token but
+                       with diminishing returns). Inference steps for a fixed
+                       text DROP as tokens drop. Savings = 1 - tokens(V)/V0.
+
+Model (illustrative; alpha = 0.40 is a typical BPE compression exponent):
+| V        | embed params | embed vs V0 | tokens vs V0 | savings/seq | cost grows faster? |
+|----------|--------------|-------------|--------------|-------------|---------------------|
+|   32,768 |   67,108,864 |       1.00x |        1.000 |       0.0%  | no (still worth it) |
+|   49,152 |  100,663,296 |       1.50x |        0.850 |      15.0%  | YES (tax > savings) |
+|   65,536 |  134,217,728 |       2.00x |        0.758 |      24.2%  | YES (tax > savings) |
+|  128,256 |  262,668,288 |       3.91x |        0.579 |      42.1%  | YES (tax > savings) |
+|  256,000 |  524,288,000 |       7.81x |        0.439 |      56.1%  | YES (tax > savings) |
+
+  * Param cost scales as V (linear); compression scales as V^(-alpha)
+    (sublinear). So cost outruns compression -- past some point each extra
+    10k tokens of vocab buys less compression than the params it costs.
+  * This is WHY the SLM sweet spot is ~32k-64k: you capture most of the
+    compression of a 128k vocab at a fraction of the param tax.
+
+  [check] compression is sublinear (tokens drop < linearly as V grows): OK
+  [check] param cost grows linearly (2x V -> 2x embed): OK
+  [check] alpha in (0,1) so diminishing returns hold: OK
+
+========================================================================
+  SECTION E: the SLM vocab decision -- the ~32k-64k sweet spot
+========================================================================
+Rule of thumb (web-verified, see _reference.txt):
+  * 1-3B SLMs (SmolLM2, Qwen2.5-1.5B):  V ~ 49k-152k. SmolLM2 picks 49k
+    deliberately; Qwen2.5 picks 152k because it must cover Chinese+code.
+  * 7B+ models (Llama-3):               V ~ 128k-256k affordable -- the
+    tax is a small % of a big N.
+
+Decision drivers:
+  - multilingual / heavy-code deployment  -> lean BIGGER (more coverage,
+    fewer tokens/text, faster inference per sequence).
+  - single-domain edge SLM (English tool)  -> lean SMALLER (buy back body
+    capacity for attention/MLP). Tie embeddings.  (🔗 SHARED_EMBEDDINGS)
+
+Lineage quantified (H=2048, tied):
+| era            | model         | V       | embed     | rationale             |
+|----------------|---------------|---------|-----------|-----------------------|
+| big-model era  | Llama-3-8B    | 128,256 |   525.3M* | 128k vocab cheap at 8B; untied |
+| SLM era        | SmolLM2-1.7B  |  49,152 |    100.7M | smaller vocab frees body capacity |
+  (*525.3M is one table at H=4096; SmolLM2 row is at H=2048.)
+
+GOLD pinned for vocab_rationalization.html:
+    SmolLM2-1.7B embed = 49152 * 2048 = 100,663,296 (~100.66M)
+  [check] SmolLM2-1.7B embed == 100,663,296: OK
+
+  SmolLM2-1.7B vocab slice = 5.9% of N
+  Gemma-2-2B  vocab slice = 22.6% of N
+  [check] Gemma-2-2B vocab% > SmolLM2-1.7B vocab%: OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

@@ -1,0 +1,102 @@
+gguf_quant_reference.txt - Web provenance log for GGUF_QUANT.md.
+Every formula, block-size constant, and dequant rule below is traced to >=2
+authoritative sources. Distinct URLs: 7. Mirrors the "## Sources" section of
+GGUF_QUANT.md.
+
+[1] https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-common.h
+    ggml-org/llama.cpp -- ggml-common.h (the canonical GGML block-struct header)
+    Verifies: the exact block sizes and dequant formulas this bundle implements.
+      QK4_0 = 32 ; block_q4_0  = ggml_half d + uint8_t qs[16]
+                = 2 + 16 = 18 bytes / 32 weights -> 4.5 bpw = 0.5625 bytes/param
+                (dequant: w = d*(q-8), q unsigned 0..15)
+      QK8_0 = 32 ; block_q8_0  = ggml_half d + int8_t qs[32]
+                = 2 + 32 = 34 bytes / 32 weights -> 8.5 bpw = 1.0625 bytes/param
+                (dequant: w = d*q, q signed -128..127)
+      QK_K = 256 ; K_SCALE_SIZE = 12
+      block_q4_K = ggml_half d + ggml_half dmin + uint8_t scales[12] + uint8_t qs[128]
+                 = 2 + 2 + 12 + 128 = 144 bytes / 256 weights -> 4.5 bpw = 0.5625
+                 bytes/param (8 sub-blocks of 32; 6-bit sub-scales + 6-bit sub-mins
+                 packed into the 12-byte scales[] array; DOUBLE quantization via the
+                 fp16 super-block d/dmin). Dequant comment in source:
+                 "weight is represented as x = a * q + b" per sub-block.
+      block_q6_K = 210 bytes / 256 -> 6.5625 bpw (the high-precision end of the _M mix).
+
+[2] https://github.com/ggml-org/llama.cpp/discussions/5063
+    ggml-org/llama.cpp discussion #5063 "Even more quantization types?" (kawrakow)
+    -- the original k-quants announcement by the llama.cpp maintainer.
+    Verifies: the k-quant design rationale and the super-block layout.
+      "All existing llama.cpp quantization types utilize a block-wise structure -
+       either blocks of 32 quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), or blocks of 16
+       or 256 quants." K-quants use "super-blocks" of 256 with per-sub-block
+       quantized scales. Confirms QK_K = 256 and the two-level (super + sub)
+       scale hierarchy that this bundle's Section C models.
+
+[3] https://github.com/ggerganov/llama.cpp/pull/1684
+    ggml-org/llama.cpp PR #1684 "k-quants" (the merge that introduced Qx_K).
+    Verifies: the k-quants type taxonomy (Q2_K..Q6_K), the "type-0" symmetric
+    vs "type-1" asymmetric dequant families (Q4_0 = w=d*q symmetric;
+    Q4_K/Q4_1 = w=a*q+b asymmetric with per-block min), and the _M / _S MIXED
+    variants that compose Q6_K (sensitive layers) + Q4_K (bulk) for the best
+    quality/size tradeoff. Source of the Q4_K_M ~4.84 bpw figure.
+
+[4] https://haroldbenoit.com/notes/ml/llms/quantization/llama.cpp/gguf-quantization
+    Harold Benoit, "GGUF quantization" (technical notes on llama.cpp formats).
+    Verifies: the super-block / sub-block mechanics in plain English.
+      "The weights of a given layer are split into 'super' blocks each containing
+       a set of 'sub' blocks. Each sub-block computes its (maximum value) and
+       scale factor s AND also quantizes its underlying values. Then the
+       super-block takes the scale factors of each sub-block, and quantizes
+       them, which requires the super-block to have a scale factor itself."
+      This is the DOUBLE-quantization concept (scale of scales) that Section C
+      demonstrates. Also confirms the Q4_0 "type-0" w=d*q vs Q4_1 "type-1"
+      w=d*q+m dequant families.
+
+[5] https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-quantization
+    Maarten Grootendorst, "A Visual Guide to Quantization" (authoritative
+    educational reference, cited widely).
+    Verifies: the symmetric vs asymmetric quantization distinction and the
+    scale/zero-point (min) math. Confirms that symmetric quantization (Q4_0)
+    centers the range on zero (wasting levels for non-zero-centered blocks)
+    while asymmetric (Q4_1/Q4_K) uses a min/zero-point so all levels land in
+    the actual data range -> lower error on biased blocks. This is exactly the
+    effect Section C measures (Q4_K 2.70x lower MSE than Q4_0 on a biased
+    super-block, at the SAME bytes/param).
+
+[6] https://huggingface.co/spaces/Steven10429/apply_lora_and_quantize/blob/main/llama.cpp/ggml/src/ggml-common.h
+    Hugging Face mirror of ggml-common.h (independent second copy of [1]).
+    Verifies (independently): QK_K = 256, K_SCALE_SIZE = 12, block_q4_K =
+    2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2 = 144 bytes, "Effectively 4.5
+    bits per weight" comment. Second source for the block_q4_0 (18 B),
+    block_q8_0 (34 B), block_q4_K (144 B) struct sizes this bundle asserts.
+
+[7] ./../local-llm/quant_types.py  (in-repo reference; mirrors ggml-common.h)
+    The production quant-type reference in this same repo (sibling section).
+    Verifies: the dequant formulas implemented here, quoted as code:
+        dequant Q4_0:  w = d * (q - 8)              symmetric,  q in 0..15
+        dequant Q8_0:  w = d * q                    symmetric,  q in -128..127
+        dequant Q4_K:  w = (dmin*min6) + (d*scale6) * q   per sub-block
+    And the documented model-level bpw for the MIXED variants:
+        Q4_K_S = 4.58 bpw, Q4_K_M = 4.84 bpw, Q5_K_M = 5.68 bpw, Q6_K = 6.56 bpw
+    The Q4_K_M = 4.84 bpw = 0.605 bytes/param figure used in Section D comes
+    from this file (which itself cites the llama.cpp examples/quantize k-quants
+    table for Llama-2-7B).
+
+================================================================================
+NOTES ON FACTS THAT WERE CHECKED BUT COULD NOT BE VERIFIED AS STATED IN THE BRIEF
+================================================================================
+- The build brief suggested "Q4_K_M ≈ 0.51875 bytes/param". This could NOT be
+  verified. The actual figures, from ggml-common.h (block_q4_K = 144 B / 256 w)
+  and the llama.cpp k-quants README / the in-repo quant_types.py, are:
+      pure Q4_K  = 0.5625 bytes/param (4.5 bpw)  -- SAME size as Q4_0
+      Q4_K_M     = 0.605   bytes/param (4.84 bpw) -- the MIXED average
+  0.51875 bytes/param (= 4.15 bpw) does not correspond to any ggml block struct
+  or documented variant. This bundle uses the VERIFIED 0.5625 (pure Q4_K) and
+  0.605 (Q4_K_M) values and flags the discrepancy here.
+
+- The Q4_K MSE advantage over Q4_0 (Section C, 2.70x lower MSE) is measured on a
+  deliberately BIASED super-block (per-sub-block offsets), which isolates the
+  symmetric-vs-asymmetric effect. On perfectly zero-centered Gaussian data the
+  advantage shrinks (Q4_0's symmetry wastes no levels there); real trained
+  weights are rarely perfectly zero-centered, so the asymmetric win is typical.
+  The real Q4_K also quantizes each sub-MIN to 6 bits (this reference keeps the
+  sub-min at fp16 to isolate the scale-hierarchy effect -- noted in gguf_quant.py).

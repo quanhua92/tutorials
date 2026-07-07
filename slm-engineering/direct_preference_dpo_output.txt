@@ -1,0 +1,183 @@
+direct_preference_dpo.py - reference impl. All numbers below feed DIRECT_PREFERENCE_DPO.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see direct_preference_dpo_reference.txt.
+
+==========================================================================
+  SECTION A: the DPO loss (eq.7) on the pinned toy quadruple
+==========================================================================
+Pinned GOLD inputs: logpi_c=-2.0, logpi_ref_c=-2.5,
+                    logpi_l=-3.0, logpi_ref_l=-2.2, beta=0.1
+
+Step 1 -- the implicit reward of each completion (relative to the FROZEN ref):
+  r_chosen  = beta*(logpi_c  - logpi_ref_c )
+            = 0.1*(-2.0 - (-2.5)) = 0.1*+0.50 = +0.0500
+  r_rejected= beta*(logpi_l  - logpi_ref_l )
+            = 0.1*(-3.0 - (-2.2)) = 0.1*-0.80 = -0.0800
+
+Step 2 -- the margin (the sigmoid's input):
+  z = r_chosen - r_rejected = +0.0500 - (-0.0800) = +0.1300
+
+Step 3 -- the loss:
+  sigma(0.13) = 1/(1+e^(-0.13)) = 0.532454
+  L = -log sigma(0.13) = -log(0.532454) = 0.6303
+
+GOLD PIN (direct_preference_dpo.html recomputes this identically):
+  z = 0.13 ; L = -log sigma(0.13) = log(1+e^-0.13) ~= 0.6303
+
+| quantity                  | value    |
+|---------------------------|----------|
+| r_chosen  (implicit rew.) | +0.0500   |
+| r_rejected(implicit rew.) | -0.0800   |
+| margin z = r_c - r_l      | +0.1300   |
+| sigma(z)                  | 0.532454 |
+| L_DPO = -log sigma(z)     | 0.6303   |
+
+  [check] GOLD margin z == 0.13 (within 1e-9): OK
+  [check] GOLD L ~= 0.6303 (within 1e-3): OK
+  [check] L is finite: OK
+  [check] L >= 0 (it is a negative log-prob): OK
+  [check] z == r_c - r_l (margin equals reward difference): OK
+  [check] loss matches the closed form log(1+e^-z): OK
+
+==========================================================================
+  SECTION B: the loss is a sigmoid of the margin r_c - r_l
+==========================================================================
+Fix the reference at logpi_ref_c = logpi_ref_l = -2.0 and beta=0.1.
+Vary the policy's logpi on chosen vs rejected and watch the margin
+and the loss. The KEY: a POSITIVE margin (policy already prefers
+chosen) -> small loss; a NEGATIVE margin (policy prefers rejected)
+-> large loss.
+
+| logpi_c | logpi_l | r_c    | r_l    | margin z | sigma(z) |  L_DPO  | reading                |
+|---------|---------|--------|--------|----------|----------|---------|-------------------------|
+| -2.0    | -2.0    | +0.0000 | +0.0000 |  +0.0000 | 0.5000   | 0.6931  | tie: policy == ref on both (no signal) |
+| -1.5    | -2.5    | +0.0500 | -0.0500 |  +0.1000 | 0.5250   | 0.6444  | chosen UP, rejected DOWN -> big positive margin |
+| -2.5    | -1.5    | -0.0500 | +0.0500 |  -0.1000 | 0.4750   | 0.7444  | chosen DOWN, rejected UP -> big negative margin |
+| -1.8    | -2.2    | +0.0200 | -0.0200 |  +0.0400 | 0.5100   | 0.6733  | mild preference for chosen |
+| -2.2    | -1.8    | -0.0200 | +0.0200 |  -0.0400 | 0.4900   | 0.7133  | mild preference for rejected |
+
+  [check] tie (r_c==r_l) -> margin 0, loss = log 2 = 0.6931: OK
+  [check] chosen UP/rejected DOWN -> positive margin, loss < log 2: OK
+  [check] chosen DOWN/rejected UP -> negative margin, loss > log 2: OK
+  [check] loss is monotonic in the margin: z_good>0>z_bad => loss_good<loss_bad: OK
+  [check] fundamental sigmoid complement: sigma(-z) = 1 - sigma(z): OK
+
+==========================================================================
+  SECTION C: beta sweep -- beta controls sensitivity + KL budget
+==========================================================================
+Same quadruple as Section A. The log-ratio difference
+  (logpi_c-logpi_ref_c) - (logpi_l-logpi_ref_l)
+  = (-2.0-(-2.5)) - (-3.0-(-2.2)) = +1.30 is FIXED.
+beta just SCALES it. So z = beta*0.13 grows linearly with beta.
+
+| beta  | r_c     | r_l     | margin z | sigma(z) |  L_DPO  | reading                       |
+|-------|---------|---------|----------|----------|---------|-------------------------------|
+| 0.01  | +0.0050  | -0.0080  |  +0.0130 | 0.5032   | 0.6867  | beta->0: ignore ref, loss->log2 |
+| 0.05  | +0.0250  | -0.0400  |  +0.0650 | 0.5162   | 0.6612  | beta->0: ignore ref, loss->log2 |
+| 0.10  | +0.0500  | -0.0800  |  +0.1300 | 0.5325   | 0.6303  | typical DPO range             |
+| 0.50  | +0.2500  | -0.4000  |  +0.6500 | 0.6570   | 0.4201  | large beta: strong signal, big KL drift |
+| 1.00  | +0.5000  | -0.8000  |  +1.3000 | 0.7858   | 0.2410  | large beta: strong signal, big KL drift |
+
+Reading the table:
+  * beta=0.01: margin ~= 0.0013, loss ~= log2. The preference signal
+    is so weak the loss barely fires -- the policy is barely nudged.
+  * beta=0.1  (the DPO default): margin 0.13, loss 0.6303. The
+    signal is meaningful but gentle -- the standard choice.
+  * beta=1.0 : margin 1.3, loss ~= 0.24. The signal is strong; the
+    policy is pushed hard, but it also drifts far from pi_ref.
+
+  [check] margin scales linearly with beta (z(1.0) = 10*z(0.1)): OK
+  [check] z(beta) = beta * log_ratio_diff (= beta*0.13 here): OK
+  [check] as beta -> 0, loss -> log 2 (no preference signal): OK
+  [check] larger beta -> smaller loss here (margin is positive): OK
+  [check] typical DPO beta 0.1 falls in the verified 0.1-0.5 range: OK
+
+==========================================================================
+  SECTION D: gradient direction + a micro DPO training loop
+==========================================================================
+Treat logpi_c, logpi_l as the policy's two trainable log-probs.
+logpi_ref_c, logpi_ref_l, beta are FROZEN. Autograd gives the exact
+gradient; we take manual SGD steps.
+
+Initial policy log-probs (START at the reference):
+  logpi_c = -2.5000  (== logpi_ref_c = -2.5)
+  logpi_l = -2.2000  (== logpi_ref_l = -2.2)
+
+Gradient signs (the whole intuition):
+  dL/d(logpi_c) = (sigma(z)-1)*beta = -0.050000   <- NEGATIVE
+                                                   (so gradient DESCENT
+                                                    INCREASES logpi_c)
+  dL/d(logpi_l) = (1-sigma(z))*beta = +0.050000   <- POSITIVE
+                                                   (so gradient DESCENT
+                                                    DECREASES logpi_l)
+
+=> minimizing L pushes chosen UP and rejected DOWN, BOTH relative
+   to the frozen reference. The margin grows; the loss falls.
+
+Micro loop: lr=1.0, 5 steps, beta=0.1, ref FROZEN.
+
+| step | logpi_c  | logpi_l  | r_c     | r_l     | margin z | L_DPO   |
+|------|----------|----------|---------|---------|----------|---------|
+| 0    |  -2.5000 |  -2.2000 | +0.0000 | +0.0000 |  +0.0000 | 0.6931  |
+| 1    |  -2.4500 |  -2.2500 | +0.0050 | -0.0050 |  +0.0100 | 0.6882  |
+| 2    |  -2.4002 |  -2.2998 | +0.0100 | -0.0100 |  +0.0200 | 0.6832  |
+| 3    |  -2.3507 |  -2.3493 | +0.0149 | -0.0149 |  +0.0299 | 0.6783  |
+| 4    |  -2.3015 |  -2.3985 | +0.0199 | -0.0199 |  +0.0397 | 0.6735  |
+| 5    |  -2.2525 |  -2.4475 | +0.0248 | -0.0248 |  +0.0495 | 0.6687  |
+
+Reading the loop:
+  * logpi_c RISES every step (chosen pushed UP).
+  * logpi_l FALLS every step (rejected pushed DOWN).
+  * the margin (r_c - r_l) grows monotonically.
+  * the loss falls toward 0 as the margin turns strongly positive.
+  * the reference (logpi_ref_c=-2.5, logpi_ref_l=-2.2) NEVER moves.
+
+  [check] dL/d(logpi_c) < 0 (chosen is pushed UP): OK
+  [check] dL/d(logpi_l) > 0 (rejected is pushed DOWN): OK
+  [check] logpi_c rose over the loop (chosen up): OK
+  [check] logpi_l fell over the loop (rejected down): OK
+  [check] margin grew monotonically: OK
+  [check] loss fell over the loop: OK
+  [check] the reference log-probs are FROZEN (never passed to an optimizer): OK
+  [check] starting at the reference -> initial margin 0, loss log 2: OK
+
+==========================================================================
+  SECTION E: lineage recap (RLHF 4-model -> DPO 2-model) + shipped recipes
+==========================================================================
+The alignment stage shed two whole models by solving the RL objective
+analytically. Each row removes a failure mode:
+
+| stage         | what it does                            | failure removed                | used by                  |
+|---------------|-----------------------------------------|--------------------------------|--------------------------|
+| SFT           | supervised fine-tune on demonstrations  | no preference signal yet       | the starting point       |
+| RLHF (PPO)    | train reward model, then PPO against it + KL to ref | 4 models in memory; RL unstable; on-policy sampling | InstructGPT, Llama 2-Chat |
+| DPO           | closed-form optimal policy -> reward model cancels | no RL; 2 models; one BCE-style loss on pairs | Rafailov 2023; Zephyr-7B-beta |
+
+What shipped models actually used (web-verified; see _reference.txt):
+
+| model           | method                          | models in memory                | beta          | dataset              | source                        |
+|-----------------|---------------------------------|---------------------------------|---------------|----------------------|-------------------------------|
+| InstructGPT     | RLHF (reward model + PPO)       | 4: policy + ref + reward + value | n/a (KL coef 0.02) | human prefs          | Ouyang 2022 arXiv:2203.02155 |
+| Llama 2-Chat    | RLHF (reward model + PPO + safety | 4: policy + ref + reward + value | n/a (KL via reward) | human prefs          | Touvron 2023 arXiv:2307.09288 |
+| DPO paper       | DPO (no RL, no reward model)    | 2: policy + ref                | 0.1 (TL;DR, HH); 0.05-0.5 (IMDb) | human prefs          | Rafailov 2023 arXiv:2305.18290 |
+| Zephyr-7B-beta  | DPO (distilled, TRL DPOTrainer) | 2: policy + ref                | 0.1           | UltraFeedback (GPT-4 ranked) | Tunstall 2023 arXiv:2310.16944 |
+
+Two patterns:
+  * InstructGPT / Llama 2-Chat: the FULL RLHF pipeline -- a separate
+    reward model + PPO + a value head + a KL anchor to the ref. Four
+    models resident; an RL inner loop; sensitive to tune.
+  * DPO / Zephyr: drop the reward model and the RL loop entirely.
+    Two models (policy + frozen ref), one classification-style loss.
+    Zephyr-7B-beta reaches near-Llama2-Chat-70B chat quality with a
+    single 7B base (Mistral-7B) + DPO on UltraFeedback at beta=0.1.
+
+  [check] RLHF needs 4 models in memory; DPO needs 2: OK
+  [check] DPO ships WITHOUT a reward model in memory (DPO rows have only '2:' models): OK
+  [check] DPO ships WITHOUT an RL loop (no PPO): OK
+  [check] Zephyr beta=0.1 falls in the verified 0.1-0.5 typical range: OK
+  [check] at least one shipped model uses DPO (Zephyr): OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

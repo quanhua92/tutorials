@@ -1,0 +1,169 @@
+shared_embeddings.py - reference impl (weight tying for SLMs).
+Numbers below feed SHARED_EMBEDDINGS.md.  torch = 2.12.1
+
+Concept: re-bind lm_head.weight = embed.weight so ONE [V, H] matrix
+wears both the input-lookup hat and the output-projection hat,
+recovering V*H params (~100M for SmolLM2-1.7B).
+
+
+========================================================================
+  SECTION A: tied vs untied parameter counts (the structural math)
+========================================================================
+Vocabulary params live in two [V, H] matrices:
+  embed_tokens.weight : [V, H]   (input lookup)
+  lm_head.weight      : [V, H]   (output projection)
+
+UNTIED: both matrices are independent   -> 2*V*H params
+TIED  : one matrix wears both hats      ->   V*H params
+savings = V*H (an entire matrix is recovered)
+
+| model                | V        | H    | untied 2*V*H | tied V*H  | savings V*H | savings % |
+|----------------------|----------|------|--------------|-----------|-------------|-----------|
+| tiny worked example  |        8 |    4 |           64 |        32 |          32 |    50.00% |
+| SmolLM2-1.7B         |    49152 | 2048 |  201,326,592 | 100,663,296 | 100,663,296 |    50.00% |
+| Llama-3-8B           |   128256 | 4096 | 1,050,673,152 | 525,336,576 | 525,336,576 |    50.00% |
+| Gemma-2-2B           |   256000 | 2304 | 1,179,648,000 | 589,824,000 | 589,824,000 |    50.00% |
+
+Every row saves EXACTLY 50% of the vocabulary parameters, because
+tying halves the count (2*V*H -> V*H). The ABSOLUTE savings grow
+with V*H: a tiny 8x4 model saves 32 params; SmolLM2 saves 100,663,296.
+
+GOLD PIN (shared_embeddings.html recomputes this):
+    SmolLM2 savings = V*H = 49152*2048 = 100663296
+[check] SmolLM2 tying savings == 100,663,296: OK
+[check] tiny V=8,H=4: untied 64, tied 32, savings 32: OK
+[check] tying always saves exactly 50% of vocab params: OK
+
+========================================================================
+  SECTION B: the torch implementation (build, tie, assert identity)
+========================================================================
+Tiny model: V=8, H=4
+
+UNTIED model:
+  embed.weight.shape = (8, 4)
+  lm_head.weight.shape = (8, 4)
+  embed.weight is lm_head.weight? False
+  unique vocab params = 64  (= 2*V*H = 64)
+
+TIED model  (after the line: lm_head.weight = embed.weight):
+  embed.weight.shape = (8, 4)
+  lm_head.weight.shape = (8, 4)
+  embed.weight is lm_head.weight? True
+  unique vocab params = 32  (= V*H = 32)
+
+The `is` identity is the WHOLE tying mechanism: one tensor object,
+two layer attributes. No copy, no transpose -- nn.Linear(H, V) stores
+its weight as [V, H] (out_features, in_features), which is EXACTLY
+nn.Embedding(V, H).weight's shape. That shape match is why a plain
+attribute rebind is sufficient.
+
+[check] untied: embed.weight is NOT lm_head.weight: OK
+[check] tied: embed.weight IS lm_head.weight (same object): OK
+[check] tied unique params (32) == half of untied (64): OK
+[check] tied unique params == V*H == 32: OK
+[check] zeroing via embed.weight also zeroes lm_head.weight (shared object): OK
+
+========================================================================
+  SECTION C: gradient flow -- the shared weight accumulates BOTH paths
+========================================================================
+Tiny tied model: V=8, H=4, L=3 (sequence of 3 tokens)
+
+token_ids  = [1, 3, 6]
+targets    = [2, 5, 7]
+hidden = embed(token_ids)   shape (3, 4)  (INPUT path)
+logits = lm_head(hidden)    shape (3, 8)  (OUTPUT path)
+cross_entropy loss = 5.6084
+
+After loss.backward(), the shared weight's gradient has shape (8, 4) and
+norm 2.8010.
+
+Proof that the tied grad == (input-path grad) + (output-path grad):
+  built an UNTIED pair with the SAME init, ran the SAME forward+backward,
+  and summed the two independent gradients.
+
+  ||grad on tied shared weight||            = 2.8010
+  ||grad on untied embed (input path)||     = 2.0283
+  ||grad on untied lm_head (output path)||  = 1.3889
+  ||input_path + output_path||              = 2.8010
+  max|tied_grad - (input + output)|         = 0.000e+00
+
+Reading: the output-path gradient dominates here (its norm is larger),
+but BOTH paths contribute. In the tied model the single .grad tensor is
+their SUM. An optimizer step therefore moves the shared weight to satisfy
+both jobs at once -- the gradient-dynamics trade-off of tying.
+
+[check] tied weight.grad IS lm_head.weight.grad (same .grad object): OK
+[check] tied grad == input-path grad + output-path grad (sum matches): OK
+[check] the output path contributes a non-trivial gradient: OK
+[check] the input path contributes a non-trivial gradient: OK
+
+========================================================================
+  SECTION D: forward output is IDENTICAL tied vs untied (structural only)
+========================================================================
+token_ids = [0, 4, 7]
+
+Untied forward: embed & lm_head are distinct objects with EQUAL values.
+Tied forward  : lm_head.weight = embed.weight (rebind), same values.
+
+logits untied (row 0) = [2.8465, -0.756, 0.8716, -1.7337, 2.9909, 0.3994, -0.206, -3.2633]
+logits tied   (row 0) = [2.8465, -0.756, 0.8716, -1.7337, 2.9909, 0.3994, -0.206, -3.2633]
+
+max|logits_untied - logits_tied| = 0.000e+00
+
+Conclusion: tying is PURELY structural. As long as the two matrices
+hold equal values, the forward output is bit-identical. Tying only
+CONSTRAINS them to stay equal during training (a single optimizer step
+updates the shared tensor once, from the summed gradient).
+
+[check] tied forward == untied forward (equal values): OK
+[check] max|untied - tied logits| < 1e-6: OK
+
+========================================================================
+  SECTION E: real-model savings table (who ties in practice?)
+========================================================================
+For each model: the vocab param block size, the savings if tying is
+used (V*H), and whether the model ACTUALLY ties in its released config.
+
+| model           | V       | H    | untied 2*V*H | tied V*H  | ties? | note                                  |
+|-----------------|---------|------|--------------|-----------|-------|---------------------------------------|
+| SmolLM2-1.7B    |   49152 | 2048 |  201,326,592 | 100,663,296 | yes   | tie_word_embeddings=true (HuggingFace config.json) |
+| Llama-3-8B      |  128256 | 4096 | 1,050,673,152 | 525,336,576 | NO    | tie_word_embeddings=false (UNTIED -- large model) |
+| Gemma-2-2B      |  256000 | 2304 | 1,179,648,000 | 589,824,000 | yes   | tie_word_embeddings=true (Gemma ties by design) |
+| GPT-2 / nanoGPT |   50257 |  768 |   77,194,752 | 38,597,376 | yes   | lm_head.weight = wte.weight (karpathy/nanoGPT) |
+
+Read the table: SmolLM2-1.7B TIES and saves 100,663,296 params (one
+entire [49152, 2048] matrix). Gemma-2-2B ties and saves 589,824,000.
+Llama-3-8B does NOT tie -- at 8B scale the parameter budget permits
+two independent matrices, and the cleaner per-path gradient (each
+matrix serves only one job) wins on perplexity. This is the
+tying-vs-untying trade-off in one table.
+
+[check] SmolLM2 savings V*H == 100,663,296: OK
+[check] Gemma-2-2B savings V*H == 589,824,000: OK
+[check] Llama-3-8B ties in practice? False: OK
+[check] GPT-2/nanoGPT ties in practice? True: OK
+
+========================================================================
+  SECTION F: lineage recap + when to tie vs untie
+========================================================================
+The decision, as a function of model scale:
+
+| regime            | recommendation | reason                                |
+|-------------------|----------------|---------------------------------------|
+| < 1B params (SLM) | TIE            | V*H savings matter; tying also regularizes (Press & Wolf: improves PPL) |
+| 1B - 7B           | usually TIE    | Gemma-2-2B ties; SmolLM2-1.7B ties; the savings still buy capacity |
+| >= 7B             | often UNTIE    | Llama-3-8B unties; budget permits 2 matrices, cleaner gradient wins |
+
+The crossover is empirical, not a hard threshold. Recent work finds the
+shared weight's gradient is the SUM of two jobs (input lookup + output
+projection), which biases the tied embeddings toward the output space
+and can hurt perplexity once the parameter budget is large enough to
+afford two separate matrices. For an SLM, tying is the default: it is
+free capacity AND a (small) perplexity win.
+
+[check] SLM regime (<1B) recommendation starts with TIE: OK
+[check] large regime (>=7B) recommends UNTIE: OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

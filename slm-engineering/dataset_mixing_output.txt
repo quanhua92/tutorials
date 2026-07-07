@@ -1,0 +1,146 @@
+dataset_mixing.py - reference impl. All numbers below feed DATASET_MIXING.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see dataset_mixing_reference.txt.
+
+==========================================================================
+  SECTION A: weighted sampling -- alpha -> per-batch domain composition
+==========================================================================
+Three toy domains (shard units n_i):
+  code   n=  8000   heuristic alpha=0.2000
+  synth  n=  2000   heuristic alpha=0.0500
+  web    n= 30000   heuristic alpha=0.7500
+  sum(alpha) = 1.000000  (must be 1)
+
+Draw batches of increasing size from the heuristic weights (seeded):
+| batch tokens |   web |  code | synth | empirical web | empirical code | empirical synth |
+|--------------|-------|-------|-------|---------------|----------------|-----------------|
+|         1000 |   727 |   233 |    40 |        0.7270 |         0.2330 |          0.0400 |
+|        10000 |  7522 |  1998 |   480 |        0.7522 |         0.1998 |          0.0480 |
+|       100000 | 75140 | 19852 |  5008 |        0.7514 |         0.1985 |          0.0501 |
+|      2000000 | 1500711 | 399651 | 99638 |        0.7504 |         0.1998 |          0.0498 |
+
+Read down the 'empirical' columns: as the batch grows, the sampled mix
+CONVERGES to alpha (law of large numbers). At 2M tokens the relative
+error vs the target weight is already < 0.1% for every domain.
+  [check] 2M-token batch matches heuristic weights within 1e-3: OK
+  [check] heuristic weights sum to 1: OK
+  [check] web is the largest domain in both size and weight: OK
+
+==========================================================================
+  SECTION B: perplexity per domain + weighted perplexity (GOLD ANCHOR)
+==========================================================================
+Per-domain mean cross-entropy loss L_i (toy val set) and weight alpha_i:
+| domain |   L_i (loss) | PPL_i = exp(L_i) | alpha_i | alpha_i * PPL_i |
+|--------|--------------|------------------|---------|----------------|
+| code   |       1.8000 |           6.0496 |    0.30 |         1.8149 |
+| synth  |       2.7000 |          14.8797 |    0.20 |         2.9759 |
+| web    |       2.3000 |           9.9742 |    0.50 |         4.9871 |
+
+GOLD PIN (dataset_mixing.html recomputes this identically):
+  weighted PPL = sum_i alpha_i * exp(L_i)
+               = 0.5*exp(2.3) + 0.3*exp(1.8) + 0.2*exp(2.7)
+               = 4.987091 + 1.814894 + 2.975946
+               = 9.777932
+
+Reading the table: synth has the WORST (highest) PPL = 14.88, so a perplexity-driven recipe
+would upweight it; web has the best PPL and would be downweighted.
+
+PPL-driven weights (alpha_i ~ PPL_i, renormalized):
+  code   PPL=  6.050  ->  alpha_ppl=0.1958  (was alpha=0.30)
+  synth  PPL= 14.880  ->  alpha_ppl=0.4815  (was alpha=0.20)
+  web    PPL=  9.974  ->  alpha_ppl=0.3228  (was alpha=0.50)
+  -> weighted PPL under PPL-driven weights = 11.5679
+     (HIGHER than the original -- because it shifts mass to the hard,
+      high-PPL domain. That is the point: more training on synth, not
+      a lower number on this proxy metric.)
+  [check] GOLD weighted PPL == 9.777932 (within 1e-6): OK
+  [check] PPL = exp(loss) is monotone in loss (synth highest): OK
+  [check] PPL-driven weights sum to 1: OK
+  [check] PPL-driven weights upweight the highest-PPL domain (synth): OK
+
+==========================================================================
+  SECTION C: DoReMi bandit -- minimize the worst-domain excess loss
+==========================================================================
+Reference policy (a proxy model trained on alpha0):
+  code   alpha0=0.30   L_ref=1.80   PPL_ref=6.050
+  synth  alpha0=0.20   L_ref=2.70   PPL_ref=14.880
+  web    alpha0=0.50   L_ref=2.30   PPL_ref=9.974
+
+Bandit starts from UNIFORM alpha = {1/3,1/3,1/3} (a deliberately bad guess).
+Loss model: L_i(alpha) = L_ref_i * (alpha0_i/alpha_i)^0.15; step eta=1.5.
+
+| round |   web alpha |  code alpha | synth alpha | web excess | code excess | synth excess | WORST excess |
+|-------|-------------|-------------|-------------|------------|-------------|--------------|--------------|
+| 0     |      0.3333 |      0.3333 |      0.3333 |     0.1442 |    -0.0282 |      -0.1992 |       0.1442 |
+| 1     |      0.3696 |      0.3299 |      0.3005 |     0.1066 |    -0.0255 |      -0.1599 |       0.1066 |
+| 2     |      0.3985 |      0.3255 |      0.2760 |     0.0796 |    -0.0219 |      -0.1273 |       0.0796 |
+| 3     |      0.4212 |      0.3211 |      0.2577 |     0.0599 |    -0.0183 |      -0.1007 |       0.0599 |
+
+Reading the table like a story:
+  round 0 : uniform weights. The WORST-domain excess is web (0.1442) -- web is UNDER-weighted vs alpha0, so its
+            loss exceeds the reference. synth is over-weighted (negative
+            excess). The bandit's job: push mass onto web.
+  round 1 : web alpha jumps 0.3333 -> 0.3696; worst excess drops 0.1442 -> 0.1066.
+  round 3 : worst excess is now 0.0599 (from 0.1442); the worst-domain loss is within 0.0599 of its reference.
+
+This is DoReMi's whole claim: a small proxy runs this loop, ships the
+final alpha to the BIG model, and the big model trains on a mix that
+provably cuts the worst-domain loss -- with NO downstream labels.
+  [check] round-1 raises weight on highest-excess domain (web): OK
+  [check] worst-domain excess strictly decreases across rounds 0->3: OK
+  [check] DoReMi weights stay normalized to 1 at every round: OK
+  [check] no domain is ever starved to < 1% weight: OK
+
+==========================================================================
+  SECTION D: curriculum anneal + what shipped models actually mixed
+==========================================================================
+Curriculum: alpha(t) = (1-t)*alpha_early + t*alpha_late
+  early (t=0): broad web (80%) for coverage, light code/synth
+  late  (t=1): upsample code(30%) + synthetic(35%) for reasoning
+
+| training frac t |   web |  code | synth | note |
+|-----------------|-------|-------|-------|------|
+|            0.00 |  0.80 |  0.10 |  0.10 | broad web (coverage)   |
+|            0.25 |  0.69 |  0.15 |  0.16 |                        |
+|            0.50 |  0.57 |  0.20 |  0.22 |                        |
+|            0.75 |  0.46 |  0.25 |  0.29 |                        |
+|            1.00 |  0.35 |  0.30 |  0.35 | reasoning/synth (anneal) |
+
+  [check] t=0 reproduces alpha_early exactly: OK
+  [check] t=1 reproduces alpha_late exactly: OK
+  [check] web share falls monotonically over the curriculum: OK
+  [check] every alpha(t) stays normalized to 1: OK
+Real-world pretraining mixtures (the actual shares shipped models used):
+
+| model                  | largest share        | code % | books/synth % | source |
+|------------------------|----------------------|--------|---------------|--------|
+| Llama-1                | web (CC+C4) (82.0)   |    4.5 |           4.5 | Touvron 2023 arXiv:2302.13971 (CC 67 + C4 15) |
+| Chinchilla             | web (MassiveWeb) (48.0) |    3.0 |          27.0 | Hoffmann 2022 / Rae 2021 MassiveText (Gopher+Chinchilla) |
+| SmolLM2 (stage-4 anneal) | web (FW-Edu+DCLM) (58.0) |   24.0 |          14.0 | Lozhkov 2025 arXiv:2502.02737 Sec 4.5 |
+
+  [check] Llama-1 mix shares sum to ~100 (got 100.0): OK
+  [check] Chinchilla mix shares sum to ~100 (got 100.0): OK
+  [check] SmolLM2 (stage-4 anneal) mix shares sum to ~100 (got 100.0): OK
+  [check] Llama web share (CC+C4) is the dominant component (~82%): OK
+  [check] SmolLM2 stage-4 anneal upweights specialized to ~42% (vs ~10% stage-1): OK
+
+==========================================================================
+  SECTION E: the decision recap -- which mixer, when
+==========================================================================
+| strategy        | how alpha is set              | what it buys you        | use when                |
+|-----------------|-------------------------------|-------------------------|-------------------------|
+| Fixed heuristic | by domain size / intuition    | cheapest; the mix is a static hyperparameter | Llama, Chinchilla era   |
+| PPL-driven      | alpha_i ~ PPL_i               | free signal (val loss), adapts to the model | proxy only; PPL != downstream |
+| DoReMi bandit   | minimize worst-domain excess  | no labels, no manual tuning, cuts worst-domain loss | proxy -> big-model transfer |
+
+The single question that picks the row:
+  CAN YOU AFFORD A PROXY RUN?      -> DoReMi (Section C).
+  ONLY HAVE VAL LOSSES?            -> PPL-driven (Section B).
+  STARTING FROM SCRATCH / NO GPU?  -> Fixed heuristic (Section D table).
+
+  [check] the three strategies are distinct in how alpha is set: OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

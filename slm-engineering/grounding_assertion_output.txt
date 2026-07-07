@@ -1,0 +1,146 @@
+grounding_assertion.py - reference impl (post-generation fact-sheet verification).
+Numbers below feed GROUNDING_ASSERTION.md.  torch = 2.12.1
+
+========================================================================
+  SECTION A: claim EXTRACTION -- parse the answer into atomic claims
+========================================================================
+Entity under review: Acme
+Toy model answer (HARDCODED, deterministic):
+  "Acme Corp reported revenue of $5.2B in 2023. The company was founded in 1998. It employs 12000 people."
+
+Extracted 3 claim(s):
+
+| # | entity | attribute | value (raw) | source clause
+|---|--------|-----------|-------------|-------------------------------------
+| 1 | Acme | revenue   | $5.2B       | Acme Corp reported revenue of $5.2B in 2023
+| 2 | Acme | founded   | 1998        | The company was founded in 1998
+| 3 | Acme | employees | 12000       | It employs 12000 people.
+
+Key: the extractor pulled ONE (entity, attribute, value) triple out of
+each clause. These are the atoms the fact sheet will be asked about.
+Nothing here is verified yet -- extraction is just 'name the claims'.
+  [check] extractor found exactly 3 claims: OK
+  [check] claims are (revenue, founded, employees) in text order: OK
+
+========================================================================
+  SECTION B: fact-sheet LOOKUP -- verify each claim against ground truth
+========================================================================
+Fact sheet (the retrieved ground-truth table):
+
+| (entity, attribute) | value (raw) | normalized
+|---------------------|-------------|------------
+| ('Acme', 'founded') | 1998        | 1998
+| ('Acme', 'revenue') | 5200000000  | 5.2e+09
+
+NOTE: ('Acme','employees') is ABSENT from the sheet on purpose --
+      any employee claim is therefore UNGROUNDED (cannot confirm).
+
+Per-claim verdict:
+
+| # | attribute | claim raw | fact raw | claim val | fact val | verdict
+|---|-----------|-----------|----------|-----------|----------|------------
+| 1 | revenue   | $5.2B     | 5200000000 | 5.2e+09   | 5.2e+09  | GROUNDED
+| 2 | founded   | 1998      | 1998     | 1998      | 1998     | GROUNDED
+| 3 | employees | 12000     | -        | 1.2e+04   | 0        | UNGROUNDED
+
+counts: GROUNDED=2  UNGROUNDED=1  CONTRADICTED=0
+  [check] revenue claim is GROUNDED: OK
+  [check] founded claim is GROUNDED: OK
+  [check] employees claim is UNGROUNDED (no sheet entry): OK
+  [check] contradiction count is 0 on the gold answer: OK
+
+========================================================================
+  SECTION C: value NORMALIZATION -- surface forms of the SAME number
+========================================================================
+All of these are the SAME number; the normalizer maps them to one float:
+
+| raw form          | normalized | matches '$5.2B'?
+|-------------------|------------|------------------
+| $5.2B             | 5.2e+09    | True
+| 5,200,000,000     | 5.2e+09    | True
+| 5.2 billion       | 5.2e+09    | True
+| 5.2b              | 5.2e+09    | True
+| 5200000000        | 5.2e+09    | True
+
+Without normalization a CORRECT '$5.2B' claim would fail to match a
+'5,200,000,000' fact-sheet entry on formatting alone -- a false negative.
+  [check] all 5 surface forms normalize to the same value: OK
+
+Contradiction check: '5.3B' -> 5.3e+09  vs  '$5.2B' -> 5.2e+09
+  match? False  -> a close-but-wrong number is CONTRADICTED.
+  [check] '5.3B' does NOT match '$5.2B' (contradiction survives): OK
+
+Edge case: '1998' -> 1998 (bare year, no suffix -> stays 1998).
+  [check] bare year '1998' normalizes to 1998 (no false suffix): OK
+
+========================================================================
+  SECTION D: end-to-end on three toy answers (strict policy)
+========================================================================
+Three answers, same fact sheet, STRICT policy (any ungrounded -> FLAGGED, any contradiction -> BLOCKED):
+
+| answer | claims | G | U | C | verdict
+|--------|--------|---|---|---|---------
+| FLAGGED (gold)  | 3      | 2 | 1 | 0 | FLAGGED
+| PASS            | 2      | 2 | 0 | 0 | PASS
+| BLOCKED         | 1      | 0 | 0 | 1 | BLOCKED
+
+Policy TOGGLE on the SAME gold answer (3 claims: 2 grounded, 1 ungrounded):
+  policy=strict  -> verdict=FLAGGED  (G=2, U=1, C=0)
+  policy=lenient -> verdict=PASS     (G=2, U=1, C=0)
+
+  strict  : the unverified employee count HOLDS the answer -> FLAGGED.
+  lenient : ungrounded is only a warning -> PASS (contradictions still block).
+  [check] strict verdict on gold answer is FLAGGED: OK
+  [check] lenient verdict on gold answer is PASS (ungrounded allowed): OK
+
+========================================================================
+  SECTION E: the GOLD TABLE -- pinned for grounding_assertion.html
+========================================================================
+The .html recomputes THIS table from the SAME answer + fact sheet in JS
+and gold-checks the pinned tuple below.
+
+| num_claims | grounded | ungrounded | contradicted | verdict (strict)
+|------------|----------|------------|--------------|------------------
+| 3          | 2        | 1          | 0            | FLAGGED
+
+GOLD PINS (grounding_assertion.html recomputes and diffs these):
+    num_claims  = 3
+    grounded    = 2
+    ungrounded  = 1
+    contradicted= 0
+    verdict     = 'FLAGGED'
+  [check] GOLD PIN (3,2,1,0,FLAGGED) holds: OK
+
+torch verdict matrix (one-hot per claim):
+tensor([[1., 0., 0.],
+        [1., 0., 0.],
+        [0., 1., 0.]])
+  [check] verdict matrix row-sums are all 1 (one verdict per claim): OK
+
+========================================================================
+  SECTION F: lineage recap + cheat sheet
+========================================================================
+The post-generation verification pipeline, old -> new:
+
+| stage             | what it does                               | why
+|-------------------|--------------------------------------------|-------------------------
+| trust-the-model   | emit answer verbatim                       | hallucinated numbers slip straight through to the user
+| claim EXTRACTION  | regex-parse answer -> (entity, attr, value) | you cannot verify what you have not first named
+| fact-sheet ASSERT | lookup each claim in retrieved ground truth | GROUNDED / UNGROUNDED / CONTRADICTED per claim
+| verdict POLICY    | strict holds on ungrounded; lenient only on contradict | domain risk picks the policy
+
+Cheat sheet:
+  * extract  : split answer on [.];]  ; first attr-keyword + first NUM_RE
+               span per clause  ->  list[(entity, attr, raw_value)]
+  * normalize: strip $/,/space, lower; suffix B/billion=1e9, M/million=1e6,
+               K/thousand=1e3 ; bare year/count stays itself
+  * verify   : key=(entity,attr);  not in sheet -> UNGROUNDED ;
+               match (rtol 1e-6) -> GROUNDED ; else CONTRADICTED
+  * verdict  : strict  -> any U=FLAGGED, any C=BLOCKED, else PASS
+               lenient -> any C=FLAGGED, else PASS (U is just a warning)
+  * torch    : values_match = torch.allclose(rtol=1e-6, atol=1e-6)
+  * GOLD     : 3-claim toy answer -> (3, 2 grounded, 1 ungrounded, FLAGGED)
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

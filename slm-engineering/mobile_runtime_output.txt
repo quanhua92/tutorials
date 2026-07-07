@@ -1,0 +1,136 @@
+mobile_runtime.py - reference impl. All numbers below feed MOBILE_RUNTIME.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see mobile_runtime_reference.txt.
+
+==========================================================================
+  SECTION A: model size  =  params x bytes/param  (the weights term)
+==========================================================================
+bytes/param by quant (cross-ref GGUF_QUANT.md / ../local-llm/QUANT_TYPES.md):
+  fp16  = 2.0000 bytes/param
+  Q8    = 1.0625 bytes/param
+  Q4    = 0.5625 bytes/param
+
+| params | fp16 (GB) | Q8 (GB)  | Q4 (GB)  |
+|--------|-----------|----------|----------|
+|  0.5B  |   1.0000  |  0.5312 |  0.2812 |
+|  1.0B  |   2.0000  |  1.0625 |  0.5625 |
+|  3.0B  |   6.0000  |  3.1875 |  1.6875 |
+|  7.0B  |  14.0000  |  7.4375 |  3.9375 |
+
+Read across: quantizing fp16 -> Q4 cuts size by ~3.6x at every scale.
+Read down:   the Q4 column is the one mobile deployment lives in.
+
+GOLD PIN (mobile_runtime.html recomputes this):
+  1B @ Q4 = 1e9 x 0.5625 / 1e9 = 0.5625 GB weights
+  7B @ Q4 = 7e9 x 0.5625 / 1e9 = 3.9375 GB weights (~3.9)
+
+  [check] 1B @ Q4 weights == 0.5625 GB (the gold anchor): OK
+  [check] 7B @ Q4 weights ~= 3.9 GB: OK
+  [check] fp16 -> Q4 is a ~3.55x size cut at every scale: OK
+  [check] size is strictly increasing in params at every quant: OK
+
+==========================================================================
+  SECTION B: active RAM  =  weights + KV-cache + overhead  (1B @ Q4)
+==========================================================================
+Fixed model: 1.0B params @ Q4 = 0.5625 GB weights.
+Architecture: n_layers=16, hidden=2048, fp16 KV (2 B/E).
+Overhead = max(0.3, 0.15 x weights) GB.
+
+KV-cache = 2 x n_layers x seq_len x hidden x bytes/E / 1e9  (LINEAR in seq)
+         = 2 x 16 x seq x 2048 x 2 / 1e9
+
+| seq_len | weights | KV-cache | KV/weights | overhead | TOTAL  | fits 4GB? | fits 6GB? | fits 8GB? |
+|---------|---------|----------|------------|----------|--------|-----------|-----------|-----------|
+|     512 | 0.5625GB |  0.0671GB |     11.93% | 0.3000GB | 0.9296GB |       FIT |       FIT |       FIT |
+|    2048 | 0.5625GB |  0.2684GB |     47.72% | 0.3000GB | 1.1309GB |       FIT |       FIT |       FIT |
+|    8192 | 0.5625GB |  1.0737GB |    190.89% | 0.3000GB | 1.9362GB |       FIT |       FIT |       FIT |
+|   32768 | 0.5625GB |  4.2950GB |    763.55% | 0.3000GB | 5.1575GB |       OOM |       FIT |       FIT |
+
+Read down the KV column: it DOUBLES every time seq doubles (linear).
+  At seq=512  KV is 12% of weights (weights dominate).
+  At seq=8192 KV is 191% of weights (KV overtook).
+  At seq=32k  KV alone (4.2950GB) is bigger than the 0.5625GB of weights AND OOMs a 4GB phone.
+
+GOLD PIN (mobile_runtime.html recomputes this):
+  KV(1B, seq=2048) = 2 x 16 x 2048 x 2048 x 2 / 1e9 = 0.2684 GB
+  (48% of the 0.5625GB weights -- non-trivial)
+
+  [check] 1B @ Q4 weights == 0.5625 GB: OK
+  [check] KV(seq=2048) for toy 1B ~= 0.2684 GB (the second gold anchor): OK
+  [check] KV-cache is strictly linear in seq (doubling seq doubles KV): OK
+  [check] KV overtakes weights at seq=8192 (KV > weights): OK
+  [check] 1B @ Q4 fits a 4GB phone up to 8K context but OOMs at 32K: OK
+
+==========================================================================
+  SECTION C: runtime contrast  --  NPU vs browser vs unified graph runtime
+==========================================================================
+| runtime        | backend                               | best precision | upside                  | the catch                         |
+|----------------|---------------------------------------|----------------|-------------------------|-----------------------------------|
+| mobile NPU     | Apple NE / Qualcomm Hexagon / MediaTek APU | INT4 / INT8    | fastest for the ops it supports | limited op coverage: some transformer layers fall back to CPU |
+| browser WebGPU | transformers.js + ONNX Runtime Web (WebGPU/WASM) | fp16 / INT8 (WASM) | portable, sandboxed, zero-install | shader-compile first-run cost + GC pauses + ~2GB tab cap |
+| unified runtime | ExecuTorch / LiteRT / ONNX Runtime Mobile | INT4 / INT8 / fp16 | one graph, pluggable EPs (NPU/CPU/GPU) | you must EXPORT per backend; EP coverage still varies by device |
+
+Decision tree (which runtime picks you, not the other way round):
+  on an iPhone / Android with a real NPU  -> CoreML / NNAPI / QNN EP
+  inside a browser tab                    -> WebGPU (WASM fallback)
+  cross-platform from one export          -> ExecuTorch / LiteRT / ORT
+
+  [check] the three runtimes are distinct in upside: OK
+  [check] every runtime lists an explicit catch (no free lunch): OK
+
+==========================================================================
+  SECTION D: device-config recommender  --  the deployment target decides
+==========================================================================
+Sizing every config at seq=2048 (a mobile chat turn).
+active_ram = ram_total x active_fraction  (OS reserves the rest).
+Pick: largest params that fits; for each params prefer Q8 over Q4.
+
+| device           | total RAM | active RAM | NPU TOPS | runtime           | recommended   | size GB | uses GB | headroom |
+|------------------|-----------|------------|----------|-------------------|--------------|---------|---------|----------|
+| low-end Android  |    4.0GB  |    2.00GB  |      8   | ExecuTorch / ORT-Mobile | 1.0B @ Q8     | 1.0625  | 1.6309 |   0.37GB |
+| iPhone (A18 NE)  |    6.0GB  |    3.00GB  |     35   | CoreML / Metal    | 3.0B @ Q4     | 1.6875  | 2.9312 |   0.07GB |
+| browser tab      |    2.0GB  |    2.00GB  |      0   | WebGPU / WASM     | 1.0B @ Q8     | 1.0625  | 1.6309 |   0.37GB |
+
+Reading the table like a story:
+  * low-end Android (2GB active) -> 1B. RAM allows the Q8 quality upgrade;
+    fall back to Q4 when context grows past ~8K (Section B).
+  * iPhone with a 35-TOPS NE (3GB active) -> 3B @ Q4. The NPU has the TOPS
+    to decode 3B fast; only Q4 (not Q8) fits the RAM at 2K context.
+  * a browser tab (2GB hard cap) -> 1B @ Q8. WebGPU is portable but the
+    ~2GB tab limit rules out anything bigger; it page-swaps / OOMs.
+
+The single takeaway: a 1B model is the config that fits EVERYWHERE. Q4
+(~0.56GB weights) is the universal fallback quant -- the gold anchor.
+
+  [check] low-end Android (2GB active) recommendation fits its budget: OK
+  [check] iPhone (3GB active) fits a model strictly larger than the browser's: OK
+  [check] a 1B model fits ALL THREE device budgets (the universal mobile fit): OK
+  [check] every recommended model is <= its active RAM (no OOM): OK
+
+==========================================================================
+  SECTION E: battery budget  --  energy per query -> queries per charge
+==========================================================================
+Energy model (TOY, order-of-magnitude): read all weights once per
+decoded token; each byte costs 2.0e-10 J (mobile LPDDR + NPU).
+Decode 256 tokens/query. battery (Wh) x 3600 = joules.
+
+| device           | battery | model    | J/query | queries/charge |
+|------------------|---------|----------|---------|----------------|
+| low-end Android  |  15.0Wh | 1.0B @ Q8 |  54.4  |          993   |
+| iPhone (A18 NE)  |  13.0Wh | 3.0B @ Q4 |  86.4  |          542   |
+
+browser tab has no battery budget of its own (it draws from the host).
+
+Read it like this: doubling the model roughly doubles the J/query, so a
+3B model gets ~1/3 the queries-per-charge of a 1B on the SAME battery.
+That is why a 1B model (the universal fit from Section D) is also the
+battery win -- and Q4 halves the J/query of Q8 at the same param count.
+
+  [check] iPhone recommendation energy >= low-end Android (bigger model): OK
+  [check] energy per query is strictly positive for every profile: OK
+  [check] queries-per-charge is finite & positive where a battery exists: OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

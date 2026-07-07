@@ -1,0 +1,245 @@
+low_rank_dora.py - reference impl (LoRA + DoRA from scratch).
+Numbers below feed LOW_RANK_DORA.md.  torch = 2.12.1
+
+Concept: LoRA learns a low-rank patch BA; DoRA splits the update
+into a magnitude vector m and a low-rank direction V/||V||_col,
+decoupling 'how much' from 'which way' at ~LoRA param cost.
+
+
+========================================================================
+  SECTION A: LoRA from scratch -- the low-rank patch W' = W + BA
+========================================================================
+Tiny layer: d=4 (out), k=4 (in), rank r=2, alpha=2 (so alpha/r = 1, W' = W + BA exactly)
+
+Trainable params: A [r,k] + B [d,r] = r*k + d*r = r(d+k)
+  = 2*4 + 4*2... = r*(d+k) = 2*(d+k) = 16
+
+frozen base W  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | -0.7961 | -0.8148 | -0.1772 | -0.3068 |
+| i=1 | +0.6001 | +0.4893 | -0.2235 | -1.4957 |
+| i=2 | +0.2279 | -0.8933 | +0.2475 | +0.2179 |
+| i=3 | +0.0847 | +0.8752 | +0.7897 | -0.1749 |
+
+At INIT (B = 0): the patch (alpha/r)BA =
+  delta_W = (alpha/r) B A  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | +0.0000 | +0.0000 | +0.0000 | +0.0000 |
+| i=1 | +0.0000 | +0.0000 | +0.0000 | +0.0000 |
+| i=2 | +0.0000 | +0.0000 | +0.0000 | +0.0000 |
+| i=3 | +0.0000 | +0.0000 | +0.0000 | +0.0000 |
+
+merged W' = W + delta_W  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | -0.7961 | -0.8148 | -0.1772 | -0.3068 |
+| i=1 | +0.6001 | +0.4893 | -0.2235 | -1.4957 |
+| i=2 | +0.2279 | -0.8933 | +0.2475 | +0.2179 |
+| i=3 | +0.0847 | +0.8752 | +0.7897 | -0.1749 |
+
+Because B = 0 at init, delta_W = 0 and W' == W exactly -- the LoRA
+adapter is a NO-OP until training moves B (same behaviour as the
+frozen base). This is why LoRA training is stable from step 0.
+
+[check] init: delta_W == 0 (B=0): OK
+[check] init: merged W' == W: OK
+Now give B learned (nonzero) values to see the rank constraint.
+A trained B [d,r] (seeded, deterministic):
+
+  trained B  (shape (4, 2))
+
+| row \ col | j=0 | j=1 |
+| --- | --- | --- |
+| i=0 | +0.3307 | +0.1335 |
+| i=1 | +0.0308 | +0.3107 |
+| i=2 | -0.2260 | -0.0831 |
+| i=3 | -0.7614 | +0.1908 |
+
+trained delta_W = (alpha/r) B A  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | -0.2490 | +0.0096 | -0.2406 | +0.0541 |
+| i=1 | -0.2039 | +0.2330 | -0.2483 | +0.0309 |
+| i=2 | +0.1652 | -0.0002 | +0.1582 | -0.0363 |
+| i=3 | +0.2716 | +0.3657 | +0.1767 | -0.0814 |
+
+singular values of delta_W = [0.6284, 0.4307, 0.0, 0.0]
+rank(delta_W) = 2  (<= r = 2 by construction: a
+d x k matrix factored as B[d,r] @ A[r,k] can have at most r nonzero
+singular values -- that is what 'low-rank' buys you.)
+
+[check] rank(trained delta_W) <= r: OK
+[check] rank(trained delta_W) == r when B,A are full rank: OK
+GOLD PIN (low_rank_dora.html recomputes this):
+    d=4, k=4, r=2: full-FT = d*k = 16;  LoRA = r(d+k) = 16
+[check] LoRA params r(d+k) == 16 for d=4,k=4,r=2: OK
+[check] full-FT params d*k == 16 for d=4,k=4: OK
+[check] LoRA trainable_params() matches r(d+k): OK
+
+========================================================================
+  SECTION B: DoRA from scratch -- magnitude m odot direction V/||V||
+========================================================================
+Same tiny layer: d=4, k=4, r=2, alpha=2. Shares the SAME frozen W, A, B as the LoRA in Section A.
+
+Trainable params: A [r,k] + B [d,r] + m [k] = r(d+k) + k
+  = 2*(d+k) + k = 16 + 4 = 20
+
+magnitude vector m [k] (init = ||W[:,j]||, the column norms of W):
+  m        = [1.0262, 1.5708, 0.8753, 1.5522]
+  ||W||_col = [1.0262, 1.5708, 0.8753, 1.5522]  (== m at init)
+
+V = W + (alpha/r)BA  ;  at init B=0 so V = W.
+  ||V||_col = [1.0262, 1.5708, 0.8753, 1.5522]  (== ||W||_col == m at init)
+
+DoRA merged W'_dora = (m / ||V||_col) odot V  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | -0.7961 | -0.8148 | -0.1772 | -0.3068 |
+| i=1 | +0.6001 | +0.4893 | -0.2235 | -1.4957 |
+| i=2 | +0.2279 | -0.8933 | +0.2475 | +0.2179 |
+| i=3 | +0.0847 | +0.8752 | +0.7897 | -0.1749 |
+
+At init: V = W, so (m / ||V||_col) = m / ||W||_col = 1 (all ones),
+so W'_dora = 1 odot W = W EXACTLY. DoRA, like LoRA, starts as a
+no-op -- but it has split the update into a free magnitude vector m
+and a low-rank direction V/||V||_col that can now move independently.
+
+[check] init: m == ||W||_col: OK
+[check] init: DoRA W'_dora == W (forward-equivalence at init): OK
+GOLD PIN (low_rank_dora.html recomputes this):
+    d=4, k=4, r=2: DoRA = r(d+k)+k = 16+4 = 20
+[check] DoRA params r(d+k)+k == 20 for d=4,k=4,r=2: OK
+[check] DoRA trainable_params() matches r(d+k)+k: OK
+[check] DoRA adds exactly k magnitude params over LoRA (20 vs 16): OK
+
+========================================================================
+  SECTION C: forward-pass comparison -- y_full vs y_lora vs y_dora
+========================================================================
+Input x [k=4] (seeded): [-0.1468, 0.7861, 0.9468, -1.1143]
+
+| output | values |
+|---|---|
+| y_full = W x          | [-0.3496, 1.7517, -0.7442, 1.6181] |
+| y_lora = W' x         | [-0.3496, 1.7517, -0.7442, 1.6181] |
+| y_dora = W'_dora x    | [-0.3496, 1.7517, -0.7442, 1.6181] |
+
+At init (B=0, m=||W||): LoRA's W'=W and DoRA's W'_dora=W, so ALL
+THREE forwards are identical. Training then diverges them: LoRA can
+only add a low-rank patch; DoRA can also rescale each column's
+magnitude via m. (Section E shows why that separation matters.)
+
+[check] init: y_lora == y_full: OK
+[check] init: y_dora == y_full: OK
+[check] init: y_dora == y_lora: OK
+
+========================================================================
+  SECTION D: param-count + expressiveness (full-FT vs LoRA vs DoRA)
+========================================================================
+For each (d, k) and rank r: trainable params and the LoRA/DoRA
+compression ratio vs full fine-tuning (full = d*k).
+
+| d   | k   | r | full-FT d*k | LoRA r(d+k) | DoRA r(d+k)+k | LoRA/full | DoRA/full |
+|-----|-----|---|-------------|-------------|---------------|-----------|------------|
+| 4   | 4   | 2 |          16 |          16 |            20 |    1.0000 |     1.2500 |
+| 8   | 8   | 2 |          64 |          32 |            40 |    0.5000 |     0.6250 |
+| 8   | 8   | 4 |          64 |          64 |            72 |    1.0000 |     1.1250 |
+| 8   | 8   | 8 |          64 |         128 |           136 |    2.0000 |     2.1250 |
+| 64  | 64  | 2 |       4,096 |         256 |           320 |    0.0625 |     0.0781 |
+| 64  | 64  | 4 |       4,096 |         512 |           576 |    0.1250 |     0.1406 |
+| 64  | 64  | 8 |       4,096 |       1,024 |         1,088 |    0.2500 |     0.2656 |
+
+Reading the table:
+- full-FT grows as d*k (quadratic in the width); LoRA/DoRA grow as
+  r*(d+k) (LINEAR in the width). So the savings explode at scale:
+  at d=k=64, r=4, full=4096 but LoRA=512 and DoRA=576 -- ~8x fewer.
+- DoRA costs exactly k MORE params than LoRA (the magnitude vector).
+  At real scale (d=k=4096, r=8) that is +4096 out of ~65536 -- about
+  +6%, i.e. the ~0.2% overhead the DoRA paper reports. Negligible.
+- When r >= min(d,k) the 'low-rank' bet stops paying (LoRA can exceed
+  full-FT, e.g. d=k=8, r=8 -> 128 > 64). Real use keeps r << min(d,k).
+
+[check] (4,4,r=2): LoRA r(d+k)==16 & DoRA +k==20: OK
+[check] (8,8,r=2): LoRA r(d+k)==32 & DoRA +k==40: OK
+[check] (8,8,r=4): LoRA r(d+k)==64 & DoRA +k==72: OK
+[check] (8,8,r=8): LoRA r(d+k)==128 & DoRA +k==136: OK
+[check] (64,64,r=2): LoRA r(d+k)==256 & DoRA +k==320: OK
+[check] (64,64,r=4): LoRA r(d+k)==512 & DoRA +k==576: OK
+[check] (64,64,r=8): LoRA r(d+k)==1024 & DoRA +k==1088: OK
+
+========================================================================
+  SECTION E: why decouple magnitude and direction (the DoRA claim)
+========================================================================
+STEP 1 -- any weight matrix factors as magnitude odot direction.
+W = m odot (W / ||W||_col),  where m = ||W||_col (length k) and
+W/||W||_col has unit columns (each column is a direction). This is
+Salimans & Kingma's weight normalization (arXiv:1602.07868), which
+DoRA reuses per column.
+
+direction = W / ||W||_col  (unit columns)  (shape (4, 4))
+
+| row \ col | j=0 | j=1 | j=2 | j=3 |
+| --- | --- | --- | --- | --- |
+| i=0 | -0.7758 | -0.5188 | -0.2024 | -0.1977 |
+| i=1 | +0.5848 | +0.3115 | -0.2553 | -0.9636 |
+| i=2 | +0.2221 | -0.5687 | +0.2827 | +0.1404 |
+| i=3 | +0.0826 | +0.5572 | +0.9022 | -0.1126 |
+
+magnitude m = ||W||_col = [1.0262, 1.5708, 0.8753, 1.5522]
+
+[check] reconstruction: m odot direction == W (exact): OK
+
+STEP 2 -- LoRA CONFLATES magnitude and direction; DoRA frees them.
+Give B learned values (same as Section A's trained B):
+
+Decompose LoRA's merged W' = W + BA the same way:
+
+| col j | ||W|| (before) | ||W+BA|| (after) | magnitude ratio | direction cosine |
+|-------|---------------|------------------|-----------------|------------------|
+| 0     |        1.0262 |           1.2373 |          1.2057 |           0.9370 |
+| 1     |        1.5708 |           1.8730 |          1.1924 |           0.9836 |
+| 2     |        0.8753 |           1.2229 |          1.3971 |           0.9743 |
+| 3     |        1.5522 |           1.5192 |          0.9788 |           0.9977 |
+
+LoRA's single patch BA shifts BOTH the magnitude (||W+BA|| != ||W||)
+AND the direction (cosine < 1) at once -- you cannot ask LoRA to
+rescale a column WITHOUT also turning it. That is the limitation
+DoRA targets: full fine-tuning updates magnitude and direction
+INDEPENDENTLY, and LoRA's proportional coupling can't mimic it.
+
+STEP 3 -- DoRA keeps them independent by construction.
+direction(V) = V/||V||_col does NOT depend on m at all. So in DoRA:
+  - moving m  -> rescales each column's MAGNITUDE only (direction
+    unchanged, because m never enters V/||V||_col);
+  - moving BA -> changes the DIRECTION only (low-rank, cheap), then
+    m re-scales it back to the learned magnitude.
+[check] direction is invariant to m (rescaling m leaves V/||V|| unchanged): OK
+[check] DoRA direction(V) == LoRA direction(W+BA) (same V, same normalise): OK
+[check] LoRA changed magnitude AND direction (both shifted from W): OK
+
+========================================================================
+  LINEAGE RECAP
+========================================================================
+| method   | merged weight                 | trainable params | magnitude / direction |
+|----------|-------------------------------|------------------|------------------------|
+| full-FT  | W + dW  (all weights)         | d*k              | both move, independently |
+| LoRA     | W + (alpha/r)BA               | r(d+k)           | both move, PROPORTIONALLY (tied) |
+| DoRA     | (m / ||V||_col) odot V        | r(d+k) + k       | magnitude (m) and direction (BA) FREE |
+
+DoRA matches full-FT's *behaviour* (independent magnitude/direction
+updates) at ~LoRA's *cost* (only +k params). Empirically it often
+beats LoRA at the same rank, and even matches LoRA at HALF the rank
+(Liu et al 2024, arXiv:2402.09353).
+
+[check] lineage: full-FT has most params (d*k): OK
+[check] lineage: DoRA params == LoRA params + k: OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

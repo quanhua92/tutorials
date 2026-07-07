@@ -1,0 +1,160 @@
+minhash_dedup.py - reference impl. All numbers below feed MINHASH_DEDUP.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see minhash_dedup_reference.txt.
+
+==========================================================================
+  SECTION A: shingling + exact Jaccard (the O(n^2) baseline)
+==========================================================================
+Word-level n-gram shingling, n = 3 (the FineWeb choice).
+
+doc_a = "the quick brown fox jumps over the lazy dog by the river bank"
+  shingles (11): ['brown fox jumps', 'by the river', 'dog by the', 'fox jumps over', 'jumps over the', 'lazy dog by', 'over the lazy', 'quick brown fox', 'the lazy dog', 'the quick brown', 'the river bank']
+doc_b = "the quick brown fox jumps over the lazy dog by the river shore"
+  shingles (11): ['brown fox jumps', 'by the river', 'dog by the', 'fox jumps over', 'jumps over the', 'lazy dog by', 'over the lazy', 'quick brown fox', 'the lazy dog', 'the quick brown', 'the river shore']
+doc_c = "machine learning models need huge amounts of clean training data"
+  shingles (8): ['amounts of clean', 'clean training data', 'huge amounts of', 'learning models need', 'machine learning models', 'models need huge', 'need huge amounts', 'of clean training']
+
+| pair            | |A∩B| | |A∪B| | exact Jaccard | verdict        |
+|-----------------|-------|-------|---------------|----------------|
+| doc_a vs doc_b  |    10 |    12 |        0.8333 | NEAR-DUPLICATE |
+| doc_a vs doc_c  |     0 |    19 |        0.0000 | distinct       |
+| doc_b vs doc_c  |     0 |    19 |        0.0000 | distinct       |
+
+doc_a vs doc_b exact J = 0.8333  (one last word changed: bank->shore)
+doc_a vs doc_c exact J = 0.0000  (totally different topic)
+
+  [check] near-dup pair (a,b) has J >= 0.5: OK
+  [check] distinct pair (a,c) has J < 0.3: OK
+  [check] exact-match dedup would MISS the (a,b) near-dup (text differs): OK
+
+==========================================================================
+  SECTION B: MinHash signature (k=20 hashes) + estimated Jaccard
+==========================================================================
+signature[i] = min over shingles s of h_i(s),  i = 0..19
+h_i(s) = fnv1a_32( f"{i}|{s}" )  (deterministic FNV-1a, no Python hash())
+
+doc_a signature (k=20):
+  20429132, 298921293, 305743498, 150263600, 51331493, 470345768, 151134879, 490330995, 95489524, 144126352, 260711045, 725999943, 293770206, 2404245, 706642217, 458412027, 671596980, 6019517, 214643508, 442117959
+doc_b signature (k=20):
+  20429132, 298921293, 305743498, 150263600, 51331493, 470345768, 151134879, 490330995, 95489524, 144126352, 912775396, 725999943, 293770206, 2404245, 677050904, 458412027, 671596980, 6019517, 214643508, 442117959
+doc_c signature (k=20):
+  1196876800, 73324876, 1185871290, 555919001, 191773565, 1774192623, 1429044223, 1168930776, 140278048, 610902643, 405103828, 925138193, 1039110205, 100157387, 488617611, 955813765, 899885854, 360109308, 582121963, 1095304049
+
+| pair            | exact J | matches/k | estimated J | |est-exact| |
+|-----------------|---------|-----------|-------------|-------------|
+| doc_a vs doc_b  |  0.8333 |   18/20   |      0.9000 |      0.0667 |
+| doc_a vs doc_c  |  0.0000 |    0/20   |      0.0000 |      0.0000 |
+| doc_b vs doc_c  |  0.0000 |    0/20   |      0.0000 |      0.0000 |
+
+Reading the table: the estimated J tracks the exact J, but is a SAMPLE
+(k=20 independent coin-flips), so it wobbles by ~1/sqrt(k) = 0.224. More hashes -> tighter estimate.
+
+GOLD ANCHOR (minhash_dedup.html recomputes this): doc_a vs doc_b
+  exact Jaccard   = 0.8333
+  estimated Jaccard = 0.9000  (k=20, deterministic FNV-1a)
+  [check] MinHash estimate within 0.15 of exact J for the near-dup pair: OK
+  [check] MinHash estimate for distinct pair (a,c) is low (< 0.30): OK
+
+==========================================================================
+  SECTION C: LSH banding (b=5 bands x r=4 rows)
+==========================================================================
+Split the k=20 signature into b=5 bands of r=4 rows.
+A pair is a CANDIDATE iff it agrees on ALL 4 rows of >= 1 band.
+
+Approximate S-curve threshold  t = (1/b)^(1/r) = (1/5)^(1/4)
+                                             = 0.66874  (~0.6687)
+At J = t: J^r = 1/b = 0.2000,  P(candidate) ~= 1 - (1-1/b)^b
+                                              = 0.6723
+
+Candidate pairs from banding on {doc_a, doc_b, doc_c}:
+  (doc_a, doc_b)  exact J=0.8333  est J=0.9000  -> kept
+
+Sweep over Jaccard J: the probability P(candidate | J) -- the S-curve
+| J    | J^r      | 1-J^r    | (1-J^r)^b | P(candidate)=1-(1-J^r)^b |
+|------|----------|----------|-----------|--------------------------|
+| 0.1  | 0.0001   | 0.9999   | 0.9995    | 0.0005                   |
+| 0.2  | 0.0016   | 0.9984   | 0.9920    | 0.0080                   |
+| 0.3  | 0.0081   | 0.9919   | 0.9602    | 0.0398                   |
+| 0.4  | 0.0256   | 0.9744   | 0.8784    | 0.1216                   |
+| 0.5  | 0.0625   | 0.9375   | 0.7242    | 0.2758                   |
+| 0.6  | 0.1296   | 0.8704   | 0.4996    | 0.5004                   |
+| 0.7  | 0.2401   | 0.7599   | 0.2534    | 0.7466                   |
+| 0.8  | 0.4096   | 0.5904   | 0.0717    | 0.9283                   |
+| 0.9  | 0.6561   | 0.3439   | 0.0048    | 0.9952                   |
+
+The S-curve is ~0 below J=0.6687 and ~1 above it -> a tunable cliff.
+Pairs with J below the cliff are (correctly) NOT compared; pairs above
+it land in the same bucket and become candidates. This is what makes
+dedup SUBLINEAR instead of O(n^2). A pair with J near the cliff is a
+coin-flip -- raising the threshold (more rows r) trades RECALL for
+PRECISION (fewer false positives, more false negatives).
+
+  [check] LSH threshold for b=5, r=4 ~= 0.6687 (within 1e-3): OK
+  [check] S-curve is ~0 at J=0.1 (< 0.05): OK
+  [check] S-curve is ~1 at J=0.9 (> 0.95): OK
+  [check] near-dup (a,b) J=0.8333 >= threshold 0.6687 -> caught as candidate: OK
+  [check] distinct pair (a,c) J=0.0000 is NOT a candidate (below cliff): OK
+
+==========================================================================
+  SECTION D: end-to-end dedup on a toy 8-doc corpus (union-find clustering)
+==========================================================================
+Corpus: 8 docs. Planted near-dup clusters {0,1} and {3,4}.
+
+Config: n=3-gram shingles, k=20 MinHash, b=5 bands x r=4 rows -> threshold t ~= 0.6687
+
+Candidate pairs from LSH banding (2):
+  (doc 0, doc 1)  exact J=0.8333  est J=0.9000
+  (doc 3, doc 4)  exact J=0.8333  est J=0.9500
+
+Clustering (union-find over candidate pairs):
+| cluster | members     | kept (representative) | removed          |
+|---------|-------------|-----------------------|------------------|
+| 0       | [0, 1]      | doc 0                  | [1]              |
+| 2       | [2]         | doc 2                  | (none)           |
+| 3       | [3, 4]      | doc 3                  | [4]              |
+| 5       | [5]         | doc 5                  | (none)           |
+| 6       | [6]         | doc 6                  | (none)           |
+| 7       | [7]         | doc 7                  | (none)           |
+
+Dedup result: 6 of 8 docs kept, 2 removed.
+Dedup rate = 2/8 = 25.00%.
+
+Both planted near-dup clusters collapsed to one representative each;
+the 4 distinct docs were untouched. This is exactly what FineWeb does
+(at 15T-token scale, with 5-grams / 112 perms / 14x8 bands).
+
+  [check] exactly 2 multi-doc clusters found: OK
+  [check] cluster {0,1} collapsed together: OK
+  [check] cluster {3,4} collapsed together: OK
+  [check] distinct docs 2,5,6,7 each kept (singleton clusters): OK
+  [check] removed docs are exactly the near-dup partners {1,4}: OK
+  [check] dedup rate = 2/8 = 25%: OK
+
+==========================================================================
+  SECTION E: production dedup parameters (FineWeb, CCNet)
+==========================================================================
+FineWeb (Penedo et al 2024, arXiv:2406.17557) -- the production recipe:
+  shingle n       = 5 words
+  MinHash length  = 112 permutations
+  LSH bands b     = 14  x  rows r = 8   (= 112 total)
+  threshold t     = (1/14)^(1/8) = 0.7190  (~0.72)
+  corpus scale    = 15 trillion tokens, 96 Common Crawl snapshots
+  applied PER-SNAPSHOT (cross-snapshot dedup is separate)
+
+NOTE: the original build brief cited '128 perms, 14 bands x 9 rows'.
+That is INCORRECT -- the NeurIPS 2024 paper appendix E.1 states verbatim
+'we use 5-grams and 112 hash functions' (14 bands of 8 rows = 112, not
+128). 14 x 9 = 126, which is not 128 either. Corrected here.
+
+At the FineWeb threshold t=0.7190: P(candidate) ~= 0.6457
+(the standard ~0.63 knee of the LSH S-curve).
+
+  [check] FineWeb k = 14*8 = 112 (NOT 128): OK
+  [check] FineWeb threshold ~= 0.72 (within 0.03): OK
+  [check] FineWeb config (14 bands x 8 rows) matches the NeurIPS 2024 paper: OK
+  [check] brief's 128/14x9 is internally inconsistent (14*9=126 != 128): OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

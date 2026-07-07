@@ -1,0 +1,190 @@
+grammar_masking.py - reference impl. All numbers below feed GRAMMAR_MASKING.md.
+torch = 2.12.1
+
+Every claim is web-verified in >=2 sources; see grammar_masking_reference.txt.
+
+==========================================================================
+  SECTION A: the JSON-number DFA and its allowed-char sets per prefix
+==========================================================================
+The schema, as a regex:  -?[0-9]+(\.[0-9]+)?
+
+Compiled to a 5-state DFA (this is what Outlines does automatically):
+
+| state | meaning                  | accepting? | allowed next chars        |
+|-------|--------------------------|------------|---------------------------|
+| S0    | start (nothing emitted)  | no         | {-, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9} |
+| S1    | after '-' (need a digit) | no         | {0, 1, 2, 3, 4, 5, 6, 7, 8, 9} |
+| S2    | integer digits           | YES        | {., 0, 1, 2, 3, 4, 5, 6, 7, 8, 9} |
+| S3    | after '.' (need a digit) | no         | {0, 1, 2, 3, 4, 5, 6, 7, 8, 9} |
+| S4    | fractional digits        | YES        | {0, 1, 2, 3, 4, 5, 6, 7, 8, 9} |
+
+Walking a few prefixes and printing the allowed-set the masker would use:
+
+| prefix so far | DFA state | allowed next chars | a letter 'a' allowed? |
+|---------------|-----------|--------------------|-----------------------|
+| ''            | S0        | ['-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] | no (masked)           |
+  [check] prefix '' lands in state S0: OK
+| '-'           | S1        | ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] | no (masked)           |
+  [check] prefix '-' lands in state S1: OK
+| '12'          | S2        | ['.', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] | no (masked)           |
+  [check] prefix '12' lands in state S2: OK
+| '12.'         | S3        | ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] | no (masked)           |
+  [check] prefix '12.' lands in state S3: OK
+| '12.3'        | S4        | ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'] | no (masked)           |
+  [check] prefix '12.3' lands in state S4: OK
+
+Letters ('a', '{') are NEVER in any allowed-set -> they are masked to -inf
+at EVERY step. '.' appears only in S2 (after >=1 integer digit) and never in
+S0/S1/S3/S4, so the decimal point is allowed AT MOST ONCE -- exactly the
+regex's contract.
+  [check] letter 'a' is never allowed in any state: OK
+  [check] '.' is allowed in exactly one state (S2): OK
+  [check] every state has at least one allowed char (the mask never deadlocks): OK
+
+==========================================================================
+  SECTION B: logit masking + renormalization (the GOLD anchor)
+==========================================================================
+A toy 'model' proposes a logits vector over the 14-char vocab. Its TOP
+preference is the letter 'a' (logit 5.0) -- but a JSON number can never
+start with a letter. The masker builds the allowed-set from the start
+state S0 = {'-', '0'..'9'} and sets every other logit to -inf, then
+softmax renormalizes over the allowed-set only.
+
+GOLD_LOGITS (by char):
+| id | char | logit  | in S0 allowed-set? |
+|----|------|--------|--------------------|
+| 0  | '0'  | 1.0    | YES                |
+| 1  | '1'  | 1.0    | YES                |
+| 2  | '2'  | 1.0    | YES                |
+| 3  | '3'  | 1.0    | YES                |
+| 4  | '4'  | 1.0    | YES                |
+| 5  | '5'  | 1.0    | YES                |
+| 6  | '6'  | 1.0    | YES                |
+| 7  | '7'  | 1.0    | YES                |
+| 8  | '8'  | 1.0    | YES                |
+| 9  | '9'  | 1.0    | YES                |
+| 10 | '.'  | 0.5    | no -> -inf         |
+| 11 | '-'  | 2.0    | YES                |
+| 12 | 'a'  | 5.0    | no -> -inf         |
+| 13 | '{'  | 0.1    | no -> -inf         |
+
+| id | char | free P(x) | masked P(x) |
+|----|------|-----------|-------------|
+| 0  | '0'  | 0.0146    | 0.0786      |
+| 1  | '1'  | 0.0146    | 0.0786      |
+| 2  | '2'  | 0.0146    | 0.0786      |
+| 3  | '3'  | 0.0146    | 0.0786      |
+| 4  | '4'  | 0.0146    | 0.0786      |
+| 5  | '5'  | 0.0146    | 0.0786      |
+| 6  | '6'  | 0.0146    | 0.0786      |
+| 7  | '7'  | 0.0146    | 0.0786      |
+| 8  | '8'  | 0.0146    | 0.0786      |
+| 9  | '9'  | 0.0146    | 0.0786      |
+| 10 | '.'  | 0.0089    | 0.0000      |
+| 11 | '-'  | 0.0398    | 0.2137      |  <- BEST VALID (chosen)
+| 12 | 'a'  | 0.7990    | 0.0000      |  <- model's true top (masked out)
+| 13 | '{'  | 0.0060    | 0.0000      |
+
+sum of free probs over vocab       = 1.000000
+sum of masked probs over allowed   = 1.000000  (= 1, renormalized)
+sum of masked probs over disallowed= 0.000000e+00  (= 0, all -inf)
+
+free argmax  -> 'a'  (a LETTER -- invalid)
+masked argmax-> '-'  (the model's BEST VALID token)
+
+GOLD PIN (grammar_masking.html recomputes this identically):
+    GOLD_LOGITS = [1.0x10, 0.5, 2.0, 5.0, 0.1]
+    allowed-set S0 = {'-', '0'..'9'}  (11 ids)
+    masked argmax (chosen char) = '-'
+    renormalized P('-') = exp(2.0)/(10*exp(1.0)+exp(2.0))
+                            = 0.213730
+  [check] every disallowed token has probability 0 after masking: OK
+  [check] masked probs over the allowed-set sum to 1: OK
+  [check] masking does not change relative order WITHIN the allowed-set: OK
+  [check] free argmax is 'a' (invalid) but masked argmax is '-' (valid): OK
+
+==========================================================================
+  SECTION C: autoregressive decode with the mask on (worked example)
+==========================================================================
+A FIXED per-step 'model' (DECODE_SCHEDULE) proposes logits each step. At
+every step its TRUE top pick is often a letter ('a'/'{') -- illegal for a
+number. The mask recomputes the allowed-set from the current DFA state,
+sets disallowed logits to -inf, and greedy-argmax then picks the best VALID
+char. STOP is only allowed when the state is accepting, so the decode can
+ONLY end on a complete, schema-valid string.
+
+| step | DFA state | model's free top | allowed-set        | masked argmax | emitted | output so far |
+|------|-----------|------------------|--------------------|---------------|---------|---------------|
+| 0    | S0        | 'a'              | {0,1,2,3,4,5,6,7,8,9,-} | '-'           | '-'     | '-'           |
+| 1    | S1        | '{'              | {0,1,2,3,4,5,6,7,8,9} | '1'           | '1'     | '-1'          |
+| 2    | S2        | 'a'              | {0,1,2,3,4,5,6,7,8,9,.,STOP} | '2'           | '2'     | '-12'         |
+| 3    | S2        | 'a'              | {0,1,2,3,4,5,6,7,8,9,.,STOP} | '.'           | '.'     | '-12.'        |
+| 4    | S3        | 'a'              | {0,1,2,3,4,5,6,7,8,9} | '5'           | '5'     | '-12.5'       |
+| 5    | S4        | 'a'              | {0,1,2,3,4,5,6,7,8,9,STOP} | STOP          | STOP    | '-12.5'       |
+
+Final masked output: '-12.5'
+re.fullmatch('-?[0-9]+(\\.[0-9]+)?', '-12.5') -> MATCH (schema-valid)
+  [check] the masked decode ended in an accepting state: OK
+  [check] the masked output fully matches the number regex: OK
+  [check] the masked output is exactly '-12.5': OK
+
+Contrast -- SAME schedule, mask OFF (free argmax each step): 'a{aaa'
+re.fullmatch -> NO MATCH (garbage -- the model just emits its top char)
+  [check] with the mask OFF the same model emits an invalid string: OK
+
+==========================================================================
+  SECTION D: reliability over 100 toy decodes -- masked vs unmasked
+==========================================================================
+For each of 100 trials a DIFFERENT seeded logits schedule; greedy-decode
+once WITH the mask, once WITHOUT; test the output with re.fullmatch.
+
+| trial | unmasked output | valid? | masked output | valid? |
+|-------|-----------------|--------|---------------|--------|
+| 0     | '06a836'        | no     | '063836'      | YES    |
+| 1     | '05{8{7'        | no     | '056857'      | YES    |
+| 2     | '.'             | no     | '4'           | YES    |
+| 3     | '-a5a6{'        | no     | '-15.63'      | YES    |
+| 4     | '2{633{'        | no     | '266336'      | YES    |
+| 5     | '5a9a5a'        | no     | '579.53'      | YES    |
+| 6     | '8..206'        | no     | '8.0206'      | YES    |
+| 7     | '43{870'        | no     | '43'          | YES    |
+| ...   | (92 more trials, same pattern) |        |               |        |
+
+masked validity  = 100/100 = 100%
+unmasked validity= 5/100 = 5%
+
+The mask makes the SAME toy model 100% schema-reliable. Free sampling emits
+letters / stops early / malformed numbers most of the time. This is the whole
+claim: reliability WITHOUT capability -- the model is unchanged, only the
+sampler is interposed with a grammar mask.
+  [check] masked validity == 100% over 100 trials: OK
+  [check] unmasked validity < 100% over 100 trials: OK
+  [check] masked is strictly more reliable than unmasked: OK
+
+==========================================================================
+  SECTION E: the lineage -- free sampling -> regex/DFA -> GBNF/CFG
+==========================================================================
+| stage               | what it does                                | win / failure                                           | where                          |
+|---------------------|---------------------------------------------|---------------------------------------------------------|--------------------------------|
+| free sampling       | softmax(z) over the FULL vocab; any token can win | ~60% schema-valid JSON from a 1B SLM; garbage crashes parsers | 🔗 ../llm/SAMPLING.md (the engine this masks INTO) |
+| regex-guided decoding | compile schema to a DFA; mask chars that leave the regex | every prefix valid; works for any regular language      | Outlines FSM (Willard & Louf 2023, arXiv:2307.09702) |
+| GBNF / CFG-guided   | BNF grammar -> byte-level LL(1) parser -> token mask | 100% schema-valid; handles nested JSON (full CFG, not just regex) | llama.cpp GBNF; 🔗 ../local-llm/GRAMMAR_OUTPUT.md |
+
+  [check] lineage has exactly 3 stages: OK
+  [check] the final stage (GBNF) is the production masker: OK
+The -inf-before-softmax mask is IDENTICAL across all three; only the
+allowed-set source grows: full vocab -> regex DFA states -> full CFG parser.
+Cost: ~10-30% slower (every vocab token is checked against the grammar state
+at every step). The payoff (100% schema validity from a small model) is the
+reason every production structured-output library ships this trick.
+
+==========================================================================
+  GOLD RECAP (pinned for grammar_masking.html)
+==========================================================================
+  GOLD start-state masked P('-') = 0.213730
+  GOLD masked validity  / 100 = 100
+  GOLD unmasked validity/ 100 = 5
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

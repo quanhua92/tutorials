@@ -1,0 +1,202 @@
+pretraining_stable.py - reference impl. All numbers below feed PRETRAINING_STABLE.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see pretraining_stable_reference.txt.
+
+==========================================================================
+  SECTION A: the three LR schedules (cosine vs WSD vs warmup)
+==========================================================================
+Pinned GOLD inputs: lr_max=3.00e-04, lr_min=3.00e-05, T=1000
+
+--- (1) cosine schedule, NO warmup (the GOLD anchor) ---
+lr(t) = lr_min + 0.5*(lr_max - lr_min)*(1 + cos(pi*t/T))
+
+| t    | phase       |    cosine lr  |
+|------|-------------|---------------|
+| 0    | decay       | 3.000000e-04 |
+| 250  | decay       | 2.604594e-04 |
+| 500  | decay       | 1.650000e-04 |
+| 750  | decay       | 6.954058e-05 |
+| 1000 | decay       | 3.000000e-05 |
+
+GOLD PIN (pretraining_stable.html recomputes this identically):
+  lr(T/2) = lr(500) = 3e-5 + 0.5*(3e-4 - 3e-5)*(1 + cos(pi*0.5))
+         = 3e-5 + 0.5*2.7e-4*1 = 1.650000e-04
+  [check] GOLD lr(500) == 1.65e-4 (within 1e-9): OK
+  [check] cosine(T/2) == (lr_max+lr_min)/2 (cos(pi/2)=0): OK
+  [check] cosine(0) == lr_max: OK
+  [check] cosine(T) == lr_min: OK
+
+--- (2) shape contrast: cosine vs WSD (warmup=100, decay_frac=0.1) ---
+Both ramp 0 -> lr_max over warmup; WSD HOLDS lr_max then decays the
+final 10%; cosine decays smoothly the WHOLE post-warmup span.
+
+| t    | phase        |   cosine lr  |    WSD lr    |
+|------|--------------|--------------|--------------|
+| 0    | warmup                   | 0.000000e+00 | 0.000000e+00 |
+| 50   | warmup                   | 1.500000e-04 | 1.500000e-04 |
+| 100  | cosine decay / WSD stable | 3.000000e-04 | 3.000000e-04 |
+| 250  | cosine decay / WSD stable | 2.819134e-04 | 3.000000e-04 |
+| 500  | cosine decay / WSD stable | 1.884425e-04 | 3.000000e-04 |
+| 750  | cosine decay / WSD stable | 7.822367e-05 | 3.000000e-04 |
+| 900  | cosine decay / WSD decay | 3.814150e-05 | 3.000000e-04 |
+| 950  | cosine decay / WSD decay | 3.205095e-05 | 1.650000e-04 |
+| 1000 | cosine decay / WSD decay | 3.000000e-05 | 3.000000e-05 |
+
+At t=500: WSD=3.000000e-04 (STILL at lr_max), cosine=1.884425e-04 (already near the midpoint).
+This is WSD's whole point: train at the PEAK rate for most of the run,
+decay only the cooldown -> the stable-phase checkpoint is reusable.
+  [check] WSD holds lr_max during the stable phase (t=500 == lr_max): OK
+  [check] cosine at t=500 is well below lr_max (mid-decay): OK
+  [check] both schedules hit lr_min at t=T: OK
+  [check] both schedules are 0 at t=0 (start of warmup): OK
+
+==========================================================================
+  SECTION B: gradient clipping by global norm (scale = min(1, max_norm/||g||))
+==========================================================================
+Clipping caps the global gradient norm so one bad batch can't catapult
+the weights. DIRECTION is preserved (every grad scaled by the SAME
+factor); only the SIZE shrinks.
+
+--- (1) grad with norm 5.0, clip to max_norm 1.0 (the GOLD anchor) ---
+  g        = [3.0, 0.0, 0.0, 0.0, 4.0]
+  ||g||    = sqrt(3^2 + 4^2) = 5.0000
+  scale    = min(1, max_norm/||g||) = min(1, 1.0/5.0000) = 0.2000
+  g' = g*scale = [0.6, 0.0, 0.0, 0.0, 0.8]
+  ||g'||   = 1.0000   (clipped to exactly max_norm)
+
+GOLD PIN (pretraining_stable.html recomputes this identically):
+  scale (||g||=5, max_norm=1) = 1.0/5.0 = 0.2 ; clipped norm = 1.0
+  [check] GOLD clip scale == 0.2 (||g||=5, max_norm=1): OK
+  [check] GOLD clipped norm == 1.0: OK
+  [check] original norm was 5.0 (3-4-5 triangle): OK
+
+--- (2) grad with norm 0.5 (< max_norm 1.0) -> UNCHANGED (scale = 1) ---
+  ||g|| = 0.5000 < max_norm=1.0 -> scale = min(1, 1/0.5000) = 1.0000
+  ||g'|| = 0.5000  (no change; below the clip threshold)
+  [check] small grad (< max_norm) is unchanged (scale == 1): OK
+  [check] small grad norm preserved exactly: OK
+
+--- (3) multi-tensor GLOBAL norm (a 2-tensor case, as in real models) ---
+  gA = [1.0, 0.0, 0.0, 0.0]  ||gA|| = 1.0
+  gB = [0.0, 0.0, 3.0, 4.0]  ||gB|| = 5.0
+  ||g||_global = sqrt(||gA||^2 + ||gB||^2) = sqrt(1 + 25) = 5.0990  (= sqrt(26))
+  scale   = min(1, 1/5.0990) = 0.1961
+  ||g'||_global = 1.0000  (both tensors scaled by 0.1961)
+  [check] global norm = sqrt(1^2 + 5^2) = sqrt(26) ~= 5.099: OK
+  [check] after clip, global norm == max_norm 1.0: OK
+  [check] direction preserved: both tensors share the same scale: OK
+
+==========================================================================
+  SECTION C: AdamW (decoupled) vs Adam+L2 (coupled) -- 1-step contrast
+==========================================================================
+Same parameter w, same gradient g, same wd. The ONLY difference is WHERE
+weight decay enters: AdamW shrinks w DIRECTLY; Adam+L2 folds wd*w into g
+and then lets the momentum average it -> the decay is diluted.
+
+w0=1.00, g=0.0100, wd=0.1, lr=0.01, beta1=0.9, beta2=0.95, t=1
+
+AdamW:    w' = w - lr*(m_hat/(sqrt(v_hat)+eps) + wd*w)
+          adaptive step = 0.010000 (lr * sign(g) at t=1)
+          decay term    = lr*wd*w = 0.001000
+          w' = 1.0000 - 1e-02*(step + 0.0010) = 0.989000
+
+Adam+L2:  g' = g + wd*w = 0.0100 + 0.1*1.0 = 0.1100  (L2 folded INTO gradient)
+          w' = w - lr*m_hat/(sqrt(v_hat)+eps)  (no separate decay)
+          w' = 1.0000 - lr*0.1100/(|0.1100|) = 0.990000
+
+weight shrinkage:  AdamW = 0.011000 ,  Adam+L2 = 0.010000
+  AdamW shrinks w MORE here (0.011000 > 0.010000) because the
+  decay term acts on the FULL weight regardless of the tiny gradient.
+  Adam+L2's decay was averaged into the moment, so it behaves like a
+  scaled-down gradient step -> the effective decay is smaller.
+
+  [check] AdamW != Adam+L2 for the same wd (the decoupling changes the update): OK
+  [check] AdamW applies a strictly larger decay-driven shrink here: OK
+  [check] both steps move w in the correct direction (toward smaller |w|): OK
+
+--- the high-momentum case (where Adam+L2's dilution shows) ---
+Pre-load momentum so t is large: beta1^t -> 0, bias correction -> 1.
+A param with a STEADY large gradient builds high momentum; under Adam+L2
+the decay is averaged with that big gradient, so it barely dents the
+update. AdamW shrinks the weight by the SAME lr*wd*w regardless.
+
+w0=2.0, g=1.0, m=9.0 (warm), t=1000
+  AdamW   w' = 1.959610   (decay = lr*wd*w = 0.0020 added)
+  Adam+L2 w' = 1.961609   (decay averaged into m, diluted)
+  [check] AdamW shrinkage > Adam+L2 shrinkage at high momentum (the decoupling win): OK
+
+That dilution is the bug AdamW fixes: a coefficient 'wd' should mean the
+same thing for every parameter, regardless of its momentum history.
+
+==========================================================================
+  SECTION D: a micro training loop -- cosine schedule + clip + AdamW
+==========================================================================
+2-layer MLP: Linear(8->8) -> ReLU -> Linear(8->8)
+Task: learn the 'reverse' mapping on 8 fixed seeded examples.
+Loss: MSE. Optimizer: AdamW (wd=0.1). Schedule: cosine, lr_max=3e-3, lr_min=3e-4, warmup=5, T=50. Clip: max_norm=1.0.
+
+| step |     lr     |   grad-norm |    loss   | note           |
+|------|------------|-------------|-----------|----------------|
+| 0    | 0.000e+00 |      0.2219 | 0.182247 | warmup         |
+| 10   | 2.919e-03 |      0.1708 | 0.152253 |                |
+| 20   | 2.325e-03 |      0.1226 | 0.125249 |                |
+| 30   | 1.416e-03 |      0.0986 | 0.111529 |                |
+| 40   | 6.158e-04 |      0.0914 | 0.105468 |                |
+| 49   | 3.033e-04 |      0.0879 | 0.103257 | final          |
+
+initial loss (pre-step) = 0.182247
+first logged loss       = 0.182247
+final loss (step 49)     = 0.103257
+loss dropped by         = 0.078991  (43.3% of first)
+
+Read the table: LR ramps over warmup (0->5), peaks, then decays via the
+cosine. Grad-norm stays bounded by the clip (<=1.0 every step). Loss
+falls monotonically-ish as the MLP learns the reverse mapping. The three
+settings -- schedule + decoupled decay + clipping -- keep it stable.
+  [check] final loss < first logged loss (the model is learning): OK
+  [check] no NaN / Inf in the loss history: OK
+  [check] pre-clip grad-norm is positive at every step (gradients flowed): OK
+  [check] clip engaged on at least one step (a pre-clip norm >= max_norm occurred): OK
+  [check] LR peaked at lr_max during the run: OK
+  [check] post-warmup LR is monotonically non-increasing, final near lr_min: OK
+  [check] LR started at 0 (warmup begins at origin): OK
+
+==========================================================================
+  SECTION E: lineage recap + what shipped models actually used
+==========================================================================
+The optimization recipe improved four times; each step removed a failure
+mode:
+
+| stage         | what it does                       | failure removed            | era                     |
+|---------------|------------------------------------|----------------------------|-------------------------|
+| SGD           | one LR for all params; no momentum | fragile on transformers    | convex / pre-Adam       |
+| Adam          | adaptive per-param rates from m, v | no built-in regularization | the adaptive baseline   |
+| Adam+L2       | decay folded into g (lambda*w)     | decay diluted by momentum  | the coupled bug         |
+| AdamW         | DECUPLE: decay direct on w (wd*w)  | stable, default for all LLMs | Llama, GPT-3 era        |
+| + cosine/WSD  | warmup -> peak -> decay to lr_min  | settles into a sharp min   | the modern schedule     |
+| + grad clip   | cap ||g|| <= max_norm each step    | kills loss spikes -> no NaN | Llama 2 / GPT-3 clip=1.0 |
+
+What shipped models actually used (all web-verified; see _reference.txt):
+
+| model    | optimizer | weight decay | grad clip | LR schedule                | source                          |
+|----------|-----------|--------------|-----------|----------------------------|--------------------------------|
+| GPT-3    | Adam      |          0.1 |       1.0 | cosine+warmup              | Brown 2020 arXiv:2005.14165 (sec 4) |
+| Llama 1  | AdamW     |          0.1 |       1.0 | cosine, 2000 warmup, peak 3e-4 | Touvron 2023 arXiv:2302.13971  |
+| Llama 2  | AdamW     |          0.1 |       1.0 | cosine, 2000 warmup, peak 3e-4, ->10% peak | Touvron 2023 arXiv:2307.09288 (train A.1) |
+| MiniCPM  | AdamW     |          0.1 |       1.0 | WSD (10% decay)            | Hu 2024 arXiv:2404.06395       |
+
+Two patterns:
+  * GPT-3/Llama use COUPLING-FREE AdamW + cosine + clip=1.0 + wd=0.1 -- the
+    de-facto standard since 2020. The cosine decays to ~10% of the peak.
+  * MiniCPM swaps cosine for WSD: same AdamW + clip, but holds lr_max for
+    ~90% of the run and decays only the final 10%. The stable-phase
+    checkpoint is reusable for continual pretraining.
+  [check] Llama 2 / GPT-3 both clip grad-norm to 1.0: OK
+  [check] Llama 2 / GPT-3 both use weight decay 0.1: OK
+  [check] at least one shipped model uses WSD (MiniCPM): OK
+  [check] at least three shipped models use a cosine-family schedule: OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

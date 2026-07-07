@@ -1,0 +1,222 @@
+instruction_sft.py - reference impl. All numbers below feed INSTRUCTION_SFT.md.
+torch = 2.12.1
+
+Every claim is web-verified in >=2 sources; see instruction_sft_reference.txt.
+
+==========================================================================
+  SECTION A: a toy ChatML conversation as integer ids + a role array
+==========================================================================
+ChatML wraps every turn as  <|im_start|>role\n{msg}<|im_end|>\n .  The model
+sees a FLAT token stream; the role array records WHO owns each token so we
+can later mask everyone except the assistant. Toy vocab V=16 (real ChatML uses
+a 32k-128k BPE vocab; the masking is byte-for-byte identical).
+
+Fixed 2-turn conversation (the GOLD anchor for instruction_sft.html):
+
+  <|im_start|>user\nHi<|im_end|>\n
+  <|im_start|>assistant\nHi!<|im_end|>\n
+  <|im_start|>user\nBye<|im_end|>\n
+  <|im_start|>assistant\nBye!<|im_end|>\n
+
+| pos | id  | token        | role        | loss? |
+|-----|-----|--------------|-------------|-------|
+| 0   | 1   | <|im_start|> | special     | -     |
+| 1   | 4   | user         | user        | -     |
+| 2   | 6   | \n           | user        | -     |
+| 3   | 7   | Hi           | user        | -     |
+| 4   | 2   | <|im_end|>   | special     | -     |
+| 5   | 6   | \n           | special     | -     |
+| 6   | 1   | <|im_start|> | special     | -     |
+| 7   | 5   | assistant    | asst-hdr    | -     |
+| 8   | 6   | \n           | asst-hdr    | -     |
+| 9   | 8   | Hi!          | ASSISTANT   | YES   |
+| 10  | 2   | <|im_end|>   | ASSISTANT   | YES   |
+| 11  | 6   | \n           | special     | -     |
+| 12  | 1   | <|im_start|> | special     | -     |
+| 13  | 4   | user         | user        | -     |
+| 14  | 6   | \n           | user        | -     |
+| 15  | 9   | Bye          | user        | -     |
+| 16  | 2   | <|im_end|>   | special     | -     |
+| 17  | 6   | \n           | special     | -     |
+| 18  | 1   | <|im_start|> | special     | -     |
+| 19  | 5   | assistant    | asst-hdr    | -     |
+| 20  | 6   | \n           | asst-hdr    | -     |
+| 21  | 10  | Bye!         | ASSISTANT   | YES   |
+| 22  | 2   | <|im_end|>   | ASSISTANT   | YES   |
+| 23  | 6   | \n           | special     | -     |
+
+T (total tokens)              = 24
+A (assistant / loss-bearing)  = 4
+masked (label -> -100)        = 20
+
+GOLD PIN (instruction_sft.html recomputes these identically):
+    T = 24 ,  A = 4 ,  masked = 20
+  [check] GOLD T == 24: OK
+  [check] GOLD A == 4 (two assistant spans: content + closing <|im_end|>): OK
+  [check] GOLD masked == T - A == 20: OK
+  [check] every assistant position sits inside an <|im_start|>assistant...<|im_end|>: OK
+
+==========================================================================
+  SECTION B: build labels by masking  (labels[role != ASSISTANT] = -100)
+==========================================================================
+The rule, in one line:  labels = ids.clone();  labels[role != ASSISTANT] = -100
+
+PyTorch's CrossEntropyLoss has ignore_index = -100 BY DEFAULT, so every -100
+position contributes ZERO loss -- only the assistant tokens train the model.
+
+| pos | id  | token        | role        | label       |
+|-----|-----|--------------|-------------|-------------|
+| 0   | 1   | <|im_start|> | special     | -100 (mask) |
+| 1   | 4   | user         | user        | -100 (mask) |
+| 2   | 6   | \n           | user        | -100 (mask) |
+| 3   | 7   | Hi           | user        | -100 (mask) |
+| 4   | 2   | <|im_end|>   | special     | -100 (mask) |
+| 5   | 6   | \n           | special     | -100 (mask) |
+| 6   | 1   | <|im_start|> | special     | -100 (mask) |
+| 7   | 5   | assistant    | asst-hdr    | -100 (mask) |
+| 8   | 6   | \n           | asst-hdr    | -100 (mask) |
+| 9   | 8   | Hi!          | ASSISTANT   | 8 (Hi!)     |
+| 10  | 2   | <|im_end|>   | ASSISTANT   | 2 (<|im_end|>) |
+| 11  | 6   | \n           | special     | -100 (mask) |
+| 12  | 1   | <|im_start|> | special     | -100 (mask) |
+| 13  | 4   | user         | user        | -100 (mask) |
+| 14  | 6   | \n           | user        | -100 (mask) |
+| 15  | 9   | Bye          | user        | -100 (mask) |
+| 16  | 2   | <|im_end|>   | special     | -100 (mask) |
+| 17  | 6   | \n           | special     | -100 (mask) |
+| 18  | 1   | <|im_start|> | special     | -100 (mask) |
+| 19  | 5   | assistant    | asst-hdr    | -100 (mask) |
+| 20  | 6   | \n           | asst-hdr    | -100 (mask) |
+| 21  | 10  | Bye!         | ASSISTANT   | 10 (Bye!)   |
+| 22  | 2   | <|im_end|>   | ASSISTANT   | 2 (<|im_end|>) |
+| 23  | 6   | \n           | special     | -100 (mask) |
+
+labels array = [-100, -100, -100, -100, -100, -100, -100, -100, -100, 8, 2, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, 10, 2, -100]
+non-masked (real id, assistant) = 4
+masked  (-100, everything else) = 20
+
+The two assistant spans carry loss; EVERYTHING else (system, user, the
+<|im_start|>assistant\n header, all separators) is -100. Note the closing
+<|im_end|> of EACH assistant turn IS kept (so the model learns to STOP);
+the <|im_end|> that closes a USER turn is masked (the model never emits it).
+  [check] non-masked label count == assistant span length == 4: OK
+  [check] masked label count == 20: OK
+  [check] every non-masked label is a real vocab id in [0, V): OK
+  [check] the <|im_start|>assistant\n header tokens are masked (they are context, not target): OK
+  [check] the kept assistant tokens include the closing <|im_end|> (id 2) twice: OK
+
+==========================================================================
+  SECTION C: cross-entropy with ignore_index=-100 -- loss only on assistant
+==========================================================================
+Seeded logits shape [T=24, V=16] (torch.Generator().manual_seed(0)).
+Causal shift: shift_logits = logits[:-1]  predicts  shift_labels = labels[1:].
+
+| shift-pos | predicts token | label        | per-pos loss | contributes? |
+|-----------|----------------|--------------|--------------|--------------|
+| 0         | user           | -100 (mask)  | 0.0000       | NO (ignored)
+| 1         | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 2         | Hi             | -100 (mask)  | 0.0000       | NO (ignored)
+| 3         | <|im_end|>     | -100 (mask)  | 0.0000       | NO (ignored)
+| 4         | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 5         | <|im_start|>   | -100 (mask)  | 0.0000       | NO (ignored)
+| 6         | assistant      | -100 (mask)  | 0.0000       | NO (ignored)
+| 7         | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 8         | Hi!            | 8 (Hi!)      | 2.8202       | YES -> loss  <-- target
+| 9         | <|im_end|>     | 2 (<|im_end|>) | 2.6800       | YES -> loss  <-- target
+| 10        | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 11        | <|im_start|>   | -100 (mask)  | 0.0000       | NO (ignored)
+| 12        | user           | -100 (mask)  | 0.0000       | NO (ignored)
+| 13        | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 14        | Bye            | -100 (mask)  | 0.0000       | NO (ignored)
+| 15        | <|im_end|>     | -100 (mask)  | 0.0000       | NO (ignored)
+| 16        | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 17        | <|im_start|>   | -100 (mask)  | 0.0000       | NO (ignored)
+| 18        | assistant      | -100 (mask)  | 0.0000       | NO (ignored)
+| 19        | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+| 20        | Bye!           | 10 (Bye!)    | 2.8963       | YES -> loss  <-- target
+| 21        | <|im_end|>     | 2 (<|im_end|>) | 3.2612       | YES -> loss  <-- target
+| 22        | \n             | -100 (mask)  | 0.0000       | NO (ignored)
+
+number of TARGET (non-masked) shift positions = 4
+loss = F.cross_entropy(..., ignore_index=-100) = 2.914430
+manual: mean of per-pos loss over the 4 target positions = 2.914430
+
+The 4 assistant targets (predicting the content + the closing <|im_end|> of
+each turn) carry all the loss; the other 19 shift positions are -100 -> loss 0.
+  [check] averaged loss is finite: OK
+  [check] loss averaged only over the 4 assistant target positions: OK
+  [check] F.cross_entropy(ignore_index=-100) == manual mean over non-masked: OK
+  [check] every masked position contributes exactly 0.0 to the loss: OK
+
+==========================================================================
+  SECTION D: naive SFT (loss on ALL tokens) vs completion-only (assistant only)
+==========================================================================
+Same seeded logits, two label arrays:
+
+| variant          | label rule                          | target positions | loss     |
+|------------------|-------------------------------------|------------------|----------|
+| naive (wrong)    | labels = input_ids (NO mask)        |               23 | 2.9207   |
+| completion-only  | labels[role!=assistant] = -100      |                4 | 2.9144   |
+
+Target positions (shift-index) that carry loss:
+  naive targets          = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]   (23 positions)
+  completion-only targets= [8, 9, 20, 21]   (4 positions)
+
+WHY naive is wrong: it backprops on predicting the USER and SYSTEM tokens too
+(every shift position is a target). At inference the model is ONLY ever asked
+to generate ASSISTANT tokens, so training it to emit 'Hi' / 'Bye' / the user's
+turns is wasted capacity AND shifts the target distribution. The fix is the
+one-line mask in Section B -- this is the single most important SFT rule.
+
+HuggingFace ships exactly these two modes:
+  SFTConfig(completion_only_loss=True)  -- prompt-completion datasets
+  SFTConfig(assistant_only_loss=True)   -- conversational / multi-turn
+  (legacy) DataCollatorForCompletionOnlyLM -- the older collator
+  [check] naive targets == T - 1 == 23 (every shift position): OK
+  [check] completion-only targets == 4 (assistant spans only): OK
+  [check] naive target set is a strict superset of completion-only target set: OK
+  [check] the two losses differ (they average over different position sets): OK
+
+==========================================================================
+  SECTION E: multi-turn spans, padding handling, and the lineage
+==========================================================================
+--- (1) the two assistant spans in the GOLD conversation ---
+
+assistant (loss) positions = [9, 10, 21, 22]
+= 2 contiguous assistant spans:
+  turn 1: positions [9, 10] -> tokens ['Hi!', '<|im_end|>']  (content + closing <|im_end|>)
+  turn 2: positions [21, 22] -> tokens ['Bye!', '<|im_end|>']  (content + closing <|im_end|>)
+A K-turn conversation (K assistant turns) has exactly K such spans; the mask
+in Section B finds them all via the role array. Multi-turn is free.
+
+  [check] 2-turn conversation has exactly 2 assistant spans: OK
+  [check] each span ends with the closing <|im_end|> (id 2): OK
+--- (2) padding: pad_id tokens are NOT auto-masked -- set them to -100 ---
+
+right-pad the 24-token convo to length 28 (+4 pad tokens, id=0).
+Pad tokens get ROLE_SPECIAL -> the build_labels() mask sets them to -100.
+  padded labels (tail) = [-100, -100, -100, -100]
+  pad positions all -100? True
+
+PITFALL: CrossEntropyLoss(ignore_index=-100) ignores the LABEL value -100,
+NOT the token id 0. If your collator leaves pad labels as id 0, the model is
+trained to predict the <pad> token -- a silent bug. Always set pad labels to -100.
+  [check] padded length == 28: OK
+  [check] all pad-token labels are -100 (padding masked): OK
+  [check] non-masked count unchanged after padding (still 4): OK
+
+--- (3) the lineage: base LM -> chat template -> naive SFT -> completion-only ---
+
+| stage          | what it does                                  | failure / win                              | where                         |
+|----------------|-----------------------------------------------|---------------------------------------------|-------------------------------|
+| base LM        | predict EVERY next token of plain text        | no notion of roles; fine for pretrain       | next-token CE on the raw stream |
+| chat template  | wrap turns: <|im_start|>role\n{msg}<|im_end|>\n | model can now see role boundaries           | ChatML (Qwen/SmolLM/OpenAI); Jinja in the tokenizer |
+| naive SFT      | tokenise template; labels = input_ids (NO mask) | trains the model to GENERATE user turns too | wrong target distribution; wasted capacity (the bug) |
+| completion-only | labels[role != assistant] = -100; CE(ignore_index=-100) | loss ONLY on assistant content + closing <|im_end|> | trl SFTConfig(assistant_only_loss=True); the SFT rule |
+
+  [check] lineage has exactly 4 stages: OK
+  [check] the completion-only stage is the SFT rule (mask + ignore_index=-100): OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

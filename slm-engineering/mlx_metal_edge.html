@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLX + the Metal Edge — Interactive Visualization</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --ink:#e6edf3; --muted:#8b949e;
+    --grid:#21262d; --accent:#1abc9c;   /* teal — the slm-engineering section identity */
+    --green:#27ae60; --red:#c0392b; --orange:#e67e22; --blue:#2980b9; --purple:#8e44ad;
+    --cpu:#2980b9; --gpu:#e67e22; --uma:#1abc9c;   /* device / memory colors */
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:system-ui,"Segoe UI",Roboto,sans-serif;padding:1.2rem 1.4rem 3rem}
+  a{color:#58a6ff}
+  h1{font-size:1.35rem;margin:.2rem 0 .1rem}
+  h2{font-size:1.02rem;color:var(--muted);margin:1.6rem 0 .6rem;font-weight:600;
+     border-bottom:1px solid var(--grid);padding-bottom:.3rem}
+  .sub{color:var(--muted);font-size:.82rem;margin-bottom:1rem}
+  .panel{background:var(--panel);border:1px solid #30363d;border-radius:10px;
+         padding:.9rem 1rem;margin:.8rem 0}
+  .controls{display:flex;flex-wrap:wrap;gap:1.4rem;align-items:center}
+  label{color:var(--muted);font-size:.82rem;display:flex;gap:.5rem;align-items:center}
+  input[type=range]{width:240px;accent-color:var(--accent);vertical-align:middle}
+  .val{color:var(--accent);font-weight:700;min-width:5ch;text-align:right;font-variant-numeric:tabular-nums}
+  .micro{color:var(--muted);font-size:.74rem}
+  .row{display:flex;gap:1.4rem;flex-wrap:wrap;align-items:flex-start}
+  .row>*{min-width:0}
+  table.heat{border-collapse:collapse;font-size:.8rem;font-variant-numeric:tabular-nums;margin-top:.5rem;width:100%}
+  table.heat td,table.heat th{border:1px solid #30363d;padding:4px 8px;text-align:center}
+  table.heat th{color:var(--muted);font-weight:600}
+  table.heat td.l{text-align:left}
+  table.heat tr.hl td{background:#0f2e29;color:var(--accent);font-weight:700}
+  table.heat td.fail{color:var(--red);font-weight:700}
+  table.heat td.ok{color:var(--green);font-weight:700}
+  .legend{display:flex;gap:1.1rem;flex-wrap:wrap;color:var(--muted);font-size:.78rem;margin-top:.5rem}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .badge{display:inline-block;border-radius:5px;padding:2px 9px;font-size:.72rem;
+         font-weight:600;margin-left:.6rem;text-decoration:none;border:1px solid}
+  .badge.md{background:#0f2e29;color:var(--accent);border-color:var(--accent)}
+  .badge.py{background:#3a2a14;color:var(--orange);border-color:var(--orange)}
+  .guide-callout{margin:10px 0 0;padding:10px 14px;border-radius:8px;
+    background:rgba(26,188,156,.06);border:1px solid rgba(26,188,156,.2);
+    font-size:.82rem;color:var(--muted);line-height:1.5}
+  .guide-callout a{color:var(--accent);font-weight:600;text-decoration:none}
+  .guide-callout a:hover{text-decoration:underline}
+  .readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:var(--ink);
+           background:#0a0e14;border:1px solid #30363d;border-radius:6px;padding:.6rem .8rem;margin-top:.5rem;
+           font-variant-numeric:tabular-nums;white-space:pre-wrap}
+  .readout b{color:var(--accent)}
+  button{background:#21262d;color:var(--ink);border:1px solid #30363d;border-radius:6px;
+         padding:5px 14px;cursor:pointer;font-size:.82rem;font-weight:600}
+  button.on{background:#0f2e29;color:var(--accent);border-color:var(--accent)}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  #memViz,#fuseBars{display:block;width:100%;max-width:980px}
+  #memViz{height:300px}
+  #fuseBars{height:220px}
+</style>
+</head>
+<body>
+  <a href="../index.html" style="display:inline-block;color:#8b949e;font-size:.8rem;text-decoration:none;border:1px solid #30363d;background:#161b22;border-radius:6px;padding:3px 11px;margin:0 0 .9rem">← all tutorials</a>
+
+  <h1>MLX + the Metal Edge — interactive
+    <a class="badge md" title="Full guide"
+       href="https://github.com/quanhua92/tutorials/blob/main/slm-engineering/MLX_METAL_EDGE.md">📖 MLX_METAL_EDGE.md</a>
+    <a class="badge py" title="Ground-truth source code"
+       href="https://github.com/quanhua92/tutorials/blob/main/slm-engineering/mlx_metal_edge.py">📄 mlx_metal_edge.py</a>
+  </h1>
+  <div class="guide-callout">📖 <a
+     href="https://github.com/quanhua92/tutorials/blob/main/slm-engineering/MLX_METAL_EDGE.md">Read the full guide</a>
+     — the discrete → UMA → MLX lineage, the lazy-fusion math, the memory-budget tables, killer gotchas, cheat sheet.
+     This page is the interactive companion.</div>
+
+  <div class="sub"><b>The shared-notebook idea:</b> a discrete GPU keeps its own VRAM notebook in another building — the CPU must
+     courier every weight across PCIe. Apple Silicon gives CPU + GPU the <b style="color:var(--accent)">same RAM notebook</b>
+     (zero copy), and MLX fuses a run of elementwise ops into one Metal kernel. Drag the footprint slider and toggle
+     eager vs fused. Every number is recomputed in JS from the <i>identical</i> formula in <code>mlx_metal_edge.py</code>.
+     &nbsp;|&nbsp; <a href="./mobile_runtime.html">compare with mobile runtime →</a></div>
+
+  <!-- ===== PANEL 1: UMA vs DISCRETE MEMORY ===== -->
+  <h2>① Unified vs discrete memory: drag the footprint → watch discrete FAIL, UMA copy 0</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> on a discrete card you must copy the whole footprint into VRAM
+      (cost ∝ bytes); it is only possible if footprint ≤ VRAM. Under UMA the GPU reads the weights from the one shared pool
+      directly — <b style="color:var(--accent)">0 bytes copied</b>, and there is no VRAM ceiling (just system RAM). The
+      default footprint = <b>8.0 GB</b> (4B params @ fp16) on <b>6 GB VRAM</b> / <b>16 GB unified</b> — the Section A gold.</div>
+    <div class="controls">
+      <label>footprint (GB)
+        <input type="range" id="foot" min="1" max="32" value="8" step="1">
+        <span class="val" id="footVal">8.0</span></label>
+      <span class="micro">VRAM = 6 GB (discrete) &nbsp;|&nbsp; unified RAM = 16 GB (Apple Silicon)</span>
+    </div>
+    <canvas id="memViz" width="980" height="300"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--cpu)"></i>system RAM / unified pool</span>
+      <span><i class="sw" style="background:var(--gpu)"></i>VRAM island (discrete)</span>
+      <span><i class="sw" style="background:var(--red)"></i>copy arrow (cudaMemcpy)</span>
+      <span><i class="sw" style="background:var(--accent)"></i>zero-copy (shared)</span>
+    </div>
+    <div class="readout" id="memOut"></div>
+  </div>
+
+  <!-- ===== PANEL 2: LAZY FUSION ===== -->
+  <h2>② Lazy fusion: toggle eager vs MLX-fused → kernel + allocation bars (3 → 1)</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> the toy lazy graph is
+      <code>x → MatMul(W) → Add(bias) → ReLU → out</code> (3 ops). Eager dispatches <b>3 kernels</b> and writes
+      <b>3</b> intermediate arrays to RAM. MLX fuses the bias-add + ReLU (elementwise) into the MatMul epilogue:
+      <b style="color:var(--accent)">1 kernel, 1 allocation</b> — the Section B gold the check badge asserts.</div>
+    <div class="controls">
+      <button id="btnEager">EAGER (1 kernel / op)</button>
+      <button id="btnFused" class="on">MLX FUSED</button>
+      <span class="micro">graph: MatMul → Add(bias) → ReLU &nbsp;(the three fuse)</span>
+    </div>
+    <canvas id="fuseBars" width="980" height="220"></canvas>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--red)"></i>kernel launches</span>
+      <span><i class="sw" style="background:var(--orange)"></i>intermediate allocations (RAM writes)</span>
+      <span><i class="sw" style="background:var(--accent)"></i>fused (intermediates in registers)</span>
+    </div>
+    <div class="readout" id="fuseOut"></div>
+  </div>
+
+  <!-- ===== PANEL 3: MEMORY BUDGET TABLE ===== -->
+  <h2>③ Memory budget: SLM sizes vs unified RAM (no VRAM) vs 24 GB discrete</h2>
+  <div class="panel">
+    <div class="micro" style="margin-bottom:.6rem"><b>How to read:</b> Q4 = 0.5625 B/param (group=32). Under UMA there is no VRAM
+      ceiling — a model fits any unified tier ≥ its footprint. Under discrete it must fit the 24 GB VRAM island to use the GPU.</div>
+    <div style="overflow-x:auto;min-width:0">
+      <table class="heat" id="budgetTable"></table>
+    </div>
+  </div>
+
+  <div class="sub" style="margin-top:1.6rem">
+    <b>Trust check —</b> the badge means the live JS recomputes the GOLD fusion count printed by
+    <code>mlx_metal_edge.py</code> Section B (the gold anchor):
+    <span class="badge" id="check">check: …</span>
+    <br><br>
+    Verified: footprint = params × bytes/param, discrete copy = footprint (FAIL if &gt; VRAM), UMA copy = 0,
+    the fusion group-counter (MatMul + elementwise run → 1 kernel), and the budget table footprints
+    (7B @ fp16 = 14 GB, 7B @ Q4 = 3.9375 GB).
+  </div>
+
+<script>
+"use strict";
+/* ===== ground-truth formulas, copied verbatim from mlx_metal_edge.py ===== */
+/* footprint (GB) = params_b * 1e9 * bpp / 1e9 == params_b * bpp */
+function footprintGb(paramsB, bpp){ return paramsB * bpp; }
+/* Q4 group-quant: group=32 -> (2B scale + 16B packed)/32 = 0.5625 B/param */
+var Q4_BPP = (2+16)/32;
+var FP16_BPP = 2.0;
+var VRAM_GB = 6.0;      /* discrete card (Section A default) */
+var UNIFIED_GB = 16.0;  /* Apple Silicon unified RAM (Section A default) */
+var DISCRETE_VRAM_24 = 24.0;  /* bigger card for the budget table */
+
+/* MLX fusion: count kernel groups for a linear op chain.
+   MATMUL/REDUCE start a new group; a trailing ELEMENTWISE run joins the
+   current group (folds into the matmul epilogue). identical to fuse_graph(). */
+var MATMUL="matmul", ELEMENTWISE="elementwise", REDUCE="reduce";
+function fuseKernels(chain){
+  var groups=0, prev=null;
+  for(var i=0;i<chain.length;i++){
+    var k=chain[i];
+    if(k===ELEMENTWISE){
+      if(prev===null||prev===REDUCE){ groups+=1; }
+      /* else joins the current group */
+    } else { groups+=1; }            /* MATMUL or REDUCE -> new kernel */
+    prev=k;
+  }
+  return groups;
+}
+/* the toy graph: MatMul -> Add(bias) -> ReLU */
+var TOY=[MATMUL, ELEMENTWISE, ELEMENTWISE];
+var TOY_EAGER=TOY.length;            /* 3 */
+var TOY_FUSED=fuseKernels(TOY);      /* 1 */
+
+/* ===== canvas helpers (DPR-safe, decoupled from backing store) ===== */
+function setup(cv){ var dpr=window.devicePixelRatio||1;
+  var w=cv.clientWidth||980, h=cv.clientHeight||300;
+  var bw=Math.round(w*dpr), bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){ cv.width=bw; cv.height=bh; }
+  var ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); return ctx;
+}
+
+/* ===== PANEL 1: memory viz ===== */
+var memCv=document.getElementById('memViz');
+function drawMem(foot){
+  var ctx=setup(memCv); var w=memCv.clientWidth,h=memCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  var discreteFits = foot<=VRAM_GB;
+  var umaFits = foot<=UNIFIED_GB;
+  var padT=28, padB=40, gap=40;
+  var colW=(w-gap*3)/2;            /* two columns */
+  var poolH=h-padT-padB;
+
+  /* helper: draw a labeled memory pool bar */
+  function poolBar(cx, cy, cap, used, color, label, capLabel){
+    var bw=colW-40;
+    ctx.strokeStyle="#30363d"; ctx.lineWidth=1;
+    ctx.strokeRect(cx, cy, bw, poolH);
+    /* capacity fill shade */
+    ctx.fillStyle="#0a0e14"; ctx.fillRect(cx, cy, bw, poolH);
+    /* used fill (bottom-up) */
+    var fillH=Math.min(poolH, (used/cap)*poolH);
+    ctx.fillStyle=color; ctx.globalAlpha=0.55;
+    ctx.fillRect(cx, cy+poolH-fillH, bw, fillH);
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=color; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(cx, cy+poolH-fillH); ctx.lineTo(cx+bw, cy+poolH-fillH); ctx.stroke();
+    /* labels */
+    ctx.fillStyle="#8b949e"; ctx.font="11px ui-monospace,monospace"; ctx.textAlign="center";
+    ctx.fillText(label, cx+bw/2, cy-12);
+    ctx.fillStyle="#e6edf3"; ctx.font="bold 11px ui-monospace,monospace";
+    ctx.fillText("used "+used.toFixed(2)+" / "+cap.toFixed(0)+" GB", cx+bw/2, cy+poolH+18);
+    ctx.fillStyle=color; ctx.font="10px ui-monospace,monospace";
+    ctx.fillText(capLabel, cx+bw/2, cy+poolH+32);
+  }
+
+  /* --- LEFT: DISCRETE (two pools + copy arrow) --- */
+  var lx=gap;
+  ctx.fillStyle="#8b949e"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText("DISCRETE (CUDA-style)", lx, padT-10);
+  /* system RAM (top half) holds the weights */
+  var halfH=(poolH-gap)/2;
+  poolBar(lx, padT, UNIFIED_GB, foot, "var(--cpu)", "system RAM (weights)", "source");
+  /* VRAM (bottom half) -- the destination */
+  var lx2=lx, vy=padT+halfH+gap;
+  ctx.strokeStyle="#30363d"; ctx.lineWidth=1;
+  var bw2=colW-40;
+  ctx.strokeRect(lx2, vy, bw2, halfH);
+  ctx.fillStyle="#0a0e14"; ctx.fillRect(lx2, vy, bw2, halfH);
+  /* VRAM fill = copy so far (foot if fits, else cap=VRAM -> overflow) */
+  var vfill = discreteFits ? foot : VRAM_GB;
+  var fH=Math.min(halfH, (vfill/VRAM_GB)*halfH);
+  ctx.fillStyle="var(--gpu)"; ctx.globalAlpha=0.55;
+  ctx.fillRect(lx2, vy+halfH-fH, bw2, fH);
+  ctx.globalAlpha=1;
+  ctx.strokeStyle="var(--gpu)"; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(lx2, vy+halfH-fH); ctx.lineTo(lx2+bw2, vy+halfH-fH); ctx.stroke();
+  ctx.fillStyle="#8b949e"; ctx.font="11px ui-monospace,monospace"; ctx.textAlign="center";
+  ctx.fillText("VRAM (island)", lx2+bw2/2, vy-12);
+  ctx.fillStyle="#e6edf3"; ctx.font="bold 11px ui-monospace,monospace";
+  ctx.fillText("copy "+vfill.toFixed(2)+" / "+VRAM_GB.toFixed(0)+" GB", lx2+bw2/2, vy+halfH+18);
+  /* copy arrow between the two pools */
+  ctx.strokeStyle= discreteFits ? "var(--red)" : "#5d2a2a";
+  ctx.lineWidth=3;
+  var ax=lx+bw2+6, ay=padT+halfH+gap/2;
+  ctx.beginPath(); ctx.moveTo(ax, ay-14); ctx.lineTo(ax+30, ay+14);
+  ctx.stroke();
+  ctx.fillStyle= discreteFits ? "var(--red)" : "#5d2a2a";
+  ctx.font="bold 10px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText("memcpy", ax+4, ay);
+  /* verdict */
+  ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillStyle= discreteFits ? "var(--green)" : "var(--red)";
+  ctx.fillText(discreteFits ? "OK — fits VRAM" : "FAIL — "+foot.toFixed(1)+" > "+VRAM_GB.toFixed(0)+" GB VRAM",
+               lx, h-14);
+
+  /* --- RIGHT: UMA (one shared pool, zero copy) --- */
+  var rx=gap*2+colW;
+  ctx.fillStyle="#8b949e"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText("APPLE SILICON UMA", rx, padT-10);
+  poolBar(rx, padT, UNIFIED_GB, foot, "var(--uma)", "ONE shared pool", "no VRAM ceiling");
+  /* CPU + GPU both point into the SAME pool */
+  ctx.fillStyle="var(--cpu)"; ctx.font="bold 10px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText("CPU view", rx+6, padT+14);
+  ctx.fillStyle="var(--gpu)";
+  ctx.fillText("GPU view", rx+6, padT+28);
+  ctx.strokeStyle="var(--accent)"; ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(rx+50, padT+10); ctx.lineTo(rx+bw2-90, padT+10);   /* CPU pointer */
+  ctx.moveTo(rx+50, padT+24); ctx.lineTo(rx+bw2-90, padT+24);   /* GPU pointer */
+  ctx.stroke();
+  ctx.fillStyle="var(--accent)"; ctx.font="bold 10px ui-monospace,monospace";
+  ctx.fillText("same bytes", rx+bw2-84, padT+20);
+  /* verdict */
+  ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillStyle= umaFits ? "var(--green)" : "var(--red)";
+  ctx.fillText(umaFits ? "OK — 0 GB copied (zero copy)" : "no — "+foot.toFixed(1)+" > "+UNIFIED_GB.toFixed(0)+" GB RAM",
+               rx, h-14);
+}
+function renderMemOut(foot){
+  var discreteFits = foot<=VRAM_GB;
+  var umaFits = foot<=UNIFIED_GB;
+  var el=document.getElementById('memOut');
+  el.innerHTML=
+    "footprint = "+foot.toFixed(2)+" GB\n"+
+    "  DISCRETE : copy "+foot.toFixed(2)+" GB to VRAM -> "+(discreteFits?"<b>OK</b> (fits 6 GB VRAM)":"<b style='color:var(--red)'>FAIL</b> ("+foot.toFixed(1)+" > 6 GB VRAM, copy impossible)")+"\n"+
+    "  UMA      : <b>0.00 GB copied</b> (zero copy) -> "+(umaFits?"<b>OK</b> (fits 16 GB unified)":"<b style='color:var(--red)'>no</b> ("+foot.toFixed(1)+" > 16 GB)")+
+    (Math.abs(foot-8)<1e-9 ? "\n  <-- the Section A gold: 8 GB on 6 GB VRAM = discrete FAIL, UMA OK":"");
+}
+
+/* ===== PANEL 2: fusion bars ===== */
+var fuseCv=document.getElementById('fuseBars');
+var mode="fused";   /* "eager" | "fused" */
+function drawFuse(){
+  var ctx=setup(fuseCv); var w=fuseCv.clientWidth,h=fuseCv.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  var kernels = mode==="eager" ? TOY_EAGER : TOY_FUSED;
+  var allocs  = mode==="eager" ? TOY_EAGER : 1;
+  var padL=120, padR=40, padT=20, padB=44;
+  var pw=w-padL-padR, ph=h-padT-padB;
+  var hi=3.5;   /* max kernels/allocs scale */
+  var Xf=function(v){return padL+(v/hi)*pw;};
+  /* gridlines */
+  ctx.strokeStyle="#21262d"; ctx.fillStyle="#8b949e"; ctx.font="10px ui-monospace,monospace"; ctx.textAlign="center";
+  for(var g=0; g<=3; g++){
+    var gx=Xf(g);
+    ctx.beginPath(); ctx.moveTo(gx,padT); ctx.lineTo(gx,padT+ph); ctx.stroke();
+    ctx.fillText(g, gx, padT+ph+14);
+  }
+  /* kernel bar */
+  var barH=Math.min(46, ph/2-12);
+  var y0=padT+(ph/2-barH)/2;
+  var kw=Math.max(2, Xf(kernels)-padL);
+  ctx.fillStyle = mode==="fused" ? "var(--accent)" : "var(--red)";
+  ctx.fillRect(padL, y0, kw, barH);
+  ctx.fillStyle="#e6edf3"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="right";
+  ctx.fillText("Metal kernels", padL-10, y0+barH/2+4);
+  ctx.fillStyle=mode==="fused"?"var(--accent)":"var(--red)"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText(kernels+"  "+(mode==="fused"?"(MatMul+Add+ReLU fused)":"(1 per op)"), padL+kw+8, y0+barH/2+4);
+  /* allocation bar */
+  var y1=padT+ph/2+(ph/2-barH)/2;
+  var aw=Math.max(2, Xf(allocs)-padL);
+  ctx.fillStyle = mode==="fused" ? "var(--accent)" : "var(--orange)";
+  ctx.fillRect(padL, y1, aw, barH);
+  ctx.fillStyle="#e6edf3"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="right";
+  ctx.fillText("allocations", padL-10, y1+barH/2+4);
+  ctx.fillStyle=mode==="fused"?"var(--accent)":"var(--orange)"; ctx.font="bold 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText(allocs+"  "+(mode==="fused"?"(only final output -> RAM)":"(each op writes RAM)"), padL+aw+8, y1+barH/2+4);
+  /* title */
+  ctx.fillStyle="#8b949e"; ctx.font="10px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillText(mode==="fused"?"MLX FUSED: 1 kernel, intermediates in registers":"EAGER: 3 kernels, 3 RAM writes", padL, padT-6);
+}
+function renderFuseOut(){
+  var k = mode==="eager" ? TOY_EAGER : TOY_FUSED;
+  var a = mode==="eager" ? TOY_EAGER : 1;
+  var el=document.getElementById('fuseOut');
+  el.innerHTML=
+    "graph: x -> MatMul(W) -> Add(bias) -> ReLU -> out   (3 ops)\n"+
+    "  mode    = "+(mode==="eager"?"EAGER":"MLX FUSED")+"\n"+
+    "  kernels = <b>"+k+"</b>"+(mode==="fused"?"   (Add+ReLU fold into the MatMul epilogue)":"   (one per op)")+"\n"+
+    "  allocs  = <b>"+a+"</b>"+(mode==="fused"?"   (only the final output lands in RAM)":"   (each op writes its output to RAM)");
+}
+
+/* ===== PANEL 3: budget table ===== */
+var SIZES=[1,3,7];
+var FORMATS=[["fp16",FP16_BPP],["Q4",Q4_BPP]];
+var TIERS=[8,16,32,64];
+function renderBudget(){
+  var t=document.getElementById('budgetTable');
+  var h="<tr><th>params</th><th>format</th><th>footprint</th>"+
+        TIERS.map(function(gb){return "<th>fits "+gb+"GB unified</th>";}).join("")+
+        "<th>fits 24GB VRAM (discrete)</th></tr>";
+  SIZES.forEach(function(p){
+    FORMATS.forEach(function(f){
+      var fp=footprintGb(p,f[1]);
+      var cells=TIERS.map(function(gb){ return fp<=gb ? "<td class='ok'>OK</td>" : "<td class='fail'>no</td>"; });
+      var disc = fp<=DISCRETE_VRAM_24 ? "<td class='ok'>OK</td>" : "<td class='fail'>no</td>";
+      h+="<tr><td>"+p+"B</td><td>"+f[0]+"</td><td>"+fp.toFixed(3)+" GB</td>"+
+         cells.join("")+disc+"</tr>";
+    });
+  });
+  t.innerHTML=h;
+}
+
+/* ===== master render ===== */
+function render(){
+  var foot=+document.getElementById('foot').value;
+  document.getElementById('footVal').textContent=foot.toFixed(1);
+  drawMem(foot); renderMemOut(foot);
+  drawFuse(); renderFuseOut();
+}
+
+/* ===== events ===== */
+document.getElementById('foot').addEventListener('input',render);
+document.getElementById('btnEager').addEventListener('click',function(){
+  mode="eager"; this.classList.add('on'); document.getElementById('btnFused').classList.remove('on'); render();
+});
+document.getElementById('btnFused').addEventListener('click',function(){
+  mode="fused"; this.classList.add('on'); document.getElementById('btnEager').classList.remove('on'); render();
+});
+window.addEventListener('resize',render);
+
+/* ===== gold-value check vs mlx_metal_edge.py Section B =====
+   .py:  graph MatMul->Add(bias)->ReLU  ->  eager = 3 kernels, MLX fused = 1 kernel
+   JS recomputes the IDENTICAL fusion group-counter for the same chain and asserts == 1.  */
+var PY_GOLD_FUSED = 1;                       /* mlx_metal_edge.py Section B */
+var jsFused = fuseKernels(TOY);              /* identical algorithm, same chain */
+var goldOk = (jsFused===PY_GOLD_FUSED) && (TOY_EAGER===3) && (jsFused<TOY_EAGER);
+var ck=document.getElementById('check');
+ck.textContent = goldOk ? "check: OK — JS fused-kernel-count = 1 matches mlx_metal_edge.py Section B"
+                        : "check: FAIL — mismatch! (JS got "+jsFused+")";
+ck.style.borderColor = goldOk ? "var(--accent)" : "var(--red)";
+ck.style.color       = goldOk ? "var(--accent)" : "var(--red)";
+ck.style.background  = goldOk ? "#0f2e29" : "#3a1414";
+
+renderBudget();
+render();
+</script>
+</body>
+</html>

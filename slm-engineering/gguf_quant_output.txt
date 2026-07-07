@@ -1,0 +1,218 @@
+gguf_quant.py - reference impl (GGUF block quantization: Q4_0, Q8_0, Q4_K).
+Pure Python + torch. Numbers below feed GGUF_QUANT.md.  torch = 2.12.1
+
+Concept: block-wise quantize weight matrices into 4-bit/8-bit blocks +
+a per-block fp16 scale, so a 7B SLM drops from 14 GB (fp16) to ~3.9 GB
+(Q4) and fits edge RAM. Q4_K adds two-level super-block scaling for
+lower error at the same size.
+
+
+========================================================================
+  SECTION A: Q4_0 -- block int4, symmetric, 32 weights/block
+========================================================================
+Block struct (verified: ggml/src/ggml-common.h block_q4_0):
+  QK4_0 = 32 weights per block
+  bytes = sizeof(ggml_half) + QK4_0/2 = 2 + 16 = 18 bytes
+  bytes/param = 18/32 = 0.5625   (4.5 bpw)
+
+Dequant formula (symmetric, centered on 0):
+  w_hat = d * (q - 8)   where d = fp16 scale, q = nibble in 0..15
+  scale d = max(|block|) / 7   (signed 4-bit range is -8..+7, so the
+  positive peak +amax maps to q=15 and the negative peak to q=1 exactly)
+
+Seeded 32-element weight block (torch.manual_seed(0), randn*0.5):
+  block = [-0.5629, -0.5762, -0.1253, -0.2169, +0.4244, +0.3460, -0.1580, -1.0576, +0.1611, -0.6317, +0.1750, +0.1541, +0.0599, +0.6188, +0.5584, -0.1236, -0.6763, -0.8480, +0.2833, +0.3968, +0.2994, -0.7775, -0.1707, +0.9265, +0.3751, -0.2927, -0.0867, +0.0917, +0.6947, +0.7932, +0.4731, -0.4218]
+
+Quantize ->  scale d = 0.151123   (fp16)
+            nibbles q (0..15) = [4, 4, 7, 7, 11, 10, 7, 1, 9, 4, 9, 9, 8, 12, 12, 7, 4, 2, 10, 11, 10, 3, 7, 14, 10, 6, 7, 9, 13, 13, 11, 5]
+Dequant  ->  w_hat = d*(q-8)
+
+| i  | original w  | q  | w_hat = d*(q-8) | abs error   |
+|----|-------------|----|------------------|-------------|
+|  0 |   -0.562920 |  4 |        -0.604492 | +0.041572 |
+|  1 |   -0.576180 |  4 |        -0.604492 | +0.028312 |
+|  2 |   -0.125289 |  7 |        -0.151123 | +0.025834 |
+|  3 |   -0.216939 |  7 |        -0.151123 | +0.065816 |
+|  4 |   +0.424355 | 11 |         0.453369 | +0.029014 |
+|  5 |   +0.346005 | 10 |         0.302246 | +0.043759 |
+|  6 |   -0.158006 |  7 |        -0.151123 | +0.006883 |
+|  7 |   -1.057610 |  1 |        -1.057861 | +0.000252 |
+|  8 |   +0.161137 |  9 |         0.151123 | +0.010014 |
+|  9 |   -0.631667 |  4 |        -0.604492 | +0.027175 |
+| 10 |   +0.174992 |  9 |         0.151123 | +0.023869 |
+| 11 |   +0.154067 |  9 |         0.151123 | +0.002944 |
+| 12 |   +0.059921 |  8 |         0.000000 | +0.059921 |
+| 13 |   +0.618829 | 12 |         0.604492 | +0.014337 |
+| 14 |   +0.558389 | 12 |         0.604492 | +0.046104 |
+| 15 |   -0.123639 |  7 |        -0.151123 | +0.027484 |
+| 16 |   -0.676327 |  4 |        -0.604492 | +0.071835 |
+| 17 |   -0.847966 |  2 |        -0.906738 | +0.058773 |
+| 18 |   +0.283325 | 10 |         0.302246 | +0.018921 |
+| 19 |   +0.396754 | 11 |         0.453369 | +0.056615 |
+| 20 |   +0.299420 | 10 |         0.302246 | +0.002826 |
+| 21 |   -0.777548 |  3 |        -0.755615 | +0.021932 |
+| 22 |   -0.170680 |  7 |        -0.151123 | +0.019557 |
+| 23 |   +0.926503 | 14 |         0.906738 | +0.019765 |
+| 24 |   +0.375095 | 10 |         0.302246 | +0.072849 |
+| 25 |   -0.292749 |  6 |        -0.302246 | +0.009498 |
+| 26 |   -0.086699 |  7 |        -0.151123 | +0.064425 |
+| 27 |   +0.091739 |  9 |         0.151123 | +0.059384 |
+| 28 |   +0.694683 | 13 |         0.755615 | +0.060932 |
+| 29 |   +0.793167 | 13 |         0.755615 | +0.037552 |
+| 30 |   +0.473149 | 11 |         0.453369 | +0.019780 |
+| 31 |   -0.421838 |  5 |        -0.453369 | +0.031531 |
+
+GOLD ANCHOR (gguf_quant.html recomputes this):
+  bytes/param Q4_0 = (16+2)/32 = 18/32 = 0.5625
+  block MSE (Q4_0)  = 0.0016077952   <-- the pinned gold value
+  max abs error     = 0.072849
+[check] all Q4_0 nibbles in [0,15]: OK
+[check] Q4_0 round-trip MSE is non-negative: OK
+[check] Q4_0 bytes/param == 0.5625: OK
+
+========================================================================
+  SECTION B: Q8_0 -- 8-bit reference, near-lossless (same block)
+========================================================================
+Block struct (verified: block_q8_0):
+  QK8_0 = 32 weights per block
+  bytes = sizeof(ggml_half) + QK8_0 = 2 + 32 = 34 bytes
+  bytes/param = 34/32 = 1.0625   (8.5 bpw)
+
+Dequant formula (symmetric int8):
+  w_hat = d * q,  q in -128..127.  scale d = max(|block|) / 127.
+  256 levels -> quantization step ~ scale/256, tiny. Q8_0 is the
+  REFERENCE: it is what 'full local quality' means, and the error of
+  every other type is measured against a Q8_0 baseline.
+
+Same seeded block. Quantize -> scale d = 0.00833130
+                       int8 q (first 16) = [-68, -69, -15, -26, 51, 42, -19, -127, 19, -76, 21, 18, 7, 74, 67, -15]
+                       int8 q (last  16) = [-81, -102, 34, 48, 36, -93, -20, 111, 45, -35, -10, 11, 83, 95, 57, -51]
+Dequant  -> max abs error = 0.00410357
+
+| quant type | bytes/param | block MSE      | vs Q4_0       |
+|------------|-------------|----------------|---------------|
+| Q4_0       | 0.5625      | 0.0016077952   | (baseline)    |
+| Q8_0       | 1.0625      | 0.0000046450   | 346.1x better |
+
+Reading: Q8_0's MSE is ~300x smaller than Q4_0's on the same block,
+because 256 levels (int8) resolve the block ~64x finer than 16 levels
+(int4). The cost is 2x the bytes (1.06 vs 0.56 bytes/param). Q8_0 is
+the quality ceiling; Q4 trades quality for the 4x size win that fits
+edge RAM.
+[check] all Q8_0 ints in [-128,127]: OK
+[check] Q8_0 MSE < Q4_0 MSE (8-bit beats 4-bit): OK
+[check] Q8_0 bytes/param == 1.0625: OK
+
+========================================================================
+  SECTION C: Q4_K super-block -- two-level scaling vs Q4_0
+========================================================================
+Super-block struct (verified: block_q4_K, QK_K = 256):
+  bytes = 2*sizeof(ggml_half) + K_SCALE_SIZE + QK_K/2
+        = 4 + 12 + 128 = 144 bytes per 256 weights
+  bytes/param = 144/256 = 0.5625   (4.5 bpw, same SIZE as Q4_0)
+
+Two-level scaling (the K-quant innovation):
+  super-block = 8 sub-blocks of 32 weights
+  each sub-block has its OWN 6-bit scale (step) + 6-bit min  -> ASYMMETRIC
+  the 8x6-bit sub-scales + 8x6-bit sub-mins are packed into 12 bytes,
+  then re-scaled by ONE fp16 super-block d (scales) + dmin (mins)
+  => DOUBLE quantization: the scales OF the scales are quantized too.
+  dequant:  w = (dmin*min6) + (d*scale6) * q   per sub-block
+
+Why it beats Q4_0 at the SAME size: Q4_0 is SYMMETRIC (centered on 0),
+so a block that is not zero-centered (real weights often aren't -- post-
+activation, biased rows) WASTES half its 16 levels. Q4_K's per-sub MIN
+lands all 16 levels inside each sub-block's actual range -> finer quant.
+
+Seeded 256-element super-block (manual_seed(7)), biased per sub-block:
+  offsets per sub-block = [0.0, 0.3, -0.2, 0.5, 0.1, -0.4, 0.25, -0.1]
+  sub-block ranges (min, max):
+  | sub | min      | max      | step=(max-min)/15 |
+  |-----|----------|----------|-------------------|
+  |  0  |  -0.4123 |  +0.3853 | 0.053171          |
+  |  1  |  -0.2932 |  +0.7597 | 0.070194          |
+  |  2  |  -0.6516 |  +0.1504 | 0.053461          |
+  |  3  |  +0.2571 |  +0.8825 | 0.041694          |
+  |  4  |  -0.3268 |  +0.5175 | 0.056285          |
+  |  5  |  -0.8302 |  -0.0933 | 0.049125          |
+  |  6  |  -0.3541 |  +0.5462 | 0.060021          |
+  |  7  |  -0.3574 |  +0.3017 | 0.043942          |
+
+Result on the SAME 256-weight super-block:
+| quant type | bytes/param | super-block MSE | vs Q4_0        |
+|------------|-------------|-----------------|----------------|
+| Q4_0       | 0.5625      | 0.0006310241    | (baseline)     |
+| Q4_K       | 0.5625      | 0.0002334389    | 2.70x lower MSE  |
+
+  super-block d    = 0.001114  (fp16 scale for the 6-bit sub-steps)
+  super-block dmin = 0.013176  (fp16 scale for the 6-bit sub-mins)
+  6-bit sub-steps (step6, 0..63) = [48, 63, 48, 37, 51, 44, 54, 39]
+  fp16 sub-mins                   = [-0.41235, -0.29321, -0.65137, 0.25708, -0.3269, -0.83008, -0.354, -0.35742]
+
+GOLD: Q4_K MSE < Q4_0 MSE on the biased super-block? True  (2.70x lower).
+The per-sub-block MIN is the whole story: it lets every sub-block spend
+all 16 levels inside its actual range, where Q4_0 (symmetric, no min)
+wastes the levels on the wrong side of zero. Same bytes, lower error.
+[check] Q4_K super-block bytes = 144: OK
+[check] Q4_K pure bytes/param == 0.5625 (same SIZE as Q4_0): OK
+[check] Q4_K MSE < Q4_0 MSE on biased super-block: OK
+[check] all 6-bit sub-steps in [1,63]: OK
+
+========================================================================
+  SECTION D: size + error ladder for a 7B model (fp16 -> Q4_K_M)
+========================================================================
+For N = 7,000,000,000 params (a 7B model), the bytes/param x N = total size:
+
+| type     | bytes/param | bpw   | total size | vs fp16  | family          |
+|----------|-------------|-------|------------|----------|-----------------|
+| fp16     |     2.00000 | 16.00 |   14.00 GB |  1.00x smaller | baseline        |
+| Q8_0     |     1.06250 |  8.50 |    7.44 GB |  1.88x smaller | legacy int8     |
+| Q4_0     |     0.56250 |  4.50 |    3.94 GB |  3.56x smaller | legacy int4     |
+| Q4_K     |     0.56250 |  4.50 |    3.94 GB |  3.56x smaller | k-quant pure    |
+| Q4_K_M   |     0.60500 |  4.84 |    4.24 GB |  3.31x smaller | k-quant MIXED (_M) |
+
+Reading the ladder left-to-right:
+  - fp16 -> Q8_0: ~2x smaller, MSE drops ~346x (near-lossless).
+  - Q8_0 -> Q4_0: another ~2x smaller (now ~4x vs fp16), MSE rises ~346x.
+  - Q4_0 -> Q4_K: SAME size (0.5625 bytes/param), LOWER MSE (asymmetric).
+  - Q4_K -> Q4_K_M: slightly larger (0.605), BEST quality at ~4-bit (mixed).
+
+The headline: a 14.0 GB fp16 7B model drops to ~3.94 GB at Q4_0 / Q4_K,
+or ~4.23 GB at Q4_K_M -- both fit a 6 GB phone/Pi RAM budget. That 3.3x
+to 3.6x shrink IS the reason an SLM runs on edge hardware at all.
+
+GOLD PINS (gguf_quant.html recomputes these):
+    fp16    bytes/param = 2.00000  ->  14.00 GB
+    Q8_0    bytes/param = 1.06250  ->  7.44 GB
+    Q4_0    bytes/param = 0.56250  ->  3.94 GB
+    Q4_K    bytes/param = 0.56250  ->  3.94 GB
+    Q4_K_M  bytes/param = 0.60500  ->  4.24 GB
+[check] Q4_0 bytes/param == 0.5625: OK
+[check] Q8_0 bytes/param == 1.0625: OK
+[check] Q4_K pure bytes/param == 0.5625: OK
+[check] Q4_K_M bytes/param == 0.605 (4.84 bpw, documented mixed average): OK
+[check] Q4_0 is ~3.56x smaller than fp16 (64/18): OK
+[check] Q4_K_M total < 6 GB (fits a phone RAM budget) for 7B: OK
+
+========================================================================
+  SECTION E: lineage recap -- the quant ladder (old -> new, with WHY)
+========================================================================
+| quant type      | bytes/param | why it exists                          |
+|-----------------|-------------|----------------------------------------|
+| fp16             |     2.00000 | perfect quality, fits nothing small (7B=14GB) |
+| per-tensor int8  |     1.00000 | ONE global scale; a single outlier wrecks all |
+| Q4_0             |     0.56250 | BLOCK int4, 32/block, symmetric; outlier contained |
+| Q8_0             |     1.06250 | same block, 8-bit; near-lossless REFERENCE |
+| Q4_K             |     0.56250 | 256 super-block, per-sub 6-bit scale+min |
+| Q4_K_M           |     0.60500 | MIXED Q6_K+Q4_K; the default, best quality/size |
+
+Each step: either SHRINK bytes/param (fp16->int8->Q4_0) or KEEP the size
+and CUT error (Q4_0->Q4_K) or trade a little size for a lot of quality
+(Q4_K->Q4_K_M). The end state -- Q4_K_M at ~0.605 bytes/param with near-
+Q6 quality -- is what ships in most GGUF downloads today.
+[check] bytes/param is monotonically non-increasing down the real ladder (fp16 -> Q4_0 == Q4_K): OK
+[check] Q4_K_M (0.605) is slightly larger than Q4_K (0.5625) -- the MIX tax: OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

@@ -1,0 +1,151 @@
+mlx_metal_edge.py - reference impl (faithful single-process UMA + MLX
+simulation). Numbers below feed MLX_METAL_EDGE.md.  torch = 2.12.1
+
+NOTE: no mlx / Metal / torch.distributed is used. The unified pool
+is a Python bytearray; the lazy graph is a DAG of MLXArray nodes; the
+fusion pass counts kernel groups. The memory-bytes and kernel-count
+arithmetic is REAL and EXACT; only the hardware transport is simulated.
+
+Every claim is web-verified in >=2 sources; see mlx_metal_edge_reference.txt.
+
+==========================================================================
+  SECTION A: UMA vs discrete memory -- the 8GB model on 6GB VRAM
+==========================================================================
+Discrete card VRAM = 6.0 GB   |   Apple Silicon unified RAM = 16.0 GB
+
+| model                | footprint | discrete copy | fits VRAM? | UMA copy | fits unified? |
+|----------------------|-----------|---------------|-----------|----------|---------------|
+| 4B params @ fp16     |    8.00 GB |        8.00 GB | FAIL      |   0.00 GB | OK            |
+
+Reading the row like a story:
+  * DISCRETE: to run the 8.0 GB model on the GPU you must copy all
+    8.0 GB across PCIe into VRAM. But VRAM is only 6 GB,
+    so 8.0 > 6 -> the copy is IMPOSSIBLE -> FAIL. The model
+    cannot run on the GPU at all on this card.
+  * UMA: the CPU and GPU share the 16 GB pool, so the GPU
+    reads the weights directly -> 0.0 GB copied, and 8.0 <= 16
+    -> OK. No copy, no VRAM ceiling.
+  [check] 4B @ fp16 footprint == 8.0 GB: OK
+  [check] discrete copy bytes == footprint (8.0 GB): OK
+  [check] discrete FAILS (8.0 GB > 6 GB VRAM): OK
+  [check] UMA copies 0.0 GB (zero copy): OK
+  [check] UMA fits unified RAM (8.0 <= 16.0 GB): OK
+
+==========================================================================
+  SECTION B: lazy eval + Metal fusion -- the 3-op graph (GOLD ANCHOR)
+==========================================================================
+Toy lazy graph (built, NOTHING computed yet):
+  x -> MatMul(W) -> Add(bias) -> ReLU -> out
+    MXArray#2(matmul,LAZY)                      (lazy = True)
+    MXArray#3(add(bias),LAZY)                   (lazy = True)
+    MXArray#4(relu,LAZY)                        (lazy = True)
+
+| mode             | Metal kernels | intermediate allocations |
+|------------------|---------------|--------------------------|
+| EAGER (1 per op) |             3 |                        3 |
+| MLX fused        |             1 |                        1 |
+
+GOLD PINS (mlx_metal_edge.html recomputes these identically):
+  eager kernel launches  = 3
+  MLX fused kernel count = 1
+  fusion saves 2 kernel launch(es) and 2 intermediate allocation(s).
+
+Why the three fuse: Add(bias) and ReLU are ELEMENTWISE, so MLX folds
+them into the MatMul's epilogue -- the matmul output never lands in
+RAM; it stays in GPU registers, gets the bias added, gets ReLU'd, and
+ONLY the final result is written. One kernel, one allocation.
+  [check] graph has 3 ops (MatMul + Add + ReLU): OK
+  [check] every node is lazy before eval: OK
+  [check] eager kernel launches == 3: OK
+  [check] MLX fused kernel count == 1 (the three fuse): OK
+  [check] eager allocations == 3, fused allocations == 1: OK
+  [check] fusion strictly reduces kernel count (3 -> 1): OK
+
+==========================================================================
+  SECTION B (numerics): fused == eager on a tiny tensor (D=4)
+==========================================================================
+x    = [1.0, 2.0, -1.0, 0.5]
+W    = diag(2) (4x4)
+bias = [0.5, -0.5, 1.0, 0.0]
+
+| mode | h = x@W | b = h+bias | out = ReLU(b) |
+|------|---------|------------|---------------|
+| eager  | [2.0, 4.0, -2.0, 1.0] | [2.5, 3.5, -1.0, 1.0] | [2.5, 3.5, 0.0, 1.0] |
+| fused  |  (in registers, never materialised)  -> [2.5, 3.5, 0.0, 1.0] |
+
+  max|eager_out - fused_out| = 0.00e+00
+  ==> fusion changes the dispatch + memory traffic, NOT the math.
+  [check] fused output == eager output (numerically identical): OK
+  [check] all ReLU negatives clamped to 0: OK
+
+==========================================================================
+  SECTION C: zero-copy CPU<->GPU sharing -- one pool, two views
+==========================================================================
+One UnifiedPool of 32 bytes. Two views into it:
+  cpu_view = UnifiedView(pool=<shared>, offset=0, len=32)
+  gpu_view = UnifiedView(pool=<shared>, offset=0, len=32)
+  cpu_view.pool IS gpu_view.pool (same object)? True
+
+CPU writes [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] (32 bytes) into the shared pool at offset 0.
+GPU reads from the SAME pool at offset 0 -> [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+bytes copied CPU->GPU for the read = 0  (zero copy: same pool)
+
+Contrast -- discrete (CUDA-style) would memcpy 32 bytes CPU->VRAM;
+UMA copies 0 because both views index the one bytearray. We assert
+STRUCTURAL identity (same pool object, same offset) -- never a raw
+pointer address (ASLR would make that nondeterministic across runs).
+  [check] cpu_view and gpu_view share the SAME pool object: OK
+  [check] cpu_view.offset == gpu_view.offset (same offset): OK
+  [check] GPU read == CPU write (no divergence): OK
+  [check] zero bytes copied (read directly from shared pool): OK
+
+==========================================================================
+  SECTION D: memory budget -- SLM sizes vs unified RAM vs discrete VRAM
+==========================================================================
+Q4 bytes/param = (2B scale + 16B packed) / 32 = 0.5625 (group-quant, group=32)
+Unified tiers (no VRAM ceiling): [8, 16, 32, 64] GB   |   Discrete VRAM ceiling: 24 GB
+
+| params | format | footprint | fits 8GB unified | 16GB | 32GB | 64GB | fits 24GB VRAM (discrete) |
+|--------|--------|-----------|------------------|------|------|------|---------------------------|
+| 1B     | fp16   |   2.000 GB | OK               | OK   | OK   | OK   | OK                       |
+| 1B     | Q4     |   0.562 GB | OK               | OK   | OK   | OK   | OK                       |
+| 3B     | fp16   |   6.000 GB | OK               | OK   | OK   | OK   | OK                       |
+| 3B     | Q4     |   1.688 GB | OK               | OK   | OK   | OK   | OK                       |
+| 7B     | fp16   |  14.000 GB | no               | OK   | OK   | OK   | OK                       |
+| 7B     | Q4     |   3.938 GB | OK               | OK   | OK   | OK   | OK                       |
+
+Reading the table:
+  * On UNIFIED memory there is NO VRAM ceiling -- a model fits any tier
+    >= its footprint. The 7B @ fp16 (14 GB) fits 16/32/64 GB Macs but
+    NOT an 8GB one; the same 7B @ Q4 (3.9 GB) fits even an 8GB Mac.
+  * On DISCRETE, the model must fit the 24GB VRAM to run on the GPU at
+    all -- all six rows fit here, but a bigger model or a smaller card
+    (e.g. 8GB weights on 6GB VRAM, Section A) simply FAILS.
+  * The asymmetry: unified RAM is the FULL system RAM (often 16-128 GB
+    on Macs); discrete VRAM is a small dedicated island. UMA lets an
+    SLM use all of it with zero copy.
+  [check] Q4 bytes/param == 0.5625 (18/32): OK
+  [check] 7B @ fp16 == 14.0 GB: OK
+  [check] 7B @ Q4 == 3.9375 GB: OK
+  [check] 1B @ fp16 fits 8GB unified but is tight on a small VRAM card: OK
+  [check] 3B @ Q4 (1.69 GB) fits 8GB where 3B @ fp16 (6 GB) is tighter: OK
+
+==========================================================================
+  SECTION E: lineage recap -- discrete -> UMA -> MLX (why each step)
+==========================================================================
+| stage                | what changes               | payoff            |
+|----------------------|----------------------------|-------------------|
+| Discrete GPU (CUDA)  | separate VRAM; cudaMemcpy across PCIe | copy = M; FAIL if M > VRAM |
+| Apple Silicon UMA    | CPU + GPU share ONE RAM pool | zero copy; no VRAM ceiling |
+| MLX (lazy + Metal)   | ops queue into a DAG; fuse on eval | fewer kernels; alloc once |
+
+Each step removes one bottleneck: the copy (UMA), then the per-op
+dispatch + intermediate traffic (lazy fusion). Decode is bandwidth-
+bound, so deleting copy + intermediate traffic directly buys tok/s.
+  [check] the three stages are distinct in their payoff: OK
+  [check] UMA payoff mentions zero copy: OK
+  [check] MLX payoff mentions fewer kernels (fusion): OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================

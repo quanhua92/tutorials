@@ -1,0 +1,164 @@
+micro_pretrain_eval.py - reference impl. All numbers below feed MICRO_PRETRAIN_EVAL.md.
+torch = 2.12.1
+
+Every formula is web-verified in >=2 sources; see micro_pretrain_eval_reference.txt.
+
+==========================================================================
+  SECTION A: the held-out slice losses across checkpoints
+==========================================================================
+Four capability slices (each ~200 held-out examples, never trained on).
+L_s[i] = mean cross-entropy of checkpoint i on slice s (lower = better).
+
+| ckpt | step  |         code |  commonsense |      factual |       reason |    benchmark |
+|------|-------|--------------|--------------|--------------|--------------|--------------|
+| 0    | 2000  |       1.4300 |       2.2500 |       2.1000 |       2.0500 |       0.2200 |
+| 1    | 4000  |       1.2800 |       2.3000 |       2.0500 |       1.9000 |       0.2550 |
+| 2    | 6000  |       1.1000 |       2.2000 |       2.0200 |       1.7200 |       0.2920 |
+| 3    | 8000  |       0.9000 |       2.2800 |       1.9500 |       1.5200 |       0.3480 |
+| 4    | 10000 |       0.7800 |       2.1500 |       1.8000 |       1.3600 |       0.3860 |
+| 5    | 12000 |       0.7200 |       2.2200 |       1.6000 |       1.2600 |       0.4040 |
+| 6    | 14000 |       0.7000 |       2.1000 |       1.4200 |       1.2000 |       0.4100 |
+| 7    | 16000 |       0.6900 |       2.1800 |       1.3000 |       1.1700 |       0.4140 |
+
+Read across a row: every slice loss FALLS (net) as training advances
+(more steps -> lower cross-entropy). Read down a column: the benchmark
+RISES (0.220 -> 0.414). So slice-loss and benchmark are ANTI-correlated
+-- the question is HOW tightly, per slice. That is Section B. Note the
+'commonsense' slice is NON-MONOTONE (e.g. 2.250 -> 2.300 at ckpt 1, then
+2.150 -> 2.220 at ckpt 5): realistic loss spikes / capability-forgetting
+blips -- and exactly why it turns out (Section B) to be a misleading,
+low-correlation proxy.
+
+  [check] slice 'code' net-decreases over the run (series[0] > series[-1]): OK
+  [check] slice 'commonsense' net-decreases over the run (series[0] > series[-1]): OK
+  [check] slice 'factual' net-decreases over the run (series[0] > series[-1]): OK
+  [check] slice 'reason' net-decreases over the run (series[0] > series[-1]): OK
+  [check] benchmark score strictly increases across ckpts: OK
+  [check] commonsense is the ONLY non-monotone slice (the misleading case): OK
+
+==========================================================================
+  SECTION B: Pearson r between each slice and the benchmark
+==========================================================================
+For each slice s, r = cov(L_s, B) / (sigma_Ls * sigma_B).
+|r| near 1 => the slice is a FAITHFUL cheap proxy for the benchmark.
+
+| slice        | Pearson r |  |r|  | faithful? (|r| >= 0.85) | verdict                |
+|--------------|-----------|------|----------------------|------------------------|
+| code         |   -0.9976 | 0.9976 | YES                  | faithful proxy         |
+| commonsense  |   -0.6570 | 0.6570 | no                   | weak / misleading slice |
+| factual      |   -0.8764 | 0.8764 | YES                  | faithful proxy         |
+| reason       |   -0.9975 | 0.9975 | YES                  | faithful proxy         |
+
+Best single slice: 'code' with r = -0.9976  (|r| = 0.9976).
+All four r values are NEGATIVE because slice loss falls while the
+benchmark rises. The MAGNITUDE |r| is what matters for prediction.
+
+GOLD PIN (micro_pretrain_eval.html recomputes this):
+  r(code, benchmark) = -0.997612
+  [check] best slice |r| >= 0.85 (a faithful proxy exists): OK
+  [check] the code slice is the best single proxy: OK
+  [check] commonsense is a weak proxy (|r| < 0.85, the misleading case): OK
+  [check] all |r| in [0,1] (Pearson range): OK
+
+==========================================================================
+  SECTION C: linear fit on the best slice 'code'  B_hat = a*L_code + b
+==========================================================================
+Fit on the early checkpoints (indices 0..4, steps 2000..10000):
+  a (slope)     = Sxy/Sxx = -0.252461
+  b (intercept) = mean(B) - a*mean(L) = +0.577402
+  => B_hat(L_code) = -0.252461 * L_code +0.577402
+
+Now PREDICT the held-out late checkpoints (indices 5..7) from slice-loss alone, and compare to the TRUE score:
+| ckpt | step  | L_code (obs) | true B | predicted B_hat | abs error |
+|------|-------|--------------|--------|-----------------|-----------|
+| 5    | 12000 |       0.7200 | 0.4040 |          0.3956 |    0.0084 |
+| 6    | 14000 |       0.7000 | 0.4100 |          0.4007 |    0.0093 |
+| 7    | 16000 |       0.6900 | 0.4140 |          0.4032 |    0.0108 |
+
+Held-out prediction max abs error = 0.0108  (on a 0..1 accuracy scale).
+A sub-percent error means: after fitting on 5 early ckpts, the code
+slice's LOSS alone predicts the late-ckpt benchmark to within a hair.
+That is the micro-pretrain-eval payoff: stop running the full bench.
+
+GOLD PIN (micro_pretrain_eval.html recomputes the r, not the slope):
+  a (slope of B_hat = a*L_code + b) = -0.252461
+  r(code, benchmark)                = -0.997612
+  [check] linear-fit slope a is negative (loss down -> benchmark up): OK
+  [check] held-out prediction max abs error < 0.02 (faithful proxy): OK
+  [check] fit reproduces early-ckpt scores within 0.01: OK
+
+==========================================================================
+  SECTION D: multi-slice linear model + the minimal micro-bench
+==========================================================================
+Full 4-slice linear model  B_hat = w_code*L_code + w_reason*L_reason
+                              + w_factual*L_factual + w_common*L_common + c
+solved by normal equations (X^T X) w = X^T y (hand Gaussian elim):
+
+| slice        |  weight w_s   |
+|--------------|---------------|
+| code         |     +0.677889 |
+| commonsense  |     +0.059562 |
+| factual      |     +0.189734 |
+| reason       |     -0.969674 |
+| intercept c  |     +0.704101 |
+
+Combined Pearson r(predicted, actual) over all 8 ckpts = +0.999558
+
+Now search ALL non-empty slice-subsets for the MINIMAL one whose
+combined predictor reaches r >= 0.9 (the 'micro-bench'):
+
+| subset                        | size | combined r | >= 0.9? |
+|-------------------------------|------|------------|---------|
+| code                          |    1 |    +0.9976 |     YES |
+| commonsense                   |    1 |    +0.6570 |      no |
+| factual                       |    1 |    +0.8764 |      no |
+| reason                        |    1 |    +0.9975 |     YES |
+| code,commonsense              |    2 |    +0.9977 |     YES |
+| code,factual                  |    2 |    +0.9989 |     YES |
+| code,reason                   |    2 |    +0.9990 |     YES |
+| commonsense,factual           |    2 |    +0.8803 |      no |
+| commonsense,reason            |    2 |    +0.9978 |     YES |
+| factual,reason                |    2 |    +0.9992 |     YES |
+| code,commonsense,factual      |    3 |    +0.9989 |     YES |
+| code,commonsense,reason       |    3 |    +0.9991 |     YES |
+| code,factual,reason           |    3 |    +0.9992 |     YES |
+| commonsense,factual,reason    |    3 |    +0.9992 |     YES |
+| code,commonsense,factual,reason |    4 |    +0.9996 |     YES |
+
+MICRO-BENCH (smallest subset with r >= 0.9): { code }  (size 1, r = +0.9976)
+=> Run those slices' loss every checkpoint (seconds), predict MMLU
+   from the fitted line, and skip the full benchmark. Re-fit the line
+   only every few checkpoints against the real benchmark to guard drift.
+
+  [check] full 4-slice model combined r >= 0.9: OK
+  [check] full 4-slice model combined |r| >= best single slice |r|: OK
+  [check] a micro-bench subset with r >= 0.9 exists: OK
+  [check] micro-bench is no larger than the full 4-slice set: OK
+  [check] full multi-slice fit residual < 0.01 (least squares is exact for 5 unknowns, 8 pts): OK
+
+==========================================================================
+  SECTION E: the decision recap -- which eval, when
+==========================================================================
+| strategy            | how                 | what it buys you        | use when                  |
+|---------------------|---------------------|-------------------------|---------------------------|
+| Full bench / ckpt   | all 8 benchmarks x every ckpt | ground truth, weeks of GPU | Pythia-style final analysis only |
+| Held-out val loss   | one aggregate cross-entropy | free (one forward pass), weak tie to capability | cheap overfitting watch (GPT-3 style) |
+| Slice correlation   | per-capability loss + Pearson r | shows WHICH capability is moving | diagnostic mid-train      |
+| MICRO-BENCH         | {code} slice(s) + fitted line | seconds/ckpt, predicts benchmark to <2% | daily training loop       |
+
+The single question that picks the row:
+  IS THIS THE FINAL CHECKPOINT?         -> full bench (the truth).
+  DO YOU JUST NEED AN OVERFITTING WATCH? -> held-out val loss.
+  DO YOU NEED PER-CAPABILITY SIGNAL?     -> slice correlation.
+  IS THIS A DAILY MID-TRAIN CHECK?       -> MICRO-BENCH (code).
+
+  [check] the four strategies are distinct in how the eval is done: OK
+
+==========================================================================
+  DONE - all sections printed, all [check]s passed
+==========================================================================
+
+GOLD ANCHORS (micro_pretrain_eval.html recomputes & asserts):
+  r(code, benchmark) = -0.997612
+  a (fit slope)      = -0.252461
+  micro-bench        = { code }  r = +0.997612

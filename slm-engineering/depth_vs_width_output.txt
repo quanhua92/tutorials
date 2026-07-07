@@ -1,0 +1,132 @@
+depth_vs_width.py - reference impl. All numbers below feed DEPTH_VS_WIDTH.md.
+torch = 2.12.1
+
+========================================================================
+  SECTION A: the 12*H^2 law -- depth vs width for a fixed budget
+========================================================================
+Non-embedding budget N = 125,000,000 params. Per-layer cost = 12*H^2.
+
+| H (width) | per-layer 12*H^2 | layers L = N/(12*H^2) | profile       |
+|-----------|------------------|----------------------|---------------|
+|       512 |        3,145,728 |              39.7364 | deep-narrow  (more reasoning per param) |
+|       768 |        7,077,888 |              17.6606 | balanced      |
+|      1024 |       12,582,912 |               9.9341 | shallow-wide (more parallelism, fewer sequential steps) |
+
+  GOLD PINS (depth_vs_width.html recomputes these, N=125,000,000):
+    H=512  -> L = 39.7364   (deep-narrow)
+    H=1024 -> L = 9.9341  (shallow-wide)
+    ratio L(512)/L(1024) = 4.0000  (= (1024/512)^2 = 4x: halving H quadruples depth at fixed N)
+  [check] H=512 depth L ~= 39.74 (deep-narrow gold): OK
+  [check] H=1024 depth L ~= 9.93 (shallow-wide gold): OK
+  [check] halving H quadruples L at fixed N (L512/L1024 == 4.0): OK
+
+========================================================================
+  SECTION B: decode traffic -- UNIQUE params read per token (memory-bandwidth bound)
+========================================================================
+Decoding ONE autoregressive token streams EVERY unique weight from
+DRAM once -> latency floor ~= (unique params) / (memory bandwidth).
+Effective DEPTH does NOT change the weight-read term: the same block,
+applied K times, is read K times but UNIQUE weights are counted once
+per block. What depth DOES add: KV-cache memory (one K,V per layer)
+and a little attention compute (re-scored over more layers).
+
+H = 512, per-layer 12*H^2 = 3,145,728 params.
+
+| config                 | unique layers | unique params | effective depth | weight-read/token | KV-cache (rel) |
+|------------------------|---------------|---------------|-----------------|-------------------|----------------|
+| deep-narrow (no share) |            40 |   125,829,120 |              40 |       125,829,120 |             40 |
+| layer-shared K=2       |            20 |    62,914,560 |              40 |        62,914,560 |             40 |
+| layer-shared K=4       |            10 |    31,457,280 |              40 |        31,457,280 |             40 |
+| layer-shared K=8       |             5 |    15,728,640 |              40 |        15,728,640 |             40 |
+
+  deep-narrow (no share): effective depth 40 (== 40? True), weight-read 125.83M  ->  1.0x less decode traffic than no-share.
+  layer-shared K=2      : effective depth 40 (== 40? True), weight-read  62.91M  ->  2.0x less decode traffic than no-share.
+  layer-shared K=4      : effective depth 40 (== 40? True), weight-read  31.46M  ->  4.0x less decode traffic than no-share.
+  layer-shared K=8      : effective depth 40 (== 40? True), weight-read  15.73M  ->  8.0x less decode traffic than no-share.
+
+  ==> All four keep effective depth 40 (quality), but UNIQUE params
+      drop with the share factor K -- so decode latency drops with K
+      too. That is the edge win: depth-quality at shallow latency.
+  [check] all 4 configs share effective depth 40: OK
+  [check] K=8 config reads 8x fewer unique weights than no-share: OK
+
+========================================================================
+  SECTION C: layer sharing -- ONE block applied K times recurrently (H=8)
+========================================================================
+One Block(H=8). Total weight params (incl. LayerNorm): 800. Leading-order 12*H^2 = 768.
+
+(The difference is the 4*H LayerNorm gamma/beta; negligible at real H.)
+
+Input x0 shape (1, 4, 8) = [B=1, L=4, H=8], seeded (deterministic).
+
+SHARED block: the SAME Block is applied K times (weights reused):
+
+| share K | step norms (||x_k||)            | unique params | vs K separate |
+|---------|--------------------------------|---------------|---------------|
+|       1 | [3.3574]                       |           800 | 100.0%  (1x fewer) |
+|       2 | [4.4197, 6.0012]               |           800 |  50.0%  (2x fewer) |
+|       3 | [7.9226, 9.9699, 12.0442]      |           800 |  33.3%  (3x fewer) |
+|       4 | [14.1150, 16.1673, 18.1963, 20.2035] |           800 |  25.0%  (4x fewer) |
+
+SEPARATE blocks: K DISTINCT Blocks stacked (K*params, no reuse):
+
+  [check] K=1: shared uses 1/1 the params of 1 separate blocks: OK
+  [check] K=2: shared uses 1/2 the params of 2 separate blocks: OK
+  [check] K=3: shared uses 1/3 the params of 3 separate blocks: OK
+  [check] K=4: shared uses 1/4 the params of 4 separate blocks: OK
+
+  [check] recurrent reuse: parameter tensor ids unchanged across K steps: OK
+  [check] unique param count is independent of share factor K: OK
+
+  ==> MobileLLM block-wise weight sharing: ONE block, applied K times.
+      Unique params stay at 12*H^2 regardless of K; effective depth = K.
+      K separate blocks would cost K*12*H^2 -- the sharing saves a factor K.
+
+========================================================================
+  SECTION D: contrast -- deep-narrow vs shallow-wide vs layer-shared (~125M, depth 40)
+========================================================================
+Three architectures, all ~125M non-embedding params, effective depth 40:
+
+| architecture       | H   | unique L | K | unique params | effective depth | weight-read/token |
+|--------------------|-----|----------|---|---------------|-----------------|-------------------|
+| deep-narrow        | 512 |       40 | 1 |   125,829,120 |              40 |       125,829,120 |
+| shallow-wide       | 1024 |       10 | 1 |   125,829,120 |              10 |       125,829,120 |
+| layer-shared (LS)  | 512 |       10 | 4 |    31,457,280 |              40 |        31,457,280 |
+
+  deep-narrow : 125.8M unique, depth 40  (the Telgarsky-favoured profile)
+  shallow-wide: 125.8M unique, depth 10   (same N, 4x fewer layers, 4x the width)
+  layer-shared: 31.5M unique, depth 40  (depth of deep-narrow, latency of a 10-layer net)
+
+  ==> deep-narrow and shallow-wide spend ~the SAME unique params but
+      deep-narrow gets 4x the effective depth (better quality per Telgarsky).
+      layer-shared MATCHES the deep-narrow depth for 1/4 the decode traffic
+      -- the edge-optimal point MobileLLM targets.
+  [check] deep-narrow and shallow-wide have ~equal unique params (~125M): OK
+  [check] layer-shared matches deep-narrow effective depth (40): OK
+  [check] layer-shared reads 4x fewer weights than deep-narrow (K=4): OK
+  [check] shallow-wide effective depth == 1/4 of deep-narrow: OK
+
+========================================================================
+  SECTION E: the embedding tax V*H -- subtracted before counting layers
+========================================================================
+Embeddings are NOT layers: V*H params sit in the token table and steal
+capacity from the stack. Layer count L = (N_total - V*H) / (12*H^2).
+
+| V (vocab) | H   | embed tax V*H | layers L @ 125M (post-tax) | tax % of 125M |
+|-----------|-----|---------------|----------------------------|---------------|
+|     49152 | 512 |    25,165,824 |                    31.7364 |         20.1% |
+|     49152 | 1024 |    50,331,648 |                     5.9341 |         40.3% |
+|    128000 | 512 |    65,536,000 |                    18.9031 |         52.4% |
+|    128000 | 1024 |   131,072,000 |                    -0.4826 |        104.9% |
+
+  Read the table: at H=1024 a 128k vocab eats 1.07x the ENTIRE 125M
+  budget as embeddings -- L goes negative (no layers left!). This is
+  WHY MobileLLM reuses input embeddings as the output head (embedding
+  sharing) and picks a modest V. See 🔗 SHARED_EMBEDDINGS.md and
+  🔗 VOCAB_RATIONALIZATION.md for the full embedding-budget story.
+  [check] post-tax depth < pre-tax depth at any V>0 (the tax steals layers): OK
+  [check] H=1024, V=128k: embedding tax exceeds 100% of 125M: OK
+
+========================================================================
+  DONE - all sections printed, all [check]s passed
+========================================================================

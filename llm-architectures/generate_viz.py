@@ -60,6 +60,21 @@ def _first_nonzero(*keys, tc, raw):
     return 0
 
 
+def fetch_param_count(model_id: str) -> int:
+    """Get exact param count from HuggingFace API safetensors metadata."""
+    try:
+        url = f"https://huggingface.co/api/models/{model_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "generate_viz/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        total = data.get("safetensors", {}).get("total")
+        if total and isinstance(total, int) and total > 0:
+            return total
+    except:
+        pass
+    return 0
+
+
 def fetch_config(model_id: str, subfolder: str = "") -> dict:
     sf = f"/{subfolder}" if subfolder else ""
     url = f"https://huggingface.co/{model_id}/resolve/main{sf}/config.json"
@@ -178,11 +193,7 @@ def parse_config(raw: dict, model_id: str) -> dict:
     first_k_dense = (_first_nonzero("first_k_dense_replace", "moe_layer_num_skipped",
                                     tc=tc, raw=raw) or 0)
 
-    # --- Layers ---
-    num_layers = (_first_nonzero("num_hidden_layers", "num_layers", "n_layers",
-                                 tc=tc, raw=raw) or 1)
-
-    # --- Hybrid layer detection ---
+    # --- Parse hybrid structure first (needed for num_layers) ---
     layer_types_list = tc.get("layer_types", raw.get("layer_types", []))
     block_configs = tc.get("block_configs", raw.get("block_configs", []))
     hybrid_patterns = tc.get("hybrid_override_pattern", raw.get("hybrid_override_pattern"))
@@ -192,6 +203,40 @@ def parse_config(raw: dict, model_id: str) -> dict:
     has_mamba = (bool(block_configs) and any(
         isinstance(b, dict) and b.get("block_type") == "mamba" for b in block_configs
     )) or (hybrid_patterns is not None)
+
+    # --- Layers ---
+    num_layers = (_first_nonzero("num_hidden_layers", "num_layers", "n_layers",
+                                 tc=tc, raw=raw) or 0)
+    # If num_hidden_layers is missing but block_configs exists, count blocks
+    if not num_layers and isinstance(block_configs, list) and block_configs:
+        num_layers = len(block_configs)
+    # If still no layers but hybrid_override_pattern exists, count pattern chars
+    if not num_layers and hybrid_patterns:
+        num_layers = len(hybrid_patterns)
+
+    # --- Parse block_configs / hybrid_pattern for per-block counts ---
+    block_moe_total_inter = 0
+    block_moe_count = 0
+    block_attn_count = 0
+    block_mamba_count = 0
+    if isinstance(block_configs, list) and block_configs:
+        for b in block_configs:
+            if not isinstance(b, dict): continue
+            bt = b.get("block_type", "")
+            if bt == "moe":
+                block_moe_count += 1
+                mi = b.get("moe_intermediate_size", 0)
+                if mi: block_moe_total_inter += mi
+            elif bt == "attention":
+                block_attn_count += 1
+            elif bt == "mamba":
+                block_mamba_count += 1
+    elif hybrid_patterns:
+        # Parse pattern string: M=mamba, E=moe, A/*=attention, S=SSM
+        for ch in hybrid_patterns:
+            if ch in ("M", "m"): block_mamba_count += 1
+            elif ch in ("E", "e"): block_moe_count += 1
+            elif ch in ("A", "a", "*", "S", "s"): block_attn_count += 1
 
     # --- Sliding window ---
     sw = tc.get("sliding_window", raw.get("sliding_window"))
@@ -281,6 +326,10 @@ def parse_config(raw: dict, model_id: str) -> dict:
         "layer_types_summary": layer_types_summary,
         "has_deltanet": has_deltanet,
         "has_mamba": has_mamba,
+        "block_moe_count": block_moe_count,
+        "block_attn_count": block_attn_count,
+        "block_mamba_count": block_mamba_count,
+        "block_moe_total_inter": block_moe_total_inter,
         "q_proj_out": nh * hd,
         "kv_proj_out": nkv * hd,
         "dtype_bytes": dt_bytes,
@@ -327,7 +376,27 @@ def compute_params(cfg: dict) -> int:
         # Standard: fc1(H->inter) + fc2(inter->H)
         dense_mlp = 2 * inter * H
 
-    if cfg.get("is_moe") and cfg.get("moe_intermediate_size", 0) > 0:
+    if cfg.get("block_moe_count", 0) > 0:
+        # Hybrid block_configs / hybrid_override_pattern model (Nemotron-H)
+        n_attn = cfg.get("block_attn_count", 0)
+        n_moe = cfg.get("block_moe_count", 0)
+        n_mamba = cfg.get("block_mamba_count", 0)
+        n_experts = cfg.get("num_experts", 0)
+        moe_inter = cfg.get("moe_intermediate_size", 0) or (cfg.get("block_moe_total_inter", 0) / n_moe if n_moe else 0)
+        # Mamba block: in_proj + conv + SSM + out_proj ≈ 4*H*H
+        mamba_params = 4 * H * H + norm
+        # MoE block: router + experts (no attention in MoE-only blocks)
+        if is_gated:
+            moe_block = n_experts * 3 * moe_inter * H + H * n_experts + norm
+        else:
+            moe_block = n_experts * 2 * moe_inter * H + H * n_experts + norm
+        # Attention block: standard attention + dense MLP
+        attn_block = attn + dense_mlp + norm
+        total = (embed +
+                 n_attn * attn_block +
+                 n_moe * moe_block +
+                 n_mamba * mamba_params + H)
+    elif cfg.get("is_moe") and cfg.get("moe_intermediate_size", 0) > 0:
         moe_inter = cfg["moe_intermediate_size"]
         n_experts = cfg["num_experts"]
         n_shared = cfg.get("n_shared_experts", 0)
@@ -437,7 +506,9 @@ def main():
 
     raw = fetch_config(args.model_id, args.subfolder)
     cfg = parse_config(raw, args.model_id)
-    total = compute_params(cfg)
+    # Try exact param count from HF API first, fall back to computation
+    exact = fetch_param_count(args.model_id)
+    total = exact if exact else compute_params(cfg)
 
     out_dir = Path(__file__).resolve().parent
     out_dir.mkdir(exist_ok=True)

@@ -186,7 +186,9 @@ def parse_config(raw: dict, model_id: str) -> dict:
     layer_types_list = tc.get("layer_types", raw.get("layer_types", []))
     block_configs = tc.get("block_configs", raw.get("block_configs", []))
     hybrid_patterns = tc.get("hybrid_override_pattern", raw.get("hybrid_override_pattern"))
-    has_deltanet = bool(layer_types_list) and any("deltanet" in str(l).lower() for l in layer_types_list)
+    has_deltanet = bool(layer_types_list) and any(
+        "deltanet" in str(l).lower() or "linear" in str(l).lower()
+        for l in layer_types_list)
     has_mamba = (bool(block_configs) and any(
         isinstance(b, dict) and b.get("block_type") == "mamba" for b in block_configs
     )) or (hybrid_patterns is not None)
@@ -354,7 +356,10 @@ def fmt_params(n: int) -> str:
 
 def generate_specs(cfg, total_params):
     """Generate specs panel <li> items."""
-    if cfg.get("is_mqa"):
+    # Attention label — MLA takes priority over GQA/MQA/MHA
+    if cfg.get("has_mla"):
+        attn_label = f"MLA (latent, {cfg['num_heads']} Q)"
+    elif cfg.get("is_mqa"):
         attn_label = f"MQA ({cfg['num_heads']} Q, 1 KV)"
     elif cfg["is_gqa"]:
         attn_label = f"GQA ({cfg['num_heads']} Q, {cfg['num_kv_heads']} KV)"
@@ -367,7 +372,7 @@ def generate_specs(cfg, total_params):
         ("Total Params", f"{total_params:,} ({fmt_params(total_params)})", False),
         ("Hidden Size", str(cfg["hidden_size"]), False),
         ("Layers", str(cfg["num_layers"]), False),
-        ("Attention", attn_label, False),
+        ("Attention", attn_label, True),
         ("Head Dimension", str(cfg["head_dim"]), True),
         ("FFN Intermediate", str(cfg["intermediate_size"]), True),
         ("Vocab Size", f"{cfg['vocab_size']:,}", True),
@@ -382,15 +387,18 @@ def generate_specs(cfg, total_params):
         ("Dtype", cfg["dtype"], False),
         ("KV Cache/Token", f"{cfg['bytes_per_token']:,} B ({cfg['bytes_per_token']//1024} KiB)", False),
     ]
-    # Architecture-specific
-    if cfg.get("has_mla"):
-        items.append(("Attention", "MLA (latent)", False))
+    # Architecture-specific (highlighted = True for important features)
     if cfg.get("layer_types_summary"):
         items.append(("Layer Types", cfg["layer_types_summary"], False))
     if cfg.get("has_deltanet"):
-        items.append(("DeltaNet Layers", "Yes (hybrid)", False))
+        items.append(("DeltaNet", "Yes (hybrid layers)", True))
     if cfg.get("has_mamba"):
-        items.append(("Mamba Layers", "Yes (hybrid)", False))
+        items.append(("Mamba/SSM", "Yes (hybrid layers)", True))
+    if cfg.get("has_mla"):
+        items.append(("MLA Latent", f"q_lora={cfg.get('q_lora_rank',0)}, kv_lora={cfg.get('kv_lora_rank',0)}", True))
+        rope_dim = cfg.get('qk_rope_head_dim', 0)
+        if rope_dim:
+            items.append(("Partial RoPE", f"{rope_dim}/{cfg['head_dim']} dims", False))
     if cfg.get("num_kv_shared_layers", 0) > 0:
         items.append(("Shared KV Layers", str(cfg["num_kv_shared_layers"]), False))
     if cfg.get("ple_dim", 0) > 0:

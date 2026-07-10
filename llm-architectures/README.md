@@ -14,32 +14,32 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 
 | Model | Type | Params | Hidden | Layers | Q/KV | hd | Attn | QK-Norm | MLP | MoE | RoPE theta | Vocab | Tie |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [glm-4-9b-chat](./THUDM_glm-4-9b-chat_viz.html) | `chatglm` | 10,737,750,016 (10.7B) | 4096 | 40 | 32/32 | 128 | MHA | - | SwiGLU | - | 10,000 | 0 | - |
-| [DeepSeek-V4-Flash-DSpark](./deepseek-ai_DeepSeek-V4-Flash-DSpark_viz.html) | `deepseek_v4` | 290,890,018,816 (290.9B) | 4096 | 43 | 64/1 | 512 | MQA | - | SwiGLU | 256 exp | 10,000 | 129,280 | - |
-| [DeepSeek-V4-Flash](./deepseek-ai_DeepSeek-V4-Flash_viz.html) | `deepseek_v4` | 290,890,018,816 (290.9B) | 4096 | 43 | 64/1 | 512 | MQA | - | SwiGLU | 256 exp | 10,000 | 129,280 | - |
-| [DeepSeek-V4-Pro-DSpark](./deepseek-ai_DeepSeek-V4-Pro-DSpark_viz.html) | `deepseek_v4` | 1,611,038,815,232 (1611.0B) | 7168 | 61 | 128/1 | 512 | MQA | - | SwiGLU | 384 exp | 10,000 | 129,280 | - |
-| [DeepSeek-V4-Pro](./deepseek-ai_DeepSeek-V4-Pro_viz.html) | `deepseek_v4` | 1,611,038,815,232 (1611.0B) | 7168 | 61 | 128/1 | 512 | MQA | - | SwiGLU | 384 exp | 10,000 | 129,280 | - |
+| [glm-4-9b-chat](./THUDM_glm-4-9b-chat_viz.html) | `chatglm` | 9,399,767,040 (9.4B) | 4096 | 40 | 32/2 | 128 | GQA 16:1 | - | SwiGLU | - | 10,000 | 151,552 | - |
+| [DeepSeek-V4-Flash-DSpark](./deepseek-ai_DeepSeek-V4-Flash-DSpark_viz.html) | `deepseek_v4` | 286,764,396,544 (286.8B) | 4096 | 43 | 64/1 | 512 | MQA | - | SwiGLU | 256 exp | 10,000 | 129,280 | - |
+| [DeepSeek-V4-Flash](./deepseek-ai_DeepSeek-V4-Flash_viz.html) | `deepseek_v4` | 286,764,396,544 (286.8B) | 4096 | 43 | 64/1 | 512 | MQA | - | SwiGLU | 256 exp | 10,000 | 129,280 | - |
+| [DeepSeek-V4-Pro-DSpark](./deepseek-ai_DeepSeek-V4-Pro-DSpark_viz.html) | `deepseek_v4` | 1,589,467,247,616 (1589.5B) | 7168 | 61 | 128/1 | 512 | MQA | - | SwiGLU | 384 exp | 10,000 | 129,280 | - |
+| [DeepSeek-V4-Pro](./deepseek-ai_DeepSeek-V4-Pro_viz.html) | `deepseek_v4` | 1,589,467,247,616 (1589.5B) | 7168 | 61 | 128/1 | 512 | MQA | - | SwiGLU | 384 exp | 10,000 | 129,280 | - |
 | [diffusiongemma-26B-A4B-it](./google_diffusiongemma-26B-A4B-it_viz.html) | `diffusion_gemma` | 24,614,444,800 (24.6B) | 2816 | 30 | 16/8 | 256 | GQA 2:1 | - | GeGLU | 128 exp | 1,000,000 | 262,144 | Y |
-| [gemma-4-E2B-it](./google_gemma-4-E2B-it_viz.html) | `gemma4` | 1,641,410,560 (1.6B) | 1536 | 35 | 8/1 | 256 | MQA | Y | GeGLU | - | 1,000,000 | 262,144 | Y |
+| [gemma-4-E2B-it](./google_gemma-4-E2B-it_viz.html) | `gemma4` | 1,971,712,000 (2.0B) | 1536 | 35 | 8/1 | 256 | MQA | Y | GeGLU | - | 1,000,000 | 262,144 | Y |
 | [gemma-4-E4B-it](./google_gemma-4-E4B-it_viz.html) | `gemma4` | 4,524,844,544 (4.5B) | 2560 | 42 | 8/2 | 256 | GQA 4:1 | Y | GeGLU | - | 1,000,000 | 262,144 | Y |
-| [GigaChat3.5-432B-A28B](./ai-sage_GigaChat3.5-432B-A28B_viz.html) | `gigachat3_5` | 430,027,365,376 (430.0B) | 7168 | 40 | 64/64 | 112 | MHA | - | SwiGLU | 256 exp | 100,000 | 128,256 | - |
-| [GLM-5.2](./zai-org_GLM-5.2_viz.html) | `glm_moe_dsa` | 753,745,704,960 (753.7B) | 6144 | 78 | 64/64 | 192 | MHA | - | SwiGLU | 256 exp | 8,000,000 | 154,880 | - |
+| [GigaChat3.5-432B-A28B](./ai-sage_GigaChat3.5-432B-A28B_viz.html) | `gigachat3_5` | 426,923,580,416 (426.9B) | 7168 | 40 | 64/64 | 192 | MHA | - | SwiGLU | 256 exp | 100,000 | 128,256 | - |
+| [GLM-5.2](./zai-org_GLM-5.2_viz.html) | `glm_moe_dsa` | 739,759,798,272 (739.8B) | 6144 | 78 | 64/64 | 192 | MHA | - | SwiGLU | 256 exp | 8,000,000 | 154,880 | - |
 | [Hunyuan-A13B-Instruct](./tencent_Hunyuan-A13B-Instruct_viz.html) | `hunyuan_v1_moe` | 80,384,794,624 (80.4B) | 4096 | 32 | 32/8 | 128 | GQA 4:1 | Y | SwiGLU | 64 exp | 10,000 | 128,167 | Y |
-| [Hy3](./tencent_Hy3_viz.html) | `hy_v3` | 293,480,304,640 (293.5B) | 4096 | 80 | 64/8 | 128 | GQA 8:1 | - | SwiGLU | 192 exp | 11,158,840 | 120,832 | - |
-| [Kimi-K2-Instruct](./moonshotai_Kimi-K2-Instruct_viz.html) | `kimi_k2` | 1,032,611,263,488 (1032.6B) | 7168 | 61 | 64/64 | 112 | MHA | - | SwiGLU | 384 exp | 50,000 | 163,840 | - |
-| [Kimi-K2.7-Code](./moonshotai_Kimi-K2.7-Code_viz.html) | `kimi_k25` | 1,032,611,263,488 (1032.6B) | 7168 | 61 | 64/64 | 112 | MHA | - | SwiGLU | 384 exp | 50,000 | 163,840 | - |
+| [Hy3](./tencent_Hy3_viz.html) | `hy_v3` | 294,971,400,192 (295.0B) | 4096 | 80 | 64/8 | 128 | GQA 8:1 | Y | SwiGLU | 192 exp | 11,158,840 | 120,832 | - |
+| [Kimi-K2-Instruct](./moonshotai_Kimi-K2-Instruct_viz.html) | `kimi_k2` | 1,024,999,650,304 (1025.0B) | 7168 | 61 | 64/64 | 112 | MHA | - | SwiGLU | 384 exp | 50,000 | 163,840 | - |
+| [Kimi-K2.7-Code](./moonshotai_Kimi-K2.7-Code_viz.html) | `kimi_k25` | 1,024,999,650,304 (1025.0B) | 7168 | 61 | 64/64 | 112 | MHA | - | SwiGLU | 384 exp | 50,000 | 163,840 | - |
 | [Kimi-VL-A3B-Thinking](./moonshotai_Kimi-VL-A3B-Thinking_viz.html) | `kimi_vl` | 16,038,082,560 (16.0B) | 2048 | 27 | 16/16 | 128 | MHA | - | SwiGLU | 64 exp | 800,000 | 163,840 | - |
-| [Laguna-XS-2.1](./poolside_Laguna-XS-2.1_viz.html) | `laguna` | 33,797,867,520 (33.8B) | 2048 | 40 | 48/8 | 128 | GQA 6:1 | - | SwiGLU | 256 exp | 500,000 | 100,352 | - |
+| [Laguna-XS-2.1](./poolside_Laguna-XS-2.1_viz.html) | `laguna` | 33,923,696,640 (33.9B) | 2048 | 40 | 48/8 | 128 | GQA 6:1 | - | SwiGLU | 256 exp | 500,000 | 100,352 | - |
 | [Supra-Router-51M](./SupraLabs_Supra-Router-51M_viz.html) | `llama` | 51,786,240 (51.8M) | 512 | 12 | 8/4 | 64 | GQA 2:1 | - | SwiGLU | - | 10,000 | 32,000 | Y |
 | [SmolLM-135M](./HuggingFaceTB_SmolLM-135M_viz.html) | `llama` | 134,515,008 (134.5M) | 576 | 30 | 9/3 | 64 | GQA 3:1 | - | SwiGLU | - | 10,000 | 49,152 | Y |
 | [MiniCPM5-1B](./openbmb_MiniCPM5-1B_viz.html) | `llama` | 1,080,632,832 (1.1B) | 1536 | 24 | 16/2 | 128 | GQA 8:1 | - | SwiGLU | - | 5,000,000 | 130,560 | - |
 | [Llama-3.1-Nemotron-Nano-8B-v1](./nvidia_Llama-3.1-Nemotron-Nano-8B-v1_viz.html) | `llama` | 8,030,261,248 (8.0B) | 4096 | 32 | 32/8 | 128 | GQA 4:1 | - | SwiGLU | - | 500,000 | 128,256 | - |
-| [MiniMax-M3](./MiniMaxAI_MiniMax-M3_viz.html) | `minimax_m3_vl` | 12,273,816,576 (12.3B) | 6144 | 60 | 64/4 | 128 | GQA 16:1 | Y | SwiGLU | - | 5,000,000 | 200,064 | - |
-| [Nemotron-Labs-Audex-2B](./nvidia_Nemotron-Labs-Audex-2B_viz.html) | `nemotron_dense` | 2,474,756,096 (2.5B) | 2048 | 28 | 16/8 | 128 | GQA 2:1 | - | MLP | - | 100,000,000 | 131,072 | - |
+| [MiniMax-M3](./MiniMaxAI_MiniMax-M3_viz.html) | `minimax_m3_vl` | 12,273,816,576 (12.3B) | 6144 | 60 | 64/4 | 128 | GQA 16:1 | Y | SwiGLU | 128 exp | 5,000,000 | 200,064 | - |
+| [Nemotron-Labs-Audex-2B](./nvidia_Nemotron-Labs-Audex-2B_viz.html) | `nemotron_dense` | 1,946,273,792 (1.9B) | 2048 | 28 | 16/8 | 128 | GQA 2:1 | - | MLP | - | 100,000,000 | 131,072 | - |
 | [Nemotron-Labs-Audex-30B-A3B](./nvidia_Nemotron-Labs-Audex-30B-A3B_viz.html) | `nemotron_h` | 2,699,808,384 (2.7B) | 2688 | 52 | 32/2 | 128 | GQA 16:1 | - | SwiGLU | - | 10,000 | 131,072 | - |
 | [NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16](./nvidia_NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16_viz.html) | `nemotron_h_puzzle` | 1,373,646,848 (1.4B) | 4096 | 1 | 32/2 | 128 | GQA 16:1 | - | SwiGLU | 512 exp | 10,000 | 131,072 | - |
 | [OLMo-2-0425-1B](./allenai_OLMo-2-0425-1B_viz.html) | `olmo2` | 1,484,851,200 (1.5B) | 2048 | 16 | 16/16 | 128 | MHA | - | SwiGLU | - | 500,000 | 100,352 | - |
-| [phi-2](./microsoft_phi-2_viz.html) | `phi` | 3,617,753,600 (3.6B) | 2560 | 32 | 32/32 | 80 | MHA | - | GeGLU | - | 10,000 | 51,200 | - |
+| [phi-2](./microsoft_phi-2_viz.html) | `phi` | 2,778,892,800 (2.8B) | 2560 | 32 | 32/32 | 80 | MHA | - | MLP | - | 10,000 | 51,200 | - |
 | [Phi-4-mini-instruct](./microsoft_Phi-4-mini-instruct_viz.html) | `phi3` | 3,836,021,760 (3.8B) | 3072 | 32 | 24/8 | 128 | GQA 3:1 | - | SwiGLU | - | 10,000 | 200,064 | Y |
 | [phi-4](./microsoft_phi-4_viz.html) | `phi3` | 14,659,507,200 (14.7B) | 5120 | 40 | 40/10 | 128 | GQA 4:1 | - | SwiGLU | - | 250,000 | 100,352 | - |
 | [Qwen2.5-0.5B](./Qwen_Qwen2.5-0.5B_viz.html) | `qwen2` | 494,005,120 (494.0M) | 896 | 24 | 14/2 | 64 | GQA 7:1 | - | SwiGLU | - | 1,000,000 | 151,936 | Y |
@@ -52,13 +52,13 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 | [DeepSeek-R1-0528-Qwen3-8B](./deepseek-ai_DeepSeek-R1-0528-Qwen3-8B_viz.html) | `qwen3` | 8,190,735,360 (8.2B) | 4096 | 36 | 32/8 | 128 | GQA 4:1 | Y | SwiGLU | - | 1,000,000 | 151,936 | - |
 | [Qwen3.5-4B](./Qwen_Qwen3.5-4B_viz.html) | `qwen3_5` | 3,739,666,944 (3.7B) | 2560 | 32 | 16/4 | 256 | GQA 4:1 | Y | SwiGLU | - | 10,000,000 | 248,320 | Y |
 | [Ornith-1.0-9B](./deepreinforce-ai_Ornith-1.0-9B_viz.html) | `qwen3_5` | 8,208,535,552 (8.2B) | 4096 | 32 | 16/4 | 256 | GQA 4:1 | Y | SwiGLU | - | 10,000,000 | 248,320 | - |
-| [Agents-A1](./InternScience_Agents-A1_viz.html) | `qwen3_5_moe` | 33,984,514,048 (34.0B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | - | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
-| [Qwen-AgentWorld-35B-A3B](./Qwen_Qwen-AgentWorld-35B-A3B_viz.html) | `qwen3_5_moe` | 33,984,514,048 (34.0B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | - | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
-| [Ornith-1.0-35B](./deepreinforce-ai_Ornith-1.0-35B_viz.html) | `qwen3_5_moe` | 33,984,514,048 (34.0B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | - | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
+| [Agents-A1](./InternScience_Agents-A1_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
+| [Qwen-AgentWorld-35B-A3B](./Qwen_Qwen-AgentWorld-35B-A3B_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
+| [Ornith-1.0-35B](./deepreinforce-ai_Ornith-1.0-35B_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
 | [Qwen3-Coder-30B-A3B-Instruct](./Qwen_Qwen3-Coder-30B-A3B-Instruct_viz.html) | `qwen3_moe` | 30,519,539,712 (30.5B) | 2048 | 48 | 32/4 | 128 | GQA 8:1 | Y | SwiGLU | 128 exp | 10,000,000 | 151,936 | - |
 | [Qwen3-235B-A22B-Instruct-2507](./Qwen_Qwen3-235B-A22B-Instruct-2507_viz.html) | `qwen3_moe` | 235,044,351,488 (235.0B) | 4096 | 94 | 64/4 | 128 | GQA 16:1 | Y | SwiGLU | 128 exp | 5,000,000 | 151,936 | - |
 | [SmolLM3-3B](./HuggingFaceTB_SmolLM3-3B_viz.html) | `smollm3` | 3,075,098,624 (3.1B) | 2048 | 36 | 16/4 | 128 | GQA 4:1 | - | SwiGLU | - | 5,000,000 | 128,256 | Y |
-| [LongCat-2.0](./meituan-longcat_LongCat-2.0_viz.html) | `unknown` | 3,758,120,960 (3.8B) | 8192 | 1 | 64/64 | 128 | MHA | - | SwiGLU | 768 exp | 1,000,000 | 163,840 | - |
+| [LongCat-2.0](./meituan-longcat_LongCat-2.0_viz.html) | `unknown` | 1,475,389,005,824 (1475.4B) | 8192 | 38 | 64/64 | 128 | MHA | - | SwiGLU | 768 exp | 1,000,000 | 163,840 | - |
 | [Unlimited-OCR](./baidu_Unlimited-OCR_viz.html) | `unlimited-ocr` | 2,933,832,960 (2.9B) | 1280 | 12 | 10/10 | 128 | MHA | - | SwiGLU | 64 exp | 10,000 | 129,280 | - |
 
 ## Architecture Types
@@ -98,13 +98,13 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 
 | Feature | Models with it | Models without |
 |---|---|---|
-| **QK-Norm** | 13 models | 33 models |
+| **QK-Norm** | 17 models | 29 models |
 | **MQA** (1 KV head) | DeepSeek-V4-Flash-DSpark, DeepSeek-V4-Flash, DeepSeek-V4-Pro-DSpark, DeepSeek-V4-Pro, gemma-4-E2B-it | - |
-| **GQA** | 31 models | - |
-| **MHA** (no sharing) | glm-4-9b-chat, GigaChat3.5-432B-A28B, GLM-5.2, Kimi-K2-Instruct, Kimi-K2.7-Code | - |
-| **MoE** | 21 models | 25 models |
-| **GeGLU** (GELU gated) | diffusiongemma-26B-A4B-it, gemma-4-E2B-it, gemma-4-E4B-it, phi-2 | - |
-| **Plain MLP** (ReLU/ReLU2) | Nemotron-Labs-Audex-2B | - |
+| **GQA** | 32 models | - |
+| **MHA** (no sharing) | GigaChat3.5-432B-A28B, GLM-5.2, Kimi-K2-Instruct, Kimi-K2.7-Code, Kimi-VL-A3B-Thinking | - |
+| **MoE** | 22 models | 24 models |
+| **GeGLU** (GELU gated) | diffusiongemma-26B-A4B-it, gemma-4-E2B-it, gemma-4-E4B-it | - |
+| **Plain MLP** (ReLU/ReLU2) | Nemotron-Labs-Audex-2B, phi-2 | - |
 
 ---
 

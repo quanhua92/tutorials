@@ -68,7 +68,7 @@
                         <li class="flex justify-between items-center"><span class="text-slate-400">Max Context</span> <span class="font-mono text-slate-200">262,144</span></li>
                         <li class="flex justify-between items-center"><span class="text-slate-400">Dtype</span> <span class="font-mono text-slate-200">bfloat16</span></li>
                         <li class="flex justify-between items-center"><span class="text-slate-400">KV Cache/Token</span> <span class="font-mono text-slate-200">131,072 B (128 KiB)</span></li>
-                        <li class="flex justify-between items-center"><span class="text-slate-400">Layer Types</span> <span class="font-mono text-slate-200">0 sliding + 8 global</span></li>
+                        <li class="flex justify-between items-center"><span class="text-slate-400">Layer Types</span> <span class="font-mono text-slate-200">8 full + 24 linear</span></li>
                     </ul>
                 </div>
                 <div class="flex flex-wrap gap-2 text-xs font-medium text-slate-300">
@@ -86,7 +86,7 @@
         </div>
     </div>
     <script>
-        const CFG = {"model_id": "Qwen/Qwen3.5-4B", "model_name": "Qwen3.5-4B", "model_type": "qwen3_5", "text_model_type": "qwen3_5_text", "hidden_size": 2560, "num_layers": 32, "num_heads": 16, "num_kv_heads": 4, "head_dim": 256, "global_head_dim": 0, "intermediate_size": 9216, "vocab_size": 248320, "rope_theta": 10000000, "norm_eps": 1e-06, "tie_embeddings": true, "attention_bias": false, "max_position_embeddings": 262144, "dtype": "bfloat16", "hidden_act": "silu", "has_qk_norm": true, "has_rope": true, "norm_type": "rms", "norm_name": "RMSNorm", "mlp_type": "SwiGLU", "act_name": "SiLU", "is_gqa": true, "is_mqa": false, "gqa_ratio": 4, "has_sliding_window": false, "sliding_window": 0, "has_logits_softcapping": false, "logit_softcapping": 0, "num_kv_shared_layers": 0, "ple_dim": 0, "double_wide_mlp": false, "layer_types_summary": "0 sliding + 8 global", "q_proj_out": 4096, "kv_proj_out": 1024, "dtype_bytes": 2, "bytes_per_token": 131072, "is_moe": false, "num_experts": 0, "num_experts_per_tok": 0, "n_shared_experts": 0, "moe_intermediate_size": 0, "first_k_dense_replace": 0};
+        const CFG = {"model_id": "Qwen/Qwen3.5-4B", "model_name": "Qwen3.5-4B", "model_type": "qwen3_5", "text_model_type": "qwen3_5_text", "hidden_size": 2560, "num_layers": 32, "num_heads": 16, "num_kv_heads": 4, "head_dim": 256, "global_head_dim": 0, "intermediate_size": 9216, "vocab_size": 248320, "rope_theta": 10000000, "norm_eps": 1e-06, "tie_embeddings": true, "attention_bias": false, "max_position_embeddings": 262144, "dtype": "bfloat16", "hidden_act": "silu", "has_qk_norm": true, "has_rope": true, "norm_type": "rms", "norm_name": "RMSNorm", "mlp_type": "SwiGLU", "act_name": "SiLU", "is_gated_mlp": true, "is_gqa": true, "is_mqa": false, "gqa_ratio": 4, "has_mla": false, "q_lora_rank": 0, "kv_lora_rank": 0, "qk_rope_head_dim": 0, "qk_nope_head_dim": 0, "v_head_dim": 0, "has_sliding_window": false, "sliding_window": 0, "has_logits_softcapping": false, "logit_softcapping": 0, "num_kv_shared_layers": 0, "ple_dim": 0, "double_wide_mlp": false, "layer_types_summary": "8 full + 24 linear", "has_deltanet": false, "has_mamba": false, "q_proj_out": 4096, "kv_proj_out": 1024, "dtype_bytes": 2, "bytes_per_token": 131072, "is_moe": false, "num_experts": 0, "num_experts_per_tok": 0, "n_shared_experts": 0, "moe_intermediate_size": 0, "first_k_dense_replace": 0};
         let B = 1, S = 32;
         const canvas = document.getElementById('flowCanvas');
         const ctx = canvas.getContext('2d');
@@ -124,8 +124,12 @@
                 add('rope_k', 'RoPE (theta='+fmtT(CFG.rope_theta)+')', 'op', XC, 140);
                 y += 100;
             }
-            var attnType = CFG.is_mqa ? 'Multi-Query Attention (MQA)' : (CFG.is_gqa ? 'Grouped Query Attention (GQA)' : 'Multi-Head Attention');
+            var attnType = CFG.has_mla ? 'Multi-head Latent Attention (MLA)' :
+                          (CFG.is_mqa ? 'Multi-Query Attention (MQA)' :
+                          (CFG.is_gqa ? 'Grouped Query Attention (GQA)' : 'Multi-Head Attention'));
             var aL = attnType+'\n'+CFG.num_heads+' Q, '+CFG.num_kv_heads+' KV';
+            if(CFG.has_deltanet) aL += '\n(Hybrid: some layers are DeltaNet)';
+            if(CFG.has_mamba) aL += '\n(Hybrid: some layers are Mamba/SSM)';
             add('attn', aL, 'layer', XC, 300, 70); y += 110;
             add('w_o', 'o_proj: '+CFG.q_proj_out+' -> '+CFG.hidden_size, 'layer', XC, 220, 65); y += 100;
             add('add1', 'Residual Add', 'op', XC, 180); y += 100;
@@ -270,6 +274,54 @@
             ]);
         }
 
+        function buildMlaSubgraph() {
+            var H = CFG.hidden_size, nh = CFG.num_heads, hd = CFG.head_dim;
+            var ql = CFG.q_lora_rank || 0, kvl = CFG.kv_lora_rank || 0;
+            var qo = CFG.q_proj_out, kvo = CFG.kv_proj_out;
+            var ropeDim = CFG.qk_rope_head_dim || 0;
+            var nopeDim = CFG.qk_nope_head_dim || hd;
+            return {
+                title: 'Multi-head Latent Attention (MLA)',
+                subtitle: 'Low-rank Q/K/V compression. '+(ropeDim? 'Partial RoPE on '+ropeDim+'/'+hd+' dims.' : ''),
+                nodes: [
+                    {id:'mi',label:'Input\n[B, S, '+H+']',type:'data',x:500,y:320,w:180,h:50},
+                    {id:'mqc',label:'Q Compress\nW_dq ['+ql+', '+H+']\nLinear H -> '+ql,type:'layer',x:500,y:420,w:240,h:65},
+                    {id:'mql',label:'Q Latent\n[B, S, '+ql+']',type:'data',x:500,y:520,w:180,h:50},
+                    {id:'mqe',label:'Q Expand\nW_uq ['+qo+', '+ql+']\nLinear '+ql+' -> '+qo,type:'layer',x:500,y:620,w:240,h:65},
+                    {id:'mq',label:'Q Heads\n[B, '+nh+', S, '+hd+']',type:'data',x:500,y:720,w:200,h:50},
+                    {id:'mkvc',label:'KV Compress\nW_dkv ['+kvl+', '+H+']\nLinear H -> '+kvl,type:'layer',x:800,y:420,w:240,h:65},
+                    {id:'mkvl',label:'KV Latent\n[B, S, '+kvl+']',type:'data',x:800,y:520,w:180,h:50},
+                    {id:'mkve',label:'KV Expand\nW_ukv ['+kvo+', '+kvl+']\nLinear '+kvl+' -> '+kvo,type:'layer',x:800,y:620,w:240,h:65},
+                    {id:'mkv',label:'K, V Heads\n[B, '+nh+', S, '+hd+']',type:'data',x:800,y:720,w:200,h:50},
+                    {id:'mrope',label:(ropeDim?'Partial RoPE\n('+ropeDim+' of '+hd+' dims)':'RoPE'),type:'op',x:500,y:810,w:180,h:50},
+                    {id:'mscore',label:'Q . K^T / sqrt('+hd+')\n[B, '+nh+', S, S]',type:'op',x:650,y:910,w:220,h:50},
+                    {id:'mcausal',label:'+ Causal Mask\n+ Softmax',type:'op',x:650,y:1000,w:180,h:50},
+                    {id:'mav',label:'Attn . V\n[B, '+nh+', S, '+hd+']',type:'op',x:650,y:1090,w:200,h:50},
+                    {id:'mo',label:'O Projection\nW_o ['+H+', '+qo+']\nLinear '+qo+' -> '+H,type:'layer',x:650,y:1190,w:240,h:65},
+                    {id:'mout',label:'Output\n[B, S, '+H+']',type:'data',x:650,y:1290,w:180,h:50},
+                    {id:'minfo',label:'MLA compresses Q/K/V through low-rank latent ('+ql+'D / '+kvl+'D)\ninstead of full projections. Saves '+(Math.round((1-(ql*H+qo*ql+kvl*H+kvo*kvl+qo*H)/(2*qo*H+2*kvo*H))*100))+'% attention params vs standard.',type:'info',x:500,y:1370,w:480,h:65}
+                ],
+                edges: [
+                    {from:'mi',to:'mqc',text:()=>''},
+                    {from:'mqc',to:'mql',text:()=>'compress'},
+                    {from:'mql',to:'mqe',text:()=>'expand'},
+                    {from:'mqe',to:'mq',text:()=>'reshape'},
+                    {from:'mi',to:'mkvc',text:()=>''},
+                    {from:'mkvc',to:'mkvl',text:()=>'compress'},
+                    {from:'mkvl',to:'mkve',text:()=>'expand'},
+                    {from:'mkve',to:'mkv',text:()=>'reshape'},
+                    {from:'mq',to:'mrope',text:()=>''},
+                    {from:'mrope',to:'mscore',text:()=>'Q'},
+                    {from:'mkv',to:'mscore',text:()=>'K',waypoints:[{x:800,y:910},{x:760,y:910}]},
+                    {from:'mscore',to:'mcausal',text:()=>''},
+                    {from:'mcausal',to:'mav',text:()=>'A'},
+                    {from:'mkv',to:'mav',text:()=>'V',waypoints:[{x:800,y:1090},{x:760,y:1090}]},
+                    {from:'mav',to:'mo',text:()=>''},
+                    {from:'mo',to:'mout',text:()=>'output'}
+                ]
+            };
+        }
+
         function buildGqaSubgraph() {
             var nh = CFG.num_heads, nkv = CFG.num_kv_heads, hd = CFG.head_dim;
             var grp = nh/nkv;
@@ -367,7 +419,7 @@
                 case 'k_norm': return makeQKNormSG('QK-Norm (k_norm)','k');
                 case 'rope_q': return makeRoPESG('RoPE on Queries','q');
                 case 'rope_k': return makeRoPESG('RoPE on Keys','k');
-                case 'attn': return buildGqaSubgraph();
+                case 'attn': return CFG.has_mla ? buildMlaSubgraph() : buildGqaSubgraph();
                 case 'w_o': return sg('Output Projection (o_proj)','Merge heads -> hidden_size'+bias,[
                     {label:'Attention Output\n[B, S, '+nh+', '+hd+']',type:'data',w:220},
                     {label:'Merge Heads\n[B, S, '+qo+']',type:'op',w:200,et:'concat '+nh+' heads'},

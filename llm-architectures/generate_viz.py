@@ -147,8 +147,12 @@ def parse_config(raw: dict, model_id: str) -> dict:
     is_gqa = nkv != nh and not is_mqa
 
     # --- MLA detection (DeepSeek V4, GLM-5.2, etc.) ---
-    has_mla = (tc.get("q_lora_rank", raw.get("q_lora_rank")) is not None or
-               tc.get("kv_lora_rank", raw.get("kv_lora_rank")) is not None)
+    q_lora = _first_nonzero("q_lora_rank", tc=tc, raw=raw)
+    kv_lora = _first_nonzero("kv_lora_rank", tc=tc, raw=raw)
+    has_mla = q_lora > 0 or kv_lora > 0
+    qk_rope_dim = _first_nonzero("qk_rope_head_dim", tc=tc, raw=raw)
+    qk_nope_dim = _first_nonzero("qk_nope_head_dim", tc=tc, raw=raw)
+    v_hd = _first_nonzero("v_head_dim", tc=tc, raw=raw)
 
     # --- MoE detection (multiple field name conventions) ---
     num_experts = (_first_nonzero("num_experts", "n_routed_experts", "num_local_experts",
@@ -260,6 +264,11 @@ def parse_config(raw: dict, model_id: str) -> dict:
         "is_mqa": is_mqa,
         "gqa_ratio": nh // nkv if nkv > 0 else 1,
         "has_mla": has_mla,
+        "q_lora_rank": q_lora,
+        "kv_lora_rank": kv_lora,
+        "qk_rope_head_dim": qk_rope_dim,
+        "qk_nope_head_dim": qk_nope_dim,
+        "v_head_dim": v_hd,
         "has_sliding_window": has_sliding,
         "sliding_window": sw or 0,
         "has_logits_softcapping": logit_softcapping > 0,
@@ -287,7 +296,19 @@ def compute_params(cfg: dict) -> int:
     H = cfg["hidden_size"]
     V = cfg["vocab_size"]
     embed = V * H
-    attn = 2 * cfg["q_proj_out"] * H + 2 * cfg["kv_proj_out"] * H
+    qo = cfg["q_proj_out"]
+    kvo = cfg["kv_proj_out"]
+
+    # Attention params — MLA uses low-rank compression, standard uses full projections
+    if cfg.get("has_mla") and cfg.get("q_lora_rank", 0) > 0:
+        ql = cfg["q_lora_rank"]
+        kvl = cfg.get("kv_lora_rank", 0) or ql
+        # MLA: Q compress(H->ql) + Q expand(ql->qo) + KV compress(H->kvl) + KV expand(kvl->kvo) + O(qo->H)
+        attn = ql * H + qo * ql + kvl * H + kvo * kvl + qo * H
+    else:
+        # Standard: q_proj(H->qo) + k_proj(H->kvo) + v_proj(H->kvo) + o_proj(qo->H)
+        attn = 2 * qo * H + 2 * kvo * H
+
     if cfg["has_qk_norm"]:
         attn += 2 * cfg["head_dim"]
     norm = 2 * H

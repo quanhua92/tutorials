@@ -455,6 +455,7 @@ def generate_specs(cfg, total_params):
         ("Max Context", f"{cfg['max_position_embeddings']:,}", False),
         ("Dtype", cfg["dtype"], False),
         ("KV Cache/Token", f"{cfg['bytes_per_token']:,} B ({cfg['bytes_per_token']//1024} KiB)", False),
+        ("Param Source", cfg.get("param_source", "computed"), "approx" in cfg.get("param_source", "")),
     ]
     # Architecture-specific (highlighted = True for important features)
     if cfg.get("layer_types_summary"):
@@ -508,7 +509,20 @@ def main():
     cfg = parse_config(raw, args.model_id)
     # Try exact param count from HF API first, fall back to computation
     exact = fetch_param_count(args.model_id)
-    total = exact if exact else compute_params(cfg)
+    if exact:
+        total = exact
+        cfg["param_source"] = "safetensors (exact)"
+    else:
+        total = compute_params(cfg)
+        warnings = []
+        if cfg.get("has_mla"): warnings.append("MLA")
+        if cfg.get("has_deltanet"): warnings.append("DeltaNet")
+        if cfg.get("has_mamba"): warnings.append("Mamba")
+        if cfg.get("block_moe_count", 0) > 0: warnings.append("hybrid blocks")
+        if warnings:
+            cfg["param_source"] = "computed (approx — may be wrong: " + "+".join(warnings) + ")"
+        else:
+            cfg["param_source"] = "computed (approx)"
 
     out_dir = Path(__file__).resolve().parent
     out_dir.mkdir(exist_ok=True)

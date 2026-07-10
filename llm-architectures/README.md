@@ -10,7 +10,7 @@ python generate_viz.py google/gemma-4-E2B-it
 python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 ```
 
-## All Visualizers (46 models)
+## All Visualizers (47 models)
 
 | Model | Type | Params | Hidden | Layers | Q/KV | hd | Attn | QK-Norm | MLP | MoE | RoPE theta | Vocab | Tie |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -54,6 +54,7 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 | [Ornith-1.0-9B](./deepreinforce-ai_Ornith-1.0-9B_viz.html) | `qwen3_5` | 8,208,535,552 (8.2B) | 4096 | 32 | 16/4 | 256 | GQA 4:1 | Y | SwiGLU | - | 10,000,000 | 248,320 | - |
 | [Agents-A1](./InternScience_Agents-A1_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
 | [Qwen-AgentWorld-35B-A3B](./Qwen_Qwen-AgentWorld-35B-A3B_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
+| [Qwen3.6-35B-A3B](./Qwen_Qwen3.6-35B-A3B_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
 | [Ornith-1.0-35B](./deepreinforce-ai_Ornith-1.0-35B_viz.html) | `qwen3_5_moe` | 34,110,363,648 (34.1B) | 2048 | 40 | 16/2 | 256 | GQA 8:1 | Y | SwiGLU | 256 exp | 10,000,000 | 248,320 | - |
 | [Qwen3-Coder-30B-A3B-Instruct](./Qwen_Qwen3-Coder-30B-A3B-Instruct_viz.html) | `qwen3_moe` | 30,519,539,712 (30.5B) | 2048 | 48 | 32/4 | 128 | GQA 8:1 | Y | SwiGLU | 128 exp | 10,000,000 | 151,936 | - |
 | [Qwen3-235B-A22B-Instruct-2507](./Qwen_Qwen3-235B-A22B-Instruct-2507_viz.html) | `qwen3_moe` | 235,044,351,488 (235.0B) | 4096 | 94 | 64/4 | 128 | GQA 16:1 | Y | SwiGLU | 128 exp | 5,000,000 | 151,936 | - |
@@ -88,7 +89,7 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 | `qwen2` | 3 | Qwen2.5-0.5B, Qwen2.5-1.5B, Qwen2.5-Coder-1.5B |
 | `qwen3` | 5 | Qwen3-0.6B, Qwen3-0.6B (hand-crafted), Qwen3-1.7B, Qwen3-4B +1 more |
 | `qwen3_5` | 2 | Qwen3.5-4B, Ornith-1.0-9B |
-| `qwen3_5_moe` | 3 | Agents-A1, Qwen-AgentWorld-35B-A3B, Ornith-1.0-35B |
+| `qwen3_5_moe` | 4 | Agents-A1, Qwen-AgentWorld-35B-A3B, Qwen3.6-35B-A3B, Ornith-1.0-35B |
 | `qwen3_moe` | 2 | Qwen3-Coder-30B-A3B-Instruct, Qwen3-235B-A22B-Instruct-2507 |
 | `smollm3` | 1 | SmolLM3-3B |
 | `unknown` | 1 | LongCat-2.0 |
@@ -98,11 +99,11 @@ python generate_viz.py tencent/Hy3 --subfolder checkpoint_folder_textonly
 
 | Feature | Models with it | Models without |
 |---|---|---|
-| **QK-Norm** | 17 models | 29 models |
+| **QK-Norm** | 18 models | 29 models |
 | **MQA** (1 KV head) | DeepSeek-V4-Flash-DSpark, DeepSeek-V4-Flash, DeepSeek-V4-Pro-DSpark, DeepSeek-V4-Pro, gemma-4-E2B-it | - |
-| **GQA** | 32 models | - |
+| **GQA** | 33 models | - |
 | **MHA** (no sharing) | GigaChat3.5-432B-A28B, GLM-5.2, Kimi-K2-Instruct, Kimi-K2.7-Code, Kimi-VL-A3B-Thinking | - |
-| **MoE** | 22 models | 24 models |
+| **MoE** | 23 models | 24 models |
 | **GeGLU** (GELU gated) | diffusiongemma-26B-A4B-it, gemma-4-E2B-it, gemma-4-E4B-it | - |
 | **Plain MLP** (ReLU/ReLU2) | Nemotron-Labs-Audex-2B, phi-2 | - |
 

@@ -110,11 +110,19 @@ __SPECS__
                           (CFG.is_mqa ? 'Multi-Query Attention (MQA)' :
                           (CFG.is_gqa ? 'Grouped Query Attention (GQA)' : 'Multi-Head Attention'));
             var aL = attnType+'\n'+CFG.num_heads+' Q, '+CFG.num_kv_heads+' KV';
-            if(CFG.has_deltanet) aL += '\n(Hybrid: some layers are DeltaNet)';
-            if(CFG.has_mamba) aL += '\n(Hybrid: some layers are Mamba/SSM)';
             add('attn', aL, 'layer', XC, 300, 70); y += 110;
             add('w_o', 'o_proj: '+CFG.q_proj_out+' -> '+CFG.hidden_size, 'layer', XC, 220, 65); y += 100;
             add('add1', 'Residual Add', 'op', XC, 180); y += 100;
+
+            // DeltaNet alternative layer (hybrid models)
+            if (CFG.has_deltanet) {
+                add('deltanet', 'DeltaNet Layer\n(gated linear attention)\n(Click to expand)', 'layer', 1050, 450, 280, 70);
+                y += 0; // doesn't push layout, sits to the right
+            }
+            // Mamba alternative layer (hybrid models)
+            if (CFG.has_mamba) {
+                add('mamba', 'Mamba/SSM Layer\n(selective state space)\n(Click to expand)', 'layer', 1050, 550, 280, 70);
+            }
             add('norm2', CFG.norm_name+' (post_attn)', 'norm', XC, 200); y += 100;
             add('gate_proj', 'gate_proj: '+CFG.hidden_size+' -> '+CFG.intermediate_size, 'layer', 400, 190);
             add('up_proj', 'up_proj: '+CFG.hidden_size+' -> '+CFG.intermediate_size, 'layer', 800, 190);
@@ -168,6 +176,16 @@ __SPECS__
             e('v_proj','attn',()=>`[${B}, ${S}, ${nkv}, ${hd}]`,{waypoints:[{x:920,y:N.v_proj.y+90},{x:740,y:N.v_proj.y+90},{x:740,y:N.attn.y-35}],exactEnd:true});
             e('attn','w_o',()=>`merge [${B}, ${S}, ${qo}]`);
             e('w_o','add1',()=>`[${B}, ${S}, ${H}]`);
+            // DeltaNet alternative path
+            if(CFG.has_deltanet && N.deltanet){
+                e('norm1','deltanet',()=>`[B, S, ${H}]`,{waypoints:[{x:600,y:N.norm1.y+50},{x:1050,y:N.norm1.y+50},{x:1050,y:N.deltanet.y-35}],exactEnd:true});
+                e('deltanet','add1',()=>`[B, S, ${H}]`,{waypoints:[{x:1050,y:N.deltanet.y+35},{x:1050,y:N.add1.y},{x:510,y:N.add1.y}],exactEnd:true});
+            }
+            // Mamba alternative path
+            if(CFG.has_mamba && N.mamba){
+                e('norm1','mamba',()=>`[B, S, ${H}]`,{waypoints:[{x:600,y:N.norm1.y+50},{x:1050,y:N.norm1.y+50},{x:1050,y:N.mamba.y-35}],exactEnd:true});
+                e('mamba','add1',()=>`[B, S, ${H}]`,{waypoints:[{x:1050,y:N.mamba.y+35},{x:1050,y:N.add1.y},{x:510,y:N.add1.y}],exactEnd:true});
+            }
             e('embed','add1',()=>`[${B}, ${S}, ${H}]`,{waypoints:[{x:600,y:N.embed.y+50},{x:120,y:N.embed.y+50},{x:120,y:N.add1.y},{x:510,y:N.add1.y}],dash:true,exactEnd:true});
             e('add1','norm2',()=>`[${B}, ${S}, ${H}]`);
             e('norm2','gate_proj',()=>`[${B}, ${S}, ${H}]`,{waypoints:[{x:600,y:N.norm2.y+50},{x:400,y:N.norm2.y+50}]});
@@ -254,6 +272,66 @@ __SPECS__
                 {label:'Result: [B, S, '+CFG.hidden_size+']',type:'data',w:240},
                 {label:'Pre-norm design:\nNorm is INSIDE the branch\nGradient highway for backprop',type:'info',w:320}
             ]);
+        }
+
+        function buildDeltaNetSubgraph() {
+            var H = CFG.hidden_size, nh = CFG.num_heads, hd = CFG.head_dim;
+            return {
+                title: 'DeltaNet Layer (Gated Linear Attention)',
+                subtitle: 'Alternative to softmax attention. No O(L^2) score matrix. Uses delta update rule with decay.',
+                nodes: [
+                    {id:'di',label:'Input [B, S, '+H+']',type:'data',x:650,y:320,w:200,h:50},
+                    {id:'dnorm',label:CFG.norm_name,type:'norm',x:650,y:410,w:160,h:40},
+                    {id:'dqkv',label:'q_proj / k_proj / v_proj\nLinear '+H+' -> projections',type:'layer',x:650,y:490,w:280,h:65},
+                    {id:'dconv',label:'1D Conv (if gated)\nConv1d on Q and K',type:'op',x:650,y:580,w:200,h:50},
+                    {id:'drope',label:'Partial RoPE\non Q, K',type:'op',x:650,y:660,w:160,h:50},
+                    {id:'ddelta',label:'Delta State Update\nS = S * decay + V @ K^T\nNo softmax!',type:'op',x:650,y:750,w:280,h:65},
+                    {id:'dout',label:'Output: O = Q @ S\n[B, S, '+H+']',type:'data',x:650,y:850,w:200,h:50},
+                    {id:'dgate',label:'Gate (SiLU)\noutput * gate',type:'op',x:650,y:930,w:160,h:50},
+                    {id:'dresult',label:'DeltaNet Output\n[B, S, '+H+']',type:'data',x:650,y:1010,w:200,h:50},
+                    {id:'dinfo',label:'DeltaNet replaces softmax attention with a recurrent delta rule.\nO(Ld) memory per layer instead of O(L^2). No causal mask needed.\nUsed in '+CFG.num_layers+'-layer models like Qwen3.5 where ~75% of layers use this.',type:'info',x:500,y:1100,w:480,h:65}
+                ],
+                edges: [
+                    {from:'di',to:'dnorm',text:()=>''},
+                    {from:'dnorm',to:'dqkv',text:()=>''},
+                    {from:'dqkv',to:'dconv',text:()=>''},
+                    {from:'dconv',to:'drope',text:()=>''},
+                    {from:'drope',to:'ddelta',text:()=>'Q, K, V'},
+                    {from:'ddelta',to:'dout',text:()=>''},
+                    {from:'dout',to:'dgate',text:()=>''},
+                    {from:'dgate',to:'dresult',text:()=>'output'}
+                ]
+            };
+        }
+
+        function buildMambaSubgraph() {
+            var H = CFG.hidden_size;
+            return {
+                title: 'Mamba/SSM Layer (Selective State Space Model)',
+                subtitle: 'Alternative to attention. Linear-time sequence modeling via selective scan.',
+                nodes: [
+                    {id:'bi',label:'Input [B, S, '+H+']',type:'data',x:650,y:320,w:200,h:50},
+                    {id:'bnorm',label:CFG.norm_name,type:'norm',x:650,y:410,w:160,h:40},
+                    {id:'bin_proj',label:'in_proj: '+H+' -> '+(H*2)+'\n(gate + conv input)',type:'layer',x:650,y:490,w:240,h:65},
+                    {id:'bconv',label:'1D Depthwise Conv\n(kernel_size from config)',type:'op',x:650,y:580,w:220,h:50},
+                    {id:'bssm',label:'Selective SSM\nA, B, C, Delta parameters\nComputed per-token',type:'op',x:650,y:670,w:260,h:65},
+                    {id:'bnorm2',label:'LayerNorm / RMSNorm',type:'norm',x:650,y:760,w:180,h:40},
+                    {id:'bout_proj',label:'out_proj: '+H+' -> '+H,type:'layer',x:650,y:840,w:200,h:50},
+                    {id:'bgate',label:'Gate multiply\nSiLU(gate) * ssm_out',type:'op',x:650,y:920,w:200,h:50},
+                    {id:'bresult',label:'Mamba Output\n[B, S, '+H+']',type:'data',x:650,y:1000,w:200,h:50},
+                    {id:'binfo',label:'Mamba replaces attention with a selective state space model.\nO(L) time complexity. No KV cache needed. Good for long sequences.\nUsed in Nemotron-H hybrid models alternating with attention and MoE.',type:'info',x:480,y:1090,w:500,h:65}
+                ],
+                edges: [
+                    {from:'bi',to:'bnorm',text:()=>''},
+                    {from:'bnorm',to:'bin_proj',text:()=>''},
+                    {from:'bin_proj',to:'bconv',text:()=>'conv branch'},
+                    {from:'bconv',to:'bssm',text:()=>''},
+                    {from:'bssm',to:'bnorm2',text:()=>''},
+                    {from:'bnorm2',to:'bout_proj',text:()=>''},
+                    {from:'bout_proj',to:'bgate',text:()=>''},
+                    {from:'bgate',to:'bresult',text:()=>'output'}
+                ]
+            };
         }
 
         function buildMlaSubgraph() {
@@ -402,6 +480,8 @@ __SPECS__
                 case 'rope_q': return makeRoPESG('RoPE on Queries','q');
                 case 'rope_k': return makeRoPESG('RoPE on Keys','k');
                 case 'attn': return CFG.has_mla ? buildMlaSubgraph() : buildGqaSubgraph();
+                case 'deltanet': return buildDeltaNetSubgraph();
+                case 'mamba': return buildMambaSubgraph();
                 case 'w_o': return sg('Output Projection (o_proj)','Merge heads -> hidden_size'+bias,[
                     {label:'Attention Output\n[B, S, '+nh+', '+hd+']',type:'data',w:220},
                     {label:'Merge Heads\n[B, S, '+qo+']',type:'op',w:200,et:'concat '+nh+' heads'},

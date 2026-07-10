@@ -33,6 +33,14 @@ ACTIVATION_MAP = {
 }
 
 
+def _scalar(v):
+    """Convert list values (per-layer configs) to a single int. Takes max of non-zero values."""
+    if isinstance(v, list):
+        nums = [x for x in v if isinstance(x, (int, float)) and x > 0]
+        return int(max(nums)) if nums else 0
+    return int(v) if v else 0
+
+
 def fetch_config(model_id: str, subfolder: str = "") -> dict:
     sf = f"/{subfolder}" if subfolder else ""
     url = f"https://huggingface.co/{model_id}/resolve/main{sf}/config.json"
@@ -65,6 +73,8 @@ def parse_config(raw: dict, model_id: str) -> dict:
 
     # Detect features
     has_qk = mt_text in QK_NORM_TYPES or mt in QK_NORM_TYPES
+    if not has_qk:
+        has_qk = tc.get("use_qk_norm", raw.get("use_qk_norm", False)) is True
     has_rope = mt_text not in NO_ROPE_TYPES and mt not in NO_ROPE_TYPES
     norm_type = "layer" if mt_text in LAYER_NORM_TYPES else "rms"
 
@@ -152,9 +162,16 @@ def parse_config(raw: dict, model_id: str) -> dict:
         "kv_proj_out": nkv * hd,
         "dtype_bytes": dt_bytes,
         "bytes_per_token": 2 * tc.get("num_hidden_layers", 1) * nkv * hd * dt_bytes,
-        "is_moe": tc.get("num_experts", raw.get("num_experts", 0)) is not None and tc.get("num_experts", raw.get("num_experts", 0)) not in (0, None),
-        "num_experts": tc.get("num_experts", raw.get("num_experts", 0)) or 0,
-        "num_experts_per_tok": tc.get("num_experts_per_tok", raw.get("num_experts_per_tok", 0)) or 0,
+        "is_moe": (tc.get("num_experts", raw.get("num_experts", 0)) or 0) > 0 or
+                  (tc.get("n_routed_experts", raw.get("n_routed_experts", 0)) or 0) > 0,
+        "num_experts": tc.get("num_experts", raw.get("num_experts", 0)) or
+                       tc.get("n_routed_experts", raw.get("n_routed_experts", 0)) or 0,
+        "num_experts_per_tok": _scalar(tc.get("num_experts_per_tok", raw.get("num_experts_per_tok", 0)) or
+                                        tc.get("moe_topk", raw.get("moe_topk", 0)) or 0),
+        "n_shared_experts": _scalar(tc.get("n_shared_experts", raw.get("n_shared_experts", 0)) or
+                                    tc.get("num_shared_expert", raw.get("num_shared_expert", 0)) or 0),
+        "moe_intermediate_size": _scalar(tc.get("moe_intermediate_size", raw.get("moe_intermediate_size", 0)) or 0),
+        "first_k_dense_replace": tc.get("first_k_dense_replace", raw.get("first_k_dense_replace", 0)) or 0,
     }
 
 
@@ -164,9 +181,22 @@ def compute_params(cfg: dict) -> int:
     attn = (cfg["q_proj_out"] + 2 * cfg["kv_proj_out"] + cfg["q_proj_out"]) * H
     if cfg["has_qk_norm"]:
         attn += 2 * cfg["head_dim"]
-    mlp = 3 * cfg["intermediate_size"] * H
     norm = 2 * H
-    total = embed + cfg["num_layers"] * (attn + mlp + norm) + H
+
+    if cfg.get("is_moe") and cfg.get("moe_intermediate_size", 0) > 0:
+        dense_mlp = 3 * cfg["intermediate_size"] * H
+        moe_inter = cfg["moe_intermediate_size"]
+        n_experts = cfg["num_experts"]
+        n_shared = cfg.get("n_shared_experts", 0)
+        moe_mlp = (n_experts + n_shared) * 3 * moe_inter * H
+        n_dense = cfg.get("first_k_dense_replace", 0)
+        n_moe = cfg["num_layers"] - n_dense
+        per_layer = attn + norm
+        total = embed + n_dense * (per_layer + dense_mlp) + n_moe * (per_layer + moe_mlp) + H
+    else:
+        mlp = 3 * cfg["intermediate_size"] * H
+        total = embed + cfg["num_layers"] * (attn + mlp + norm) + H
+
     if not cfg["tie_embeddings"]:
         total += embed
     return total
